@@ -1,0 +1,35 @@
+# ─── Rust ───
+/target/
+**/target/
+Cargo.lock
+
+# ─── Node.js ───
+node_modules/
+.next/
+dist/
+build/
+
+# ─── Environment ───
+.env
+.env.local
+.env.*.local
+
+# ─── Keys ───
+keys/
+*.pem
+*.key
+
+# ─── IDE ───
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ─── Logs ───
+*.log
+logs/
+
+# ─── Docker ───
+docker-compose.override.yml
