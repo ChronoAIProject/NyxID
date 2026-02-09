@@ -1,7 +1,16 @@
-import { useState, useEffect, useCallback } from "react"
-import { useApiKeys, useDeleteApiKey, useRotateApiKey } from "@/hooks/use-api-keys"
-import type { ApiKey } from "@/types/api"
-import { maskApiKey, formatDate, formatRelativeTime, copyToClipboard } from "@/lib/utils"
+import { useState, useEffect, useCallback } from "react";
+import {
+  useApiKeys,
+  useDeleteApiKey,
+  useRotateApiKey,
+} from "@/hooks/use-api-keys";
+import type { ApiKey } from "@/types/api";
+import {
+  maskApiKey,
+  formatDate,
+  formatRelativeTime,
+  copyToClipboard,
+} from "@/lib/utils";
 import {
   Table,
   TableBody,
@@ -9,16 +18,16 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { Skeleton } from "@/components/ui/skeleton"
+} from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
   DialogContent,
@@ -26,59 +35,59 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog"
-import { MoreHorizontal, RefreshCw, Trash2, Copy, Check } from "lucide-react"
-import { toast } from "sonner"
+} from "@/components/ui/dialog";
+import { MoreHorizontal, RefreshCw, Trash2, Copy, Check } from "lucide-react";
+import { toast } from "sonner";
 
 function parseScopesString(scopes: string): readonly string[] {
-  if (!scopes || scopes.trim().length === 0) return []
-  return scopes.trim().split(/\s+/)
+  if (!scopes || scopes.trim().length === 0) return [];
+  return scopes.trim().split(/\s+/);
 }
 
 export function ApiKeyTable() {
-  const { data: apiKeys, isLoading } = useApiKeys()
-  const deleteMutation = useDeleteApiKey()
-  const rotateMutation = useRotateApiKey()
-  const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null)
-  const [newKeyValue, setNewKeyValue] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
+  const { data: apiKeys, isLoading } = useApiKeys();
+  const deleteMutation = useDeleteApiKey();
+  const rotateMutation = useRotateApiKey();
+  const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
+  const [newKeyValue, setNewKeyValue] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    if (!copied) return
-    const timer = setTimeout(() => setCopied(false), 2000)
-    return () => clearTimeout(timer)
-  }, [copied])
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
 
   async function handleDelete() {
-    if (!deleteTarget) return
+    if (!deleteTarget) return;
     try {
-      await deleteMutation.mutateAsync(deleteTarget.id)
-      toast.success("API key revoked successfully")
-      setDeleteTarget(null)
+      await deleteMutation.mutateAsync(deleteTarget.id);
+      toast.success("API key revoked successfully");
+      setDeleteTarget(null);
     } catch {
-      toast.error("Failed to revoke API key")
+      toast.error("Failed to revoke API key");
     }
   }
 
   async function handleRotate(key: ApiKey) {
     try {
-      const result = await rotateMutation.mutateAsync(key.id)
-      setNewKeyValue(result.key)
-      toast.success("API key rotated successfully")
+      const result = await rotateMutation.mutateAsync(key.id);
+      setNewKeyValue(result.key);
+      toast.success("API key rotated successfully");
     } catch {
-      toast.error("Failed to rotate API key")
+      toast.error("Failed to rotate API key");
     }
   }
 
   const handleCopyKey = useCallback(async () => {
-    if (!newKeyValue) return
+    if (!newKeyValue) return;
     try {
-      await copyToClipboard(newKeyValue)
-      setCopied(true)
+      await copyToClipboard(newKeyValue);
+      setCopied(true);
     } catch {
-      toast.error("Failed to copy to clipboard")
+      toast.error("Failed to copy to clipboard");
     }
-  }, [newKeyValue])
+  }, [newKeyValue]);
 
   if (isLoading) {
     return (
@@ -87,7 +96,7 @@ export function ApiKeyTable() {
           <Skeleton key={`skel-${String(i)}`} className="h-12 w-full" />
         ))}
       </div>
-    )
+    );
   }
 
   if (!apiKeys || apiKeys.length === 0) {
@@ -97,7 +106,7 @@ export function ApiKeyTable() {
           No API keys yet. Create one to get started.
         </p>
       </div>
-    )
+    );
   }
 
   return (
@@ -110,12 +119,14 @@ export function ApiKeyTable() {
             <TableHead>Scopes</TableHead>
             <TableHead>Created</TableHead>
             <TableHead>Last Used</TableHead>
-            <TableHead className="w-12"><span className="sr-only">Actions</span></TableHead>
+            <TableHead className="w-12">
+              <span className="sr-only">Actions</span>
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {apiKeys.map((key) => {
-            const scopesList = parseScopesString(key.scopes)
+            const scopesList = parseScopesString(key.scopes);
             return (
               <TableRow key={key.id}>
                 <TableCell className="font-medium">{key.name}</TableCell>
@@ -127,7 +138,11 @@ export function ApiKeyTable() {
                 <TableCell>
                   <div className="flex flex-wrap gap-1">
                     {scopesList.map((scope) => (
-                      <Badge key={scope} variant="secondary" className="text-xs">
+                      <Badge
+                        key={scope}
+                        variant="secondary"
+                        className="text-xs"
+                      >
                         {scope}
                       </Badge>
                     ))}
@@ -145,7 +160,10 @@ export function ApiKeyTable() {
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon" className="h-8 w-8">
-                        <MoreHorizontal className="h-4 w-4" aria-hidden="true" />
+                        <MoreHorizontal
+                          className="h-4 w-4"
+                          aria-hidden="true"
+                        />
                         <span className="sr-only">Actions for {key.name}</span>
                       </Button>
                     </DropdownMenuTrigger>
@@ -154,7 +172,10 @@ export function ApiKeyTable() {
                         onClick={() => void handleRotate(key)}
                         disabled={key.revoked}
                       >
-                        <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />
+                        <RefreshCw
+                          className="mr-2 h-4 w-4"
+                          aria-hidden="true"
+                        />
                         Rotate
                       </DropdownMenuItem>
                       <DropdownMenuItem
@@ -169,7 +190,7 @@ export function ApiKeyTable() {
                   </DropdownMenu>
                 </TableCell>
               </TableRow>
-            )
+            );
           })}
         </TableBody>
       </Table>
@@ -177,7 +198,7 @@ export function ApiKeyTable() {
       <Dialog
         open={deleteTarget !== null}
         onOpenChange={(open) => {
-          if (!open) setDeleteTarget(null)
+          if (!open) setDeleteTarget(null);
         }}
       >
         <DialogContent>
@@ -190,10 +211,7 @@ export function ApiKeyTable() {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setDeleteTarget(null)}
-            >
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
               Cancel
             </Button>
             <Button
@@ -211,8 +229,8 @@ export function ApiKeyTable() {
         open={newKeyValue !== null}
         onOpenChange={(open) => {
           if (!open) {
-            setNewKeyValue(null)
-            setCopied(false)
+            setNewKeyValue(null);
+            setCopied(false);
           }
         }}
       >
@@ -234,7 +252,10 @@ export function ApiKeyTable() {
               aria-label="Copy API key to clipboard"
             >
               {copied ? (
-                <Check className="h-4 w-4 text-emerald-400" aria-hidden="true" />
+                <Check
+                  className="h-4 w-4 text-emerald-400"
+                  aria-hidden="true"
+                />
               ) : (
                 <Copy className="h-4 w-4" aria-hidden="true" />
               )}
@@ -243,8 +264,8 @@ export function ApiKeyTable() {
           <DialogFooter>
             <Button
               onClick={() => {
-                setNewKeyValue(null)
-                setCopied(false)
+                setNewKeyValue(null);
+                setCopied(false);
               }}
             >
               Done
@@ -253,5 +274,5 @@ export function ApiKeyTable() {
         </DialogContent>
       </Dialog>
     </>
-  )
+  );
 }

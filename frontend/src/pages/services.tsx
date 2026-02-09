@@ -1,16 +1,20 @@
-import { useState } from "react"
-import { useForm } from "react-hook-form"
-import { zodResolver } from "@hookform/resolvers/zod"
-import { useServices, useCreateService, useDeleteService } from "@/hooks/use-services"
+import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import {
+  useServices,
+  useCreateService,
+  useDeleteService,
+} from "@/hooks/use-services";
 import {
   createServiceSchema,
   type CreateServiceFormData,
   AUTH_TYPES,
-} from "@/schemas/services"
-import { ApiError } from "@/lib/api-client"
-import { ServiceCard } from "@/components/dashboard/service-card"
-import { Skeleton } from "@/components/ui/skeleton"
-import { Button } from "@/components/ui/button"
+} from "@/schemas/services";
+import { ApiError } from "@/lib/api-client";
+import { ServiceCard } from "@/components/dashboard/service-card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -19,7 +23,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog"
+} from "@/components/ui/dialog";
 import {
   Form,
   FormControl,
@@ -27,23 +31,23 @@ import {
   FormItem,
   FormLabel,
   FormMessage,
-} from "@/components/ui/form"
-import { Input } from "@/components/ui/input"
-import { Plus, Server } from "lucide-react"
-import { toast } from "sonner"
+} from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { Plus, Server } from "lucide-react";
+import { toast } from "sonner";
 
 const AUTH_TYPE_LABELS: Record<string, string> = {
   api_key: "API Key",
   oauth2: "OAuth 2.0",
   basic: "Basic Auth",
   bearer: "Bearer Token",
-}
+};
 
 export function ServicesPage() {
-  const { data: services, isLoading } = useServices()
-  const createMutation = useCreateService()
-  const deleteMutation = useDeleteService()
-  const [open, setOpen] = useState(false)
+  const { data: services, isLoading } = useServices();
+  const createMutation = useCreateService();
+  const deleteMutation = useDeleteService();
+  const [open, setOpen] = useState(false);
 
   const form = useForm<CreateServiceFormData>({
     resolver: zodResolver(createServiceSchema),
@@ -52,29 +56,29 @@ export function ServicesPage() {
       base_url: "",
       auth_type: "api_key",
     },
-  })
+  });
 
   async function onSubmit(data: CreateServiceFormData) {
     try {
-      await createMutation.mutateAsync(data)
-      toast.success("Service created successfully")
-      form.reset()
-      setOpen(false)
+      await createMutation.mutateAsync(data);
+      toast.success("Service created successfully");
+      form.reset();
+      setOpen(false);
     } catch (error) {
       if (error instanceof ApiError) {
-        form.setError("root", { message: error.message })
+        form.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to create service")
+        toast.error("Failed to create service");
       }
     }
   }
 
   async function handleDelete(id: string) {
     try {
-      await deleteMutation.mutateAsync(id)
-      toast.success("Service deleted successfully")
+      await deleteMutation.mutateAsync(id);
+      toast.success("Service deleted successfully");
     } catch {
-      toast.error("Failed to delete service")
+      toast.error("Failed to delete service");
     }
   }
 
@@ -178,10 +182,7 @@ export function ServicesPage() {
                   >
                     Cancel
                   </Button>
-                  <Button
-                    type="submit"
-                    isLoading={createMutation.isPending}
-                  >
+                  <Button type="submit" isLoading={createMutation.isPending}>
                     Create service
                   </Button>
                 </DialogFooter>
@@ -217,5 +218,5 @@ export function ServicesPage() {
         </div>
       )}
     </div>
-  )
+  );
 }

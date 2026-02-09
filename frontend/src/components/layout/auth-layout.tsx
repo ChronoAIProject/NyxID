@@ -1,6 +1,6 @@
-import { Outlet } from "@tanstack/react-router"
-import { Shield } from "lucide-react"
-import { Card, CardContent } from "@/components/ui/card"
+import { Outlet } from "@tanstack/react-router";
+import { Shield } from "lucide-react";
+import { Card, CardContent } from "@/components/ui/card";
 
 export function AuthLayout() {
   return (
@@ -22,5 +22,5 @@ export function AuthLayout() {
         Secure identity and access management by NyxID
       </p>
     </div>
-  )
+  );
 }

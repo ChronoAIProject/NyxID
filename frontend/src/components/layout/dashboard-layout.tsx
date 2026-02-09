@@ -1,6 +1,6 @@
-import { Outlet } from "@tanstack/react-router"
-import { Sidebar } from "@/components/dashboard/sidebar"
-import { Header } from "@/components/dashboard/header"
+import { Outlet } from "@tanstack/react-router";
+import { Sidebar } from "@/components/dashboard/sidebar";
+import { Header } from "@/components/dashboard/header";
 
 export function DashboardLayout() {
   return (
@@ -13,5 +13,5 @@ export function DashboardLayout() {
         </main>
       </div>
     </div>
-  )
+  );
 }

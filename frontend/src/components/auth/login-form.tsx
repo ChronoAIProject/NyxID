@@ -1,9 +1,9 @@
-import { useForm } from "react-hook-form"
-import { zodResolver } from "@hookform/resolvers/zod"
-import { useNavigate, Link } from "@tanstack/react-router"
-import { loginSchema, type LoginFormData } from "@/schemas/auth"
-import { useLogin } from "@/hooks/use-auth"
-import { ApiError } from "@/lib/api-client"
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useNavigate, Link } from "@tanstack/react-router";
+import { loginSchema, type LoginFormData } from "@/schemas/auth";
+import { useLogin } from "@/hooks/use-auth";
+import { ApiError } from "@/lib/api-client";
 import {
   Form,
   FormControl,
@@ -11,15 +11,15 @@ import {
   FormItem,
   FormLabel,
   FormMessage,
-} from "@/components/ui/form"
-import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
-import { SocialLoginButtons } from "@/components/auth/social-login-buttons"
-import { Separator } from "@/components/ui/separator"
+} from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { SocialLoginButtons } from "@/components/auth/social-login-buttons";
+import { Separator } from "@/components/ui/separator";
 
 export function LoginForm() {
-  const navigate = useNavigate()
-  const loginMutation = useLogin()
+  const navigate = useNavigate();
+  const loginMutation = useLogin();
 
   const form = useForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
@@ -27,21 +27,21 @@ export function LoginForm() {
       email: "",
       password: "",
     },
-  })
+  });
 
   async function onSubmit(data: LoginFormData) {
     try {
-      const result = await loginMutation.mutateAsync(data)
+      const result = await loginMutation.mutateAsync(data);
       if (!result.mfaRequired) {
-        void navigate({ to: "/" as string })
+        void navigate({ to: "/" as string });
       }
     } catch (error) {
       if (error instanceof ApiError) {
-        form.setError("root", { message: error.message })
+        form.setError("root", { message: error.message });
       } else {
         form.setError("root", {
           message: "An unexpected error occurred. Please try again.",
-        })
+        });
       }
     }
   }
@@ -106,7 +106,7 @@ export function LoginForm() {
                 <div className="flex items-center justify-between">
                   <FormLabel>Password</FormLabel>
                   <Link
-                    to="/forgot-password"
+                    to={"/forgot-password" as string}
                     className="text-xs text-muted-foreground hover:text-primary"
                   >
                     Forgot password?
@@ -142,5 +142,5 @@ export function LoginForm() {
         </Link>
       </p>
     </div>
-  )
+  );
 }

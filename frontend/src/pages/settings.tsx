@@ -1,18 +1,18 @@
-import { useState } from "react"
-import { useForm } from "react-hook-form"
-import { zodResolver } from "@hookform/resolvers/zod"
-import { useQuery } from "@tanstack/react-query"
-import { useAuthStore } from "@/stores/auth-store"
-import { useUser, useMfaDisable } from "@/hooks/use-auth"
-import { api, ApiError } from "@/lib/api-client"
-import type { User, Session } from "@/types/api"
+import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useQuery } from "@tanstack/react-query";
+import { useAuthStore } from "@/stores/auth-store";
+import { useUser, useMfaDisable } from "@/hooks/use-auth";
+import { api, ApiError } from "@/lib/api-client";
+import type { User, Session } from "@/types/api";
 import {
   changePasswordSchema,
   type ChangePasswordFormData,
-} from "@/schemas/auth"
-import { formatDate } from "@/lib/utils"
-import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+} from "@/schemas/auth";
+import { formatDate } from "@/lib/utils";
+import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Card,
   CardContent,
@@ -20,7 +20,7 @@ import {
   CardFooter,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card"
+} from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -28,7 +28,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog"
+} from "@/components/ui/dialog";
 import {
   Form,
   FormControl,
@@ -36,13 +36,13 @@ import {
   FormItem,
   FormLabel,
   FormMessage,
-} from "@/components/ui/form"
-import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Separator } from "@/components/ui/separator"
-import { Skeleton } from "@/components/ui/skeleton"
-import { Switch } from "@/components/ui/switch"
+} from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -50,15 +50,15 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table"
+} from "@/components/ui/table";
 import {
   ShieldCheck,
   ShieldOff,
   Monitor,
   Smartphone,
   Globe,
-} from "lucide-react"
-import { toast } from "sonner"
+} from "lucide-react";
+import { toast } from "sonner";
 
 export function SettingsPage() {
   return (
@@ -88,37 +88,37 @@ export function SettingsPage() {
         </TabsContent>
       </Tabs>
     </div>
-  )
+  );
 }
 
 function ProfileTab() {
-  const { data: user, isLoading } = useUser()
-  const [name, setName] = useState("")
-  const [saving, setSaving] = useState(false)
-  const setUser = useAuthStore((s) => s.setUser)
+  const { data: user, isLoading } = useUser();
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const setUser = useAuthStore((s) => s.setUser);
 
   if (isLoading) {
-    return <Skeleton className="h-64 w-full" />
+    return <Skeleton className="h-64 w-full" />;
   }
 
-  const displayName = name || user?.name || ""
+  const displayName = name || user?.name || "";
 
   async function handleSave() {
-    setSaving(true)
+    setSaving(true);
     try {
       const updated = await api.put<User>("/users/me", {
         display_name: displayName,
-      })
-      setUser(updated)
-      toast.success("Profile updated successfully")
+      });
+      setUser(updated);
+      toast.success("Profile updated successfully");
     } catch (error) {
       if (error instanceof ApiError) {
-        toast.error(error.message)
+        toast.error(error.message);
       } else {
-        toast.error("Failed to update profile")
+        toast.error("Failed to update profile");
       }
     } finally {
-      setSaving(false)
+      setSaving(false);
     }
   }
 
@@ -126,9 +126,7 @@ function ProfileTab() {
     <Card>
       <CardHeader>
         <CardTitle>Profile</CardTitle>
-        <CardDescription>
-          Update your personal information.
-        </CardDescription>
+        <CardDescription>Update your personal information.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
@@ -172,16 +170,16 @@ function ProfileTab() {
         </Button>
       </CardFooter>
     </Card>
-  )
+  );
 }
 
 function SecurityTab() {
-  const user = useAuthStore((s) => s.user)
-  const [mfaDialogOpen, setMfaDialogOpen] = useState(false)
-  const [disableMfaDialogOpen, setDisableMfaDialogOpen] = useState(false)
-  const [disableMfaPassword, setDisableMfaPassword] = useState("")
-  const [disableMfaError, setDisableMfaError] = useState<string | null>(null)
-  const disableMfa = useMfaDisable()
+  const user = useAuthStore((s) => s.user);
+  const [mfaDialogOpen, setMfaDialogOpen] = useState(false);
+  const [disableMfaDialogOpen, setDisableMfaDialogOpen] = useState(false);
+  const [disableMfaPassword, setDisableMfaPassword] = useState("");
+  const [disableMfaError, setDisableMfaError] = useState<string | null>(null);
+  const disableMfa = useMfaDisable();
 
   const passwordForm = useForm<ChangePasswordFormData>({
     resolver: zodResolver(changePasswordSchema),
@@ -190,49 +188,49 @@ function SecurityTab() {
       newPassword: "",
       confirmNewPassword: "",
     },
-  })
+  });
 
   async function handleChangePassword(data: ChangePasswordFormData) {
     try {
       await api.post<void>("/auth/password/change", {
         current_password: data.currentPassword,
         new_password: data.newPassword,
-      })
-      toast.success("Password changed successfully")
-      passwordForm.reset()
+      });
+      toast.success("Password changed successfully");
+      passwordForm.reset();
     } catch (error) {
       if (error instanceof ApiError) {
-        passwordForm.setError("root", { message: error.message })
+        passwordForm.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to change password")
+        toast.error("Failed to change password");
       }
     }
   }
 
   async function handleDisableMfa() {
     if (!disableMfaPassword) {
-      setDisableMfaError("Password is required")
-      return
+      setDisableMfaError("Password is required");
+      return;
     }
     try {
-      await disableMfa.mutateAsync(disableMfaPassword)
-      toast.success("MFA disabled")
-      setDisableMfaDialogOpen(false)
-      setDisableMfaPassword("")
-      setDisableMfaError(null)
+      await disableMfa.mutateAsync(disableMfaPassword);
+      toast.success("MFA disabled");
+      setDisableMfaDialogOpen(false);
+      setDisableMfaPassword("");
+      setDisableMfaError(null);
     } catch (error) {
       if (error instanceof ApiError) {
-        setDisableMfaError(error.message)
+        setDisableMfaError(error.message);
       } else {
-        setDisableMfaError("Failed to disable MFA")
+        setDisableMfaError("Failed to disable MFA");
       }
     }
   }
 
   function handleDisableMfaClose() {
-    setDisableMfaDialogOpen(false)
-    setDisableMfaPassword("")
-    setDisableMfaError(null)
+    setDisableMfaDialogOpen(false);
+    setDisableMfaPassword("");
+    setDisableMfaError(null);
   }
 
   return (
@@ -241,9 +239,15 @@ function SecurityTab() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             {user?.mfa_enabled ? (
-              <ShieldCheck className="h-5 w-5 text-emerald-400" aria-hidden="true" />
+              <ShieldCheck
+                className="h-5 w-5 text-emerald-400"
+                aria-hidden="true"
+              />
             ) : (
-              <ShieldOff className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
+              <ShieldOff
+                className="h-5 w-5 text-muted-foreground"
+                aria-hidden="true"
+              />
             )}
             Two-Factor Authentication
           </CardTitle>
@@ -260,9 +264,9 @@ function SecurityTab() {
                 checked={user?.mfa_enabled ?? false}
                 onCheckedChange={(checked) => {
                   if (checked) {
-                    setMfaDialogOpen(true)
+                    setMfaDialogOpen(true);
                   } else {
-                    setDisableMfaDialogOpen(true)
+                    setDisableMfaDialogOpen(true);
                   }
                 }}
                 aria-label="Toggle two-factor authentication"
@@ -417,38 +421,38 @@ function SecurityTab() {
         </CardContent>
       </Card>
     </div>
-  )
+  );
 }
 
 function getDeviceIcon(userAgent: string) {
-  const ua = userAgent.toLowerCase()
+  const ua = userAgent.toLowerCase();
   if (
     ua.includes("mobile") ||
     ua.includes("android") ||
     ua.includes("iphone")
   ) {
-    return <Smartphone className="h-4 w-4" aria-hidden="true" />
+    return <Smartphone className="h-4 w-4" aria-hidden="true" />;
   }
   if (
     ua.includes("mozilla") ||
     ua.includes("chrome") ||
     ua.includes("safari")
   ) {
-    return <Monitor className="h-4 w-4" aria-hidden="true" />
+    return <Monitor className="h-4 w-4" aria-hidden="true" />;
   }
-  return <Globe className="h-4 w-4" aria-hidden="true" />
+  return <Globe className="h-4 w-4" aria-hidden="true" />;
 }
 
 function SessionsTab() {
   const { data: sessions, isLoading } = useQuery({
     queryKey: ["sessions"],
     queryFn: async (): Promise<readonly Session[]> => {
-      return api.get<readonly Session[]>("/sessions")
+      return api.get<readonly Session[]>("/sessions");
     },
-  })
+  });
 
   if (isLoading) {
-    return <Skeleton className="h-64 w-full" />
+    return <Skeleton className="h-64 w-full" />;
   }
 
   return (
@@ -501,5 +505,5 @@ function SessionsTab() {
         )}
       </CardContent>
     </Card>
-  )
+  );
 }

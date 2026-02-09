@@ -3,15 +3,14 @@ members = ["backend"]
 resolver = "2"
 
 [workspace.dependencies]
-axum = { version = "0.8", features = ["macros"] }
-axum-extra = { version = "0.10", features = ["cookie", "typed-header"] }
-tokio = { version = "1.43", features = ["full"] }
-mongodb = "3.1"
-bson = { version = "2.13", features = ["uuid-1", "chrono-0_4"] }
-futures = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+axum = { version = "0.8.8", features = ["macros"] }
+tokio = { version = "1.49", features = ["full"] }
+mongodb = "3.5"
+bson = { version = "2.15", features = ["uuid-1", "chrono-0_4"] }
+futures = "0.3.31"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+uuid = { version = "1.20", features = ["v4", "serde"] }
+chrono = { version = "0.4.43", features = ["serde"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }

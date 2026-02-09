@@ -80,7 +80,7 @@ This document describes the system architecture, component design, data flows, a
              |
     +--------v---------+
     |  MongoDB 8.0     |
-    |  (12 collections)|
+    |  (10 collections)|
     +------------------+
 ```
 
@@ -109,7 +109,7 @@ Responsibilities:
 
 | Module              | Responsibility                                        |
 |---------------------|-------------------------------------------------------|
-| `auth.rs`           | Extract `AuthUser` from Bearer token, session cookie, or access token cookie. Verify user is active. Also provides `OptionalAuthUser` for endpoints with optional auth. |
+| `auth.rs`           | Extract `AuthUser` from Bearer token, session cookie, access token cookie, or API key header. Verify user is active. |
 | `rate_limit.rs`     | Per-IP sliding window rate limiter with global token-bucket fallback. Background cleanup prevents memory growth. |
 | `security_headers.rs` | Inject HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, X-XSS-Protection into every response. |
 
@@ -129,7 +129,11 @@ Request arrives
 3. Check nyx_access_token cookie
    |-- Found? --> Verify JWT --> Extract user_id --> Check user is_active --> AuthUser
    |
-4. None found --> Reject with 401
+4. Check x-api-key header
+   |-- Found? --> Hash key --> Lookup api_key in DB --> Check is_active, not expired
+   |             --> Load user --> Check user is_active --> AuthUser
+   |
+5. None found --> Reject with 401
 ```
 
 #### 3. Handler Layer (`handlers/`)
@@ -143,7 +147,7 @@ Handlers are thin HTTP boundary functions. They:
 
 | Module        | Endpoints                                                       |
 |---------------|-----------------------------------------------------------------|
-| `auth.rs`     | register, login, logout, refresh                                |
+| `auth.rs`     | register, login, logout, refresh, verify_email, forgot_password, reset_password |
 | `users.rs`    | get_me, update_me                                               |
 | `api_keys.rs` | list_keys, create_key, delete_key, rotate_key                   |
 | `services.rs` | list_services, create_service, delete_service                   |
@@ -151,6 +155,7 @@ Handlers are thin HTTP boundary functions. They:
 | `oauth.rs`    | authorize, token, userinfo                                      |
 | `admin.rs`    | list_users, get_user, list_audit_log                            |
 | `health.rs`   | health_check                                                    |
+| `mfa.rs`      | setup, verify_setup                                             |
 
 #### 4. Service Layer (`services/`)
 
@@ -483,8 +488,7 @@ Client                     NyxID Backend                     Downstream
 
 ```
 +---------------+        +-------------------+
-|    users      |<-------| user_social_conn  |
-|               |<-------| sessions          |
+|    users      |<-------| sessions          |
 |               |<-------| api_keys          |
 |               |<-------| mfa_factors       |
 |               |<-------| audit_log         |
@@ -499,10 +503,6 @@ Client                     NyxID Backend                     Downstream
         |            |
         |    +-------v-----------+
         +--->| authorization_codes|
-        |    +-------------------+
-        |
-        |    +-------------------+
-        +--->| access_tokens     |
         |    +-------------------+
         |
         |    +-------------------+      +-------------------+
@@ -601,24 +601,6 @@ Short-lived OIDC authorization codes (typically 60-second TTL).
 
 **Indexes:** `code_hash`
 
-#### access_tokens
-
-OAuth-issued access token tracking (for revocation and auditing).
-
-| Field        | Type          | Constraints       | Description                   |
-|--------------|---------------|-------------------|-------------------------------|
-| `_id`        | ObjectId      | PK                | MongoDB document ID           |
-| `id`         | UUID (string) | NOT NULL, UNIQUE  | Token record identifier       |
-| `jti`        | string        | NOT NULL, UNIQUE  | JWT ID (matches JWT jti claim)|
-| `client_id`  | UUID (string) | NOT NULL          | Issuing client                |
-| `user_id`    | UUID (string) | NOT NULL          | Token owner                   |
-| `scope`      | string        | NOT NULL          | Granted scopes                |
-| `expires_at` | ISO 8601 date | NOT NULL          | Token expiration              |
-| `revoked`    | boolean       | NOT NULL, DEFAULT false | Revocation flag         |
-| `created_at` | ISO 8601 date | NOT NULL          | Token creation timestamp      |
-
-**Indexes:** `user_id`
-
 #### refresh_tokens
 
 Refresh tokens with rotation chain tracking. The `replaced_by` field links to the successor token, enabling replay detection.
@@ -637,28 +619,6 @@ Refresh tokens with rotation chain tracking. The `replaced_by` field links to th
 | `created_at`  | ISO 8601 date | NOT NULL          | Token creation timestamp      |
 
 **Indexes:** `jti`, `session_id`
-
-#### user_social_connections
-
-Links between NyxID users and social provider accounts. Provider tokens are encrypted with AES-256-GCM.
-
-| Field                   | Type          | Constraints     | Description                   |
-|-------------------------|---------------|-----------------|-------------------------------|
-| `_id`                   | ObjectId      | PK              | MongoDB document ID           |
-| `id`                    | UUID (string) | NOT NULL, UNIQUE| Connection identifier         |
-| `user_id`               | UUID (string) | NOT NULL        | NyxID user                    |
-| `provider`              | string        | NOT NULL        | Provider name (google, github)|
-| `provider_user_id`      | string        | NOT NULL        | User ID at provider           |
-| `provider_email`        | string        | NULLABLE        | Email from provider           |
-| `provider_display_name` | string        | NULLABLE        | Name from provider            |
-| `provider_avatar_url`   | string        | NULLABLE        | Avatar from provider          |
-| `access_token_encrypted`| binary        | NULLABLE        | AES-encrypted provider token  |
-| `refresh_token_encrypted`| binary       | NULLABLE        | AES-encrypted refresh token   |
-| `token_expires_at`      | ISO 8601 date | NULLABLE        | Provider token expiration     |
-| `created_at`            | ISO 8601 date | NOT NULL        | Connection creation           |
-| `updated_at`            | ISO 8601 date | NOT NULL        | Last update                   |
-
-**Indexes:** `(provider, provider_user_id)` UNIQUE, `user_id`
 
 #### api_keys
 

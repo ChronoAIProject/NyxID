@@ -1,8 +1,8 @@
-import { useRouterState, useNavigate } from "@tanstack/react-router"
-import { useLogout } from "@/hooks/use-auth"
-import { useAuthStore } from "@/stores/auth-store"
-import { sanitizeAvatarUrl } from "@/lib/utils"
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { useRouterState, useNavigate } from "@tanstack/react-router";
+import { useLogout } from "@/hooks/use-auth";
+import { useAuthStore } from "@/stores/auth-store";
+import { sanitizeAvatarUrl } from "@/lib/utils";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -10,8 +10,8 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { User, Settings, LogOut } from "lucide-react"
+} from "@/components/ui/dropdown-menu";
+import { User, Settings, LogOut } from "lucide-react";
 
 function getPageTitle(pathname: string): string {
   const titles: Record<string, string> = {
@@ -20,8 +20,8 @@ function getPageTitle(pathname: string): string {
     "/services": "Services",
     "/connections": "Connections",
     "/settings": "Settings",
-  }
-  return titles[pathname] ?? "Dashboard"
+  };
+  return titles[pathname] ?? "Dashboard";
 }
 
 function getInitials(name: string | null, email: string): string {
@@ -32,23 +32,23 @@ function getInitials(name: string | null, email: string): string {
       .filter(Boolean)
       .join("")
       .toUpperCase()
-      .slice(0, 2)
+      .slice(0, 2);
   }
-  return email.slice(0, 2).toUpperCase()
+  return email.slice(0, 2).toUpperCase();
 }
 
 export function Header() {
-  const routerState = useRouterState()
-  const navigate = useNavigate()
-  const logoutMutation = useLogout()
-  const user = useAuthStore((s) => s.user)
+  const routerState = useRouterState();
+  const navigate = useNavigate();
+  const logoutMutation = useLogout();
+  const user = useAuthStore((s) => s.user);
 
-  const title = getPageTitle(routerState.location.pathname)
-  const safeAvatarUrl = sanitizeAvatarUrl(user?.avatar_url)
+  const title = getPageTitle(routerState.location.pathname);
+  const safeAvatarUrl = sanitizeAvatarUrl(user?.avatar_url);
 
   async function handleLogout() {
-    await logoutMutation.mutateAsync()
-    void navigate({ to: "/login" as string })
+    await logoutMutation.mutateAsync();
+    void navigate({ to: "/login" as string });
   }
 
   return (
@@ -104,5 +104,5 @@ export function Header() {
         </DropdownMenuContent>
       </DropdownMenu>
     </header>
-  )
+  );
 }

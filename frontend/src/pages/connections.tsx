@@ -1,4 +1,4 @@
-import { ConnectionGrid } from "@/components/dashboard/connection-grid"
+import { ConnectionGrid } from "@/components/dashboard/connection-grid";
 
 export function ConnectionsPage() {
   return (
@@ -12,5 +12,5 @@ export function ConnectionsPage() {
 
       <ConnectionGrid />
     </div>
-  )
+  );
 }

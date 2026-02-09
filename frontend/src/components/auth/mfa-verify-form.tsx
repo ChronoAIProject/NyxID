@@ -1,11 +1,11 @@
-import { useRef, useEffect } from "react"
-import { useForm } from "react-hook-form"
-import { zodResolver } from "@hookform/resolvers/zod"
-import { useNavigate } from "@tanstack/react-router"
-import { mfaVerifySchema, type MfaVerifyFormData } from "@/schemas/auth"
-import { useMfaVerify } from "@/hooks/use-auth"
-import { useAuthStore } from "@/stores/auth-store"
-import { ApiError } from "@/lib/api-client"
+import { useRef, useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useNavigate } from "@tanstack/react-router";
+import { mfaVerifySchema, type MfaVerifyFormData } from "@/schemas/auth";
+import { useMfaVerify } from "@/hooks/use-auth";
+import { useAuthStore } from "@/stores/auth-store";
+import { ApiError } from "@/lib/api-client";
 import {
   Form,
   FormControl,
@@ -13,50 +13,50 @@ import {
   FormItem,
   FormLabel,
   FormMessage,
-} from "@/components/ui/form"
-import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
-import { ShieldCheck } from "lucide-react"
+} from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { ShieldCheck } from "lucide-react";
 
 export function MfaVerifyForm() {
-  const navigate = useNavigate()
-  const verifyMutation = useMfaVerify()
-  const mfaToken = useAuthStore((s) => s.mfaToken)
-  const clearMfaState = useAuthStore((s) => s.clearMfaState)
-  const codeInputRef = useRef<HTMLInputElement>(null)
+  const navigate = useNavigate();
+  const verifyMutation = useMfaVerify();
+  const mfaToken = useAuthStore((s) => s.mfaToken);
+  const clearMfaState = useAuthStore((s) => s.clearMfaState);
+  const codeInputRef = useRef<HTMLInputElement>(null);
 
   const form = useForm<MfaVerifyFormData>({
     resolver: zodResolver(mfaVerifySchema),
     defaultValues: {
       code: "",
     },
-  })
+  });
 
   useEffect(() => {
-    codeInputRef.current?.focus()
-  }, [])
+    codeInputRef.current?.focus();
+  }, []);
 
   async function onSubmit(data: MfaVerifyFormData) {
-    if (!mfaToken) return
+    if (!mfaToken) return;
     try {
       await verifyMutation.mutateAsync({
         code: data.code,
         mfa_token: mfaToken,
-      })
-      void navigate({ to: "/" as string })
+      });
+      void navigate({ to: "/" as string });
     } catch (error) {
       if (error instanceof ApiError) {
-        form.setError("root", { message: error.message })
+        form.setError("root", { message: error.message });
       } else {
         form.setError("root", {
           message: "Verification failed. Please try again.",
-        })
+        });
       }
     }
   }
 
   function handleCancel() {
-    clearMfaState()
+    clearMfaState();
   }
 
   return (
@@ -92,7 +92,6 @@ export function MfaVerifyForm() {
                 <FormLabel>Verification Code</FormLabel>
                 <FormControl>
                   <Input
-                    ref={codeInputRef}
                     placeholder="000000"
                     maxLength={6}
                     autoComplete="one-time-code"
@@ -100,6 +99,7 @@ export function MfaVerifyForm() {
                     aria-label="Enter 6-digit verification code"
                     className="text-center font-mono text-lg tracking-widest"
                     {...field}
+                    ref={codeInputRef}
                   />
                 </FormControl>
                 <FormMessage />
@@ -127,5 +127,5 @@ export function MfaVerifyForm() {
         </form>
       </Form>
     </div>
-  )
+  );
 }

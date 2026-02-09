@@ -1,4 +1,4 @@
-import { useRouterState, useNavigate } from "@tanstack/react-router"
+import { useRouterState, useNavigate } from "@tanstack/react-router";
 import {
   LayoutDashboard,
   Key,
@@ -6,9 +6,9 @@ import {
   Link2,
   Settings,
   Shield,
-} from "lucide-react"
-import { cn } from "@/lib/utils"
-import { Separator } from "@/components/ui/separator"
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Separator } from "@/components/ui/separator";
 
 const NAV_ITEMS = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
@@ -16,12 +16,12 @@ const NAV_ITEMS = [
   { to: "/services", icon: Server, label: "Services" },
   { to: "/connections", icon: Link2, label: "Connections" },
   { to: "/settings", icon: Settings, label: "Settings" },
-] as const
+] as const;
 
 export function Sidebar() {
-  const routerState = useRouterState()
-  const navigate = useNavigate()
-  const currentPath = routerState.location.pathname
+  const routerState = useRouterState();
+  const navigate = useNavigate();
+  const currentPath = routerState.location.pathname;
 
   return (
     <aside className="flex w-64 flex-col border-r bg-card">
@@ -39,7 +39,7 @@ export function Sidebar() {
           const isActive =
             item.to === "/"
               ? currentPath === "/"
-              : currentPath.startsWith(item.to)
+              : currentPath.startsWith(item.to);
 
           return (
             <button
@@ -56,7 +56,7 @@ export function Sidebar() {
               <item.icon className="h-4 w-4" />
               {item.label}
             </button>
-          )
+          );
         })}
       </nav>
 
@@ -73,5 +73,5 @@ export function Sidebar() {
         </div>
       </div>
     </aside>
-  )
+  );
 }

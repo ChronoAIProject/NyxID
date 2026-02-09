@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button"
+import { Button } from "@/components/ui/button";
 
 const SOCIAL_PROVIDERS = [
   {
@@ -43,23 +43,24 @@ const SOCIAL_PROVIDERS = [
       </svg>
     ),
   },
-] as const
+] as const;
 
-const ALLOWED_PROVIDER_IDS = new Set(
-  SOCIAL_PROVIDERS.map((p) => p.id),
-)
+const ALLOWED_PROVIDER_IDS = new Set(SOCIAL_PROVIDERS.map((p) => p.id));
 
 export function SocialLoginButtons() {
-  function handleSocialLogin(provider: string) {
+  function handleSocialLogin(
+    provider: (typeof SOCIAL_PROVIDERS)[number]["id"],
+  ) {
     if (!ALLOWED_PROVIDER_IDS.has(provider)) {
-      return
+      return;
     }
-    const encodedProvider = encodeURIComponent(provider)
-    const returnUrl = `${window.location.origin}/api/v1/auth/social/${encodedProvider}`
+    const encodedProvider = encodeURIComponent(provider);
+    const returnUrl = `${window.location.origin}/api/v1/auth/social/${encodedProvider}`;
     if (!returnUrl.startsWith(window.location.origin)) {
-      return
+      return;
     }
-    window.location.href = returnUrl
+    // eslint-disable-next-line react-hooks/immutability -- browser navigation API, not React state
+    window.location.href = returnUrl;
   }
 
   return (
@@ -78,5 +79,5 @@ export function SocialLoginButtons() {
         </Button>
       ))}
     </div>
-  )
+  );
 }

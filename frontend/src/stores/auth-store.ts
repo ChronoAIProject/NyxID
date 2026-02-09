@@ -1,32 +1,32 @@
-import { create } from "zustand"
-import type { User, LoginResponse } from "@/types/api"
-import { api, ApiError } from "@/lib/api-client"
+import { create } from "zustand";
+import type { User, LoginResponse } from "@/types/api";
+import { api, ApiError } from "@/lib/api-client";
 
-const MFA_REQUIRED_ERROR_CODE = "2002"
+const MFA_REQUIRED_ERROR_CODE = "2002";
 
 interface LoginResult {
-  readonly mfaRequired: boolean
-  readonly response?: LoginResponse
+  readonly mfaRequired: boolean;
+  readonly response?: LoginResponse;
 }
 
 interface AuthState {
-  readonly user: User | null
-  readonly isAuthenticated: boolean
-  readonly isLoading: boolean
-  readonly mfaRequired: boolean
-  readonly mfaToken: string | null
+  readonly user: User | null;
+  readonly isAuthenticated: boolean;
+  readonly isLoading: boolean;
+  readonly mfaRequired: boolean;
+  readonly mfaToken: string | null;
 }
 
 interface AuthActions {
-  readonly login: (email: string, password: string) => Promise<LoginResult>
-  readonly logout: () => Promise<void>
-  readonly checkAuth: () => Promise<void>
-  readonly setUser: (user: User | null) => void
-  readonly setMfaRequired: (required: boolean, token: string | null) => void
-  readonly clearMfaState: () => void
+  readonly login: (email: string, password: string) => Promise<LoginResult>;
+  readonly logout: () => Promise<void>;
+  readonly checkAuth: () => Promise<void>;
+  readonly setUser: (user: User | null) => void;
+  readonly setMfaRequired: (required: boolean, token: string | null) => void;
+  readonly clearMfaState: () => void;
 }
 
-type AuthStore = AuthState & AuthActions
+type AuthStore = AuthState & AuthActions;
 
 export const useAuthStore = create<AuthStore>((set) => ({
   user: null,
@@ -40,15 +40,15 @@ export const useAuthStore = create<AuthStore>((set) => ({
       const response = await api.post<LoginResponse>("/auth/login", {
         email,
         password,
-      })
+      });
 
       set({
         isAuthenticated: true,
         mfaRequired: false,
         mfaToken: null,
-      })
+      });
 
-      return { mfaRequired: false, response }
+      return { mfaRequired: false, response };
     } catch (error) {
       if (
         error instanceof ApiError &&
@@ -56,53 +56,53 @@ export const useAuthStore = create<AuthStore>((set) => ({
       ) {
         const sessionToken =
           (error.errorResponse as { session_token?: string }).session_token ??
-          null
+          null;
         set({
           mfaRequired: true,
           mfaToken: sessionToken,
-        })
-        return { mfaRequired: true }
+        });
+        return { mfaRequired: true };
       }
-      throw error
+      throw error;
     }
   },
 
   logout: async (): Promise<void> => {
     try {
-      await api.post<void>("/auth/logout")
+      await api.post<void>("/auth/logout");
     } finally {
       set({
         user: null,
         isAuthenticated: false,
         mfaRequired: false,
         mfaToken: null,
-      })
+      });
     }
   },
 
   checkAuth: async (): Promise<void> => {
-    set({ isLoading: true })
+    set({ isLoading: true });
     try {
-      const user = await api.get<User>("/users/me")
-      set({ user, isAuthenticated: true, isLoading: false })
+      const user = await api.get<User>("/users/me");
+      set({ user, isAuthenticated: true, isLoading: false });
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
-        set({ user: null, isAuthenticated: false, isLoading: false })
+        set({ user: null, isAuthenticated: false, isLoading: false });
       } else {
-        set({ isLoading: false })
+        set({ isLoading: false });
       }
     }
   },
 
   setUser: (user: User | null): void => {
-    set({ user, isAuthenticated: user !== null })
+    set({ user, isAuthenticated: user !== null });
   },
 
   setMfaRequired: (required: boolean, token: string | null): void => {
-    set({ mfaRequired: required, mfaToken: token })
+    set({ mfaRequired: required, mfaToken: token });
   },
 
   clearMfaState: (): void => {
-    set({ mfaRequired: false, mfaToken: null })
+    set({ mfaRequired: false, mfaToken: null });
   },
-}))
+}));

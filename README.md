@@ -129,7 +129,7 @@ It provides a complete identity layer: user registration, session management, Op
                                   |
                          +--------v---------+
                          |  MongoDB 8.0     |
-                         |  (12 collections)|
+                         |  (10 collections)|
                          +------------------+
 ```
 
@@ -147,7 +147,7 @@ The backend follows a layered architecture:
 
 | Tool       | Version   | Purpose                              |
 |------------|-----------|--------------------------------------|
-| Rust       | 1.75+     | Backend compiler                     |
+| Rust       | 1.85+     | Backend compiler                     |
 | Node.js    | 20+       | Frontend build tooling               |
 | MongoDB    | 8.0       | Primary database                     |
 | Docker     | 24+       | Run MongoDB and Mailpit via Compose  |
@@ -240,6 +240,9 @@ For the full API reference with request/response schemas and example curl comman
 | POST   | `/api/v1/auth/login`                 | None     | Log in (returns tokens + cookies)    |
 | POST   | `/api/v1/auth/logout`                | Required | Log out and revoke session           |
 | POST   | `/api/v1/auth/refresh`               | Cookie   | Refresh access token                 |
+| POST   | `/api/v1/auth/verify-email`          | None     | Verify email address with token      |
+| POST   | `/api/v1/auth/forgot-password`       | None     | Request a password reset email       |
+| POST   | `/api/v1/auth/reset-password`        | None     | Reset password with token            |
 | GET    | `/api/v1/users/me`                   | Required | Get current user profile             |
 | PUT    | `/api/v1/users/me`                   | Required | Update current user profile          |
 | GET    | `/api/v1/api-keys`                   | Required | List API keys                        |
@@ -256,6 +259,8 @@ For the full API reference with request/response schemas and example curl comman
 | GET    | `/api/v1/admin/users`                | Admin    | List all users (paginated)           |
 | GET    | `/api/v1/admin/users/{user_id}`      | Admin    | Get user details                     |
 | GET    | `/api/v1/admin/audit-log`            | Admin    | Query audit log (paginated)          |
+| POST   | `/api/v1/mfa/setup`                  | Required | Begin TOTP MFA enrollment            |
+| POST   | `/api/v1/mfa/verify-setup`           | Required | Complete TOTP MFA enrollment         |
 
 ---
 
@@ -284,7 +289,6 @@ All configuration is loaded from environment variables. A `.env` file is support
 | Variable                   | Default | Description                     |
 |----------------------------|---------|---------------------------------|
 | `DATABASE_MAX_CONNECTIONS` | `10`    | Connection pool max size        |
-| `SQL_LOGGING`              | Auto    | Enable SQL query logging (auto-disabled in production) |
 
 ### JWT
 
@@ -342,7 +346,7 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 
 ## Database Schema
 
-NyxID uses 12 MongoDB collections:
+NyxID uses 10 MongoDB collections:
 
 | Collection                 | Description                                          |
 |----------------------------|------------------------------------------------------|
@@ -350,9 +354,7 @@ NyxID uses 12 MongoDB collections:
 | `sessions`                 | Server-side sessions with hashed tokens              |
 | `oauth_clients`            | Registered OIDC/OAuth clients                        |
 | `authorization_codes`      | Short-lived OIDC authorization codes                 |
-| `access_tokens`            | Issued OAuth access tokens (JTI tracking)            |
 | `refresh_tokens`           | Issued refresh tokens with rotation chain tracking   |
-| `user_social_connections`  | Linked social provider accounts (Google, GitHub, etc)|
 | `api_keys`                 | User-scoped API keys (hashed, with prefix)           |
 | `downstream_services`      | Registered downstream services for proxying          |
 | `user_service_connections` | Per-user credential overrides for downstream services|
@@ -455,19 +457,6 @@ The backend follows a strict layered architecture:
 3. Register the route in `routes.rs`
 4. Add audit logging where appropriate
 
-### Adding a New Migration
-
-```bash
-cd migration
-cargo run -- generate <migration_name>
-```
-
-Edit the generated file, then apply:
-
-```bash
-cargo run --manifest-path migration/Cargo.toml -- up
-```
-
 ### Frontend Development
 
 The frontend uses:
@@ -516,15 +505,16 @@ NyxID/
 |       |   |-- jwt.rs          RS256 JWT signing, verification, key management
 |       |   |-- aes.rs          AES-256-GCM encryption and decryption
 |       |   `-- token.rs        Random token generation, SHA-256 hashing
-|       |-- models/             MongoDB document definitions (12 modules)
+|       |-- models/             MongoDB document definitions (10 modules)
 |       |-- handlers/           HTTP handler functions by domain
-|       |   |-- auth.rs         Register, login, logout, refresh
+|       |   |-- auth.rs         Register, login, logout, refresh, verify-email, forgot/reset-password
 |       |   |-- users.rs        Get/update user profile
 |       |   |-- api_keys.rs     CRUD + rotate API keys
 |       |   |-- services.rs     CRUD downstream services
 |       |   |-- proxy.rs        Reverse proxy handler
 |       |   |-- oauth.rs        OIDC authorize, token, userinfo
 |       |   |-- admin.rs        Admin user/audit endpoints
+|       |   |-- mfa.rs          MFA setup and verification
 |       |   `-- health.rs       Health check
 |       |-- services/           Business logic layer
 |       |   |-- auth_service.rs     User registration, password verification
@@ -535,7 +525,7 @@ NyxID/
 |       |   |-- mfa_service.rs      TOTP provisioning, verification
 |       |   `-- audit_service.rs    Async audit log insertion
 |       `-- mw/                 Middleware
-|           |-- auth.rs         AuthUser extractor (Bearer / cookie)
+|           |-- auth.rs         AuthUser extractor (Bearer / cookie / API key)
 |           |-- rate_limit.rs   Per-IP + global rate limiting
 |           `-- security_headers.rs  HSTS, CSP, XFO, etc.
 |

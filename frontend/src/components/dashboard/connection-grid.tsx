@@ -3,44 +3,44 @@ import {
   useServices,
   useConnectService,
   useDisconnectService,
-} from "@/hooks/use-services"
-import { formatDate } from "@/lib/utils"
+} from "@/hooks/use-services";
+import { formatDate } from "@/lib/utils";
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Skeleton } from "@/components/ui/skeleton"
-import { Link2, Unlink, Server } from "lucide-react"
-import { toast } from "sonner"
+} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Link2, Unlink, Server } from "lucide-react";
+import { toast } from "sonner";
 
 export function ConnectionGrid() {
-  const { data: services, isLoading: servicesLoading } = useServices()
-  const { data: connections, isLoading: connectionsLoading } = useConnections()
-  const connectMutation = useConnectService()
-  const disconnectMutation = useDisconnectService()
+  const { data: services, isLoading: servicesLoading } = useServices();
+  const { data: connections, isLoading: connectionsLoading } = useConnections();
+  const connectMutation = useConnectService();
+  const disconnectMutation = useDisconnectService();
 
-  const isLoading = servicesLoading || connectionsLoading
+  const isLoading = servicesLoading || connectionsLoading;
 
   async function handleConnect(serviceId: string) {
     try {
-      await connectMutation.mutateAsync(serviceId)
-      toast.success("Connected to service")
+      await connectMutation.mutateAsync(serviceId);
+      toast.success("Connected to service");
     } catch {
-      toast.error("Failed to connect to service")
+      toast.error("Failed to connect to service");
     }
   }
 
   async function handleDisconnect(serviceId: string) {
     try {
-      await disconnectMutation.mutateAsync(serviceId)
-      toast.success("Disconnected from service")
+      await disconnectMutation.mutateAsync(serviceId);
+      toast.success("Disconnected from service");
     } catch {
-      toast.error("Failed to disconnect from service")
+      toast.error("Failed to disconnect from service");
     }
   }
 
@@ -51,7 +51,7 @@ export function ConnectionGrid() {
           <Skeleton key={`conn-skel-${String(i)}`} className="h-40 w-full" />
         ))}
       </div>
-    )
+    );
   }
 
   if (!services || services.length === 0) {
@@ -62,20 +62,18 @@ export function ConnectionGrid() {
           No services available. Create a service first.
         </p>
       </div>
-    )
+    );
   }
 
-  const connectedIds = new Set(
-    connections?.map((c) => c.service_id) ?? [],
-  )
+  const connectedIds = new Set(connections?.map((c) => c.service_id) ?? []);
 
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {services.map((service) => {
-        const isConnected = connectedIds.has(service.id)
+        const isConnected = connectedIds.has(service.id);
         const connection = connections?.find(
           (c) => c.service_id === service.id,
-        )
+        );
 
         return (
           <Card
@@ -91,9 +89,7 @@ export function ConnectionGrid() {
                 <div className="flex items-center gap-3">
                   <div
                     className={`flex h-10 w-10 items-center justify-center rounded-lg ${
-                      isConnected
-                        ? "bg-primary/20"
-                        : "bg-muted"
+                      isConnected ? "bg-primary/20" : "bg-muted"
                     }`}
                   >
                     <Server
@@ -149,8 +145,8 @@ export function ConnectionGrid() {
               </div>
             </CardContent>
           </Card>
-        )
+        );
       })}
     </div>
-  )
+  );
 }

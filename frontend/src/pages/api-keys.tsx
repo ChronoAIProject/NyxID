@@ -1,5 +1,5 @@
-import { ApiKeyTable } from "@/components/dashboard/api-key-table"
-import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog"
+import { ApiKeyTable } from "@/components/dashboard/api-key-table";
+import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
 
 export function ApiKeysPage() {
   return (
@@ -16,5 +16,5 @@ export function ApiKeysPage() {
 
       <ApiKeyTable />
     </div>
-  )
+  );
 }

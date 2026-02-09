@@ -1,4 +1,4 @@
-import { z } from "zod"
+import { z } from "zod";
 
 export const API_KEY_SCOPES = [
   "read:profile",
@@ -8,9 +8,9 @@ export const API_KEY_SCOPES = [
   "read:connections",
   "write:connections",
   "admin",
-] as const
+] as const;
 
-export type ApiKeyScope = (typeof API_KEY_SCOPES)[number]
+export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];
 
 export const createApiKeySchema = z.object({
   name: z
@@ -21,6 +21,6 @@ export const createApiKeySchema = z.object({
     .array(z.enum(API_KEY_SCOPES))
     .min(1, "At least one scope is required"),
   expires_at: z.string().nullable().optional(),
-})
+});
 
-export type CreateApiKeyFormData = z.infer<typeof createApiKeySchema>
+export type CreateApiKeyFormData = z.infer<typeof createApiKeySchema>;

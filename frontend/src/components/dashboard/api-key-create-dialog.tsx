@@ -1,14 +1,14 @@
-import { useState } from "react"
-import { useForm } from "react-hook-form"
-import { zodResolver } from "@hookform/resolvers/zod"
+import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
 import {
   createApiKeySchema,
   type CreateApiKeyFormData,
   API_KEY_SCOPES,
-} from "@/schemas/api-keys"
-import { useCreateApiKey } from "@/hooks/use-api-keys"
-import { copyToClipboard } from "@/lib/utils"
-import { ApiError } from "@/lib/api-client"
+} from "@/schemas/api-keys";
+import { useCreateApiKey } from "@/hooks/use-api-keys";
+import { copyToClipboard } from "@/lib/utils";
+import { ApiError } from "@/lib/api-client";
 import {
   Dialog,
   DialogContent,
@@ -17,7 +17,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
-} from "@/components/ui/dialog"
+} from "@/components/ui/dialog";
 import {
   Form,
   FormControl,
@@ -25,18 +25,18 @@ import {
   FormItem,
   FormLabel,
   FormMessage,
-} from "@/components/ui/form"
-import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Plus, Copy, Check } from "lucide-react"
-import { toast } from "sonner"
+} from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Plus, Copy, Check } from "lucide-react";
+import { toast } from "sonner";
 
 export function ApiKeyCreateDialog() {
-  const [open, setOpen] = useState(false)
-  const [createdKey, setCreatedKey] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
-  const createMutation = useCreateApiKey()
+  const [open, setOpen] = useState(false);
+  const [createdKey, setCreatedKey] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const createMutation = useCreateApiKey();
 
   const form = useForm<CreateApiKeyFormData>({
     resolver: zodResolver(createApiKeySchema),
@@ -45,34 +45,34 @@ export function ApiKeyCreateDialog() {
       scopes: [],
       expires_at: null,
     },
-  })
+  });
 
   async function onSubmit(data: CreateApiKeyFormData) {
     try {
-      const result = await createMutation.mutateAsync(data)
-      setCreatedKey(result.key)
-      toast.success("API key created successfully")
+      const result = await createMutation.mutateAsync(data);
+      setCreatedKey(result.key);
+      toast.success("API key created successfully");
     } catch (error) {
       if (error instanceof ApiError) {
-        form.setError("root", { message: error.message })
+        form.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to create API key")
+        toast.error("Failed to create API key");
       }
     }
   }
 
   async function handleCopy() {
-    if (!createdKey) return
-    await copyToClipboard(createdKey)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    if (!createdKey) return;
+    await copyToClipboard(createdKey);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   }
 
   function handleClose() {
-    setOpen(false)
-    setCreatedKey(null)
-    setCopied(false)
-    form.reset()
+    setOpen(false);
+    setCreatedKey(null);
+    setCopied(false);
+    form.reset();
   }
 
   function toggleScope(
@@ -81,14 +81,17 @@ export function ApiKeyCreateDialog() {
     onChange: (value: readonly string[]) => void,
   ) {
     if (currentScopes.includes(scope)) {
-      onChange(currentScopes.filter((s) => s !== scope))
+      onChange(currentScopes.filter((s) => s !== scope));
     } else {
-      onChange([...currentScopes, scope])
+      onChange([...currentScopes, scope]);
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={(o) => (o ? setOpen(true) : handleClose())}>
+    <Dialog
+      open={open}
+      onOpenChange={(o) => (o ? setOpen(true) : handleClose())}
+    >
       <DialogTrigger asChild>
         <Button>
           <Plus className="mr-2 h-4 w-4" />
@@ -151,10 +154,7 @@ export function ApiKeyCreateDialog() {
                     <FormItem>
                       <FormLabel>Name</FormLabel>
                       <FormControl>
-                        <Input
-                          placeholder="My API Key"
-                          {...field}
-                        />
+                        <Input placeholder="My API Key" {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -171,7 +171,7 @@ export function ApiKeyCreateDialog() {
                         {API_KEY_SCOPES.map((scope) => {
                           const isSelected = (
                             field.value as readonly string[]
-                          ).includes(scope)
+                          ).includes(scope);
                           return (
                             <Badge
                               key={scope}
@@ -189,7 +189,7 @@ export function ApiKeyCreateDialog() {
                             >
                               {scope}
                             </Badge>
-                          )
+                          );
                         })}
                       </div>
                       <FormMessage />
@@ -204,7 +204,9 @@ export function ApiKeyCreateDialog() {
                     <FormItem>
                       <FormLabel>
                         Expiry Date{" "}
-                        <span className="text-muted-foreground">(optional)</span>
+                        <span className="text-muted-foreground">
+                          (optional)
+                        </span>
                       </FormLabel>
                       <FormControl>
                         <Input
@@ -222,17 +224,10 @@ export function ApiKeyCreateDialog() {
                 />
 
                 <DialogFooter>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={handleClose}
-                  >
+                  <Button type="button" variant="outline" onClick={handleClose}>
                     Cancel
                   </Button>
-                  <Button
-                    type="submit"
-                    isLoading={createMutation.isPending}
-                  >
+                  <Button type="submit" isLoading={createMutation.isPending}>
                     Create key
                   </Button>
                 </DialogFooter>
@@ -242,5 +237,5 @@ export function ApiKeyCreateDialog() {
         )}
       </DialogContent>
     </Dialog>
-  )
+  );
 }

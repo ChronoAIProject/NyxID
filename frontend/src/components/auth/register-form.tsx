@@ -1,9 +1,9 @@
-import { useForm } from "react-hook-form"
-import { zodResolver } from "@hookform/resolvers/zod"
-import { useNavigate, Link } from "@tanstack/react-router"
-import { registerSchema, type RegisterFormData } from "@/schemas/auth"
-import { useRegister } from "@/hooks/use-auth"
-import { ApiError } from "@/lib/api-client"
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useNavigate, Link } from "@tanstack/react-router";
+import { registerSchema, type RegisterFormData } from "@/schemas/auth";
+import { useRegister } from "@/hooks/use-auth";
+import { ApiError } from "@/lib/api-client";
 import {
   Form,
   FormControl,
@@ -11,34 +11,34 @@ import {
   FormItem,
   FormLabel,
   FormMessage,
-} from "@/components/ui/form"
-import { Input } from "@/components/ui/input"
-import { Button } from "@/components/ui/button"
-import { SocialLoginButtons } from "@/components/auth/social-login-buttons"
-import { Separator } from "@/components/ui/separator"
-import { toast } from "sonner"
+} from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { SocialLoginButtons } from "@/components/auth/social-login-buttons";
+import { Separator } from "@/components/ui/separator";
+import { toast } from "sonner";
 
 function getPasswordStrength(password: string): {
-  score: number
-  label: string
-  color: string
+  score: number;
+  label: string;
+  color: string;
 } {
-  let score = 0
-  if (password.length >= 8) score += 1
-  if (password.length >= 12) score += 1
-  if (/[A-Z]/.test(password)) score += 1
-  if (/[a-z]/.test(password)) score += 1
-  if (/[0-9]/.test(password)) score += 1
-  if (/[^A-Za-z0-9]/.test(password)) score += 1
+  let score = 0;
+  if (password.length >= 8) score += 1;
+  if (password.length >= 12) score += 1;
+  if (/[A-Z]/.test(password)) score += 1;
+  if (/[a-z]/.test(password)) score += 1;
+  if (/[0-9]/.test(password)) score += 1;
+  if (/[^A-Za-z0-9]/.test(password)) score += 1;
 
-  if (score <= 2) return { score, label: "Weak", color: "bg-destructive" }
-  if (score <= 4) return { score, label: "Fair", color: "bg-amber-500" }
-  return { score, label: "Strong", color: "bg-emerald-500" }
+  if (score <= 2) return { score, label: "Weak", color: "bg-destructive" };
+  if (score <= 4) return { score, label: "Fair", color: "bg-amber-500" };
+  return { score, label: "Strong", color: "bg-emerald-500" };
 }
 
 export function RegisterForm() {
-  const navigate = useNavigate()
-  const registerMutation = useRegister()
+  const navigate = useNavigate();
+  const registerMutation = useRegister();
 
   const form = useForm<RegisterFormData>({
     resolver: zodResolver(registerSchema),
@@ -48,10 +48,10 @@ export function RegisterForm() {
       password: "",
       confirmPassword: "",
     },
-  })
+  });
 
-  const password = form.watch("password")
-  const strength = getPasswordStrength(password)
+  const password = form.watch("password");
+  const strength = getPasswordStrength(password);
 
   async function onSubmit(data: RegisterFormData) {
     try {
@@ -59,16 +59,16 @@ export function RegisterForm() {
         name: data.name,
         email: data.email,
         password: data.password,
-      })
-      toast.success(result.message || "Account created successfully")
-      void navigate({ to: "/login" as string })
+      });
+      toast.success(result.message || "Account created successfully");
+      void navigate({ to: "/login" as string });
     } catch (error) {
       if (error instanceof ApiError) {
-        form.setError("root", { message: error.message })
+        form.setError("root", { message: error.message });
       } else {
         form.setError("root", {
           message: "An unexpected error occurred. Please try again.",
-        })
+        });
       }
     }
   }
@@ -79,9 +79,7 @@ export function RegisterForm() {
         <h1 className="text-2xl font-semibold tracking-tight">
           Create an account
         </h1>
-        <p className="text-sm text-muted-foreground">
-          Get started with NyxID
-        </p>
+        <p className="text-sm text-muted-foreground">Get started with NyxID</p>
       </div>
 
       <SocialLoginButtons />
@@ -161,14 +159,19 @@ export function RegisterForm() {
                 </FormControl>
                 {password.length > 0 && (
                   <div className="space-y-1" aria-live="polite">
-                    <div className="flex gap-1" role="progressbar" aria-valuenow={strength.score} aria-valuemin={0} aria-valuemax={6} aria-label={`Password strength: ${strength.label}`}>
+                    <div
+                      className="flex gap-1"
+                      role="progressbar"
+                      aria-valuenow={strength.score}
+                      aria-valuemin={0}
+                      aria-valuemax={6}
+                      aria-label={`Password strength: ${strength.label}`}
+                    >
                       {Array.from({ length: 6 }).map((_, i) => (
                         <div
                           key={`strength-${String(i)}`}
                           className={`h-1 flex-1 rounded-full ${
-                            i < strength.score
-                              ? strength.color
-                              : "bg-muted"
+                            i < strength.score ? strength.color : "bg-muted"
                           }`}
                         />
                       ))}
@@ -219,5 +222,5 @@ export function RegisterForm() {
         </Link>
       </p>
     </div>
-  )
+  );
 }

@@ -1,20 +1,20 @@
-import type { DownstreamService } from "@/types/api"
-import { formatDate } from "@/lib/utils"
+import type { DownstreamService } from "@/types/api";
+import { formatDate } from "@/lib/utils";
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
-import { Server, Trash2 } from "lucide-react"
+} from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Server, Trash2 } from "lucide-react";
 
 interface ServiceCardProps {
-  readonly service: DownstreamService
-  readonly onDelete: (id: string) => void
-  readonly isDeleting: boolean
+  readonly service: DownstreamService;
+  readonly onDelete: (id: string) => void;
+  readonly isDeleting: boolean;
 }
 
 const AUTH_TYPE_LABELS: Record<string, string> = {
@@ -22,7 +22,7 @@ const AUTH_TYPE_LABELS: Record<string, string> = {
   oauth2: "OAuth 2.0",
   basic: "Basic Auth",
   bearer: "Bearer Token",
-}
+};
 
 export function ServiceCard({
   service,
@@ -65,5 +65,5 @@ export function ServiceCard({
         </div>
       </CardContent>
     </Card>
-  )
+  );
 }

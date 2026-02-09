@@ -16,6 +16,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [API Keys](#api-keys)
   - [Downstream Services](#downstream-services)
   - [Proxy](#proxy)
+  - [MFA](#mfa-multi-factor-authentication)
   - [OAuth / OpenID Connect](#oauth--openid-connect)
   - [Admin](#admin)
 
@@ -23,11 +24,12 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 
 ## Authentication
 
-Most endpoints require authentication. NyxID supports three authentication methods, checked in the following order:
+Most endpoints require authentication. NyxID supports four authentication methods, checked in the following order:
 
 1. **Bearer Token** -- `Authorization: Bearer <access_token>` header
 2. **Session Cookie** -- `nyx_session` HttpOnly cookie (set at login)
 3. **Access Token Cookie** -- `nyx_access_token` HttpOnly cookie (set at login)
+4. **API Key** -- `X-API-Key: <key>` header
 
 Endpoints marked **Auth: None** do not require authentication.
 Endpoints marked **Auth: Required** require any of the above.
@@ -299,6 +301,124 @@ Exchange a refresh token for a new access token. The refresh token is read from 
 curl -X POST http://localhost:3001/api/v1/auth/refresh \
   -b cookies.txt \
   -c cookies.txt
+```
+
+---
+
+#### POST /api/v1/auth/verify-email
+
+Verify a user's email address using the token sent during registration.
+
+**Auth:** None
+
+**Request Body:**
+
+| Field   | Type   | Required | Description                         |
+|---------|--------|----------|-------------------------------------|
+| `token` | string | Yes      | Email verification token            |
+
+```json
+{
+  "token": "verification-token-here"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "message": "Email verified successfully"
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Missing or invalid token
+- `1003 not_found` -- Token not found or already used
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/auth/verify-email \
+  -H "Content-Type: application/json" \
+  -d '{"token": "verification-token-here"}'
+```
+
+---
+
+#### POST /api/v1/auth/forgot-password
+
+Request a password reset. Always returns success to prevent email enumeration.
+
+**Auth:** None
+
+**Request Body:**
+
+| Field   | Type   | Required | Description           |
+|---------|--------|----------|-----------------------|
+| `email` | string | Yes      | User email address    |
+
+```json
+{
+  "email": "user@example.com"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "message": "If an account exists with that email, a password reset link has been sent."
+}
+```
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/auth/forgot-password \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com"}'
+```
+
+---
+
+#### POST /api/v1/auth/reset-password
+
+Reset a user's password using a valid reset token.
+
+**Auth:** None
+
+**Request Body:**
+
+| Field          | Type   | Required | Description                    |
+|----------------|--------|----------|--------------------------------|
+| `token`        | string | Yes      | Password reset token           |
+| `new_password` | string | Yes      | New password (8-128 characters)|
+
+```json
+{
+  "token": "reset-token-here",
+  "new_password": "newsecurepassword123"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "message": "Password reset successfully"
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Missing token or password too short/long
+- `1003 not_found` -- Token not found, expired, or already used
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/auth/reset-password \
+  -H "Content-Type: application/json" \
+  -d '{"token": "reset-token-here", "new_password": "newsecurepassword123"}'
 ```
 
 ---
@@ -868,6 +988,78 @@ OpenID Connect UserInfo endpoint. Returns claims about the authenticated user.
 ```bash
 curl http://localhost:3001/oauth/userinfo \
   -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+### MFA (Multi-Factor Authentication)
+
+#### POST /api/v1/mfa/setup
+
+Begin TOTP MFA enrollment. Returns a TOTP secret and a QR code provisioning URL.
+
+**Auth:** Required
+
+**Response (200):**
+
+```json
+{
+  "secret": "JBSWY3DPEHPK3PXP",
+  "qr_url": "otpauth://totp/NyxID:user@example.com?secret=JBSWY3DPEHPK3PXP&issuer=NyxID"
+}
+```
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/mfa/setup \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### POST /api/v1/mfa/verify-setup
+
+Complete MFA enrollment by verifying a TOTP code. On success, MFA is enabled on the user account and recovery codes are returned.
+
+**Auth:** Required
+
+**Request Body:**
+
+| Field  | Type   | Required | Description                           |
+|--------|--------|----------|---------------------------------------|
+| `code` | string | Yes      | 6-digit TOTP code from authenticator  |
+
+```json
+{
+  "code": "123456"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "message": "MFA enabled successfully",
+  "recovery_codes": [
+    "ABCD-1234-EFGH",
+    "IJKL-5678-MNOP",
+    "QRST-9012-UVWX"
+  ]
+}
+```
+
+**Errors:**
+- `2000 authentication_failed` -- Invalid TOTP code
+- `1003 not_found` -- No pending MFA factor found
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/mfa/verify-setup \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"code": "123456"}'
 ```
 
 ---

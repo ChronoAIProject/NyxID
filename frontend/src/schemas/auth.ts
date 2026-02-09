@@ -1,11 +1,11 @@
-import { z } from "zod"
+import { z } from "zod";
 
 export const loginSchema = z.object({
   email: z.string().min(1, "Email is required").email("Invalid email address"),
   password: z.string().min(1, "Password is required"),
-})
+});
 
-export type LoginFormData = z.infer<typeof loginSchema>
+export type LoginFormData = z.infer<typeof loginSchema>;
 
 export const registerSchema = z
   .object({
@@ -29,15 +29,15 @@ export const registerSchema = z
   .refine((data) => data.password === data.confirmPassword, {
     message: "Passwords do not match",
     path: ["confirmPassword"],
-  })
+  });
 
-export type RegisterFormData = z.infer<typeof registerSchema>
+export type RegisterFormData = z.infer<typeof registerSchema>;
 
 export const forgotPasswordSchema = z.object({
   email: z.string().min(1, "Email is required").email("Invalid email address"),
-})
+});
 
-export type ForgotPasswordFormData = z.infer<typeof forgotPasswordSchema>
+export type ForgotPasswordFormData = z.infer<typeof forgotPasswordSchema>;
 
 export const resetPasswordSchema = z
   .object({
@@ -53,9 +53,9 @@ export const resetPasswordSchema = z
   .refine((data) => data.password === data.confirmPassword, {
     message: "Passwords do not match",
     path: ["confirmPassword"],
-  })
+  });
 
-export type ResetPasswordFormData = z.infer<typeof resetPasswordSchema>
+export type ResetPasswordFormData = z.infer<typeof resetPasswordSchema>;
 
 export const changePasswordSchema = z
   .object({
@@ -72,9 +72,9 @@ export const changePasswordSchema = z
   .refine((data) => data.newPassword === data.confirmNewPassword, {
     message: "Passwords do not match",
     path: ["confirmNewPassword"],
-  })
+  });
 
-export type ChangePasswordFormData = z.infer<typeof changePasswordSchema>
+export type ChangePasswordFormData = z.infer<typeof changePasswordSchema>;
 
 export const mfaVerifySchema = z.object({
   code: z
@@ -82,6 +82,6 @@ export const mfaVerifySchema = z.object({
     .min(1, "Code is required")
     .length(6, "Code must be 6 digits")
     .regex(/^\d{6}$/, "Code must be 6 digits"),
-})
+});
 
-export type MfaVerifyFormData = z.infer<typeof mfaVerifySchema>
+export type MfaVerifyFormData = z.infer<typeof mfaVerifySchema>;

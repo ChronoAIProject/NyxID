@@ -1,31 +1,31 @@
-import { memo } from "react"
-import { Link } from "@tanstack/react-router"
-import { useAuthStore } from "@/stores/auth-store"
-import { useApiKeys } from "@/hooks/use-api-keys"
-import { useServices, useConnections } from "@/hooks/use-services"
+import { memo } from "react";
+import { Link } from "@tanstack/react-router";
+import { useAuthStore } from "@/stores/auth-store";
+import { useApiKeys } from "@/hooks/use-api-keys";
+import { useServices, useConnections } from "@/hooks/use-services";
 import {
   Card,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
-} from "@/components/ui/card"
-import { Skeleton } from "@/components/ui/skeleton"
-import { Key, Server, Link2, ShieldCheck, ShieldOff } from "lucide-react"
+} from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Key, Server, Link2, ShieldCheck, ShieldOff } from "lucide-react";
 
 interface StatItem {
-  readonly title: string
-  readonly value: number | string
-  readonly description: string
-  readonly icon: React.ComponentType<{ className?: string }>
-  readonly loading: boolean
+  readonly title: string;
+  readonly value: number | string;
+  readonly description: string;
+  readonly icon: React.ComponentType<{ className?: string }>;
+  readonly loading: boolean;
 }
 
 export function DashboardPage() {
-  const user = useAuthStore((s) => s.user)
-  const { data: apiKeys, isLoading: keysLoading } = useApiKeys()
-  const { data: services, isLoading: servicesLoading } = useServices()
-  const { data: connections, isLoading: connectionsLoading } = useConnections()
+  const user = useAuthStore((s) => s.user);
+  const { data: apiKeys, isLoading: keysLoading } = useApiKeys();
+  const { data: services, isLoading: servicesLoading } = useServices();
+  const { data: connections, isLoading: connectionsLoading } = useConnections();
 
   const stats: readonly StatItem[] = [
     {
@@ -58,7 +58,7 @@ export function DashboardPage() {
       icon: user?.mfa_enabled ? ShieldCheck : ShieldOff,
       loading: false,
     },
-  ]
+  ];
 
   return (
     <div className="space-y-8">
@@ -78,7 +78,10 @@ export function DashboardPage() {
               <CardTitle className="text-sm font-medium">
                 {stat.title}
               </CardTitle>
-              <stat.icon className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+              <stat.icon
+                className="h-4 w-4 text-muted-foreground"
+                aria-hidden="true"
+              />
             </CardHeader>
             <CardContent>
               {stat.loading ? (
@@ -146,7 +149,7 @@ export function DashboardPage() {
         </Card>
       </div>
     </div>
-  )
+  );
 }
 
 const QuickAction = memo(function QuickAction({
@@ -154,9 +157,9 @@ const QuickAction = memo(function QuickAction({
   to,
   icon,
 }: {
-  readonly label: string
-  readonly to: string
-  readonly icon: React.ReactNode
+  readonly label: string;
+  readonly to: string;
+  readonly icon: React.ReactNode;
 }) {
   return (
     <Link
@@ -166,20 +169,20 @@ const QuickAction = memo(function QuickAction({
       <div className="text-muted-foreground">{icon}</div>
       <span>{label}</span>
     </Link>
-  )
-})
+  );
+});
 
 const InfoRow = memo(function InfoRow({
   label,
   value,
 }: {
-  readonly label: string
-  readonly value: string
+  readonly label: string;
+  readonly value: string;
 }) {
   return (
     <div className="flex items-center justify-between">
       <span className="text-sm text-muted-foreground">{label}</span>
       <span className="text-sm font-medium">{value}</span>
     </div>
-  )
-})
+  );
+});
