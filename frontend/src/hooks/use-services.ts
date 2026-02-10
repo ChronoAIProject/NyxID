@@ -149,12 +149,52 @@ export function useConnections() {
   });
 }
 
+interface ConnectServiceParams {
+  readonly serviceId: string;
+  readonly credential?: string;
+  readonly credentialLabel?: string;
+}
+
+interface ConnectResponse {
+  readonly service_id: string;
+  readonly service_name: string;
+  readonly connected_at: string;
+}
+
 export function useConnectService() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (serviceId: string): Promise<UserServiceConnection> => {
-      return api.post<UserServiceConnection>(`/connections/${serviceId}`);
+    mutationFn: async (
+      params: ConnectServiceParams,
+    ): Promise<ConnectResponse> => {
+      return api.post<ConnectResponse>(
+        `/connections/${params.serviceId}`,
+        {
+          credential: params.credential,
+          credential_label: params.credentialLabel,
+        },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["connections"] });
+    },
+  });
+}
+
+export function useUpdateCredential() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (params: {
+      readonly serviceId: string;
+      readonly credential: string;
+      readonly credentialLabel?: string;
+    }): Promise<void> => {
+      return api.put<void>(`/connections/${params.serviceId}/credential`, {
+        credential: params.credential,
+        credential_label: params.credentialLabel,
+      });
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["connections"] });

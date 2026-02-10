@@ -710,9 +710,15 @@ curl -X POST http://localhost:3001/api/v1/api-keys/a1b2c3d4-e5f6-7890-abcd-ef123
 
 #### GET /api/v1/services
 
-List all active downstream services.
+List all active downstream services. Supports optional filtering by service category.
 
 **Auth:** Required
+
+**Query Parameters:**
+
+| Parameter  | Type   | Required | Description                                           |
+|------------|--------|----------|-------------------------------------------------------|
+| `category` | string | No       | Filter by service category: `provider`, `connection`, or `internal`. Omit for all. |
 
 **Response (200):**
 
@@ -721,16 +727,18 @@ List all active downstream services.
   "services": [
     {
       "id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
-      "name": "Internal Analytics API",
-      "slug": "analytics",
-      "description": "Company analytics service",
-      "base_url": "https://analytics.example.com",
-      "auth_method": "bearer",
-      "auth_type": "oauth2",
+      "name": "Stripe API",
+      "slug": "stripe",
+      "description": "Payment processing",
+      "base_url": "https://api.stripe.com",
+      "auth_method": "header",
+      "auth_type": "api_key",
       "auth_key_name": "Authorization",
       "is_active": true,
       "oauth_client_id": null,
       "api_spec_url": null,
+      "service_category": "connection",
+      "requires_user_credential": true,
       "created_by": "550e8400-e29b-41d4-a716-446655440000",
       "created_at": "2025-01-15T10:30:00+00:00",
       "updated_at": "2025-01-15T10:30:00+00:00"
@@ -742,7 +750,12 @@ List all active downstream services.
 **Example:**
 
 ```bash
+# List all services
 curl http://localhost:3001/api/v1/services \
+  -H "Authorization: Bearer <access_token>"
+
+# List only connectable services
+curl "http://localhost:3001/api/v1/services?category=connection" \
   -H "Authorization: Bearer <access_token>"
 ```
 
@@ -758,15 +771,16 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 
 **Request Body:**
 
-| Field           | Type   | Required | Description                                                                           |
-|-----------------|--------|----------|---------------------------------------------------------------------------------------|
-| `name`          | string | Yes      | Service display name (max 200 chars)                                                  |
-| `slug`          | string | No       | URL-safe identifier (max 100 chars, unique). Auto-derived from `name` if omitted.     |
-| `description`   | string | No       | Service description                                                                   |
-| `base_url`      | string | Yes      | Downstream service base URL (max 2048 chars). Must not point to private/internal IPs. |
-| `auth_type`     | string | No       | One of: `api_key`, `oauth2`/`bearer`, `basic`, `oidc`, `header`, `query`. Default: `header`. Alias: `auth_method`. |
-| `auth_key_name` | string | No       | Header or query param name. Defaults based on `auth_type`.                            |
-| `credential`    | string | No       | API key, token, or `user:password` for basic. Not needed for OIDC services.           |
+| Field              | Type   | Required | Description                                                                           |
+|--------------------|--------|----------|---------------------------------------------------------------------------------------|
+| `name`             | string | Yes      | Service display name (max 200 chars)                                                  |
+| `slug`             | string | No       | URL-safe identifier (max 100 chars, unique). Auto-derived from `name` if omitted.     |
+| `description`      | string | No       | Service description                                                                   |
+| `base_url`         | string | Yes      | Downstream service base URL (max 2048 chars). Must not point to private/internal IPs. |
+| `auth_type`        | string | No       | One of: `api_key`, `oauth2`/`bearer`, `basic`, `oidc`, `header`, `query`. Default: `header`. Alias: `auth_method`. |
+| `auth_key_name`    | string | No       | Header or query param name. Defaults based on `auth_type`.                            |
+| `credential`       | string | No       | API key, token, or `user:password` for basic. Not needed for OIDC services.           |
+| `service_category` | string | No       | `"connection"` (default), `"internal"`, or `"provider"` (OIDC only). See below.       |
 
 **Auth Type Mapping:**
 
@@ -778,16 +792,37 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 | `basic`              | `basic`              | `Authorization`         | Sends HTTP Basic Auth (credential = `user:password`) |
 | `oidc`               | `oidc`               | `X-API-Key`             | Auto-provisions OAuth client; uses OIDC flow        |
 
-**Example (API key service):**
+**Service Category Rules:**
+
+| `service_category` | When to use | `requires_user_credential` | User can connect? |
+|--------------------|-------------|----------------------------|-------------------|
+| `connection` (default) | External services users connect to with their own credentials | `true` | Yes (must supply credential) |
+| `internal` | Services using a master credential managed by admin | `false` | Yes (enable only, no credential) |
+| `provider` | OIDC services (auto-assigned when `auth_type` is `oidc`) | `false` | No (admin-managed) |
+
+**Example (connection service with API key):**
 
 ```json
 {
-  "name": "Internal Analytics API",
-  "slug": "analytics",
-  "description": "Company analytics service",
-  "base_url": "https://analytics.example.com",
+  "name": "Stripe API",
+  "slug": "stripe",
+  "description": "Payment processing",
+  "base_url": "https://api.stripe.com",
   "auth_type": "api_key",
-  "credential": "sk-analytics-secret-key-here"
+  "credential": "sk-master-key-here",
+  "service_category": "connection"
+}
+```
+
+**Example (internal service):**
+
+```json
+{
+  "name": "Internal Analytics",
+  "base_url": "https://analytics.internal.example.com",
+  "auth_type": "bearer",
+  "credential": "internal-master-token",
+  "service_category": "internal"
 }
 ```
 
@@ -806,23 +841,25 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 ```json
 {
   "id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
-  "name": "Internal Analytics API",
-  "slug": "analytics",
-  "description": "Company analytics service",
-  "base_url": "https://analytics.example.com",
+  "name": "Stripe API",
+  "slug": "stripe",
+  "description": "Payment processing",
+  "base_url": "https://api.stripe.com",
   "auth_method": "header",
   "auth_type": "api_key",
   "auth_key_name": "X-API-Key",
   "is_active": true,
   "oauth_client_id": null,
   "api_spec_url": null,
+  "service_category": "connection",
+  "requires_user_credential": true,
   "created_by": "550e8400-e29b-41d4-a716-446655440000",
   "created_at": "2025-06-01T10:00:00+00:00",
   "updated_at": "2025-06-01T10:00:00+00:00"
 }
 ```
 
-For OIDC services, `oauth_client_id` will contain the auto-provisioned OAuth client ID.
+For OIDC services, `oauth_client_id` will contain the auto-provisioned OAuth client ID and `service_category` will be `"provider"`.
 
 **Errors:**
 - `1002 forbidden` -- User is not an admin
@@ -873,6 +910,8 @@ Get a single downstream service by ID.
   "is_active": true,
   "oauth_client_id": null,
   "api_spec_url": null,
+  "service_category": "connection",
+  "requires_user_credential": true,
   "created_by": "550e8400-e29b-41d4-a716-446655440000",
   "created_at": "2025-06-01T10:00:00+00:00",
   "updated_at": "2025-06-01T10:00:00+00:00"
@@ -1368,7 +1407,12 @@ curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-56789
 
 #### GET /api/v1/mcp/config
 
-Returns the MCP tool configuration for the authenticated user. Includes all services the user is connected to, along with their registered endpoints (tools) and the proxy base URL. Used by MCP clients to auto-configure available tools.
+Returns the MCP tool configuration for the authenticated user. Includes all services the user has valid connections to, along with their registered endpoints (tools) and the proxy base URL. Used by MCP clients to auto-configure available tools.
+
+Services are only included if the user has a valid connection with satisfied credentials:
+- For `connection` services: the user must have a stored encrypted credential.
+- For `internal` services: an active connection record is sufficient.
+- `provider` services are excluded (not proxyable).
 
 **Auth:** Required
 
@@ -1385,6 +1429,7 @@ Returns the MCP tool configuration for the authenticated user. Includes all serv
       "service_slug": "stripe",
       "description": "Payment processing",
       "base_url": "https://api.stripe.com",
+      "service_category": "connection",
       "endpoints": [
         {
           "endpoint_id": "e1f2a3b4-c5d6-7890-abcd-ef1234567890",
@@ -1400,11 +1445,13 @@ Returns the MCP tool configuration for the authenticated user. Includes all serv
         }
       ]
     }
-  ]
+  ],
+  "total_services": 1,
+  "total_endpoints": 1
 }
 ```
 
-If the user has no active connections, `services` is an empty array.
+If the user has no active connections or no valid credentials, `services` is an empty array and counts are `0`.
 
 **Example:**
 
@@ -1417,7 +1464,13 @@ curl http://localhost:3001/api/v1/mcp/config \
 
 ### Service Connections
 
-Connections allow individual users to associate themselves with downstream services. When a user has a connection to a service, their per-user credential override (if any) is used instead of the service-level default during proxy requests.
+Connections allow individual users to associate themselves with downstream services. Services are divided into three categories:
+
+- **provider** -- OIDC/SSO services where NyxID is the identity provider. Not user-connectable.
+- **connection** -- External services that require per-user credentials (API keys, bearer tokens, basic auth).
+- **internal** -- Services that use a master credential managed by the admin. Users just "enable" access.
+
+When proxying requests, `connection` services use the per-user encrypted credential. `internal` services use the service-level master credential but require an active connection record.
 
 #### GET /api/v1/connections
 
@@ -1432,7 +1485,20 @@ List all active service connections for the authenticated user.
   "connections": [
     {
       "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
-      "service_name": "Internal Analytics API",
+      "service_name": "Stripe API",
+      "service_category": "connection",
+      "auth_type": "api_key",
+      "has_credential": true,
+      "credential_label": "Production Key",
+      "connected_at": "2025-06-01T10:00:00+00:00"
+    },
+    {
+      "service_id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+      "service_name": "Internal Analytics",
+      "service_category": "internal",
+      "auth_type": "bearer",
+      "has_credential": false,
+      "credential_label": null,
       "connected_at": "2025-06-01T10:00:00+00:00"
     }
   ]
@@ -1450,7 +1516,7 @@ curl http://localhost:3001/api/v1/connections \
 
 #### POST /api/v1/connections/{service_id}
 
-Connect the authenticated user to a downstream service.
+Connect the authenticated user to a downstream service. For `connection` category services, a credential must be provided in the JSON body. For `internal` services, no credential is needed (omit `credential` or set to `null`). Provider services cannot be connected to.
 
 **Auth:** Required
 
@@ -1460,32 +1526,115 @@ Connect the authenticated user to a downstream service.
 |--------------|------|----------------|
 | `service_id` | UUID | The service ID |
 
+**Request Body:**
+
+| Field              | Type   | Required | Description                                           |
+|--------------------|--------|----------|-------------------------------------------------------|
+| `credential`       | string | Depends  | Required for `connection` services. Must be absent/null for `internal` services. Max 8192 chars. |
+| `credential_label` | string | No       | Optional label (e.g., "Production Key"). Max 200 chars. |
+
+**Example (connection service):**
+
+```json
+{
+  "credential": "sk-live-abc123...",
+  "credential_label": "Production Key"
+}
+```
+
+**Example (internal service):**
+
+```json
+{}
+```
+
 **Response (200):**
 
 ```json
 {
   "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
-  "service_name": "Internal Analytics API",
+  "service_name": "Stripe API",
   "connected_at": "2025-06-01T10:00:00+00:00"
 }
 ```
 
 **Errors:**
+- `1000 bad_request` -- Provider services are not connectable, or credential missing/unexpected for the service category
 - `1003 not_found` -- Service does not exist or is inactive
 - `1004 conflict` -- Already connected to this service
+- `1008 validation_error` -- Credential empty, too long, or label too long
 
 **Example:**
 
 ```bash
+# Connect to a "connection" service with credentials
 curl -X POST http://localhost:3001/api/v1/connections/d1e2f3a4-b5c6-7890-1234-567890abcdef \
-  -H "Authorization: Bearer <access_token>"
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"credential": "sk-live-abc123", "credential_label": "Production Key"}'
+
+# Connect to an "internal" service (no credential)
+curl -X POST http://localhost:3001/api/v1/connections/a1b2c3d4-e5f6-7890-1234-567890abcdef \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+---
+
+#### PUT /api/v1/connections/{service_id}/credential
+
+Update the credential on an existing connection. Only applicable to `connection` category services (those that require per-user credentials).
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Request Body:**
+
+| Field              | Type   | Required | Description                                  |
+|--------------------|--------|----------|----------------------------------------------|
+| `credential`       | string | Yes      | New credential value. Max 8192 chars.        |
+| `credential_label` | string | No       | New label. When omitted, existing label is preserved. Max 200 chars. |
+
+```json
+{
+  "credential": "sk-live-new-key-456...",
+  "credential_label": "Rotated Production Key"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "message": "Credential updated"
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Service does not use per-user credentials
+- `1003 not_found` -- No active connection found for this service
+- `1008 validation_error` -- Credential empty, too long, or label too long
+
+**Example:**
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/connections/d1e2f3a4-b5c6-7890-1234-567890abcdef/credential \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"credential": "sk-live-new-key-456"}'
 ```
 
 ---
 
 #### DELETE /api/v1/connections/{service_id}
 
-Disconnect the authenticated user from a downstream service.
+Disconnect the authenticated user from a downstream service. Securely clears all stored credential data (encrypted credential, credential type, credential label).
 
 **Auth:** Required
 
@@ -1550,9 +1699,11 @@ curl http://localhost:3001/api/v1/sessions \
 
 #### ANY /api/v1/proxy/{service_id}/{*path}
 
-Forward any HTTP request to a registered downstream service. NyxID resolves the service, decrypts the stored credential, and injects it into the outbound request using the configured auth method.
+Forward any HTTP request to a registered downstream service. NyxID resolves the service, verifies the user has an active connection, decrypts the appropriate credential, and injects it into the outbound request using the configured auth method.
 
-If the authenticated user has a per-user credential override for this service (via `user_service_connections`), that credential is used instead of the service-level default.
+**Connection enforcement:** An active `UserServiceConnection` is always required before proxying. For `connection` category services, the per-user encrypted credential is used. For `internal` category services, the service-level master credential is used. `provider` services are not proxyable.
+
+**Path validation:** Paths containing `..` or `//` are rejected to prevent path traversal attacks.
 
 **Auth:** Required
 
@@ -1570,6 +1721,11 @@ If the authenticated user has a per-user credential override for this service (v
 **Response:** The downstream service's response status code, headers (minus hop-by-hop headers), and body are returned directly.
 
 **Limits:** Request body is limited to 10 MB for proxy requests.
+
+**Errors:**
+- `1000 bad_request` -- Service is inactive, service is a provider, invalid proxy path, or connection missing credential
+- `1002 forbidden` -- No active connection to this service
+- `1003 not_found` -- Service does not exist
 
 **Example:**
 
@@ -2007,20 +2163,23 @@ Query the audit log with pagination. Entries are returned in reverse chronologic
 
 **Audit Event Types:**
 
-| Event Type                | Description                                  |
-|---------------------------|----------------------------------------------|
-| `register`                | New user registration                        |
-| `login`                   | Successful login                             |
-| `logout`                  | User logout                                  |
-| `admin_setup`             | Initial admin created via bootstrap endpoint |
-| `admin_promoted`          | User promoted to admin via CLI               |
-| `service_created`         | Downstream service registered                |
-| `service_updated`         | Downstream service updated                   |
-| `service_deleted`         | Downstream service deactivated               |
-| `oidc_credentials_accessed` | OIDC credentials retrieved                 |
-| `oidc_secret_regenerated` | OIDC client secret regenerated               |
-| `redirect_uris_updated`  | OIDC redirect URIs updated                   |
-| `proxy_request`           | Request forwarded through the proxy           |
+| Event Type                     | Description                                  |
+|--------------------------------|----------------------------------------------|
+| `register`                     | New user registration                        |
+| `login`                        | Successful login                             |
+| `logout`                       | User logout                                  |
+| `admin_setup`                  | Initial admin created via bootstrap endpoint |
+| `admin_promoted`               | User promoted to admin via CLI               |
+| `service_created`              | Downstream service registered                |
+| `service_updated`              | Downstream service updated                   |
+| `service_deleted`              | Downstream service deactivated               |
+| `connection_created`           | User connected to a service                  |
+| `connection_credential_updated`| User updated their connection credential     |
+| `connection_removed`           | User disconnected from a service             |
+| `oidc_credentials_accessed`    | OIDC credentials retrieved                   |
+| `oidc_secret_regenerated`      | OIDC client secret regenerated               |
+| `redirect_uris_updated`       | OIDC redirect URIs updated                   |
+| `proxy_request`                | Request forwarded through the proxy          |
 
 **Example:**
 

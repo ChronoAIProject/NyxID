@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 use chrono::Utc;
@@ -24,7 +24,7 @@ use super::services_helpers::{
 
 // --- Request / Response types ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateServiceRequest {
     pub name: String,
     pub slug: Option<String>,
@@ -35,6 +35,23 @@ pub struct CreateServiceRequest {
     pub auth_method: Option<String>,
     pub auth_key_name: Option<String>,
     pub credential: Option<String>,
+    /// "provider", "connection", or "internal". Defaults to "connection".
+    pub service_category: Option<String>,
+}
+
+impl std::fmt::Debug for CreateServiceRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateServiceRequest")
+            .field("name", &self.name)
+            .field("slug", &self.slug)
+            .field("description", &self.description)
+            .field("base_url", &self.base_url)
+            .field("auth_method", &self.auth_method)
+            .field("auth_key_name", &self.auth_key_name)
+            .field("credential", &self.credential.as_ref().map(|_| "[REDACTED]"))
+            .field("service_category", &self.service_category)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -50,6 +67,8 @@ pub struct ServiceResponse {
     pub is_active: bool,
     pub oauth_client_id: Option<String>,
     pub api_spec_url: Option<String>,
+    pub service_category: String,
+    pub requires_user_credential: bool,
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -98,6 +117,11 @@ pub struct RegenerateSecretResponse {
     pub message: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListServicesQuery {
+    pub category: Option<String>,
+}
+
 // --- Handlers ---
 // TODO(SEC-7): Credential endpoints (get_oidc_credentials, update_redirect_uris,
 // regenerate_oidc_secret) should have stricter per-endpoint rate limiting (e.g.,
@@ -106,21 +130,33 @@ pub struct RegenerateSecretResponse {
 
 /// GET /api/v1/services
 ///
-/// List all downstream services. Requires authentication.
+/// List all downstream services. Supports optional `?category=` filter.
 pub async fn list_services(
     State(state): State<AppState>,
     _auth_user: AuthUser,
+    Query(query): Query<ListServicesQuery>,
 ) -> AppResult<Json<ServiceListResponse>> {
+    let mut filter = doc! { "is_active": true };
+    if let Some(ref category) = query.category {
+        let valid = ["provider", "connection", "internal"];
+        if !valid.contains(&category.as_str()) {
+            return Err(AppError::ValidationError(format!(
+                "Invalid category filter: {category}. Must be one of: {}",
+                valid.join(", ")
+            )));
+        }
+        filter.insert("service_category", category.as_str());
+    }
+
     let services: Vec<DownstreamService> = state
         .db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(doc! { "is_active": true })
+        .find(filter)
         .sort(doc! { "name": 1 })
         .await?
         .try_collect()
         .await?;
 
-    // CR-10: Reuse service_to_response helper instead of duplicating mapping
     let items: Vec<ServiceResponse> = services
         .into_iter()
         .map(service_to_response)
@@ -254,6 +290,29 @@ pub async fn create_service(
     let id = Uuid::new_v4().to_string();
     let now = Utc::now();
 
+    // Derive service_category and requires_user_credential
+    let service_category = if auth_method == "oidc" {
+        // OIDC services are always providers
+        "provider".to_string()
+    } else {
+        match body.service_category.as_deref() {
+            Some("provider") => {
+                return Err(AppError::ValidationError(
+                    "Only OIDC services can be categorized as provider".to_string(),
+                ));
+            }
+            Some("internal") => "internal".to_string(),
+            Some("connection") | None => "connection".to_string(),
+            Some(other) => {
+                return Err(AppError::ValidationError(format!(
+                    "Invalid service_category: {other}. Must be provider, connection, or internal"
+                )));
+            }
+        }
+    };
+
+    let requires_user_credential = service_category == "connection";
+
     let new_service = DownstreamService {
         id: id.clone(),
         name: body.name.clone(),
@@ -266,6 +325,8 @@ pub async fn create_service(
         credential_encrypted: encrypted_cred,
         api_spec_url: None,
         oauth_client_id: oauth_client_id.clone(),
+        service_category,
+        requires_user_credential,
         is_active: true,
         created_by: user_id_str.clone(),
         created_at: now,
@@ -313,6 +374,25 @@ pub async fn delete_service(
             doc! { "_id": &service_id },
             doc! { "$set": {
                 "is_active": false,
+                "updated_at": bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    // SEC-M2: Cascade deactivation - wipe all user credentials for this service
+    use crate::models::user_service_connection::{
+        UserServiceConnection, COLLECTION_NAME as CONNECTIONS,
+    };
+    state
+        .db
+        .collection::<UserServiceConnection>(CONNECTIONS)
+        .update_many(
+            doc! { "service_id": &service_id, "is_active": true },
+            doc! { "$set": {
+                "is_active": false,
+                "credential_encrypted": bson::Bson::Null,
+                "credential_type": bson::Bson::Null,
+                "credential_label": bson::Bson::Null,
                 "updated_at": bson::DateTime::from_chrono(now),
             }},
         )

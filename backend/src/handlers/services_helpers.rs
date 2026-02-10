@@ -77,6 +77,8 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
         is_active: s.is_active,
         oauth_client_id: s.oauth_client_id,
         api_spec_url: s.api_spec_url,
+        service_category: s.service_category,
+        requires_user_credential: s.requires_user_credential,
         created_by: s.created_by,
         created_at: s.created_at.to_rfc3339(),
         updated_at: s.updated_at.to_rfc3339(),

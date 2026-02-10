@@ -10,6 +10,14 @@ export const AUTH_TYPES = [
 
 export type AuthType = (typeof AUTH_TYPES)[number];
 
+export const SERVICE_CATEGORIES = [
+  "provider",
+  "connection",
+  "internal",
+] as const;
+
+export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
+
 // CR-6: Aligned with backend max length of 200 characters
 export const createServiceSchema = z.object({
   name: z
@@ -25,6 +33,7 @@ export const createServiceSchema = z.object({
     .min(1, "Base URL is required")
     .url("Must be a valid URL"),
   auth_type: z.enum(AUTH_TYPES),
+  service_category: z.enum(SERVICE_CATEGORIES).optional(),
 });
 
 export type CreateServiceFormData = z.infer<typeof createServiceSchema>;

@@ -52,6 +52,8 @@ export interface DownstreamService {
   readonly is_active: boolean;
   readonly oauth_client_id: string | null;
   readonly api_spec_url: string | null;
+  readonly service_category: string;
+  readonly requires_user_credential: boolean;
   readonly created_by: string;
   readonly created_at: string;
   readonly updated_at: string;
@@ -101,6 +103,10 @@ export interface RedirectUrisResponse {
 export interface UserServiceConnection {
   readonly service_id: string;
   readonly service_name: string;
+  readonly service_category: string;
+  readonly auth_type: string | null;
+  readonly has_credential: boolean;
+  readonly credential_label: string | null;
   readonly connected_at: string;
 }
 

@@ -390,7 +390,17 @@ mongodb://user:pass@host1:27017,host2:27017,host3:27017/nyxid?authSource=admin&r
 
 ### Automatic Setup
 
-NyxID creates all required collections and indexes automatically on first startup via `db::ensure_indexes()`. No manual migration steps are needed.
+NyxID creates all required collections and indexes automatically on first startup via `db::ensure_indexes()`. No manual migration steps are needed for fresh installations.
+
+### Data Migrations
+
+When upgrading NyxID, some releases may include data migration scripts in `docs/migrations/`. These scripts backfill new fields on existing documents. See **[docs/migrations/README.md](migrations/README.md)** for details.
+
+Currently available migrations:
+
+| Script | Description | When to run |
+|--------|-------------|-------------|
+| `001-service-categories.js` | Adds `service_category` and `requires_user_credential` to services, `credential_type` and `credential_label` to connections | Before deploying the service proxy overhaul |
 
 ### Collections Created
 
@@ -403,7 +413,7 @@ NyxID creates all required collections and indexes automatically on first startu
 | `refresh_tokens`         | Refresh tokens with rotation tracking        |
 | `api_keys`               | User-scoped API keys                         |
 | `downstream_services`    | Registered downstream services               |
-| `user_service_connections` | Per-user credential overrides              |
+| `user_service_connections` | Per-user connections and encrypted credentials |
 | `mfa_factors`            | TOTP factors and recovery codes              |
 | `service_endpoints`      | Registered API endpoints per service (MCP tools) |
 | `audit_log`              | Immutable audit trail                        |
@@ -1034,9 +1044,16 @@ For each active downstream service with registered endpoints, the proxy creates 
 - **Description**: `[{service_name}] {endpoint_description}`
 - **Input schema**: Derived from endpoint parameters and request body schema
 
+Only services with valid connections and satisfied credentials are included:
+- `connection` services require the user to have stored an encrypted per-user credential
+- `internal` services only require an active connection record
+- `provider` services are excluded (not proxyable)
+
+When a user has more than 20 tools, a built-in `nyxid__search_tools` meta-tool is automatically added. This tool accepts a `query` string and an optional `service` slug filter, returning up to 25 matching tools by name or description.
+
 When a tool is called, the proxy:
 1. Resolves the service and endpoint from the tool name.
-2. Substitutes path parameters from tool arguments.
+2. Substitutes path parameters from tool arguments (URL-encoded for safety).
 3. Separates remaining arguments into query parameters and request body.
 4. Forwards the request through NyxID's authenticated proxy (`/api/v1/proxy/{service_id}/{path}`).
 

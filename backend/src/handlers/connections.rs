@@ -2,13 +2,12 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::doc;
-use serde::Serialize;
-use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 
-use crate::errors::{AppError, AppResult};
+use crate::crypto::aes;
+use crate::errors::AppResult;
 use crate::models::downstream_service::{
     DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES,
 };
@@ -16,7 +15,44 @@ use crate::models::user_service_connection::{
     UserServiceConnection, COLLECTION_NAME as CONNECTIONS,
 };
 use crate::mw::auth::AuthUser;
+use crate::services::{audit_service, connection_service};
 use crate::AppState;
+
+// --- Request types ---
+
+#[derive(Deserialize)]
+pub struct ConnectRequest {
+    /// The user's credential for this service.
+    /// Required for "connection" category services.
+    /// Must be None/absent for "internal" category services.
+    pub credential: Option<String>,
+    /// Optional label for the credential (e.g., "Production Key").
+    pub credential_label: Option<String>,
+}
+
+impl std::fmt::Debug for ConnectRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectRequest")
+            .field("credential", &self.credential.as_ref().map(|_| "[REDACTED]"))
+            .field("credential_label", &self.credential_label)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpdateCredentialRequest {
+    pub credential: String,
+    pub credential_label: Option<String>,
+}
+
+impl std::fmt::Debug for UpdateCredentialRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateCredentialRequest")
+            .field("credential", &"[REDACTED]")
+            .field("credential_label", &self.credential_label)
+            .finish()
+    }
+}
 
 // --- Response types ---
 
@@ -24,6 +60,10 @@ use crate::AppState;
 pub struct ConnectionItem {
     pub service_id: String,
     pub service_name: String,
+    pub service_category: String,
+    pub auth_type: Option<String>,
+    pub has_credential: bool,
+    pub credential_label: Option<String>,
     pub connected_at: String,
 }
 
@@ -41,6 +81,11 @@ pub struct ConnectResponse {
 
 #[derive(Debug, Serialize)]
 pub struct DisconnectResponse {
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateCredentialResponse {
     pub message: String,
 }
 
@@ -63,7 +108,7 @@ pub async fn list_connections(
         .try_collect()
         .await?;
 
-    // Gather service names
+    // Gather service details
     let service_ids: Vec<&str> = conns.iter().map(|c| c.service_id.as_str()).collect();
     let services: Vec<DownstreamService> = if service_ids.is_empty() {
         vec![]
@@ -77,20 +122,26 @@ pub async fn list_connections(
             .await?
     };
 
-    let service_map: std::collections::HashMap<&str, &str> = services
+    let service_map: std::collections::HashMap<&str, &DownstreamService> = services
         .iter()
-        .map(|s| (s.id.as_str(), s.name.as_str()))
+        .map(|s| (s.id.as_str(), s))
         .collect();
 
     let items: Vec<ConnectionItem> = conns
         .iter()
-        .map(|c| ConnectionItem {
-            service_id: c.service_id.clone(),
-            service_name: service_map
-                .get(c.service_id.as_str())
-                .unwrap_or(&"Unknown")
-                .to_string(),
-            connected_at: c.created_at.to_rfc3339(),
+        .map(|c| {
+            let svc = service_map.get(c.service_id.as_str());
+            ConnectionItem {
+                service_id: c.service_id.clone(),
+                service_name: svc.map_or("Unknown".to_string(), |s| s.name.clone()),
+                service_category: svc.map_or("connection".to_string(), |s| {
+                    s.service_category.clone()
+                }),
+                auth_type: svc.and_then(|s| s.auth_type.clone()),
+                has_credential: c.credential_encrypted.is_some(),
+                credential_label: c.credential_label.clone(),
+                connected_at: c.created_at.to_rfc3339(),
+            }
         })
         .collect();
 
@@ -100,55 +151,26 @@ pub async fn list_connections(
 /// POST /api/v1/connections/{service_id}
 ///
 /// Connect the authenticated user to a downstream service.
+/// For "connection" services, a credential must be provided in the JSON body.
+/// For "internal" services, no credential is needed.
 pub async fn connect_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(service_id): Path<String>,
+    Json(body): Json<ConnectRequest>,
 ) -> AppResult<Json<ConnectResponse>> {
     let user_id = auth_user.user_id.to_string();
+    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
-    // Verify service exists and is active
-    let service = state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "_id": &service_id, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
-
-    // Check if already connected
-    let existing = state
-        .db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .find_one(doc! {
-            "user_id": &user_id,
-            "service_id": &service_id,
-            "is_active": true,
-        })
-        .await?;
-
-    if existing.is_some() {
-        return Err(AppError::Conflict(
-            "Already connected to this service".to_string(),
-        ));
-    }
-
-    let now = Utc::now();
-    let conn = UserServiceConnection {
-        id: Uuid::new_v4().to_string(),
-        user_id: user_id.clone(),
-        service_id: service_id.clone(),
-        credential_encrypted: None,
-        metadata: None,
-        is_active: true,
-        created_at: now,
-        updated_at: now,
-    };
-
-    state
-        .db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .insert_one(&conn)
-        .await?;
+    let result = connection_service::connect_user(
+        &state.db,
+        &encryption_key,
+        &user_id,
+        &service_id,
+        body.credential.as_deref(),
+        body.credential_label.as_deref(),
+    )
+    .await?;
 
     tracing::info!(
         user_id = %user_id,
@@ -156,48 +178,93 @@ pub async fn connect_service(
         "User connected to service"
     );
 
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "connection_created".to_string(),
+        Some(serde_json::json!({
+            "service_id": &service_id,
+            "has_credential": body.credential.is_some(),
+        })),
+        None,
+        None,
+    );
+
     Ok(Json(ConnectResponse {
         service_id,
-        service_name: service.name,
-        connected_at: now.to_rfc3339(),
+        service_name: result.service_name,
+        connected_at: result.connected_at.to_rfc3339(),
+    }))
+}
+
+/// PUT /api/v1/connections/{service_id}/credential
+///
+/// Update the credential on an existing connection.
+pub async fn update_connection_credential(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(service_id): Path<String>,
+    Json(body): Json<UpdateCredentialRequest>,
+) -> AppResult<Json<UpdateCredentialResponse>> {
+    let user_id = auth_user.user_id.to_string();
+    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
+
+    connection_service::update_credential(
+        &state.db,
+        &encryption_key,
+        &user_id,
+        &service_id,
+        &body.credential,
+        body.credential_label.as_deref(),
+    )
+    .await?;
+
+    tracing::info!(
+        user_id = %user_id,
+        service_id = %service_id,
+        "Connection credential updated"
+    );
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "connection_credential_updated".to_string(),
+        Some(serde_json::json!({ "service_id": &service_id })),
+        None,
+        None,
+    );
+
+    Ok(Json(UpdateCredentialResponse {
+        message: "Credential updated".to_string(),
     }))
 }
 
 /// DELETE /api/v1/connections/{service_id}
 ///
 /// Disconnect the authenticated user from a downstream service.
+/// Securely clears the stored credential.
 pub async fn disconnect_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<DisconnectResponse>> {
     let user_id = auth_user.user_id.to_string();
-    let now = Utc::now();
 
-    let result = state
-        .db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .update_one(
-            doc! {
-                "user_id": &user_id,
-                "service_id": &service_id,
-                "is_active": true,
-            },
-            doc! { "$set": {
-                "is_active": false,
-                "updated_at": mongodb::bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("Connection not found".to_string()));
-    }
+    connection_service::disconnect_user(&state.db, &user_id, &service_id).await?;
 
     tracing::info!(
         user_id = %user_id,
         service_id = %service_id,
         "User disconnected from service"
+    );
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "connection_removed".to_string(),
+        Some(serde_json::json!({ "service_id": &service_id })),
+        None,
+        None,
     );
 
     Ok(Json(DisconnectResponse {

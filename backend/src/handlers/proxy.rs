@@ -21,15 +21,37 @@ pub async fn proxy_request(
     Path((service_id, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    // TODO(SEC-M3): Parse the encryption key once at startup and store the raw bytes
+    // in AppState instead of hex-decoding on every request. This reduces CPU work and
+    // prevents multiple copies of the key in memory across concurrent requests.
     let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
-    let target = proxy_service::resolve_proxy_target(
+    let user_id_str = auth_user.user_id.to_string();
+
+    let target = match proxy_service::resolve_proxy_target(
         &state.db,
         &encryption_key,
-        &auth_user.user_id.to_string(),
+        &user_id_str,
         &service_id,
     )
-    .await?;
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user_id_str.clone()),
+                "proxy_request_denied".to_string(),
+                Some(serde_json::json!({
+                    "service_id": &service_id,
+                    "reason": e.to_string(),
+                })),
+                None,
+                None,
+            );
+            return Err(e);
+        }
+    };
 
     let method = request.method().clone();
     let query = request.uri().query().map(String::from);
@@ -113,7 +135,7 @@ pub async fn proxy_request(
     // Audit log the proxy request
     audit_service::log_async(
         state.db.clone(),
-        Some(auth_user.user_id.to_string()),
+        Some(user_id_str),
         "proxy_request".to_string(),
         Some(serde_json::json!({
             "service_id": &service_id,

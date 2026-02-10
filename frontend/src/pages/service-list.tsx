@@ -10,8 +10,9 @@ import {
   createServiceSchema,
   type CreateServiceFormData,
   AUTH_TYPES,
+  SERVICE_CATEGORIES,
 } from "@/schemas/services";
-import { AUTH_TYPE_LABELS } from "@/lib/constants";
+import { AUTH_TYPE_LABELS, SERVICE_CATEGORY_LABELS } from "@/lib/constants";
 import { ApiError } from "@/lib/api-client";
 import { ServiceCard } from "@/components/dashboard/service-card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -51,6 +52,7 @@ export function ServiceListPage() {
       description: "",
       base_url: "",
       auth_type: "api_key",
+      service_category: "connection",
     },
   });
 
@@ -175,7 +177,17 @@ export function ServiceListPage() {
                         <select
                           className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                           value={field.value}
-                          onChange={field.onChange}
+                          onChange={(e) => {
+                            field.onChange(e);
+                            // Auto-set category to provider for OIDC
+                            if (e.target.value === "oidc") {
+                              form.setValue("service_category", "provider");
+                            } else if (
+                              form.getValues("service_category") === "provider"
+                            ) {
+                              form.setValue("service_category", "connection");
+                            }
+                          }}
                           onBlur={field.onBlur}
                           name={field.name}
                         >
@@ -190,6 +202,36 @@ export function ServiceListPage() {
                     </FormItem>
                   )}
                 />
+
+                {form.watch("auth_type") !== "oidc" && (
+                  <FormField
+                    control={form.control}
+                    name="service_category"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Service Category</FormLabel>
+                        <FormControl>
+                          <select
+                            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                            value={field.value ?? "connection"}
+                            onChange={field.onChange}
+                            onBlur={field.onBlur}
+                            name={field.name}
+                          >
+                            {SERVICE_CATEGORIES.filter(
+                              (cat) => cat !== "provider",
+                            ).map((cat) => (
+                              <option key={cat} value={cat}>
+                                {SERVICE_CATEGORY_LABELS[cat] ?? cat}
+                              </option>
+                            ))}
+                          </select>
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
 
                 <DialogFooter>
                   <Button

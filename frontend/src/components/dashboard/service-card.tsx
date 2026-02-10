@@ -1,6 +1,10 @@
 import { useNavigate } from "@tanstack/react-router";
 import type { DownstreamService } from "@/types/api";
-import { getAuthTypeLabel, isOidcService } from "@/lib/constants";
+import {
+  getAuthTypeLabel,
+  isOidcService,
+  SERVICE_CATEGORY_LABELS,
+} from "@/lib/constants";
 import { formatDate } from "@/lib/utils";
 import {
   Card,
@@ -69,6 +73,10 @@ export function ServiceCard({
             {isOidcService(service) && (
               <Badge variant="outline">OIDC</Badge>
             )}
+            <Badge variant="outline">
+              {SERVICE_CATEGORY_LABELS[service.service_category] ??
+                service.service_category}
+            </Badge>
           </div>
           <span className="text-xs text-muted-foreground">
             Created {formatDate(service.created_at)}

@@ -29,8 +29,9 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
 
 /// Resolve the downstream service and credential for a proxy request.
 ///
-/// Checks for a per-user credential first, falling back to the
-/// service-level master credential.
+/// Enforces that the user has an active connection. For "connection" services,
+/// uses the per-user credential. For "internal" services, uses the master credential.
+/// Provider services are not proxyable.
 pub async fn resolve_proxy_target(
     db: &mongodb::Database,
     encryption_key: &[u8],
@@ -48,7 +49,14 @@ pub async fn resolve_proxy_target(
         return Err(AppError::BadRequest("Service is inactive".to_string()));
     }
 
-    // Check for per-user credential override
+    // Provider services cannot be proxied to
+    if service.service_category == "provider" {
+        return Err(AppError::BadRequest(
+            "Provider services are not proxyable".to_string(),
+        ));
+    }
+
+    // Require an active user connection
     let user_conn = db
         .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
         .find_one(doc! {
@@ -56,17 +64,33 @@ pub async fn resolve_proxy_target(
             "service_id": service_id,
             "is_active": true,
         })
-        .await?;
+        .await?
+        .ok_or_else(|| {
+            AppError::Forbidden(
+                "You must connect to this service before making requests".to_string(),
+            )
+        })?;
 
-    let credential_encrypted = match user_conn.and_then(|c| c.credential_encrypted) {
-        Some(user_cred) => user_cred,
-        None => service.credential_encrypted,
+    // Determine which credential to use
+    let credential_encrypted = if service.requires_user_credential {
+        // Connection services: must have per-user credential
+        user_conn.credential_encrypted.ok_or_else(|| {
+            AppError::BadRequest(
+                "Connection is missing credential. Please reconnect with your API key.".to_string(),
+            )
+        })?
+    } else {
+        // Internal services: use master credential
+        service.credential_encrypted
     };
 
     let credential = String::from_utf8(
-        aes::decrypt(&credential_encrypted, encryption_key)?
+        aes::decrypt(&credential_encrypted, encryption_key)?,
     )
-    .map_err(|e| AppError::Internal(format!("Credential is not valid UTF-8: {e}")))?;
+    .map_err(|e| {
+        tracing::error!("Credential UTF-8 decode failed: {e}");
+        AppError::Internal("Failed to decode credential".to_string())
+    })?;
 
     Ok(ProxyTarget {
         base_url: service.base_url,
@@ -89,6 +113,16 @@ pub async fn forward_request(
     headers: reqwest::header::HeaderMap,
     body: Option<bytes::Bytes>,
 ) -> AppResult<reqwest::Response> {
+    // SEC-H3: Reject paths containing traversal sequences
+    if path.contains("..") || path.contains("//") {
+        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
+    }
+
+    // TODO(SEC-H1): Re-validate the resolved IP at proxy time to prevent DNS rebinding.
+    // Currently base_url is only validated at service creation/update time. An attacker
+    // could change DNS to point to a private IP after validation. Consider using a custom
+    // DNS resolver or reqwest's `resolve` feature to check the resolved IP before connecting.
+
     let url = if let Some(q) = query {
         format!("{}/{}?{}", target.base_url.trim_end_matches('/'), path.trim_start_matches('/'), q)
     } else {
@@ -144,7 +178,10 @@ pub async fn forward_request(
     let response = request
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Proxy request failed: {e}")))?;
+        .map_err(|e| {
+            tracing::error!("Proxy request to {} failed: {e}", target.base_url);
+            AppError::Internal("Proxy request failed".to_string())
+        })?;
 
     Ok(response)
 }

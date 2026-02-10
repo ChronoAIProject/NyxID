@@ -28,10 +28,31 @@ pub struct DownstreamService {
     /// Associated OAuth client ID (set when auth_method is "oidc")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_client_id: Option<String>,
+
+    /// "provider" | "connection" | "internal"
+    /// - provider: OIDC services where NyxID is the identity provider (not user-connectable)
+    /// - connection: external services users connect to with their own credentials
+    /// - internal: internal services using master credential (users just enable access)
+    #[serde(default = "default_service_category")]
+    pub service_category: String,
+
+    /// Whether this service requires per-user credentials to connect.
+    /// true for connection services, false for internal/provider services.
+    #[serde(default = "default_true")]
+    pub requires_user_credential: bool,
+
     pub is_active: bool,
     pub created_by: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_service_category() -> String {
+    "connection".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }

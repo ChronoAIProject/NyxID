@@ -57,14 +57,18 @@ It provides a complete identity layer: user registration, session management, Op
 
 ### Downstream Service Proxy
 - Reverse proxy to internal or external services
+- Three service categories: **provider** (OIDC/SSO), **connection** (per-user credentials), **internal** (master credential)
 - Automatic credential injection: header, bearer token, query parameter, or basic auth
-- Per-user credential overrides with fallback to service-level credentials
+- Connection enforcement: users must connect before proxying; per-user credentials for connection services, master credentials for internal services
 - SSRF protection (blocks private IPs, metadata endpoints, localhost)
+- Path traversal prevention (rejects `..` and `//` in proxy paths)
 - Header allowlist to prevent leaking sensitive request headers
 
 ### Service Connection Management
-- Register downstream services with encrypted credentials
-- Per-user connection overrides
+- Register downstream services with encrypted credentials (AES-256-GCM)
+- Per-user encrypted credential storage for connection services
+- Credential update without disconnect/reconnect
+- Secure credential cleanup on disconnect and service deactivation
 - Single source of truth for mapping users to downstream APIs
 
 ### Administration
@@ -249,10 +253,14 @@ For the full API reference with request/response schemas and example curl comman
 | POST   | `/api/v1/api-keys`                   | Required | Create a new API key                 |
 | DELETE | `/api/v1/api-keys/{key_id}`          | Required | Delete (deactivate) an API key       |
 | POST   | `/api/v1/api-keys/{key_id}/rotate`   | Required | Rotate an API key                    |
-| GET    | `/api/v1/services`                   | Required | List downstream services             |
+| GET    | `/api/v1/services`                   | Required | List downstream services (`?category=` filter) |
 | POST   | `/api/v1/services`                   | Admin    | Register a downstream service        |
 | DELETE | `/api/v1/services/{service_id}`      | Admin    | Deactivate a downstream service      |
-| ANY    | `/api/v1/proxy/{service_id}/{*path}` | Required | Proxy request to downstream service  |
+| GET    | `/api/v1/connections`                | Required | List user's service connections      |
+| POST   | `/api/v1/connections/{service_id}`   | Required | Connect to a service (with credentials) |
+| PUT    | `/api/v1/connections/{id}/credential`| Required | Update connection credential         |
+| DELETE | `/api/v1/connections/{service_id}`   | Required | Disconnect from a service            |
+| ANY    | `/api/v1/proxy/{service_id}/{*path}` | Required | Proxy request (requires connection)  |
 | GET    | `/oauth/authorize`                   | Required | OIDC authorization endpoint          |
 | POST   | `/oauth/token`                       | None     | OIDC token endpoint                  |
 | GET    | `/oauth/userinfo`                    | Required | OIDC userinfo endpoint               |
@@ -357,7 +365,7 @@ NyxID uses 10 MongoDB collections:
 | `refresh_tokens`           | Issued refresh tokens with rotation chain tracking   |
 | `api_keys`                 | User-scoped API keys (hashed, with prefix)           |
 | `downstream_services`      | Registered downstream services for proxying          |
-| `user_service_connections` | Per-user credential overrides for downstream services|
+| `user_service_connections` | Per-user connections and encrypted credentials for downstream services |
 | `mfa_factors`              | TOTP factors and encrypted recovery codes            |
 | `audit_log`                | Immutable audit trail of security events             |
 
@@ -415,15 +423,23 @@ Returns HTTP 429 when limits are exceeded.
 
 ## MCP Integration
 
-NyxID is designed to be accessible to AI agents via the Model Context Protocol (MCP). The `rmcp` SDK dependency enables tool-based access patterns where agents can:
+NyxID is designed to be accessible to AI agents via the Model Context Protocol (MCP). A dedicated MCP proxy (`mcp-proxy/`) exposes connected downstream services as MCP tools.
 
+**How it works:**
+- Each downstream service endpoint is mapped to an MCP tool named `{service_slug}__{endpoint_name}`
+- The proxy authenticates via NyxID's OAuth endpoints and fetches the user's MCP config
+- Tool calls are forwarded through NyxID's authenticated proxy with per-user credential injection
+- When a user has more than 20 connected tools, a built-in `nyxid__search_tools` meta-tool is added for discovery
+- Only services with valid connections and satisfied credentials appear as available tools
+
+**Agent capabilities:**
 - Authenticate users and manage sessions
 - Create and rotate API keys
 - Register and query downstream services
 - Proxy requests to downstream services on behalf of users
 - Query audit logs
 
-This makes NyxID suitable as an identity and credential management layer in agentic workflows.
+This makes NyxID suitable as an identity and credential management layer in agentic workflows. See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for MCP proxy deployment instructions.
 
 ---
 
@@ -511,7 +527,9 @@ NyxID/
 |       |   |-- users.rs        Get/update user profile
 |       |   |-- api_keys.rs     CRUD + rotate API keys
 |       |   |-- services.rs     CRUD downstream services
+|       |   |-- connections.rs  Connect/disconnect, credential management
 |       |   |-- proxy.rs        Reverse proxy handler
+|       |   |-- mcp.rs          MCP config endpoint
 |       |   |-- oauth.rs        OIDC authorize, token, userinfo
 |       |   |-- admin.rs        Admin user/audit endpoints
 |       |   |-- mfa.rs          MFA setup and verification
@@ -522,6 +540,7 @@ NyxID/
 |       |   |-- oauth_service.rs    Client validation, code exchange
 |       |   |-- key_service.rs      API key lifecycle
 |       |   |-- proxy_service.rs    Target resolution, request forwarding
+|       |   |-- connection_service.rs Connection lifecycle, credential management
 |       |   |-- mfa_service.rs      TOTP provisioning, verification
 |       |   `-- audit_service.rs    Async audit log insertion
 |       `-- mw/                 Middleware

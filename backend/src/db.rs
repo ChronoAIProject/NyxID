@@ -189,6 +189,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    services
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "service_category": 1, "is_active": 1 })
+                .build(),
+        )
+        .await?;
 
     // ── user_service_connections ──
     let usc = db.collection::<mongodb::bson::Document>("user_service_connections");
