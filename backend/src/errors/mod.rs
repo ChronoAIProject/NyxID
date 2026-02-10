@@ -105,7 +105,7 @@ impl AppError {
         }
     }
 
-    fn error_key(&self) -> &str {
+    pub(crate) fn error_key(&self) -> &str {
         match self {
             Self::BadRequest(_) => "bad_request",
             Self::Unauthorized(_) => "unauthorized",

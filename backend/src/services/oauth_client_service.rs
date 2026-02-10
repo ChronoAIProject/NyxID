@@ -7,6 +7,46 @@ use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::oauth_client::{OauthClient, COLLECTION_NAME as OAUTH_CLIENTS};
 
+/// Well-known client ID for native MCP clients (Cursor, Claude Code, etc.).
+const MCP_CLIENT_ID: &str = "nyx-mcp";
+
+/// Seed default OAuth clients at startup (idempotent).
+///
+/// Creates the `nyx-mcp` public client used by MCP desktop apps. The client
+/// has no registered redirect URIs because loopback URIs are validated
+/// dynamically per RFC 8252 section 7.3.
+pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
+    let collection = db.collection::<OauthClient>(OAUTH_CLIENTS);
+
+    if collection
+        .find_one(doc! { "_id": MCP_CLIENT_ID })
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let now = Utc::now();
+    let client = OauthClient {
+        id: MCP_CLIENT_ID.to_string(),
+        client_name: "NyxID MCP Client".to_string(),
+        client_secret_hash: "NONE".to_string(),
+        redirect_uris: vec![],
+        allowed_scopes: "openid profile email".to_string(),
+        grant_types: "authorization_code".to_string(),
+        client_type: "public".to_string(),
+        is_active: true,
+        created_by: Some("system".to_string()),
+        created_at: now,
+        updated_at: now,
+    };
+
+    collection.insert_one(&client).await?;
+    tracing::info!("Seeded default MCP OAuth client (id={MCP_CLIENT_ID})");
+
+    Ok(())
+}
+
 /// Create a new OAuth client.
 ///
 /// Returns the persisted client and, for confidential clients, the raw client
@@ -26,7 +66,7 @@ pub async fn create_client(
         let hash = hash_token(&secret);
         (hash, Some(secret))
     } else {
-        (String::new(), None)
+        ("NONE".to_string(), None)
     };
 
     let client = OauthClient {

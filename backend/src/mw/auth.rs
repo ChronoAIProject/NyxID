@@ -214,6 +214,36 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
+/// Non-rejecting version of `AuthUser`.
+///
+/// Returns `None` instead of 401 when no valid credentials are found.
+/// Used by the OAuth authorize endpoint to support unauthenticated browser
+/// visits (MCP clients that haven't logged in yet).
+pub struct OptionalAuthUser(pub Option<AuthUser>);
+
+impl FromRequestParts<AppState> for OptionalAuthUser {
+    type Rejection = std::convert::Infallible;
+
+    fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+        async move {
+            let result = AuthUser::from_request_parts(parts, state).await;
+            match result {
+                Ok(user) => Ok(OptionalAuthUser(Some(user))),
+                Err(AppError::Unauthorized(_)) | Err(AppError::TokenExpired) => {
+                    Ok(OptionalAuthUser(None))
+                }
+                Err(other) => {
+                    tracing::error!("OptionalAuthUser internal error: {other}");
+                    Ok(OptionalAuthUser(None))
+                }
+            }
+        }
+    }
+}
+
 /// Parse a specific cookie value from a Cookie header string.
 fn parse_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
     cookie_header.split(';').find_map(|pair| {

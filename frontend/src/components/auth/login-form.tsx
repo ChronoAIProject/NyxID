@@ -17,7 +17,16 @@ import { Button } from "@/components/ui/button";
 import { SocialLoginButtons } from "@/components/auth/social-login-buttons";
 import { Separator } from "@/components/ui/separator";
 
-export function LoginForm() {
+interface LoginFormProps {
+  readonly returnTo?: string;
+}
+
+/** Backend base URL used to validate return_to redirects (open-redirect prevention). */
+const BACKEND_URL = (
+  import.meta.env.VITE_BACKEND_URL ?? "http://localhost:3001"
+).replace(/\/+$/, "");
+
+export function LoginForm({ returnTo }: LoginFormProps) {
   const navigate = useNavigate();
   const loginMutation = useLogin();
 
@@ -33,6 +42,16 @@ export function LoginForm() {
     try {
       const result = await loginMutation.mutateAsync(data);
       if (!result.mfaRequired) {
+        // If return_to was provided (OAuth browser flow), redirect back to the
+        // backend authorize endpoint so it can issue the authorization code.
+        // Validate the URL first to prevent open-redirect attacks.
+        if (
+          returnTo &&
+          returnTo.startsWith(BACKEND_URL + "/")
+        ) {
+          window.location.href = returnTo;
+          return;
+        }
         void navigate({ to: "/" as string });
       }
     } catch (error) {

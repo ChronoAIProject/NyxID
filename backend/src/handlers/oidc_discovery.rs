@@ -22,9 +22,54 @@ pub async fn openid_configuration(
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "scopes_supported": ["openid", "profile", "email"],
-        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce"],
+        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
+    }))
+}
+
+/// GET /.well-known/oauth-authorization-server
+///
+/// RFC 8414 OAuth Authorization Server Metadata. MCP clients check this
+/// endpoint before falling back to `/.well-known/openid-configuration`.
+pub async fn oauth_authorization_server_metadata(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let base = &state.config.base_url;
+
+    Json(serde_json::json!({
+        "issuer": state.config.jwt_issuer,
+        "authorization_endpoint": format!("{base}/oauth/authorize"),
+        "token_endpoint": format!("{base}/oauth/token"),
+        "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
+        "userinfo_endpoint": format!("{base}/oauth/userinfo"),
+        "jwks_uri": format!("{base}/.well-known/jwks.json"),
+        "registration_endpoint": null,
+        "scopes_supported": ["openid", "profile", "email"],
+        "response_types_supported": ["code"],
+        "response_modes_supported": ["query"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "id_token_signing_alg_values_supported": ["RS256"],
+        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash"],
+        "service_documentation": null,
+    }))
+}
+
+/// GET /.well-known/oauth-protected-resource
+///
+/// RFC 9728 Protected Resource Metadata. MCP clients use this to discover
+/// where to authenticate (NyxID's OAuth endpoints) before connecting.
+pub async fn oauth_protected_resource(
+    State(state): State<AppState>,
+) -> Json<serde_json::Value> {
+    let base = &state.config.base_url;
+
+    Json(serde_json::json!({
+        "resource": format!("{base}/mcp"),
+        "authorization_servers": [base],
+        "scopes_supported": ["openid", "profile", "email"],
+        "bearer_methods_supported": ["header"],
     }))
 }
 

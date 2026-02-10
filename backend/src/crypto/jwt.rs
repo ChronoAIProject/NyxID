@@ -4,6 +4,7 @@ use rsa::pkcs1::{DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
+use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
@@ -55,6 +56,8 @@ pub struct IdTokenClaims {
     pub name: Option<String>,
     pub picture: Option<String>,
     pub nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at_hash: Option<String>,
 }
 
 impl JwtKeys {
@@ -213,8 +216,18 @@ pub fn generate_id_token(
     picture: Option<&str>,
     audience: &str,
     nonce: Option<&str>,
+    access_token: Option<&str>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
+
+    // Compute at_hash per OIDC Core Section 3.1.3.6: left half of SHA-256
+    // of the access token, base64url-encoded.
+    let at_hash = access_token.map(|token| {
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let full_hash = hasher.finalize();
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&full_hash[..16])
+    });
 
     let claims = IdTokenClaims {
         sub: user_id.to_string(),
@@ -227,6 +240,7 @@ pub fn generate_id_token(
         name: name.map(String::from),
         picture: picture.map(String::from),
         nonce: nonce.map(String::from),
+        at_hash,
     };
 
     let mut header = Header::new(Algorithm::RS256);

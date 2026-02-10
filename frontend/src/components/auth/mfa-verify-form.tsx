@@ -18,7 +18,16 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ShieldCheck } from "lucide-react";
 
-export function MfaVerifyForm() {
+/** Backend base URL used to validate return_to redirects (open-redirect prevention). */
+const BACKEND_URL = (
+  import.meta.env.VITE_BACKEND_URL ?? "http://localhost:3001"
+).replace(/\/+$/, "");
+
+interface MfaVerifyFormProps {
+  readonly returnTo?: string;
+}
+
+export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
   const navigate = useNavigate();
   const verifyMutation = useMfaVerify();
   const mfaToken = useAuthStore((s) => s.mfaToken);
@@ -43,6 +52,10 @@ export function MfaVerifyForm() {
         code: data.code,
         mfa_token: mfaToken,
       });
+      if (returnTo && returnTo.startsWith(BACKEND_URL + "/")) {
+        window.location.href = returnTo;
+        return;
+      }
       void navigate({ to: "/" as string });
     } catch (error) {
       if (error instanceof ApiError) {
