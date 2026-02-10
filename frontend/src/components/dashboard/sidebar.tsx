@@ -4,6 +4,7 @@ import {
   Key,
   Server,
   Link2,
+  Plug,
   Settings,
   BookOpen,
   Shield,
@@ -16,6 +17,7 @@ const NAV_ITEMS = [
   { to: "/api-keys", icon: Key, label: "API Keys" },
   { to: "/services", icon: Server, label: "Services" },
   { to: "/connections", icon: Link2, label: "Connections" },
+  { to: "/providers", icon: Plug, label: "Providers" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/guide", icon: BookOpen, label: "Guide" },
 ] as const;

@@ -1,0 +1,385 @@
+# NyxID Security Documentation
+
+This document details NyxID's security architecture, threat mitigations, and operational security practices.
+
+---
+
+## Table of Contents
+
+- [Encryption at Rest](#encryption-at-rest)
+- [OAuth Security](#oauth-security)
+- [Token Lifecycle Security](#token-lifecycle-security)
+- [Identity Propagation Security](#identity-propagation-security)
+- [Proxy Security](#proxy-security)
+- [Credential Broker Security](#credential-broker-security)
+- [Authentication Security](#authentication-security)
+- [HTTP Security Headers](#http-security-headers)
+- [Rate Limiting](#rate-limiting)
+- [Threat Model](#threat-model)
+- [Incident Response](#incident-response)
+- [Security Controls Reference](#security-controls-reference)
+
+---
+
+## Encryption at Rest
+
+### Algorithm
+
+All sensitive data is encrypted using **AES-256-GCM** (Galois/Counter Mode):
+
+- **Key size:** 256 bits (32 bytes), provided via `ENCRYPTION_KEY` environment variable (64 hex characters)
+- **Nonce:** Random 96-bit (12-byte) nonce generated per encryption operation via `OsRng`
+- **Storage format:** `nonce(12 bytes) || ciphertext || authentication_tag(16 bytes)`
+- **Authentication:** GCM provides authenticated encryption -- tampering is detected on decryption
+
+### What Is Encrypted
+
+| Data                                | Collection               | Fields                                         |
+|-------------------------------------|--------------------------|------------------------------------------------|
+| Service master credentials          | `downstream_services`    | `credential_encrypted`                         |
+| Per-user service credentials        | `user_service_connections` | `credential_encrypted`                       |
+| MFA TOTP secrets                    | `mfa_factors`            | `secret_encrypted`                             |
+| Provider OAuth client credentials   | `provider_configs`       | `client_id_encrypted`, `client_secret_encrypted` |
+| User provider OAuth tokens          | `user_provider_tokens`   | `access_token_encrypted`, `refresh_token_encrypted` |
+| User provider API keys              | `user_provider_tokens`   | `api_key_encrypted`                            |
+
+### Key Management
+
+- The encryption key must be generated using a cryptographically secure RNG: `openssl rand -hex 32`
+- Never reuse the development key in production
+- All instances in a horizontal scaling setup must share the same key
+- Key rotation requires re-encrypting all stored data (not yet automated)
+- The key is validated at startup -- all-zero keys are rejected
+
+### Memory Protection
+
+Decrypted secrets use the `zeroize` crate's `Zeroizing<Vec<u8>>` wrapper, which overwrites memory on drop. This prevents sensitive data from lingering in process memory after use.
+
+---
+
+## OAuth Security
+
+### PKCE (Proof Key for Code Exchange)
+
+NyxID enforces PKCE on two distinct OAuth flows:
+
+**1. NyxID as OIDC Provider (downstream services authenticating via NyxID):**
+- Method: S256 (SHA-256)
+- `code_challenge` is mandatory on all authorization requests
+- The code verifier is verified during token exchange
+
+**2. NyxID as OAuth Client (connecting to external providers):**
+- PKCE is used when `supports_pkce = true` on the provider configuration
+- Code verifier: 32 random bytes, base64url-encoded (43 characters)
+- Code challenge: SHA-256 of the verifier, base64url-encoded
+- The code verifier is stored in the `oauth_states` collection (not encrypted, but short-lived)
+
+### OAuth State / CSRF Protection
+
+- Each OAuth initiation creates an `oauth_states` record with a unique UUID
+- The state parameter maps to this record
+- State records expire (short TTL) and are consumed atomically via `find_one_and_delete`
+- The callback verifies the session user matches the state's `user_id` to prevent cross-user attacks
+
+### Token Exchange Security
+
+- **No-redirect HTTP client (SEC-H2):** Token exchange requests use a dedicated `reqwest::Client` configured with `redirect::Policy::none()`. This prevents SSRF attacks where a malicious provider could redirect the token exchange request to an internal service.
+- **Error body truncation (SEC-M5):** Error responses from providers are truncated to 200 characters before storing in the database, preventing log injection or storage exhaustion.
+
+---
+
+## Token Lifecycle Security
+
+### Access Tokens (NyxID-issued JWTs)
+
+| Property         | Value                          |
+|------------------|--------------------------------|
+| Algorithm        | RS256 (RSA SHA-256)            |
+| Key size         | 4096-bit RSA                   |
+| Default TTL      | 15 minutes                     |
+| Storage          | Client-side only (not in DB)   |
+| Revocation       | Short TTL; no explicit revoke  |
+
+### Refresh Tokens (NyxID-issued JWTs)
+
+| Property         | Value                          |
+|------------------|--------------------------------|
+| Algorithm        | RS256                          |
+| Default TTL      | 7 days                         |
+| Storage          | JTI stored in DB               |
+| Rotation         | New token on each refresh      |
+| Replay detection | `replaced_by` chain tracking   |
+
+### Provider OAuth Tokens (stored by credential broker)
+
+| Property           | Value                                         |
+|--------------------|-----------------------------------------------|
+| Storage            | AES-256-GCM encrypted in `user_provider_tokens` |
+| Refresh strategy   | Lazy refresh with 5-minute buffer before expiry |
+| Refresh failure    | Status set to `refresh_failed` with error msg |
+| Memory protection  | `Zeroizing` wrapper on decrypted tokens       |
+| Disconnect cleanup | Status set to `revoked`, encrypted fields nulled |
+
+### Session Tokens
+
+| Property         | Value                          |
+|------------------|--------------------------------|
+| Generation       | 32 random bytes                |
+| Storage          | SHA-256 hash in DB             |
+| TTL              | 30 days                        |
+| Revocation       | Marked `revoked` on logout     |
+
+### API Keys
+
+| Property         | Value                          |
+|------------------|--------------------------------|
+| Generation       | Random with `nyx_k_` prefix    |
+| Storage          | SHA-256 hash in DB             |
+| Full key         | Shown only at creation         |
+| Revocation       | Soft deactivation              |
+
+---
+
+## Identity Propagation Security
+
+### CRLF Injection Prevention (SEC-M1)
+
+All identity header values pass through `sanitize_header_value()` which strips:
+- Carriage return (`\r`)
+- Line feed (`\n`)
+- Null byte (`\0`)
+
+This prevents CRLF injection attacks where a malicious display name like `"Alice\r\nX-Admin: true"` could inject additional headers.
+
+### Short-Lived Identity JWTs
+
+Identity assertion JWTs have a 60-second TTL to minimize the replay window. Claims include:
+- `sub` -- User ID
+- `iss` -- NyxID issuer
+- `aud` -- Target service (scoped, preventing cross-service reuse)
+- `jti` -- Unique token ID
+- `nyx_service_id` -- Explicit service binding
+
+### Per-Service Audience
+
+The `aud` claim is set to the service's `identity_jwt_audience` (or `base_url` as fallback). This ensures an identity JWT captured from one service cannot be replayed against another.
+
+### Claim Minimization
+
+Each service explicitly opts into which claims to include:
+- `identity_include_user_id` -- User ID
+- `identity_include_email` -- Email address
+- `identity_include_name` -- Display name
+
+Services only receive the identity information they need.
+
+---
+
+## Proxy Security
+
+### SSRF Protection
+
+Base URLs for downstream services and OAuth provider endpoints are validated against:
+
+- **Scheme check:** Must be `http://` or `https://`
+- **Hostname blocklist:** `localhost`, `127.0.0.1`, `0.0.0.0`, `[::1]`, `metadata.google.internal`
+- **Private IP ranges:** 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, loopback
+
+### Path Traversal Prevention
+
+Proxy paths containing `..` or `//` are rejected to prevent path traversal attacks against downstream services.
+
+### Header Allowlists
+
+**Request headers forwarded to downstream:**
+`content-type`, `accept`, `accept-language`, `accept-encoding`, `content-length`, `user-agent`, `x-request-id`, `x-correlation-id`
+
+All other headers (including `Authorization`, `Cookie`) are stripped.
+
+**Response headers returned to client:**
+`content-type`, `content-length`, `content-encoding`, `content-language`, `content-disposition`, `cache-control`, `etag`, `last-modified`, `x-request-id`, `x-correlation-id`, `vary`, `access-control-*`
+
+### Body Size Limit
+
+Proxy requests are limited to 10 MB request body. The global body size limit for other endpoints is 1 MB.
+
+---
+
+## Credential Broker Security
+
+### Injection Key Blocklist
+
+To prevent security header injection via credential delegation, the following header names are blocked as `injection_key` values in service provider requirements:
+
+`host`, `authorization`, `cookie`, `set-cookie`, `transfer-encoding`, `content-length`, `connection`, `x-forwarded-for`, `x-forwarded-host`, `x-real-ip`
+
+### Provider Credential Isolation
+
+- Provider OAuth client credentials (`client_id`, `client_secret`) are encrypted separately from user tokens
+- User tokens are scoped to `(user_id, provider_config_id)` -- one user cannot access another user's tokens
+- Provider deactivation atomically revokes all associated user tokens
+
+### Credential Lifecycle
+
+| Event                | Action                                                      |
+|----------------------|-------------------------------------------------------------|
+| API key connect      | Encrypted and stored; upserts existing token                |
+| OAuth connect        | Code exchanged with no-redirect client; tokens encrypted    |
+| Token use (proxy)    | Decrypted on-demand; lazy refresh if near expiry            |
+| Disconnect           | Status set to `revoked`; encrypted fields set to null       |
+| Provider deactivated | All user tokens for that provider are revoked               |
+
+---
+
+## Authentication Security
+
+### Password Hashing
+
+- **Algorithm:** Argon2id (recommended by OWASP)
+- **Parameters:** m=64MiB, t=3 iterations, p=4 parallelism
+- **Salt:** Random per-hash via `SaltString::generate(OsRng)`
+- **Max length:** 128 characters (prevents Argon2 DoS)
+
+### Cookie Security
+
+| Cookie              | Flags                                             | Path                      |
+|---------------------|---------------------------------------------------|---------------------------|
+| `nyx_session`       | HttpOnly, SameSite=Lax, Secure*                   | `/`                       |
+| `nyx_access_token`  | HttpOnly, SameSite=Lax, Secure*                   | `/`                       |
+| `nyx_refresh_token` | HttpOnly, SameSite=Lax, Secure*                   | `/api/v1/auth/refresh`    |
+
+\* `Secure` flag is set when `BASE_URL` does not start with `http://localhost` or `http://127.0.0.1`.
+
+### Authentication Chain
+
+Requests are authenticated in this order:
+1. `Authorization: Bearer <JWT>` header
+2. `nyx_session` cookie (hashed, looked up in DB)
+3. `nyx_access_token` cookie (JWT verified)
+4. `X-API-Key` header (hashed, looked up in DB)
+
+All methods verify the user is active before granting access.
+
+---
+
+## HTTP Security Headers
+
+Every response includes:
+
+| Header                       | Value                                              | Purpose                    |
+|------------------------------|----------------------------------------------------|----------------------------|
+| `Strict-Transport-Security`  | `max-age=31536000; includeSubDomains; preload`     | Enforce HTTPS              |
+| `X-Content-Type-Options`     | `nosniff`                                          | Prevent MIME sniffing      |
+| `X-Frame-Options`            | `DENY`                                             | Prevent clickjacking       |
+| `Content-Security-Policy`    | `default-src 'none'; frame-ancestors 'none'`       | Restrict resource loading  |
+| `Referrer-Policy`            | `strict-origin-when-cross-origin`                  | Control referrer leakage   |
+| `Permissions-Policy`         | `camera=(), microphone=(), geolocation=(), interest-cohort=()` | Restrict browser APIs |
+| `X-XSS-Protection`          | `1; mode=block`                                    | Legacy XSS protection      |
+
+---
+
+## Rate Limiting
+
+Dual-layer rate limiting protects against abuse:
+
+1. **Per-IP:** Sliding window counter per client IP
+2. **Global:** Token-bucket algorithm as throughput safety net
+
+| Setting                  | Default | Environment Variable        |
+|--------------------------|---------|------------------------------|
+| Per-IP limit             | 30/sec  | `RATE_LIMIT_BURST`           |
+| Global sustained rate    | 10/sec  | `RATE_LIMIT_PER_SECOND`      |
+| Global burst capacity    | 30      | `RATE_LIMIT_BURST`           |
+
+Rate limit state is per-instance (in-memory). For distributed deployments, consider rate limiting at the reverse proxy level.
+
+---
+
+## Threat Model
+
+### Assets
+
+| Asset                          | Sensitivity | Protection                           |
+|--------------------------------|-------------|--------------------------------------|
+| User passwords                 | Critical    | Argon2id hashing (never stored plain)|
+| Provider OAuth client secrets  | Critical    | AES-256-GCM encryption              |
+| User provider tokens           | Critical    | AES-256-GCM encryption + zeroize    |
+| Service master credentials     | Critical    | AES-256-GCM encryption              |
+| Per-user service credentials   | Critical    | AES-256-GCM encryption              |
+| MFA secrets                    | Critical    | AES-256-GCM encryption              |
+| RSA private key                | Critical    | File permissions (0600)              |
+| Encryption key                 | Critical    | Environment variable                 |
+| Session tokens                 | High        | SHA-256 hashed in DB                 |
+| API keys                       | High        | SHA-256 hashed, prefix-only display  |
+| User PII (email, name)         | Medium      | Access control, audit logging        |
+
+### Threat Mitigations
+
+| Threat                          | Mitigation                                          |
+|---------------------------------|-----------------------------------------------------|
+| Credential theft (DB breach)    | AES-256-GCM encryption at rest                      |
+| Password brute force            | Argon2id cost parameters, rate limiting              |
+| Session hijacking               | HttpOnly cookies, SameSite, short JWT TTL            |
+| CSRF                            | SameSite cookies, OAuth state parameter              |
+| SSRF via proxy                  | IP blocklist, hostname validation                    |
+| SSRF via OAuth redirect         | No-redirect HTTP client for token exchange           |
+| Path traversal via proxy        | Reject `..` and `//` in paths                        |
+| Header injection                | Request/response header allowlists                   |
+| CRLF injection via identity     | `sanitize_header_value()` strips CR/LF/NUL           |
+| Injection key manipulation      | Blocked injection keys list for sensitive headers    |
+| Token replay (identity JWT)     | 60-second TTL, per-service audience, unique JTI      |
+| Token replay (refresh token)    | Single-use rotation with `replaced_by` chain         |
+| Credential leakage in memory    | `zeroize` crate for secure memory cleanup            |
+| Credential leakage in logs      | Custom `Debug` impls redact secrets                  |
+| Error message info leakage      | Internal errors never expose details in responses    |
+| Provider error leakage          | OAuth error bodies truncated to 200 chars            |
+| Timing attacks on auth          | Constant-time comparison for token verification      |
+
+---
+
+## Incident Response
+
+### If ENCRYPTION_KEY Is Compromised
+
+1. Generate a new key: `openssl rand -hex 32`
+2. Stop all NyxID instances
+3. Run a re-encryption migration (decrypt all data with old key, re-encrypt with new key)
+4. Update the `ENCRYPTION_KEY` environment variable
+5. Restart all instances
+6. Audit all access logs for the compromise window
+
+### If RSA Private Key Is Compromised
+
+1. Generate a new key pair
+2. Replace key files at the configured paths
+3. Restart all NyxID instances
+4. All existing JWTs are immediately invalidated
+5. Users must re-authenticate
+
+### If a Provider Token Is Compromised
+
+1. User disconnects from the provider via `DELETE /api/v1/providers/{id}/disconnect`
+2. User revokes the token directly with the provider (e.g., OpenAI dashboard)
+3. User reconnects with a new token/key
+
+### If Suspicious Activity Is Detected
+
+1. Review the audit log: `GET /api/v1/admin/audit-log`
+2. Check for unusual `proxy_request` patterns or `provider_token_connected` events
+3. Deactivate compromised user accounts via admin API
+4. Rotate affected credentials
+
+---
+
+## Security Controls Reference
+
+Summary of security controls by identifier (from the architecture plan):
+
+| ID     | Control                                    | Implementation                              |
+|--------|--------------------------------------------|---------------------------------------------|
+| SEC-H2 | No-redirect HTTP client for token exchange | `reqwest::Client` with `redirect::Policy::none()` |
+| SEC-M1 | CRLF injection prevention                 | `sanitize_header_value()` in identity_service |
+| SEC-M3 | Zeroize decrypted credentials              | `Zeroizing<Vec<u8>>` wrapper in proxy_service |
+| SEC-M5 | Error body truncation                      | 200-char limit on provider error messages   |
+| CR-4/5/6 | N+1 query prevention                    | Batch `$in` queries for provider lookups    |
+| CR-15  | Required provider enforcement              | 400 error for missing required provider tokens |

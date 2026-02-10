@@ -416,6 +416,10 @@ Currently available migrations:
 | `user_service_connections` | Per-user connections and encrypted credentials |
 | `mfa_factors`            | TOTP factors and recovery codes              |
 | `service_endpoints`      | Registered API endpoints per service (MCP tools) |
+| `provider_configs`       | External provider registry (OpenAI, Anthropic, etc.) |
+| `user_provider_tokens`   | Per-user encrypted provider tokens                |
+| `service_provider_requirements` | Provider token requirements per service     |
+| `oauth_states`           | Temporary OAuth state for provider flows          |
 | `audit_log`              | Immutable audit trail                        |
 
 ### MongoDB Atlas
@@ -1127,6 +1131,111 @@ server {
 ```
 
 Note the extended `proxy_read_timeout` -- MCP tool calls that proxy to slow downstream APIs may take longer than the default timeout.
+
+---
+
+## Credential Broker Setup
+
+NyxID's credential broker feature lets users store encrypted API keys and OAuth tokens for external providers (e.g., OpenAI, Anthropic, Google AI). These tokens are injected into proxy requests on behalf of users.
+
+### Prerequisites
+
+The credential broker reuses the existing `ENCRYPTION_KEY` and `BASE_URL` environment variables. No additional configuration is needed.
+
+### Step 1: Configure Providers
+
+After the initial admin setup, register provider configurations via the API:
+
+**API key provider (e.g., OpenAI):**
+
+```bash
+curl -X POST https://auth.example.com/api/v1/providers \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "OpenAI",
+    "slug": "openai",
+    "provider_type": "api_key",
+    "description": "OpenAI API for GPT models",
+    "api_key_instructions": "Visit https://platform.openai.com/api-keys to create a key",
+    "api_key_url": "https://platform.openai.com/api-keys",
+    "icon_url": "https://example.com/icons/openai.svg",
+    "documentation_url": "https://platform.openai.com/docs"
+  }'
+```
+
+**OAuth2 provider (e.g., Google AI):**
+
+```bash
+curl -X POST https://auth.example.com/api/v1/providers \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Google AI",
+    "slug": "google-ai",
+    "provider_type": "oauth2",
+    "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+    "token_url": "https://oauth2.googleapis.com/token",
+    "revocation_url": "https://oauth2.googleapis.com/revoke",
+    "default_scopes": ["https://www.googleapis.com/auth/generative-language"],
+    "client_id": "your-google-client-id",
+    "client_secret": "your-google-client-secret",
+    "supports_pkce": true
+  }'
+```
+
+### Step 2: Configure Service Requirements
+
+For each downstream service that needs provider tokens, add provider requirements:
+
+```bash
+curl -X POST https://auth.example.com/api/v1/services/<service_id>/requirements \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider_config_id": "<openai_provider_id>",
+    "required": true,
+    "injection_method": "bearer"
+  }'
+```
+
+### Step 3: Configure Identity Propagation (Optional)
+
+Enable identity propagation on downstream services to forward user identity:
+
+```bash
+curl -X PUT https://auth.example.com/api/v1/services/<service_id> \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "identity_propagation_mode": "both",
+    "identity_include_user_id": true,
+    "identity_include_email": true,
+    "identity_include_name": true,
+    "identity_jwt_audience": "https://my-service.example.com"
+  }'
+```
+
+### Common Provider Configurations
+
+| Provider   | Type    | Auth Model  | Notes                                    |
+|------------|---------|-------------|------------------------------------------|
+| OpenAI     | api_key | API key     | `Authorization: Bearer <key>` injection  |
+| Anthropic  | api_key | API key     | `x-api-key: <key>` header injection      |
+| Mistral    | api_key | API key     | `Authorization: Bearer <key>` injection  |
+| Cohere     | api_key | API key     | `Authorization: Bearer <key>` injection  |
+| Google AI  | oauth2  | OAuth2+PKCE | Requires Google Cloud OAuth credentials  |
+| Azure OpenAI | api_key | API key  | `api-key: <key>` header injection        |
+
+### OAuth2 Redirect URI
+
+For OAuth2 providers, register the following redirect URI in the provider's developer console:
+
+```
+https://auth.example.com/api/v1/providers/callback
+```
+
+This is the generic callback endpoint that handles all provider OAuth flows.
 
 ---
 

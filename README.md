@@ -77,6 +77,22 @@ It provides a complete identity layer: user registration, session management, Op
 - Audit log with action, resource, IP, and user-agent tracking
 - Admin-only access control
 
+### Credential Broker
+- Admin-managed provider registry (OpenAI, Anthropic, Google AI, Mistral, Cohere, etc.)
+- Users connect by entering API keys or completing OAuth2 flows
+- All credentials encrypted at rest (AES-256-GCM) with secure memory cleanup (zeroize)
+- Credential delegation: downstream services declare provider requirements, proxy injects user tokens automatically
+- Lazy OAuth token refresh with 5-minute buffer before expiry
+- Token lifecycle tracking: active, expired, revoked, refresh_failed
+
+### Identity Propagation
+- Forward authenticated user identity to downstream services during proxy requests
+- Four modes: `none`, `headers`, `jwt`, `both`
+- Header mode: `X-NyxID-User-Id`, `X-NyxID-User-Email`, `X-NyxID-User-Name`
+- JWT mode: Short-lived RS256-signed identity assertion (60-second TTL) via `X-NyxID-Identity-Token`
+- Per-service configuration of which claims to include
+- CRLF injection prevention on all header values
+
 ### Security Hardening
 - Rate limiting: per-IP sliding window with global token-bucket fallback
 - Security headers: HSTS, CSP, X-Frame-Options (DENY), X-Content-Type-Options, Referrer-Policy, Permissions-Policy
@@ -133,7 +149,7 @@ It provides a complete identity layer: user registration, session management, Op
                                   |
                          +--------v---------+
                          |  MongoDB 8.0     |
-                         |  (10 collections)|
+                         |  (14 collections)|
                          +------------------+
 ```
 
@@ -267,6 +283,20 @@ For the full API reference with request/response schemas and example curl comman
 | GET    | `/api/v1/admin/users`                | Admin    | List all users (paginated)           |
 | GET    | `/api/v1/admin/users/{user_id}`      | Admin    | Get user details                     |
 | GET    | `/api/v1/admin/audit-log`            | Admin    | Query audit log (paginated)          |
+| GET    | `/api/v1/providers`                  | Required | List provider configurations          |
+| POST   | `/api/v1/providers`                  | Admin    | Register a provider                   |
+| GET    | `/api/v1/providers/{id}`             | Required | Get a provider                        |
+| PUT    | `/api/v1/providers/{id}`             | Admin    | Update a provider                     |
+| DELETE | `/api/v1/providers/{id}`             | Admin    | Deactivate a provider                 |
+| GET    | `/api/v1/providers/my-tokens`        | Required | List user's provider tokens           |
+| POST   | `/api/v1/providers/{id}/connect/api-key` | Required | Connect via API key              |
+| GET    | `/api/v1/providers/{id}/connect/oauth` | Required | Start OAuth connection flow         |
+| GET    | `/api/v1/providers/callback`         | Required | Generic OAuth callback                |
+| DELETE | `/api/v1/providers/{id}/disconnect`  | Required | Disconnect from a provider            |
+| POST   | `/api/v1/providers/{id}/refresh`     | Required | Manually refresh provider token       |
+| GET    | `/api/v1/services/{id}/requirements` | Required | List service provider requirements    |
+| POST   | `/api/v1/services/{id}/requirements` | Admin    | Add a provider requirement            |
+| DELETE | `/api/v1/services/{id}/requirements/{rid}` | Admin | Remove a provider requirement    |
 | POST   | `/api/v1/mfa/setup`                  | Required | Begin TOTP MFA enrollment            |
 | POST   | `/api/v1/mfa/verify-setup`           | Required | Complete TOTP MFA enrollment         |
 
@@ -354,7 +384,7 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 
 ## Database Schema
 
-NyxID uses 10 MongoDB collections:
+NyxID uses 14 MongoDB collections:
 
 | Collection                 | Description                                          |
 |----------------------------|------------------------------------------------------|
@@ -367,6 +397,11 @@ NyxID uses 10 MongoDB collections:
 | `downstream_services`      | Registered downstream services for proxying          |
 | `user_service_connections` | Per-user connections and encrypted credentials for downstream services |
 | `mfa_factors`              | TOTP factors and encrypted recovery codes            |
+| `service_endpoints`        | Registered API endpoints per service (MCP tools)     |
+| `provider_configs`         | External provider registry (encrypted OAuth creds)   |
+| `user_provider_tokens`     | Per-user encrypted provider tokens (API keys/OAuth)  |
+| `service_provider_requirements` | Provider token requirements per service          |
+| `oauth_states`             | Temporary OAuth state for provider flows             |
 | `audit_log`                | Immutable audit trail of security events             |
 
 All documents use UUID identifiers, ISO 8601 timestamps, and appropriate indexes for query patterns.
@@ -526,9 +561,12 @@ NyxID/
 |       |   |-- auth.rs         Register, login, logout, refresh, verify-email, forgot/reset-password
 |       |   |-- users.rs        Get/update user profile
 |       |   |-- api_keys.rs     CRUD + rotate API keys
-|       |   |-- services.rs     CRUD downstream services
+|       |   |-- services.rs     CRUD downstream services (+ identity propagation config)
 |       |   |-- connections.rs  Connect/disconnect, credential management
-|       |   |-- proxy.rs        Reverse proxy handler
+|       |   |-- providers.rs    CRUD external provider configurations
+|       |   |-- user_tokens.rs  User provider token management (API key + OAuth)
+|       |   |-- service_requirements.rs  Service provider requirement management
+|       |   |-- proxy.rs        Reverse proxy handler (+ identity + delegation)
 |       |   |-- mcp.rs          MCP config endpoint
 |       |   |-- oauth.rs        OIDC authorize, token, userinfo
 |       |   |-- admin.rs        Admin user/audit endpoints
@@ -539,8 +577,13 @@ NyxID/
 |       |   |-- token_service.rs    Session/token issuance, refresh rotation
 |       |   |-- oauth_service.rs    Client validation, code exchange
 |       |   |-- key_service.rs      API key lifecycle
-|       |   |-- proxy_service.rs    Target resolution, request forwarding
+|       |   |-- proxy_service.rs    Target resolution, request forwarding (+ identity + delegation)
 |       |   |-- connection_service.rs Connection lifecycle, credential management
+|       |   |-- provider_service.rs Provider registry CRUD, encrypted credential storage
+|       |   |-- user_token_service.rs User provider token lifecycle (API key + OAuth)
+|       |   |-- delegation_service.rs Credential delegation resolution for proxy
+|       |   |-- identity_service.rs Identity propagation headers + JWT assertions
+|       |   |-- oauth_flow.rs       OAuth2 utilities (PKCE, token exchange, refresh)
 |       |   |-- mfa_service.rs      TOTP provisioning, verification
 |       |   `-- audit_service.rs    Async audit log insertion
 |       `-- mw/                 Middleware

@@ -38,6 +38,16 @@ export const createServiceSchema = z.object({
 
 export type CreateServiceFormData = z.infer<typeof createServiceSchema>;
 
+export const IDENTITY_PROPAGATION_MODES = [
+  "none",
+  "headers",
+  "jwt",
+  "both",
+] as const;
+
+export type IdentityPropagationMode =
+  (typeof IDENTITY_PROPAGATION_MODES)[number];
+
 export const updateServiceSchema = z.object({
   name: z
     .string()
@@ -54,6 +64,13 @@ export const updateServiceSchema = z.object({
     .url("Must be a valid URL")
     .optional()
     .or(z.literal("")),
+  identity_propagation_mode: z
+    .enum(IDENTITY_PROPAGATION_MODES)
+    .optional(),
+  identity_include_user_id: z.boolean().optional(),
+  identity_include_email: z.boolean().optional(),
+  identity_include_name: z.boolean().optional(),
+  identity_jwt_audience: z.string().max(500).optional().or(z.literal("")),
 });
 
 export type UpdateServiceFormData = z.infer<typeof updateServiceSchema>;

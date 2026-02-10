@@ -22,6 +22,12 @@ import { ServiceEditPage } from "@/pages/service-edit";
 import { ConnectionsPage } from "@/pages/connections";
 import { SettingsPage } from "@/pages/settings";
 import { GuidePage } from "@/pages/guide";
+import { ProvidersLayout } from "@/pages/providers-layout";
+import { ProvidersPage } from "@/pages/providers";
+import { ProvidersCallbackPage } from "@/pages/providers-callback";
+import { ProviderListPage } from "@/pages/provider-list";
+import { ProviderDetailPage } from "@/pages/provider-detail";
+import { ProviderEditPage } from "@/pages/provider-edit";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -122,6 +128,42 @@ const guideRoute = createRoute({
   component: GuidePage,
 });
 
+const providersLayout = createRoute({
+  path: "/providers",
+  getParentRoute: () => dashboardLayout,
+  component: ProvidersLayout,
+});
+
+const providersIndexRoute = createRoute({
+  path: "/",
+  getParentRoute: () => providersLayout,
+  component: ProvidersPage,
+});
+
+const providersCallbackRoute = createRoute({
+  path: "callback",
+  getParentRoute: () => providersLayout,
+  component: ProvidersCallbackPage,
+});
+
+const providerManageRoute = createRoute({
+  path: "manage",
+  getParentRoute: () => providersLayout,
+  component: ProviderListPage,
+});
+
+const providerDetailRoute = createRoute({
+  path: "$providerId",
+  getParentRoute: () => providersLayout,
+  component: ProviderDetailPage,
+});
+
+const providerEditRoute = createRoute({
+  path: "$providerId/edit",
+  getParentRoute: () => providersLayout,
+  component: ProviderEditPage,
+});
+
 const routeTree = rootRoute.addChildren([
   authLayout.addChildren([loginRoute, registerRoute]),
   dashboardLayout.addChildren([
@@ -133,6 +175,13 @@ const routeTree = rootRoute.addChildren([
       serviceEditRoute,
     ]),
     connectionsRoute,
+    providersLayout.addChildren([
+      providersIndexRoute,
+      providersCallbackRoute,
+      providerManageRoute,
+      providerDetailRoute,
+      providerEditRoute,
+    ]),
     settingsRoute,
     guideRoute,
   ]),

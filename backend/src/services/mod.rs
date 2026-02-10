@@ -1,12 +1,17 @@
 pub mod audit_service;
 pub mod auth_service;
 pub mod connection_service;
+pub mod delegation_service;
+pub mod identity_service;
 pub mod key_service;
 pub mod mcp_service;
 pub mod mfa_service;
+pub mod oauth_flow;
 pub mod oauth_client_service;
 pub mod oauth_service;
 pub mod openapi_parser;
+pub mod provider_service;
 pub mod proxy_service;
 pub mod service_endpoint_service;
 pub mod token_service;
+pub mod user_token_service;

@@ -57,6 +57,11 @@ export interface DownstreamService {
   readonly created_by: string;
   readonly created_at: string;
   readonly updated_at: string;
+  readonly identity_propagation_mode?: string;
+  readonly identity_include_user_id?: boolean;
+  readonly identity_include_email?: boolean;
+  readonly identity_include_name?: boolean;
+  readonly identity_jwt_audience?: string | null;
 }
 
 export interface ServiceEndpoint {
@@ -175,4 +180,79 @@ export interface MfaVerifyRequest {
 export interface PublicConfig {
   readonly mcp_url: string;
   readonly version: string;
+}
+
+export interface ProviderConfig {
+  readonly id: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly provider_type: "oauth2" | "api_key" | "device_code";
+  readonly has_oauth_config: boolean;
+  readonly default_scopes: readonly string[] | null;
+  readonly supports_pkce: boolean;
+  readonly device_code_url: string | null;
+  readonly device_token_url: string | null;
+  readonly device_verification_url: string | null;
+  readonly hosted_callback_url: string | null;
+  readonly api_key_instructions: string | null;
+  readonly api_key_url: string | null;
+  readonly icon_url: string | null;
+  readonly documentation_url: string | null;
+  readonly is_active: boolean;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface UserProviderToken {
+  readonly provider_id: string;
+  readonly provider_name: string;
+  readonly provider_slug: string;
+  readonly provider_type: string;
+  readonly status: "active" | "expired" | "revoked" | "refresh_failed";
+  readonly label: string | null;
+  readonly expires_at: string | null;
+  readonly last_used_at: string | null;
+  readonly connected_at: string;
+}
+
+export interface OAuthInitiateResponse {
+  readonly authorization_url: string;
+}
+
+export interface DeviceCodeInitiateResponse {
+  readonly user_code: string;
+  readonly verification_uri: string;
+  readonly state: string;
+  readonly expires_in: number;
+  readonly interval: number;
+}
+
+export interface DeviceCodePollRequest {
+  readonly state: string;
+}
+
+export interface DeviceCodePollResponse {
+  readonly status: "pending" | "slow_down" | "expired" | "denied" | "complete";
+  readonly interval?: number;
+}
+
+export interface ServiceProviderRequirement {
+  readonly id: string;
+  readonly service_id: string;
+  readonly provider_config_id: string;
+  readonly provider_name: string;
+  readonly provider_slug: string;
+  readonly required: boolean;
+  readonly scopes: readonly string[] | null;
+  readonly injection_method: string;
+  readonly injection_key: string | null;
+}
+
+export interface UserTokenListResponse {
+  readonly tokens: readonly UserProviderToken[];
+}
+
+export interface ProviderListResponse {
+  readonly providers: readonly ProviderConfig[];
 }

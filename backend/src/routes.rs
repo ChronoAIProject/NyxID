@@ -45,7 +45,10 @@ pub fn build_router() -> Router<AppState> {
         .route("/{service_id}/endpoints", post(handlers::endpoints::create_endpoint))
         .route("/{service_id}/endpoints/{endpoint_id}", put(handlers::endpoints::update_endpoint))
         .route("/{service_id}/endpoints/{endpoint_id}", delete(handlers::endpoints::delete_endpoint))
-        .route("/{service_id}/discover-endpoints", post(handlers::endpoints::discover_endpoints));
+        .route("/{service_id}/discover-endpoints", post(handlers::endpoints::discover_endpoints))
+        .route("/{service_id}/requirements", get(handlers::service_requirements::list_requirements))
+        .route("/{service_id}/requirements", post(handlers::service_requirements::add_requirement))
+        .route("/{service_id}/requirements/{requirement_id}", delete(handlers::service_requirements::remove_requirement));
 
     let session_routes = Router::new()
         .route("/", get(handlers::sessions::list_sessions));
@@ -63,6 +66,46 @@ pub fn build_router() -> Router<AppState> {
         .route(
             "/{service_id}/credential",
             put(handlers::connections::update_connection_credential),
+        );
+
+    let provider_routes = Router::new()
+        .route("/", get(handlers::providers::list_providers))
+        .route("/", post(handlers::providers::create_provider))
+        .route("/my-tokens", get(handlers::user_tokens::list_my_tokens))
+        .route(
+            "/callback",
+            get(handlers::user_tokens::generic_oauth_callback),
+        )
+        .route("/{provider_id}", get(handlers::providers::get_provider))
+        .route("/{provider_id}", put(handlers::providers::update_provider))
+        .route("/{provider_id}", delete(handlers::providers::delete_provider))
+        .route(
+            "/{provider_id}/connect/api-key",
+            post(handlers::user_tokens::connect_api_key),
+        )
+        .route(
+            "/{provider_id}/connect/oauth",
+            get(handlers::user_tokens::initiate_oauth_connect),
+        )
+        .route(
+            "/{provider_id}/callback",
+            get(handlers::user_tokens::oauth_callback),
+        )
+        .route(
+            "/{provider_id}/connect/device-code/initiate",
+            post(handlers::user_tokens::request_device_code),
+        )
+        .route(
+            "/{provider_id}/connect/device-code/poll",
+            post(handlers::user_tokens::poll_device_code),
+        )
+        .route(
+            "/{provider_id}/disconnect",
+            delete(handlers::user_tokens::disconnect_provider),
+        )
+        .route(
+            "/{provider_id}/refresh",
+            post(handlers::user_tokens::manual_refresh),
         );
 
     let admin_routes = Router::new()
@@ -86,6 +129,7 @@ pub fn build_router() -> Router<AppState> {
         .nest("/services", service_routes)
         .nest("/sessions", session_routes)
         .nest("/connections", connection_routes)
+        .nest("/providers", provider_routes)
         .nest("/mcp", mcp_routes)
         .nest("/admin", admin_routes)
         .route("/public/config", get(handlers::health::public_config))

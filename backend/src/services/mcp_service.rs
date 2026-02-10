@@ -492,6 +492,9 @@ pub fn build_proxy_args(
 
 /// Execute a resolved tool by calling `proxy_service` directly (no HTTP self-call).
 /// Returns (http_status, response_body).
+///
+/// Builds identity headers and resolves delegated credentials (CR-8),
+/// matching the behavior of `handlers/proxy.rs`.
 pub async fn execute_tool(
     http_client: &reqwest::Client,
     db: &mongodb::Database,
@@ -500,7 +503,13 @@ pub async fn execute_tool(
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
     arguments: &serde_json::Value,
+    jwt_keys: &crate::crypto::jwt::JwtKeys,
+    config: &crate::config::AppConfig,
 ) -> AppResult<(u16, String)> {
+    use crate::models::user::{User, COLLECTION_NAME as USERS};
+    use crate::services::{delegation_service, identity_service};
+    use mongodb::bson::doc;
+
     let (method, path, query, body) = build_proxy_args(endpoint, arguments);
 
     let target = proxy_service::resolve_proxy_target(
@@ -510,6 +519,61 @@ pub async fn execute_tool(
         &service.service_id,
     )
     .await?;
+
+    // Build identity headers if configured on the service (CR-8)
+    let mut identity_headers = Vec::new();
+    if target.service.identity_propagation_mode != "none" {
+        let user = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": user_id })
+            .await?;
+
+        if let Some(ref user) = user {
+            if matches!(
+                target.service.identity_propagation_mode.as_str(),
+                "headers" | "both"
+            ) {
+                identity_headers =
+                    identity_service::build_identity_headers(user, &target.service);
+            }
+
+            if matches!(
+                target.service.identity_propagation_mode.as_str(),
+                "jwt" | "both"
+            ) {
+                match identity_service::generate_identity_assertion(
+                    jwt_keys,
+                    config,
+                    user,
+                    &target.service,
+                ) {
+                    Ok(assertion) => {
+                        identity_headers.push((
+                            "X-NyxID-Identity-Token".to_string(),
+                            assertion,
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            service_id = %service.service_id,
+                            error = %e,
+                            "Failed to generate identity assertion for MCP tool"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Resolve delegated credentials (CR-8)
+    let delegated = delegation_service::resolve_delegated_credentials(
+        db,
+        encryption_key,
+        user_id,
+        &service.service_id,
+    )
+    .await
+    .unwrap_or_default();
 
     // Minimal headers for the downstream request
     let mut headers = reqwest::header::HeaderMap::new();
@@ -532,6 +596,8 @@ pub async fn execute_tool(
         query.as_deref(),
         headers,
         body,
+        identity_headers,
+        delegated,
     )
     .await?;
 

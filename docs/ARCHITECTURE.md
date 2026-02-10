@@ -13,6 +13,8 @@ This document describes the system architecture, component design, data flows, a
 - [Data Flow Diagrams](#data-flow-diagrams)
 - [Database Schema](#database-schema)
 - [Security Architecture](#security-architecture)
+- [Credential Broker](#credential-broker)
+- [Identity Propagation](#identity-propagation)
 - [Deployment Architecture](#deployment-architecture)
 
 ---
@@ -80,7 +82,7 @@ This document describes the system architecture, component design, data flows, a
              |
     +--------v---------+
     |  MongoDB 8.0     |
-    |  (10 collections)|
+    |  (14 collections)|
     +------------------+
 ```
 
@@ -156,6 +158,9 @@ Handlers are thin HTTP boundary functions. They:
 | `admin.rs`    | list_users, get_user, list_audit_log                            |
 | `health.rs`   | health_check                                                    |
 | `mfa.rs`      | setup, verify_setup                                             |
+| `providers.rs`| list, create, get, update, delete provider configs              |
+| `user_tokens.rs` | list tokens, connect API key/OAuth, disconnect, refresh      |
+| `service_requirements.rs` | list, add, remove service provider requirements      |
 
 #### 4. Service Layer (`services/`)
 
@@ -170,6 +175,11 @@ The service layer contains all business logic. Services receive database connect
 | `proxy_service.rs`  | Downstream service resolution, credential decryption, request forwarding with credential injection (header/bearer/query/basic), header allowlist enforcement |
 | `mfa_service.rs`    | TOTP secret generation with QR provisioning, code verification against encrypted secrets, recovery code management |
 | `audit_service.rs`  | Asynchronous audit log insertion (fire-and-forget via `tokio::spawn`), captures user, action, resource, IP, user-agent |
+| `provider_service.rs` | Provider registry CRUD, slug uniqueness, encrypted OAuth credential storage |
+| `user_token_service.rs` | User provider token lifecycle: API key storage, OAuth flow initiation/callback, token refresh with 5-min buffer, token retrieval with lazy refresh |
+| `delegation_service.rs` | Resolves delegated provider credentials for proxy injection, batch provider queries (N+1 fix), required vs. optional enforcement |
+| `identity_service.rs` | Builds identity propagation headers (CRLF-sanitized), generates short-lived RS256 identity assertion JWTs (60s TTL) |
+| `oauth_flow.rs`     | OAuth2 utilities: PKCE code verifier/challenge generation, token exchange with no-redirect HTTP client, token refresh |
 
 #### 5. Crypto Layer (`crypto/`)
 
@@ -460,11 +470,24 @@ Client                     NyxID Backend                     Downstream
   |                          |                                  |
   |                          |  AES-256-GCM decrypt credential  |
   |                          |                                  |
+  |                          |  Identity propagation:           |
+  |                          |  - If mode=headers/both:         |
+  |                          |    add X-NyxID-User-* headers    |
+  |                          |  - If mode=jwt/both:             |
+  |                          |    sign RS256 identity assertion |
+  |                          |    add X-NyxID-Identity-Token    |
+  |                          |                                  |
+  |                          |  Credential delegation:          |
+  |                          |  - Load service requirements     |
+  |                          |  - Resolve user provider tokens  |
+  |                          |  - Decrypt + inject each token   |
+  |                          |                                  |
   |                          |  Build outbound request:         |
   |                          |  - URL: base_url + /path + ?query|
   |                          |  - Copy allowed headers only     |
-  |                          |  - Inject credential:            |
-  |                          |    header/bearer/query/basic     |
+  |                          |  - Inject service credential     |
+  |                          |  - Inject identity headers       |
+  |                          |  - Inject delegated credentials  |
   |                          |  - Forward body (up to 10MB)     |
   |                          |                                  |
   |                          |  reqwest::Client::request(...)   |
@@ -473,7 +496,7 @@ Client                     NyxID Backend                     Downstream
   |                          |                                  |
   |                          |  Convert response:               |
   |                          |  - Map status code               |
-  |                          |  - Forward headers (skip hop)    |
+  |                          |  - Forward allowlisted headers   |
   |                          |  - Forward body                  |
   |                          |                                  |
   |  <downstream response>   |                                  |
@@ -510,7 +533,20 @@ Client                     NyxID Backend                     Downstream
         |    +-------------------+      +-------------------+
         |
         |    +-------------------+
-        +--->| downstream_services|
+        +--->| downstream_services|----+
+        |    +-------------------+    |
+        |                             |
+        |    +-------------------+    |    +------------------------+
+        +--->| provider_configs  |<---+----| service_provider_      |
+        |    +-------------------+         | requirements           |
+        |            |                     +------------------------+
+        |    +-------v-----------+
+        +--->| user_provider_    |
+        |    | tokens            |
+        |    +-------------------+
+        |
+        |    +-------------------+
+        +--->| oauth_states      |
              +-------------------+
 ```
 
@@ -715,6 +751,193 @@ Append-only audit trail for security events. References to deleted users are ret
 
 **Indexes:** `user_id`, `action`, `created_at`
 
+#### provider_configs
+
+Admin-managed registry of external providers (e.g., OpenAI, Anthropic, Google AI). OAuth client credentials are encrypted at rest.
+
+| Field                    | Type          | Constraints     | Description                     |
+|--------------------------|---------------|-----------------|---------------------------------|
+| `_id`                    | UUID (string) | PK              | Provider identifier             |
+| `slug`                   | string        | NOT NULL, UNIQUE| URL-safe identifier             |
+| `name`                   | string        | NOT NULL        | Display name                    |
+| `description`            | string        | NULLABLE        | Provider description            |
+| `provider_type`          | string        | NOT NULL        | `oauth2` or `api_key`           |
+| `authorization_url`      | string        | NULLABLE        | OAuth2 authorization endpoint   |
+| `token_url`              | string        | NULLABLE        | OAuth2 token endpoint           |
+| `revocation_url`         | string        | NULLABLE        | OAuth2 revocation endpoint      |
+| `default_scopes`         | array         | NULLABLE        | Default OAuth2 scopes           |
+| `client_id_encrypted`    | binary        | NULLABLE        | AES-encrypted OAuth client ID   |
+| `client_secret_encrypted`| binary        | NULLABLE        | AES-encrypted OAuth client secret|
+| `supports_pkce`          | boolean       | NOT NULL, DEFAULT false | PKCE support flag       |
+| `api_key_instructions`   | string        | NULLABLE        | Instructions for API key setup  |
+| `api_key_url`            | string        | NULLABLE        | URL to create API keys          |
+| `icon_url`               | string        | NULLABLE        | Provider icon URL               |
+| `documentation_url`      | string        | NULLABLE        | Provider documentation URL      |
+| `is_active`              | boolean       | NOT NULL, DEFAULT true | Active status            |
+| `created_by`             | UUID (string) | NOT NULL        | Admin who created it            |
+| `created_at`             | ISO 8601 date | NOT NULL        | Creation timestamp              |
+| `updated_at`             | ISO 8601 date | NOT NULL        | Last update                     |
+
+**Indexes:** `slug` (unique)
+
+#### user_provider_tokens
+
+Per-user encrypted tokens for external providers. Supports both API keys and OAuth2 tokens with refresh lifecycle.
+
+| Field                    | Type          | Constraints     | Description                     |
+|--------------------------|---------------|-----------------|---------------------------------|
+| `_id`                    | UUID (string) | PK              | Token record identifier         |
+| `user_id`                | UUID (string) | NOT NULL        | Token owner                     |
+| `provider_config_id`     | UUID (string) | NOT NULL        | Provider (-> provider_configs)  |
+| `token_type`             | string        | NOT NULL        | `oauth2` or `api_key`           |
+| `access_token_encrypted` | binary        | NULLABLE        | AES-encrypted OAuth access token|
+| `refresh_token_encrypted`| binary        | NULLABLE        | AES-encrypted OAuth refresh token|
+| `token_scopes`           | string        | NULLABLE        | Granted OAuth scopes            |
+| `expires_at`             | ISO 8601 date | NULLABLE        | Token expiration                |
+| `api_key_encrypted`      | binary        | NULLABLE        | AES-encrypted API key           |
+| `status`                 | string        | NOT NULL        | active/expired/revoked/refresh_failed |
+| `last_refreshed_at`      | ISO 8601 date | NULLABLE        | Last refresh timestamp          |
+| `last_used_at`           | ISO 8601 date | NULLABLE        | Last usage timestamp            |
+| `error_message`          | string        | NULLABLE        | Last error during refresh       |
+| `label`                  | string        | NULLABLE        | User-provided label             |
+| `created_at`             | ISO 8601 date | NOT NULL        | Connection timestamp            |
+| `updated_at`             | ISO 8601 date | NOT NULL        | Last update                     |
+
+**Indexes:** `(user_id, provider_config_id)` (unique)
+
+#### service_provider_requirements
+
+Defines which providers a downstream service needs credentials from. The proxy resolves these during request forwarding.
+
+| Field                | Type          | Constraints     | Description                     |
+|----------------------|---------------|-----------------|---------------------------------|
+| `_id`                | UUID (string) | PK              | Requirement identifier          |
+| `service_id`         | UUID (string) | NOT NULL        | Service (-> downstream_services)|
+| `provider_config_id` | UUID (string) | NOT NULL        | Provider (-> provider_configs)  |
+| `required`           | boolean       | NOT NULL        | Fail if user has no token       |
+| `scopes`             | array         | NULLABLE        | Specific scopes needed          |
+| `injection_method`   | string        | NOT NULL        | bearer/header/query             |
+| `injection_key`      | string        | NULLABLE        | Header/param name for injection |
+| `created_at`         | ISO 8601 date | NOT NULL        | Creation timestamp              |
+| `updated_at`         | ISO 8601 date | NOT NULL        | Last update                     |
+
+**Indexes:** `(service_id, provider_config_id)` (unique)
+
+#### oauth_states
+
+Temporary OAuth state records for provider OAuth flows. Used for CSRF protection and PKCE code verifier storage. Expired states are cleaned up by TTL.
+
+| Field                | Type          | Constraints     | Description                     |
+|----------------------|---------------|-----------------|---------------------------------|
+| `_id`                | UUID (string) | PK              | State identifier                |
+| `user_id`            | UUID (string) | NOT NULL        | User who initiated the flow     |
+| `provider_config_id` | UUID (string) | NOT NULL        | Target provider                 |
+| `code_verifier`      | string        | NULLABLE        | PKCE code verifier              |
+| `expires_at`         | ISO 8601 date | NOT NULL        | State expiration                |
+| `created_at`         | ISO 8601 date | NOT NULL        | Creation timestamp              |
+
+**Indexes:** `expires_at` (TTL)
+
+---
+
+## Credential Broker
+
+The credential broker enables NyxID to act as a centralized token vault for external service providers. Admins configure providers, users connect their credentials, and downstream services declare which provider tokens they need.
+
+### Provider Registry
+
+```
+Admin creates                  Users connect
+provider config                their credentials
+     |                              |
+     v                              v
++----------------+          +--------------------+
+| provider_configs|<---------| user_provider_tokens|
+| (OpenAI, etc.) |          | (encrypted keys/   |
+|                |          |  OAuth tokens)     |
++-------+--------+          +---------+----------+
+        |                             |
+        v                             v
++-------------------+    +---------------------+
+| service_provider_ |    | delegation_service  |
+| requirements      |    | (resolve + inject)  |
+| (per-service)     |    +---------------------+
++-------------------+
+```
+
+### Credential Delegation Flow
+
+When a proxied request is made to a service with provider requirements:
+
+1. **Load requirements** -- Query `service_provider_requirements` for the target service
+2. **Batch fetch providers** -- Single query to `provider_configs` (N+1 prevention)
+3. **Resolve user tokens** -- For each requirement, fetch the user's active token via `user_token_service::get_active_token()` (triggers lazy OAuth refresh)
+4. **Required vs. optional** -- Required providers without tokens cause a 400 error; optional providers are silently skipped
+5. **Inject credentials** -- Each resolved token is injected into the outbound request using the configured method (bearer/header/query)
+
+### Token Refresh Lifecycle
+
+OAuth2 tokens are refreshed lazily during proxy requests:
+
+- **Buffer window:** 5 minutes before expiry
+- **No-redirect client:** Token exchange uses a dedicated `reqwest::Client` with `redirect::Policy::none()` to prevent SSRF via redirect
+- **Error truncation:** Error bodies from providers are truncated to 200 characters before storage
+- **Status tracking:** Failed refreshes update status to `refresh_failed` with an error message
+- **Memory protection:** Decrypted tokens use the `zeroize` crate for secure memory cleanup
+
+### Supported Providers
+
+NyxID supports two provider authentication models:
+
+| Provider Type | Connection Method | Examples                          |
+|---------------|-------------------|-----------------------------------|
+| `api_key`     | User enters key   | OpenAI, Anthropic, Mistral, Cohere|
+| `oauth2`      | OAuth2 flow       | Google AI (Vertex), Azure OpenAI  |
+
+---
+
+## Identity Propagation
+
+Identity propagation allows downstream services to know which NyxID user is making the request, without the downstream service needing to integrate with NyxID's auth system.
+
+### Propagation Modes
+
+| Mode      | Headers Added                                | JWT Added | Use Case                          |
+|-----------|----------------------------------------------|-----------|-----------------------------------|
+| `none`    | --                                           | No        | Default. Service handles its own auth. |
+| `headers` | `X-NyxID-User-Id`, `X-NyxID-User-Email`, `X-NyxID-User-Name` | No | Simple identity forwarding (trusted network). |
+| `jwt`     | `X-NyxID-Identity-Token`                     | Yes       | Cryptographically verified identity. |
+| `both`    | All of the above                             | Yes       | Headers for convenience, JWT for verification. |
+
+Which identity claims are included is controlled per-service:
+- `identity_include_user_id` -- includes `X-NyxID-User-Id`
+- `identity_include_email` -- includes `X-NyxID-User-Email` and `email` in JWT
+- `identity_include_name` -- includes `X-NyxID-User-Name` and `name` in JWT
+
+### Identity Assertion JWT
+
+When `identity_propagation_mode` is `jwt` or `both`, NyxID generates a short-lived RS256-signed JWT:
+
+| Claim            | Type    | Description                                    |
+|------------------|---------|------------------------------------------------|
+| `sub`            | string  | User ID (UUID)                                 |
+| `iss`            | string  | NyxID JWT issuer                               |
+| `aud`            | string  | Service's `identity_jwt_audience` or `base_url`|
+| `exp`            | integer | Expiration (now + 60 seconds)                  |
+| `iat`            | integer | Issued at                                      |
+| `jti`            | string  | Unique token ID                                |
+| `email`          | string  | User email (if `identity_include_email`)       |
+| `name`           | string  | Display name (if `identity_include_name`)      |
+| `nyx_service_id` | string  | Target service ID                              |
+
+Downstream services verify the JWT using NyxID's JWKS endpoint (`/.well-known/jwks.json`).
+
+### Security Considerations
+
+- **CRLF injection prevention:** All identity header values pass through `sanitize_header_value()` which strips CR (`\r`), LF (`\n`), and NUL (`\0`) characters
+- **Short token lifetime:** Identity JWTs expire in 60 seconds to minimize replay window
+- **Per-service audience:** The `aud` claim is scoped to the target service, preventing token reuse across services
+
 ---
 
 ## Security Architecture
@@ -780,6 +1003,8 @@ The following data is encrypted with AES-256-GCM before database storage:
 - Per-user service credentials (`user_service_connections.credential_encrypted`)
 - Social login provider tokens (`user_social_connections.access_token_encrypted`, `refresh_token_encrypted`)
 - MFA TOTP secrets (`mfa_factors.secret_encrypted`)
+- Provider OAuth client credentials (`provider_configs.client_id_encrypted`, `client_secret_encrypted`)
+- User provider tokens (`user_provider_tokens.access_token_encrypted`, `refresh_token_encrypted`, `api_key_encrypted`)
 
 The encryption key is provided via the `ENCRYPTION_KEY` environment variable (64 hex characters = 32 bytes). A random 96-bit nonce is generated per encryption operation. The stored format is `nonce(12) || ciphertext || tag(16)`.
 

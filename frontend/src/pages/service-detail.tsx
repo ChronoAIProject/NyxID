@@ -13,17 +13,27 @@ import { DetailRow } from "@/components/shared/detail-row";
 import { OidcCredentialsSection } from "@/components/dashboard/oidc-credentials-section";
 import { EndpointList } from "@/components/dashboard/endpoint-list";
 import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
+import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
+import { useMyProviderTokens } from "@/hooks/use-providers";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Pencil, Trash2, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 
+const PROPAGATION_MODE_LABELS: Readonly<Record<string, string>> = {
+  none: "None",
+  headers: "Headers (X-NyxID-*)",
+  jwt: "Signed JWT",
+  both: "Headers + JWT",
+};
+
 export function ServiceDetailPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const navigate = useNavigate();
   const { data: service, isLoading, error } = useService(serviceId);
   const deleteMutation = useDeleteService();
+  const { data: tokens } = useMyProviderTokens();
 
   async function handleDelete() {
     if (!service) return;
@@ -157,6 +167,47 @@ export function ServiceDetailPage() {
           </DetailSection>
         </>
       )}
+
+      {service.identity_propagation_mode &&
+        service.identity_propagation_mode !== "none" && (
+          <>
+            <Separator />
+            <DetailSection title="Identity Propagation">
+              <DetailRow
+                label="Mode"
+                value={
+                  PROPAGATION_MODE_LABELS[service.identity_propagation_mode] ??
+                  service.identity_propagation_mode
+                }
+                badge
+              />
+              {service.identity_include_user_id && (
+                <DetailRow label="User ID" value="Included" badge badgeVariant="success" />
+              )}
+              {service.identity_include_email && (
+                <DetailRow label="Email" value="Included" badge badgeVariant="success" />
+              )}
+              {service.identity_include_name && (
+                <DetailRow label="Display Name" value="Included" badge badgeVariant="success" />
+              )}
+              {service.identity_jwt_audience && (
+                <DetailRow label="JWT Audience" value={service.identity_jwt_audience} />
+              )}
+            </DetailSection>
+          </>
+        )}
+
+      <Separator />
+      <DetailSection title="Provider Requirements">
+        <ServiceRequirementsView
+          serviceId={service.id}
+          userTokenProviderIds={
+            tokens
+              ? new Set(tokens.map((t) => t.provider_id))
+              : undefined
+          }
+        />
+      </DetailSection>
     </div>
   );
 }

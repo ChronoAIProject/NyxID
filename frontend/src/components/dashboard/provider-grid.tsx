@@ -1,0 +1,189 @@
+import { useState } from "react";
+import type { ProviderConfig } from "@/types/api";
+import {
+  useProviders,
+  useMyProviderTokens,
+  useConnectApiKey,
+  useInitiateOAuth,
+  useDisconnectProvider,
+  useRefreshProviderToken,
+} from "@/hooks/use-providers";
+import { ProviderCard } from "./provider-card";
+import { ApiKeyDialog } from "./api-key-dialog";
+import { DeviceCodeDialog } from "./device-code-dialog";
+import { Skeleton } from "@/components/ui/skeleton";
+import { KeyRound } from "lucide-react";
+import { toast } from "sonner";
+import { ApiError } from "@/lib/api-client";
+
+export function ProviderGrid() {
+  const { data: providers, isLoading: providersLoading } = useProviders();
+  const { data: tokens, isLoading: tokensLoading } = useMyProviderTokens();
+  const connectApiKeyMutation = useConnectApiKey();
+  const initiateOAuthMutation = useInitiateOAuth();
+  const disconnectMutation = useDisconnectProvider();
+  const refreshMutation = useRefreshProviderToken();
+
+  const [apiKeyDialog, setApiKeyDialog] = useState<ProviderConfig | null>(
+    null,
+  );
+  const [deviceCodeDialog, setDeviceCodeDialog] =
+    useState<ProviderConfig | null>(null);
+  // Track which provider is currently being acted upon for per-card disabled state
+  const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
+
+  const isLoading = providersLoading || tokensLoading;
+
+  function handleConnect(provider: ProviderConfig) {
+    if (provider.provider_type === "api_key") {
+      setApiKeyDialog(provider);
+    } else if (provider.provider_type === "device_code") {
+      setDeviceCodeDialog(provider);
+    } else {
+      void handleOAuthConnect(provider.id);
+    }
+  }
+
+  async function handleOAuthConnect(providerId: string) {
+    setActiveProviderId(providerId);
+    try {
+      const response = await initiateOAuthMutation.mutateAsync(providerId);
+      window.location.href = response.authorization_url;
+    } catch (error) {
+      if (error instanceof ApiError) {
+        toast.error(error.message);
+      } else {
+        toast.error("Failed to initiate OAuth connection");
+      }
+    } finally {
+      setActiveProviderId(null);
+    }
+  }
+
+  async function handleApiKeySubmit(apiKey: string, label?: string) {
+    if (!apiKeyDialog) return;
+    setActiveProviderId(apiKeyDialog.id);
+    try {
+      await connectApiKeyMutation.mutateAsync({
+        providerId: apiKeyDialog.id,
+        apiKey,
+        label,
+      });
+      toast.success(`Connected to ${apiKeyDialog.name}`);
+      setApiKeyDialog(null);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        toast.error(error.message);
+      } else {
+        toast.error("Failed to connect API key");
+      }
+    } finally {
+      setActiveProviderId(null);
+    }
+  }
+
+  async function handleDisconnect(providerId: string) {
+    const provider = providers?.find((p) => p.id === providerId);
+    setActiveProviderId(providerId);
+    try {
+      await disconnectMutation.mutateAsync(providerId);
+      toast.success(
+        `Disconnected from ${provider?.name ?? "provider"}`,
+      );
+    } catch (error) {
+      if (error instanceof ApiError) {
+        toast.error(error.message);
+      } else {
+        toast.error("Failed to disconnect provider");
+      }
+    } finally {
+      setActiveProviderId(null);
+    }
+  }
+
+  async function handleRefresh(providerId: string) {
+    setActiveProviderId(providerId);
+    try {
+      await refreshMutation.mutateAsync(providerId);
+      toast.success("Token refreshed");
+    } catch (error) {
+      if (error instanceof ApiError) {
+        toast.error(error.message);
+      } else {
+        toast.error("Failed to refresh token");
+      }
+    } finally {
+      setActiveProviderId(null);
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <Skeleton key={`prov-skel-${String(i)}`} className="h-40 w-full" />
+        ))}
+      </div>
+    );
+  }
+
+  const activeProviders = providers?.filter((p) => p.is_active) ?? [];
+
+  if (activeProviders.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-center">
+        <KeyRound className="mb-4 h-12 w-12 text-muted-foreground/50" />
+        <p className="text-sm text-muted-foreground">
+          No providers available. An admin needs to configure providers first.
+        </p>
+      </div>
+    );
+  }
+
+  const tokensByProviderId = new Map(
+    tokens?.map((t) => [t.provider_id, t]) ?? [],
+  );
+
+  return (
+    <>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {activeProviders.map((provider) => {
+          const isActive = activeProviderId === provider.id;
+          return (
+            <ProviderCard
+              key={provider.id}
+              provider={provider}
+              token={tokensByProviderId.get(provider.id)}
+              onConnect={handleConnect}
+              onDisconnect={(id) => void handleDisconnect(id)}
+              onRefresh={(id) => void handleRefresh(id)}
+              isConnecting={
+                isActive &&
+                (connectApiKeyMutation.isPending ||
+                  initiateOAuthMutation.isPending)
+              }
+              isDisconnecting={isActive && disconnectMutation.isPending}
+              isRefreshing={isActive && refreshMutation.isPending}
+            />
+          );
+        })}
+      </div>
+
+      {apiKeyDialog !== null && (
+        <ApiKeyDialog
+          provider={apiKeyDialog}
+          onSubmit={(key, label) => void handleApiKeySubmit(key, label)}
+          onCancel={() => setApiKeyDialog(null)}
+          isPending={connectApiKeyMutation.isPending}
+        />
+      )}
+
+      {deviceCodeDialog !== null && (
+        <DeviceCodeDialog
+          provider={deviceCodeDialog}
+          onClose={() => setDeviceCodeDialog(null)}
+        />
+      )}
+    </>
+  );
+}

@@ -244,5 +244,92 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── provider_configs ──
+    let provider_configs = db.collection::<mongodb::bson::Document>("provider_configs");
+    provider_configs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "slug": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    provider_configs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "provider_type": 1, "is_active": 1 })
+                .build(),
+        )
+        .await?;
+
+    // ── user_provider_tokens ──
+    let user_tokens = db.collection::<mongodb::bson::Document>("user_provider_tokens");
+    user_tokens
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "provider_config_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    user_tokens
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "status": 1 })
+                .build(),
+        )
+        .await?;
+    user_tokens
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "status": 1, "expires_at": 1 })
+                .build(),
+        )
+        .await?;
+
+    // ── service_provider_requirements ──
+    let spr = db.collection::<mongodb::bson::Document>("service_provider_requirements");
+    spr.create_index(
+        IndexModel::builder()
+            .keys(doc! { "service_id": 1, "provider_config_id": 1 })
+            .options(IndexOptions::builder().unique(true).build())
+            .build(),
+    )
+    .await?;
+    spr.create_index(
+        IndexModel::builder()
+            .keys(doc! { "service_id": 1 })
+            .build(),
+    )
+    .await?;
+    spr.create_index(
+        IndexModel::builder()
+            .keys(doc! { "provider_config_id": 1 })
+            .build(),
+    )
+    .await?;
+
+    // ── oauth_states ──
+    let oauth_states = db.collection::<mongodb::bson::Document>("oauth_states");
+    oauth_states
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    oauth_states
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1 })
+                .build(),
+        )
+        .await?;
+
     Ok(())
 }

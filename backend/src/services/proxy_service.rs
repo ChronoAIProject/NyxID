@@ -1,10 +1,12 @@
 use mongodb::bson::doc;
 use reqwest::Client;
+use zeroize::Zeroizing;
 
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES};
 use crate::models::user_service_connection::{UserServiceConnection, COLLECTION_NAME as USER_SERVICE_CONNECTIONS};
+use crate::services::delegation_service::DelegatedCredential;
 
 /// Result of resolving a proxy target.
 pub struct ProxyTarget {
@@ -12,6 +14,7 @@ pub struct ProxyTarget {
     pub auth_method: String,
     pub auth_key_name: String,
     pub credential: String,
+    pub service: DownstreamService,
 }
 
 /// Headers that are safe to forward to downstream services.
@@ -81,26 +84,28 @@ pub async fn resolve_proxy_target(
         })?
     } else {
         // Internal services: use master credential
-        service.credential_encrypted
+        service.credential_encrypted.clone()
     };
 
-    let credential = String::from_utf8(
-        aes::decrypt(&credential_encrypted, encryption_key)?,
-    )
-    .map_err(|e| {
-        tracing::error!("Credential UTF-8 decode failed: {e}");
-        AppError::Internal("Failed to decode credential".to_string())
-    })?;
+    // SEC-M3: Wrap raw decrypted bytes in Zeroizing so they are zeroed on drop
+    let decrypted_bytes = Zeroizing::new(aes::decrypt(&credential_encrypted, encryption_key)?);
+    let credential = String::from_utf8((*decrypted_bytes).clone())
+        .map_err(|e| {
+            tracing::error!("Credential UTF-8 decode failed: {e}");
+            AppError::Internal("Failed to decode credential".to_string())
+        })?;
 
     Ok(ProxyTarget {
-        base_url: service.base_url,
-        auth_method: service.auth_method,
-        auth_key_name: service.auth_key_name,
+        base_url: service.base_url.clone(),
+        auth_method: service.auth_method.clone(),
+        auth_key_name: service.auth_key_name.clone(),
         credential,
+        service,
     })
 }
 
-/// Forward a request to the downstream service with credential injection.
+/// Forward a request to the downstream service with credential injection,
+/// identity propagation headers, and delegated provider credentials.
 ///
 /// Uses an allowlist for headers to prevent leaking sensitive data.
 /// Preserves the original HTTP method for all auth methods including query auth.
@@ -112,6 +117,8 @@ pub async fn forward_request(
     query: Option<&str>,
     headers: reqwest::header::HeaderMap,
     body: Option<bytes::Bytes>,
+    identity_headers: Vec<(String, String)>,
+    delegated_credentials: Vec<DelegatedCredential>,
 ) -> AppResult<reqwest::Response> {
     // SEC-H3: Reject paths containing traversal sequences
     if path.contains("..") || path.contains("//") {
@@ -137,6 +144,11 @@ pub async fn forward_request(
         if ALLOWED_FORWARD_HEADERS.contains(&name_lower.as_str()) {
             request = request.header(name, value);
         }
+    }
+
+    // Inject identity propagation headers
+    for (name, value) in &identity_headers {
+        request = request.header(name, value);
     }
 
     // Inject credentials based on auth method
@@ -168,6 +180,25 @@ pub async fn forward_request(
                 "Unknown auth method: {}",
                 target.auth_method
             )));
+        }
+    }
+
+    // Inject delegated provider credentials
+    for cred in &delegated_credentials {
+        match cred.injection_method.as_str() {
+            "bearer" => {
+                request = request.header(
+                    &cred.injection_key,
+                    format!("Bearer {}", cred.credential),
+                );
+            }
+            "header" => {
+                request = request.header(&cred.injection_key, &cred.credential);
+            }
+            "query" => {
+                request = request.query(&[(&cred.injection_key, &cred.credential)]);
+            }
+            _ => {}
         }
     }
 

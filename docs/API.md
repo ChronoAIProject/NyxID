@@ -16,6 +16,9 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [API Keys](#api-keys)
   - [Downstream Services](#downstream-services)
   - [Service Connections](#service-connections)
+  - [Service Provider Requirements](#service-provider-requirements)
+  - [Providers](#providers)
+  - [User Provider Tokens](#user-provider-tokens)
   - [Sessions](#sessions)
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
@@ -739,6 +742,11 @@ List all active downstream services. Supports optional filtering by service cate
       "api_spec_url": null,
       "service_category": "connection",
       "requires_user_credential": true,
+      "identity_propagation_mode": "none",
+      "identity_include_user_id": false,
+      "identity_include_email": false,
+      "identity_include_name": false,
+      "identity_jwt_audience": null,
       "created_by": "550e8400-e29b-41d4-a716-446655440000",
       "created_at": "2025-01-15T10:30:00+00:00",
       "updated_at": "2025-01-15T10:30:00+00:00"
@@ -853,6 +861,11 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
   "api_spec_url": null,
   "service_category": "connection",
   "requires_user_credential": true,
+  "identity_propagation_mode": "none",
+  "identity_include_user_id": false,
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_jwt_audience": null,
   "created_by": "550e8400-e29b-41d4-a716-446655440000",
   "created_at": "2025-06-01T10:00:00+00:00",
   "updated_at": "2025-06-01T10:00:00+00:00"
@@ -912,6 +925,11 @@ Get a single downstream service by ID.
   "api_spec_url": null,
   "service_category": "connection",
   "requires_user_credential": true,
+  "identity_propagation_mode": "none",
+  "identity_include_user_id": false,
+  "identity_include_email": false,
+  "identity_include_name": false,
+  "identity_jwt_audience": null,
   "created_by": "550e8400-e29b-41d4-a716-446655440000",
   "created_at": "2025-06-01T10:00:00+00:00",
   "updated_at": "2025-06-01T10:00:00+00:00"
@@ -951,6 +969,11 @@ Update a downstream service. Only the provided fields are updated (partial updat
 | `base_url`     | string  | No       | New base URL (max 2048 chars, SSRF-validated)                           |
 | `is_active`    | boolean | No       | Enable or disable the service                                           |
 | `api_spec_url` | string  | No       | URL to an OpenAPI/Swagger spec for endpoint discovery (max 2048 chars)  |
+| `identity_propagation_mode` | string | No | Identity propagation mode: `none` (default), `headers`, `jwt`, or `both` |
+| `identity_include_user_id`  | boolean | No | Include `X-NyxID-User-Id` header when propagating identity |
+| `identity_include_email`    | boolean | No | Include `X-NyxID-User-Email` header when propagating identity |
+| `identity_include_name`     | boolean | No | Include `X-NyxID-User-Name` header when propagating identity |
+| `identity_jwt_audience`     | string  | No | Custom JWT `aud` claim for identity assertions (defaults to service `base_url`) |
 
 At least one field must be provided.
 
@@ -1664,6 +1687,616 @@ curl -X DELETE http://localhost:3001/api/v1/connections/d1e2f3a4-b5c6-7890-1234-
 
 ---
 
+### Service Provider Requirements
+
+Service provider requirements define which external providers (e.g., OpenAI, Anthropic) a downstream service needs credentials from. When a user proxies a request to that service, NyxID resolves the user's provider tokens and injects them into the outbound request alongside the service credential.
+
+#### GET /api/v1/services/{service_id}/requirements
+
+List all provider requirements for a service.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Response (200):**
+
+```json
+{
+  "requirements": [
+    {
+      "id": "r1a2b3c4-d5e6-7890-abcd-ef1234567890",
+      "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+      "provider_config_id": "p1a2b3c4-d5e6-7890-abcd-ef1234567890",
+      "provider_name": "OpenAI",
+      "provider_slug": "openai",
+      "required": true,
+      "scopes": null,
+      "injection_method": "bearer",
+      "injection_key": null,
+      "created_at": "2025-06-01T10:00:00+00:00",
+      "updated_at": "2025-06-01T10:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Service does not exist
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/requirements \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### POST /api/v1/services/{service_id}/requirements
+
+Add a provider requirement to a service. The proxy will inject the user's token for this provider into outbound requests.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Request Body:**
+
+| Field                | Type     | Required | Description                                                              |
+|----------------------|----------|----------|--------------------------------------------------------------------------|
+| `provider_config_id` | string   | Yes      | ID of the provider configuration                                         |
+| `required`           | boolean  | Yes      | If `true`, proxy fails when user has no token for this provider          |
+| `scopes`             | string[] | No       | Specific OAuth scopes this service needs from the provider               |
+| `injection_method`   | string   | Yes      | How to inject the token: `bearer`, `header`, or `query`                  |
+| `injection_key`      | string   | No       | Header name or query param. Defaults: `Authorization` (bearer), `X-API-Key` (header), `api_key` (query) |
+
+**Injection Method Defaults:**
+
+| `injection_method` | Default `injection_key` | Behavior                              |
+|---------------------|-------------------------|---------------------------------------|
+| `bearer`            | `Authorization`         | Adds `Authorization: Bearer <token>`  |
+| `header`            | `X-API-Key`             | Adds `<injection_key>: <token>`       |
+| `query`             | `api_key`               | Appends `?<injection_key>=<token>`    |
+
+**Blocked Injection Keys:** The following header names are blocked for security: `host`, `authorization`, `cookie`, `set-cookie`, `transfer-encoding`, `content-length`, `connection`, `x-forwarded-for`, `x-forwarded-host`, `x-real-ip`.
+
+```json
+{
+  "provider_config_id": "p1a2b3c4-d5e6-7890-abcd-ef1234567890",
+  "required": true,
+  "injection_method": "bearer"
+}
+```
+
+**Response (200):**
+
+Returns the created requirement with provider details.
+
+**Errors:**
+- `1002 forbidden` -- User is not an admin
+- `1003 not_found` -- Service or provider does not exist
+- `1004 conflict` -- This provider requirement already exists for this service
+- `1008 validation_error` -- Invalid injection_method or blocked injection_key
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/requirements \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider_config_id": "p1a2b3c4-d5e6-7890-abcd-ef1234567890",
+    "required": true,
+    "injection_method": "bearer"
+  }'
+```
+
+---
+
+#### DELETE /api/v1/services/{service_id}/requirements/{requirement_id}
+
+Remove a provider requirement from a service.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter        | Type | Description         |
+|------------------|------|---------------------|
+| `service_id`     | UUID | The service ID      |
+| `requirement_id` | UUID | The requirement ID  |
+
+**Response (200):**
+
+```json
+{
+  "message": "Requirement removed"
+}
+```
+
+**Errors:**
+- `1002 forbidden` -- User is not an admin
+- `1003 not_found` -- Requirement does not exist
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/requirements/r1a2b3c4-d5e6-7890-abcd-ef1234567890 \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+### Providers
+
+Providers represent external service providers (e.g., OpenAI, Anthropic, Google AI) that users can connect their credentials to. NyxID stores provider configurations centrally, and users connect by entering API keys or completing OAuth flows.
+
+#### GET /api/v1/providers
+
+List all active provider configurations.
+
+**Auth:** Required
+
+**Response (200):**
+
+```json
+{
+  "providers": [
+    {
+      "id": "p1a2b3c4-d5e6-7890-abcd-ef1234567890",
+      "slug": "openai",
+      "name": "OpenAI",
+      "description": "OpenAI API for GPT models",
+      "provider_type": "api_key",
+      "has_oauth_config": false,
+      "default_scopes": null,
+      "supports_pkce": false,
+      "api_key_instructions": "Get your API key from https://platform.openai.com/api-keys",
+      "api_key_url": "https://platform.openai.com/api-keys",
+      "icon_url": "https://example.com/openai-icon.svg",
+      "documentation_url": "https://platform.openai.com/docs",
+      "is_active": true,
+      "created_at": "2025-06-01T10:00:00+00:00",
+      "updated_at": "2025-06-01T10:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/providers \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### POST /api/v1/providers
+
+Register a new provider configuration. OAuth2 providers require additional fields for the OAuth flow.
+
+**Auth:** Admin
+
+**Request Body:**
+
+| Field               | Type     | Required | Description                                                          |
+|---------------------|----------|----------|----------------------------------------------------------------------|
+| `name`              | string   | Yes      | Display name (max 200 chars)                                         |
+| `slug`              | string   | Yes      | URL-safe identifier (1-100 chars, lowercase alphanumeric + hyphens)  |
+| `description`       | string   | No       | Provider description                                                 |
+| `provider_type`     | string   | Yes      | `oauth2` or `api_key`                                                |
+| `authorization_url` | string   | OAuth2   | OAuth2 authorization endpoint (required for `oauth2` type)           |
+| `token_url`         | string   | OAuth2   | OAuth2 token endpoint (required for `oauth2` type)                   |
+| `revocation_url`    | string   | No       | OAuth2 token revocation endpoint                                     |
+| `default_scopes`    | string[] | No       | Default OAuth2 scopes to request                                     |
+| `client_id`         | string   | OAuth2   | OAuth2 client ID (required for `oauth2` type, encrypted at rest)     |
+| `client_secret`     | string   | OAuth2   | OAuth2 client secret (required for `oauth2` type, encrypted at rest) |
+| `supports_pkce`     | boolean  | No       | Whether the provider supports PKCE (default: `false`)                |
+| `api_key_instructions` | string | No      | Instructions for obtaining an API key (for `api_key` type)           |
+| `api_key_url`       | string   | No       | URL where users can create API keys                                  |
+| `icon_url`          | string   | No       | Provider icon/logo URL                                               |
+| `documentation_url` | string   | No       | Provider documentation URL                                           |
+
+**Slug Validation:** Must contain only lowercase letters, digits, and hyphens. No leading, trailing, or consecutive hyphens.
+
+**Example (API key provider):**
+
+```json
+{
+  "name": "OpenAI",
+  "slug": "openai",
+  "description": "OpenAI API for GPT models",
+  "provider_type": "api_key",
+  "api_key_instructions": "Get your API key from https://platform.openai.com/api-keys",
+  "api_key_url": "https://platform.openai.com/api-keys",
+  "icon_url": "https://example.com/openai-icon.svg",
+  "documentation_url": "https://platform.openai.com/docs"
+}
+```
+
+**Example (OAuth2 provider):**
+
+```json
+{
+  "name": "Google AI",
+  "slug": "google-ai",
+  "provider_type": "oauth2",
+  "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+  "token_url": "https://oauth2.googleapis.com/token",
+  "revocation_url": "https://oauth2.googleapis.com/revoke",
+  "default_scopes": ["https://www.googleapis.com/auth/generative-language"],
+  "client_id": "your-client-id.apps.googleusercontent.com",
+  "client_secret": "your-client-secret",
+  "supports_pkce": true
+}
+```
+
+**Response (200):**
+
+Returns the created provider (same shape as list response items, without encrypted fields).
+
+**Errors:**
+- `1002 forbidden` -- User is not an admin
+- `1004 conflict` -- Slug already exists
+- `1008 validation_error` -- Missing required fields, invalid provider_type, invalid slug, or SSRF-blocked URL
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/providers \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "OpenAI",
+    "slug": "openai",
+    "provider_type": "api_key",
+    "api_key_url": "https://platform.openai.com/api-keys"
+  }'
+```
+
+---
+
+#### GET /api/v1/providers/{provider_id}
+
+Get a single provider configuration by ID.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Response (200):**
+
+Returns a single provider object (same shape as list response items).
+
+**Errors:**
+- `1003 not_found` -- Provider does not exist
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890 \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### PUT /api/v1/providers/{provider_id}
+
+Update a provider configuration. Only the provided fields are updated (partial update).
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Request Body:**
+
+| Field               | Type     | Required | Description                                          |
+|---------------------|----------|----------|------------------------------------------------------|
+| `name`              | string   | No       | Display name                                         |
+| `description`       | string   | No       | Provider description                                 |
+| `is_active`         | boolean  | No       | Enable or disable the provider                       |
+| `authorization_url` | string   | No       | OAuth2 authorization endpoint                        |
+| `token_url`         | string   | No       | OAuth2 token endpoint                                |
+| `revocation_url`    | string   | No       | OAuth2 revocation endpoint                           |
+| `default_scopes`    | string[] | No       | Default OAuth2 scopes                                |
+| `client_id`         | string   | No       | OAuth2 client ID (encrypted at rest)                 |
+| `client_secret`     | string   | No       | OAuth2 client secret (encrypted at rest)             |
+| `supports_pkce`     | boolean  | No       | PKCE support flag                                    |
+| `api_key_instructions` | string | No      | Instructions for obtaining an API key                |
+| `api_key_url`       | string   | No       | URL where users can create API keys                  |
+| `icon_url`          | string   | No       | Provider icon/logo URL                               |
+| `documentation_url` | string   | No       | Provider documentation URL                           |
+
+**Response (200):**
+
+Returns the updated provider object.
+
+**Errors:**
+- `1002 forbidden` -- User is not an admin
+- `1003 not_found` -- Provider does not exist
+- `1008 validation_error` -- SSRF-blocked URL
+
+**Example:**
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890 \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Updated description", "is_active": true}'
+```
+
+---
+
+#### DELETE /api/v1/providers/{provider_id}
+
+Deactivate a provider and revoke all user tokens associated with it.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Response (200):**
+
+```json
+{
+  "message": "Provider deactivated and user tokens revoked"
+}
+```
+
+**Errors:**
+- `1002 forbidden` -- User is not an admin
+- `1003 not_found` -- Provider does not exist
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890 \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+### User Provider Tokens
+
+Users connect to providers by submitting API keys or completing OAuth flows. These endpoints manage the user's provider token lifecycle.
+
+#### GET /api/v1/providers/my-tokens
+
+List all provider tokens for the authenticated user.
+
+**Auth:** Required
+
+**Response (200):**
+
+```json
+{
+  "tokens": [
+    {
+      "provider_id": "p1a2b3c4-d5e6-7890-abcd-ef1234567890",
+      "provider_name": "OpenAI",
+      "provider_slug": "openai",
+      "provider_type": "api_key",
+      "status": "active",
+      "label": "Production Key",
+      "expires_at": null,
+      "last_used_at": "2025-06-01T14:22:00+00:00",
+      "connected_at": "2025-06-01T10:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Token Status Values:**
+
+| Status           | Description                                              |
+|------------------|----------------------------------------------------------|
+| `active`         | Token is valid and ready for use                         |
+| `expired`        | OAuth token has expired (will attempt lazy refresh)      |
+| `revoked`        | User disconnected or admin deactivated the provider      |
+| `refresh_failed` | OAuth token refresh failed (user must reconnect)         |
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/providers/my-tokens \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### POST /api/v1/providers/{provider_id}/connect/api-key
+
+Connect to an API key provider by submitting the key. The key is encrypted with AES-256-GCM before storage.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Request Body:**
+
+| Field     | Type   | Required | Description                            |
+|-----------|--------|----------|----------------------------------------|
+| `api_key` | string | Yes      | The API key (1-4096 characters)        |
+| `label`   | string | No       | Human-readable label for the key       |
+
+```json
+{
+  "api_key": "sk-proj-abc123...",
+  "label": "Production Key"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "status": "connected",
+  "message": "API key stored successfully"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Provider does not exist or is inactive
+- `1008 validation_error` -- API key is empty or exceeds 4096 characters
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/connect/api-key \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"api_key": "sk-proj-abc123", "label": "My OpenAI Key"}'
+```
+
+---
+
+#### GET /api/v1/providers/{provider_id}/connect/oauth
+
+Initiate an OAuth2 connection flow with a provider. Returns the authorization URL that the user should be redirected to. Uses PKCE (S256) when the provider supports it.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Response (200):**
+
+```json
+{
+  "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=...&redirect_uri=...&code_challenge=...&state=..."
+}
+```
+
+The frontend should redirect the user to this URL. After the user authorizes, the provider redirects back to NyxID's callback endpoint.
+
+**Errors:**
+- `1003 not_found` -- Provider does not exist, is inactive, or is not an OAuth2 provider
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/connect/oauth \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### GET /api/v1/providers/callback
+
+Generic OAuth callback endpoint. Handles the redirect from OAuth providers after user authorization. Resolves the provider from the `state` parameter, verifies the session user matches, exchanges the code for tokens, and redirects to the frontend callback page.
+
+**Auth:** Required (session cookie)
+
+**Query Parameters:**
+
+| Parameter           | Type   | Required | Description                                |
+|---------------------|--------|----------|--------------------------------------------|
+| `code`              | string | Yes      | Authorization code from the provider       |
+| `state`             | string | Yes      | State parameter (maps to NyxID OAuth state)|
+| `error`             | string | No       | Error code from the provider               |
+| `error_description` | string | No       | Error description from the provider        |
+
+**Response:** HTTP 302 redirect to `{FRONTEND_URL}/providers/callback?status=success` on success, or `?status=error&message=...` on failure.
+
+This endpoint is not called directly by the frontend. It is the OAuth redirect URI registered with external providers.
+
+---
+
+#### DELETE /api/v1/providers/{provider_id}/disconnect
+
+Disconnect from a provider. Sets the token status to "revoked" and clears encrypted credential data.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Response (200):**
+
+```json
+{
+  "status": "disconnected",
+  "message": "Provider disconnected and credentials removed"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- No token found for this provider
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/disconnect \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### POST /api/v1/providers/{provider_id}/refresh
+
+Manually trigger a token refresh for an OAuth2 provider. For OAuth tokens, this triggers a lazy refresh if the token is within 5 minutes of expiry or already expired.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Response (200):**
+
+```json
+{
+  "status": "refreshed",
+  "message": "Token refreshed successfully"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- No active token for this provider
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/refresh \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
 ### Sessions
 
 #### GET /api/v1/sessions
@@ -1718,7 +2351,11 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Request:** The request body, query parameters, and allowed headers are forwarded to the downstream service. Only safe headers are forwarded (content-type, accept, accept-language, accept-encoding, content-length, user-agent, x-request-id, x-correlation-id).
 
-**Response:** The downstream service's response status code, headers (minus hop-by-hop headers), and body are returned directly.
+**Identity Propagation:** If the service has `identity_propagation_mode` set to `headers` or `both`, NyxID injects identity headers (`X-NyxID-User-Id`, `X-NyxID-User-Email`, `X-NyxID-User-Name`) based on the service configuration. If set to `jwt` or `both`, a short-lived RS256-signed identity assertion JWT is added as `X-NyxID-Identity-Token` (60-second lifetime).
+
+**Credential Delegation:** If the service has provider requirements configured, NyxID resolves the user's provider tokens and injects them into the outbound request. Required provider tokens cause the request to fail if missing; optional tokens are silently skipped.
+
+**Response:** The downstream service's response status code, allowed headers, and body are returned directly. Only a safe allowlist of response headers is forwarded.
 
 **Limits:** Request body is limited to 10 MB for proxy requests.
 
@@ -2180,6 +2817,17 @@ Query the audit log with pagination. Entries are returned in reverse chronologic
 | `oidc_secret_regenerated`      | OIDC client secret regenerated               |
 | `redirect_uris_updated`       | OIDC redirect URIs updated                   |
 | `proxy_request`                | Request forwarded through the proxy          |
+| `proxy_request_denied`         | Proxy request denied (auth or config issue)  |
+| `provider_created`             | Provider configuration created               |
+| `provider_updated`             | Provider configuration updated               |
+| `provider_deleted`             | Provider deactivated                         |
+| `provider_token_connected`     | User connected a provider token              |
+| `provider_token_disconnected`  | User disconnected a provider token           |
+| `provider_token_refreshed`     | Provider token manually refreshed            |
+| `provider_oauth_initiated`     | User started OAuth flow with a provider      |
+| `provider_oauth_callback_failed` | Provider OAuth callback failed             |
+| `service_requirement_added`    | Provider requirement added to a service      |
+| `service_requirement_removed`  | Provider requirement removed from a service  |
 
 **Example:**
 

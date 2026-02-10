@@ -69,6 +69,11 @@ pub struct ServiceResponse {
     pub api_spec_url: Option<String>,
     pub service_category: String,
     pub requires_user_credential: bool,
+    pub identity_propagation_mode: String,
+    pub identity_include_user_id: bool,
+    pub identity_include_email: bool,
+    pub identity_include_name: bool,
+    pub identity_jwt_audience: Option<String>,
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -86,6 +91,11 @@ pub struct UpdateServiceRequest {
     pub base_url: Option<String>,
     pub is_active: Option<bool>,
     pub api_spec_url: Option<String>,
+    pub identity_propagation_mode: Option<String>,
+    pub identity_include_user_id: Option<bool>,
+    pub identity_include_email: Option<bool>,
+    pub identity_include_name: Option<bool>,
+    pub identity_jwt_audience: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -329,6 +339,11 @@ pub async fn create_service(
         requires_user_credential,
         is_active: true,
         created_by: user_id_str.clone(),
+        identity_propagation_mode: "none".to_string(),
+        identity_include_user_id: false,
+        identity_include_email: false,
+        identity_include_name: false,
+        identity_jwt_audience: None,
         created_at: now,
         updated_at: now,
     };
@@ -482,6 +497,34 @@ pub async fn update_service(
             ));
         }
         set_doc.insert("api_spec_url", api_spec_url.as_str());
+    }
+
+    if let Some(ref mode) = body.identity_propagation_mode {
+        let valid_modes = ["none", "headers", "jwt", "both"];
+        if !valid_modes.contains(&mode.as_str()) {
+            return Err(AppError::ValidationError(format!(
+                "identity_propagation_mode must be one of: {}",
+                valid_modes.join(", ")
+            )));
+        }
+        set_doc.insert("identity_propagation_mode", mode.as_str());
+    }
+    if let Some(include_uid) = body.identity_include_user_id {
+        set_doc.insert("identity_include_user_id", include_uid);
+    }
+    if let Some(include_email) = body.identity_include_email {
+        set_doc.insert("identity_include_email", include_email);
+    }
+    if let Some(include_name) = body.identity_include_name {
+        set_doc.insert("identity_include_name", include_name);
+    }
+    if let Some(ref audience) = body.identity_jwt_audience {
+        if audience.len() > 2048 {
+            return Err(AppError::ValidationError(
+                "identity_jwt_audience must not exceed 2048 characters".to_string(),
+            ));
+        }
+        set_doc.insert("identity_jwt_audience", audience.as_str());
     }
 
     if set_doc.is_empty() {

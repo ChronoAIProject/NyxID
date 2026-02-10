@@ -419,6 +419,8 @@ async fn handle_tools_call(
         service,
         endpoint,
         &arguments,
+        &state.jwt_keys,
+        &state.config,
     )
     .await
     {

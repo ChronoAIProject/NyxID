@@ -43,6 +43,21 @@ pub struct DownstreamService {
 
     pub is_active: bool,
     pub created_by: String,
+
+    // --- Identity propagation config ---
+    /// "none" | "headers" | "jwt" | "both"
+    #[serde(default = "default_identity_propagation_mode")]
+    pub identity_propagation_mode: String,
+    #[serde(default)]
+    pub identity_include_user_id: bool,
+    #[serde(default)]
+    pub identity_include_email: bool,
+    #[serde(default)]
+    pub identity_include_name: bool,
+    /// Custom JWT audience for identity assertions (defaults to service base_url)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_jwt_audience: Option<String>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -51,6 +66,10 @@ pub struct DownstreamService {
 
 fn default_service_category() -> String {
     "connection".to_string()
+}
+
+fn default_identity_propagation_mode() -> String {
+    "none".to_string()
 }
 
 fn default_true() -> bool {

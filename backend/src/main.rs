@@ -78,6 +78,11 @@ async fn main() {
         .await
         .expect("Failed to seed default OAuth clients");
 
+    // Seed default AI provider configurations (idempotent)
+    services::provider_service::seed_default_providers(&db, &config.encryption_key)
+        .await
+        .expect("Failed to seed default providers");
+
     // --- Server startup ---
     tracing::info!("Starting NyxID authentication server");
     tracing::info!(port = config.port, "Configuration loaded");
