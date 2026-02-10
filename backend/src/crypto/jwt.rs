@@ -1,8 +1,10 @@
 use chrono::Utc;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
-use rsa::RsaPrivateKey;
+use rsa::pkcs1::{DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey};
+use rsa::traits::PublicKeyParts;
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 use uuid::Uuid;
@@ -15,6 +17,8 @@ use crate::errors::AppError;
 pub struct JwtKeys {
     pub encoding: EncodingKey,
     pub decoding: DecodingKey,
+    /// Key ID included in JWT headers for key rotation support
+    pub kid: String,
 }
 
 /// Standard JWT claims for NyxID tokens.
@@ -89,7 +93,15 @@ impl JwtKeys {
         let decoding = DecodingKey::from_rsa_pem(public_pem.as_bytes())
             .map_err(|e| AppError::Internal(format!("Invalid public key PEM: {e}")))?;
 
-        Ok(Self { encoding, decoding })
+        // Compute a stable kid from the public key modulus
+        let pub_key = RsaPublicKey::from_pkcs1_pem(&public_pem)
+            .map_err(|e| AppError::Internal(format!("Failed to parse public key for kid: {e}")))?;
+        let n_bytes = pub_key.n().to_bytes_be();
+        let mut hasher = Sha256::new();
+        hasher.update(&n_bytes);
+        let kid = hex::encode(&hasher.finalize()[..8]);
+
+        Ok(Self { encoding, decoding, kid })
     }
 }
 
@@ -154,7 +166,8 @@ pub fn generate_access_token(
         token_type: "access".to_string(),
     };
 
-    let header = Header::new(Algorithm::RS256);
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
 
     encode(&header, &claims, &keys.encoding)
         .map_err(|e| AppError::Internal(format!("Failed to encode access token: {e}")))
@@ -180,7 +193,8 @@ pub fn generate_refresh_token(
         token_type: "refresh".to_string(),
     };
 
-    let header = Header::new(Algorithm::RS256);
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
 
     let token = encode(&header, &claims, &keys.encoding)
         .map_err(|e| AppError::Internal(format!("Failed to encode refresh token: {e}")))?;
@@ -215,10 +229,39 @@ pub fn generate_id_token(
         nonce: nonce.map(String::from),
     };
 
-    let header = Header::new(Algorithm::RS256);
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
 
     encode(&header, &claims, &keys.encoding)
         .map_err(|e| AppError::Internal(format!("Failed to encode ID token: {e}")))
+}
+
+/// Extract the RSA public key as a JWK (JSON Web Key) for the JWKS endpoint.
+pub fn public_key_jwk(public_pem: &str) -> Result<serde_json::Value, AppError> {
+    use base64::Engine as _;
+
+    let pub_key = RsaPublicKey::from_pkcs1_pem(public_pem)
+        .map_err(|e| AppError::Internal(format!("Failed to parse public key for JWK: {e}")))?;
+
+    let n_bytes = pub_key.n().to_bytes_be();
+    let e_bytes = pub_key.e().to_bytes_be();
+
+    let n_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&n_bytes);
+    let e_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&e_bytes);
+
+    // Stable kid derived from SHA-256 of the modulus
+    let mut hasher = Sha256::new();
+    hasher.update(&n_bytes);
+    let kid = hex::encode(&hasher.finalize()[..8]);
+
+    Ok(serde_json::json!({
+        "kty": "RSA",
+        "use": "sig",
+        "alg": "RS256",
+        "kid": kid,
+        "n": n_b64,
+        "e": e_b64,
+    }))
 }
 
 /// Verify and decode an access or refresh token.

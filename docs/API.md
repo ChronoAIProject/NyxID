@@ -15,9 +15,14 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Users](#users)
   - [API Keys](#api-keys)
   - [Downstream Services](#downstream-services)
+  - [Service Connections](#service-connections)
+  - [Sessions](#sessions)
+  - [Service Endpoints](#service-endpoints)
+  - [MCP Config](#mcp-config)
   - [Proxy](#proxy)
   - [MFA](#mfa-multi-factor-authentication)
   - [OAuth / OpenID Connect](#oauth--openid-connect)
+  - [OIDC Discovery](#oidc-discovery)
   - [Admin](#admin)
 
 ---
@@ -423,6 +428,55 @@ curl -X POST http://localhost:3001/api/v1/auth/reset-password \
 
 ---
 
+#### POST /api/v1/auth/setup
+
+One-time bootstrap endpoint to create the initial admin user. Only works when the users collection is completely empty. After the first user is created, this endpoint returns 403 Forbidden.
+
+**Auth:** None
+
+**Request Body:**
+
+| Field          | Type   | Required | Description                               |
+|----------------|--------|----------|-------------------------------------------|
+| `email`        | string | Yes      | Valid email address                       |
+| `password`     | string | Yes      | 8-128 characters                          |
+| `display_name` | string | No       | Admin display name                        |
+
+```json
+{
+  "email": "admin@example.com",
+  "password": "secureadminpassword123",
+  "display_name": "Admin"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "user_id": "550e8400-e29b-41d4-a716-446655440000",
+  "message": "Admin account created successfully."
+}
+```
+
+**Errors:**
+- `1002 forbidden` -- Users already exist (setup already completed)
+- `1008 validation_error` -- Invalid email format or password length
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/auth/setup \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "admin@example.com",
+    "password": "secureadminpassword123",
+    "display_name": "Admin"
+  }'
+```
+
+---
+
 ### Users
 
 #### GET /api/v1/users/me
@@ -670,11 +724,16 @@ List all active downstream services.
       "name": "Internal Analytics API",
       "slug": "analytics",
       "description": "Company analytics service",
-      "base_url": "https://analytics.internal.example.com",
+      "base_url": "https://analytics.example.com",
       "auth_method": "bearer",
+      "auth_type": "oauth2",
       "auth_key_name": "Authorization",
       "is_active": true,
-      "created_at": "2025-01-15T10:30:00+00:00"
+      "oauth_client_id": null,
+      "api_spec_url": null,
+      "created_by": "550e8400-e29b-41d4-a716-446655440000",
+      "created_at": "2025-01-15T10:30:00+00:00",
+      "updated_at": "2025-01-15T10:30:00+00:00"
     }
   ]
 }
@@ -693,38 +752,52 @@ curl http://localhost:3001/api/v1/services \
 
 Register a new downstream service. The credential is encrypted with AES-256-GCM before storage.
 
+When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically provisions an OAuth client for the service, generates a client secret, and sets the default redirect URI to `{base_url}/callback`. No `credential` field is needed for OIDC services.
+
 **Auth:** Admin
 
 **Request Body:**
 
-| Field           | Type   | Required | Description                                     |
-|-----------------|--------|----------|-------------------------------------------------|
-| `name`          | string | Yes      | Service display name (max 200 chars)            |
-| `slug`          | string | Yes      | URL-safe identifier (max 100 chars, unique)     |
-| `description`   | string | No       | Service description                             |
-| `base_url`      | string | Yes      | Downstream service base URL (max 2048 chars)    |
-| `auth_method`   | string | Yes      | One of: `header`, `bearer`, `query`, `basic`    |
-| `auth_key_name` | string | Yes      | Header name, query param name, etc.             |
-| `credential`    | string | Yes      | API key, token, or `username:password` for basic|
+| Field           | Type   | Required | Description                                                                           |
+|-----------------|--------|----------|---------------------------------------------------------------------------------------|
+| `name`          | string | Yes      | Service display name (max 200 chars)                                                  |
+| `slug`          | string | No       | URL-safe identifier (max 100 chars, unique). Auto-derived from `name` if omitted.     |
+| `description`   | string | No       | Service description                                                                   |
+| `base_url`      | string | Yes      | Downstream service base URL (max 2048 chars). Must not point to private/internal IPs. |
+| `auth_type`     | string | No       | One of: `api_key`, `oauth2`/`bearer`, `basic`, `oidc`, `header`, `query`. Default: `header`. Alias: `auth_method`. |
+| `auth_key_name` | string | No       | Header or query param name. Defaults based on `auth_type`.                            |
+| `credential`    | string | No       | API key, token, or `user:password` for basic. Not needed for OIDC services.           |
 
-**Auth Methods:**
+**Auth Type Mapping:**
 
-| Method   | Behavior                                            |
-|----------|-----------------------------------------------------|
-| `header` | Adds `auth_key_name: credential` as a request header|
-| `bearer` | Adds `Authorization: Bearer credential` header      |
-| `query`  | Appends `?auth_key_name=credential` to the URL      |
-| `basic`  | Sends HTTP Basic Auth (credential = `user:password`) |
+| `auth_type` value  | Internal `auth_method` | Default `auth_key_name` | Behavior                                            |
+|--------------------|------------------------|-------------------------|-----------------------------------------------------|
+| `api_key` / `header` | `header`             | `X-API-Key`             | Adds `auth_key_name: credential` as a request header|
+| `oauth2` / `bearer`  | `bearer`             | `Authorization`         | Adds `Authorization: Bearer credential` header      |
+| `query`              | `query`              | `api_key`               | Appends `?auth_key_name=credential` to the URL      |
+| `basic`              | `basic`              | `Authorization`         | Sends HTTP Basic Auth (credential = `user:password`) |
+| `oidc`               | `oidc`               | `X-API-Key`             | Auto-provisions OAuth client; uses OIDC flow        |
+
+**Example (API key service):**
 
 ```json
 {
   "name": "Internal Analytics API",
   "slug": "analytics",
   "description": "Company analytics service",
-  "base_url": "https://analytics.internal.example.com",
-  "auth_method": "bearer",
-  "auth_key_name": "Authorization",
+  "base_url": "https://analytics.example.com",
+  "auth_type": "api_key",
   "credential": "sk-analytics-secret-key-here"
+}
+```
+
+**Example (OIDC service):**
+
+```json
+{
+  "name": "Customer Portal",
+  "base_url": "https://portal.example.com",
+  "auth_type": "oidc"
 }
 ```
 
@@ -736,18 +809,25 @@ Register a new downstream service. The credential is encrypted with AES-256-GCM 
   "name": "Internal Analytics API",
   "slug": "analytics",
   "description": "Company analytics service",
-  "base_url": "https://analytics.internal.example.com",
-  "auth_method": "bearer",
-  "auth_key_name": "Authorization",
+  "base_url": "https://analytics.example.com",
+  "auth_method": "header",
+  "auth_type": "api_key",
+  "auth_key_name": "X-API-Key",
   "is_active": true,
-  "created_at": "2025-06-01T10:00:00+00:00"
+  "oauth_client_id": null,
+  "api_spec_url": null,
+  "created_by": "550e8400-e29b-41d4-a716-446655440000",
+  "created_at": "2025-06-01T10:00:00+00:00",
+  "updated_at": "2025-06-01T10:00:00+00:00"
 }
 ```
+
+For OIDC services, `oauth_client_id` will contain the auto-provisioned OAuth client ID.
 
 **Errors:**
 - `1002 forbidden` -- User is not an admin
 - `1004 conflict` -- Slug already exists
-- `1008 validation_error` -- Missing required fields, invalid auth_method, or SSRF-blocked URL
+- `1008 validation_error` -- Missing required fields, invalid auth_type, slug too long, or SSRF-blocked URL
 
 **Example:**
 
@@ -759,25 +839,122 @@ curl -X POST http://localhost:3001/api/v1/services \
     "name": "Analytics API",
     "slug": "analytics",
     "base_url": "https://analytics.example.com",
-    "auth_method": "header",
-    "auth_key_name": "X-API-Key",
+    "auth_type": "api_key",
     "credential": "secret-api-key"
   }'
 ```
 
 ---
 
-#### DELETE /api/v1/services/{service_id}
+#### GET /api/v1/services/{service_id}
 
-Deactivate a downstream service. Only admins or the original service creator can perform this action.
+Get a single downstream service by ID.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Response (200):**
+
+```json
+{
+  "id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+  "name": "Internal Analytics API",
+  "slug": "analytics",
+  "description": "Company analytics service",
+  "base_url": "https://analytics.example.com",
+  "auth_method": "header",
+  "auth_type": "api_key",
+  "auth_key_name": "X-API-Key",
+  "is_active": true,
+  "oauth_client_id": null,
+  "api_spec_url": null,
+  "created_by": "550e8400-e29b-41d4-a716-446655440000",
+  "created_at": "2025-06-01T10:00:00+00:00",
+  "updated_at": "2025-06-01T10:00:00+00:00"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Service does not exist
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### PUT /api/v1/services/{service_id}
+
+Update a downstream service. Only the provided fields are updated (partial update). If the service is an OIDC service and `base_url` is changed, the default redirect URI on the associated OAuth client is automatically updated.
 
 **Auth:** Admin (or service creator)
 
 **Path Parameters:**
 
-| Parameter    | Type | Description          |
-|--------------|------|----------------------|
-| `service_id` | UUID | The service ID       |
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Request Body:**
+
+| Field         | Type    | Required | Description                                     |
+|---------------|---------|----------|-------------------------------------------------|
+| `name`         | string  | No       | New display name (1-200 chars)                                          |
+| `description`  | string  | No       | New description (max 500 chars)                                         |
+| `base_url`     | string  | No       | New base URL (max 2048 chars, SSRF-validated)                           |
+| `is_active`    | boolean | No       | Enable or disable the service                                           |
+| `api_spec_url` | string  | No       | URL to an OpenAPI/Swagger spec for endpoint discovery (max 2048 chars)  |
+
+At least one field must be provided.
+
+```json
+{
+  "name": "Updated Analytics API",
+  "description": "Updated description",
+  "base_url": "https://new-analytics.example.com",
+  "api_spec_url": "https://analytics.example.com/openapi.json"
+}
+```
+
+**Response (200):**
+
+Returns the full updated service object (same shape as GET response).
+
+**Errors:**
+- `1002 forbidden` -- User is not admin and not the service creator
+- `1003 not_found` -- Service does not exist
+- `1008 validation_error` -- Name empty or too long, description too long, base_url too long or SSRF-blocked, or no fields provided
+
+**Example:**
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Updated Analytics API"}'
+```
+
+---
+
+#### DELETE /api/v1/services/{service_id}
+
+Deactivate a downstream service (soft delete). Only admins or the original service creator can perform this action.
+
+**Auth:** Admin (or service creator)
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
 
 **Response (200):**
 
@@ -796,6 +973,575 @@ Deactivate a downstream service. Only admins or the original service creator can
 ```bash
 curl -X DELETE http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef \
   -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### GET /api/v1/services/{service_id}/oidc-credentials
+
+Retrieve the OIDC client credentials and discovery endpoints for a service configured with OIDC auth. The client secret is decrypted from storage and returned in plaintext.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Response (200):**
+
+```json
+{
+  "client_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "client_secret": "nyx_secret_abc123...",
+  "redirect_uris": ["https://portal.example.com/callback"],
+  "allowed_scopes": "openid profile email",
+  "issuer": "https://auth.example.com",
+  "authorization_endpoint": "https://auth.example.com/oauth/authorize",
+  "token_endpoint": "https://auth.example.com/oauth/token",
+  "userinfo_endpoint": "https://auth.example.com/oauth/userinfo",
+  "jwks_uri": "https://auth.example.com/.well-known/jwks.json"
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Service is not an OIDC service
+- `1002 forbidden` -- User is not an admin
+- `1003 not_found` -- Service does not exist
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/oidc-credentials \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### PUT /api/v1/services/{service_id}/redirect-uris
+
+Update the redirect URIs for an OIDC service. Replaces the full set of redirect URIs on the associated OAuth client.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Request Body:**
+
+| Field           | Type     | Required | Description                                          |
+|-----------------|----------|----------|------------------------------------------------------|
+| `redirect_uris` | string[] | Yes      | Array of redirect URIs (1-10 items, max 2048 chars each, http/https only) |
+
+```json
+{
+  "redirect_uris": [
+    "https://portal.example.com/callback",
+    "https://portal.example.com/auth/callback"
+  ]
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "redirect_uris": [
+    "https://portal.example.com/callback",
+    "https://portal.example.com/auth/callback"
+  ]
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Service is not an OIDC service
+- `1002 forbidden` -- User is not an admin
+- `1003 not_found` -- Service does not exist
+- `1008 validation_error` -- Empty array, more than 10 URIs, URI too long, or invalid URI scheme
+
+**Example:**
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/redirect-uris \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"redirect_uris": ["https://portal.example.com/callback"]}'
+```
+
+---
+
+#### POST /api/v1/services/{service_id}/regenerate-secret
+
+Regenerate the OIDC client secret for a service. The previous secret is immediately invalidated. Store the new secret securely -- it cannot be retrieved again.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Response (200):**
+
+```json
+{
+  "client_secret": "nyx_secret_new_abc123...",
+  "message": "Previous secret is now invalidated. Store this secret securely."
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Service is not an OIDC service
+- `1002 forbidden` -- User is not an admin
+- `1003 not_found` -- Service does not exist
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/regenerate-secret \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+### Service Endpoints
+
+Endpoints describe the individual API operations available on a downstream service. They are used by the MCP proxy to generate MCP tools, and can be created manually or auto-discovered from an OpenAPI spec.
+
+Endpoint names must match `^[a-z][a-z0-9_]*$` (valid MCP tool names).
+
+#### GET /api/v1/services/{service_id}/endpoints
+
+List all active endpoints for a service.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Response (200):**
+
+```json
+{
+  "endpoints": [
+    {
+      "id": "e1f2a3b4-c5d6-7890-abcd-ef1234567890",
+      "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+      "name": "list_customers",
+      "description": "List all customers with pagination",
+      "method": "GET",
+      "path": "/v1/customers",
+      "parameters": [
+        {"name": "limit", "in": "query", "schema": {"type": "integer"}}
+      ],
+      "request_body_schema": null,
+      "response_description": null,
+      "is_active": true,
+      "created_at": "2025-06-01T10:00:00+00:00",
+      "updated_at": "2025-06-01T10:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Service does not exist
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/endpoints \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### POST /api/v1/services/{service_id}/endpoints
+
+Create a new endpoint for a service.
+
+**Auth:** Admin (or service creator)
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Request Body:**
+
+| Field                  | Type   | Required | Description                                        |
+|------------------------|--------|----------|----------------------------------------------------|
+| `name`                 | string | Yes      | MCP tool name (1-100 chars, `^[a-z][a-z0-9_]*$`)  |
+| `description`          | string | No       | Human-readable description                         |
+| `method`               | string | Yes      | HTTP method: GET, POST, PUT, DELETE, PATCH         |
+| `path`                 | string | Yes      | URL path starting with `/` (max 2048 chars)        |
+| `parameters`           | JSON   | No       | OpenAPI-style parameter definitions                |
+| `request_body_schema`  | JSON   | No       | JSON Schema for the request body                   |
+| `response_description` | string | No       | Description of the expected response               |
+
+```json
+{
+  "name": "list_customers",
+  "description": "List all customers with pagination",
+  "method": "GET",
+  "path": "/v1/customers",
+  "parameters": [
+    {"name": "limit", "in": "query", "schema": {"type": "integer"}},
+    {"name": "offset", "in": "query", "schema": {"type": "integer"}}
+  ]
+}
+```
+
+**Response (200):**
+
+Returns the created endpoint object (same shape as list response items).
+
+**Errors:**
+- `1002 forbidden` -- User is not admin and not the service creator
+- `1003 not_found` -- Service does not exist
+- `1008 validation_error` -- Invalid name format, unsupported method, or path not starting with `/`
+- `1007 database_error` -- Duplicate endpoint name for this service (unique constraint)
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/endpoints \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "list_customers",
+    "method": "GET",
+    "path": "/v1/customers"
+  }'
+```
+
+---
+
+#### PUT /api/v1/services/{service_id}/endpoints/{endpoint_id}
+
+Update an existing endpoint. Only the provided fields are updated (partial update).
+
+**Auth:** Admin (or service creator)
+
+**Path Parameters:**
+
+| Parameter     | Type | Description      |
+|---------------|------|------------------|
+| `service_id`  | UUID | The service ID   |
+| `endpoint_id` | UUID | The endpoint ID  |
+
+**Request Body:**
+
+| Field                  | Type    | Required | Description                                              |
+|------------------------|---------|----------|----------------------------------------------------------|
+| `name`                 | string  | No       | MCP tool name (1-100 chars, `^[a-z][a-z0-9_]*$`)        |
+| `description`          | string? | No       | Human-readable description (null to clear)               |
+| `method`               | string  | No       | HTTP method: GET, POST, PUT, DELETE, PATCH               |
+| `path`                 | string  | No       | URL path starting with `/` (max 2048 chars)              |
+| `parameters`           | JSON?   | No       | OpenAPI-style parameter definitions (null to clear)      |
+| `request_body_schema`  | JSON?   | No       | JSON Schema for the request body (null to clear)         |
+| `response_description` | string? | No       | Description of the expected response (null to clear)     |
+| `is_active`            | boolean | No       | Enable or disable the endpoint                           |
+
+**Response (200):**
+
+```json
+{
+  "message": "Endpoint updated"
+}
+```
+
+**Errors:**
+- `1002 forbidden` -- User is not admin and not the service creator
+- `1003 not_found` -- Service or endpoint does not exist
+- `1008 validation_error` -- Invalid name, method, or path
+
+**Example:**
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/endpoints/e1f2a3b4-c5d6-7890-abcd-ef1234567890 \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Updated description", "is_active": false}'
+```
+
+---
+
+#### DELETE /api/v1/services/{service_id}/endpoints/{endpoint_id}
+
+Permanently delete an endpoint.
+
+**Auth:** Admin (or service creator)
+
+**Path Parameters:**
+
+| Parameter     | Type | Description      |
+|---------------|------|------------------|
+| `service_id`  | UUID | The service ID   |
+| `endpoint_id` | UUID | The endpoint ID  |
+
+**Response (200):**
+
+```json
+{
+  "message": "Endpoint deleted"
+}
+```
+
+**Errors:**
+- `1002 forbidden` -- User is not admin and not the service creator
+- `1003 not_found` -- Service or endpoint does not exist
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/endpoints/e1f2a3b4-c5d6-7890-abcd-ef1234567890 \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/services/{service_id}/discover-endpoints
+
+Fetch the service's `api_spec_url`, parse the OpenAPI/Swagger specification, and bulk upsert discovered endpoints. Existing endpoints matched by name are updated; new ones are created; endpoints not in the spec are soft-deleted (set `is_active = false`).
+
+**Auth:** Admin (or service creator)
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Prerequisites:** The service must have `api_spec_url` set (via PUT /api/v1/services/{service_id}).
+
+**Supported Specs:** OpenAPI 3.x and Swagger 2.0 in JSON format.
+
+**Response (200):**
+
+```json
+{
+  "message": "12 endpoints discovered and synced",
+  "endpoints": [
+    {
+      "id": "e1f2a3b4-c5d6-7890-abcd-ef1234567890",
+      "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+      "name": "list_customers",
+      "description": "List all customers",
+      "method": "GET",
+      "path": "/v1/customers",
+      "parameters": [...],
+      "request_body_schema": null,
+      "response_description": null,
+      "is_active": true,
+      "created_at": "2025-06-01T10:00:00+00:00",
+      "updated_at": "2025-06-01T12:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Service has no `api_spec_url`, spec fetch failed, invalid spec format, or spec is not JSON
+- `1002 forbidden` -- User is not admin and not the service creator
+- `1003 not_found` -- Service does not exist
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/discover-endpoints \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+### MCP Config
+
+#### GET /api/v1/mcp/config
+
+Returns the MCP tool configuration for the authenticated user. Includes all services the user is connected to, along with their registered endpoints (tools) and the proxy base URL. Used by MCP clients to auto-configure available tools.
+
+**Auth:** Required
+
+**Response (200):**
+
+```json
+{
+  "user_id": "550e8400-e29b-41d4-a716-446655440000",
+  "proxy_base_url": "https://auth.example.com/api/v1/proxy",
+  "services": [
+    {
+      "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+      "service_name": "Stripe API",
+      "service_slug": "stripe",
+      "description": "Payment processing",
+      "base_url": "https://api.stripe.com",
+      "endpoints": [
+        {
+          "endpoint_id": "e1f2a3b4-c5d6-7890-abcd-ef1234567890",
+          "name": "list_customers",
+          "description": "List all customers with pagination",
+          "method": "GET",
+          "path": "/v1/customers",
+          "parameters": [
+            {"name": "limit", "in": "query", "schema": {"type": "integer"}}
+          ],
+          "request_body_schema": null,
+          "response_description": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+If the user has no active connections, `services` is an empty array.
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/mcp/config \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+### Service Connections
+
+Connections allow individual users to associate themselves with downstream services. When a user has a connection to a service, their per-user credential override (if any) is used instead of the service-level default during proxy requests.
+
+#### GET /api/v1/connections
+
+List all active service connections for the authenticated user.
+
+**Auth:** Required
+
+**Response (200):**
+
+```json
+{
+  "connections": [
+    {
+      "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+      "service_name": "Internal Analytics API",
+      "connected_at": "2025-06-01T10:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/connections \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### POST /api/v1/connections/{service_id}
+
+Connect the authenticated user to a downstream service.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Response (200):**
+
+```json
+{
+  "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+  "service_name": "Internal Analytics API",
+  "connected_at": "2025-06-01T10:00:00+00:00"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Service does not exist or is inactive
+- `1004 conflict` -- Already connected to this service
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/connections/d1e2f3a4-b5c6-7890-1234-567890abcdef \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### DELETE /api/v1/connections/{service_id}
+
+Disconnect the authenticated user from a downstream service.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Response (200):**
+
+```json
+{
+  "message": "Disconnected from service"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Connection does not exist
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/connections/d1e2f3a4-b5c6-7890-1234-567890abcdef \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+### Sessions
+
+#### GET /api/v1/sessions
+
+List all active (non-revoked, non-expired) sessions for the authenticated user. Sessions are returned in reverse chronological order.
+
+**Auth:** Required
+
+**Response (200):**
+
+```json
+[
+  {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "ip_address": "203.0.113.42",
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)...",
+    "created_at": "2025-06-01T14:22:00+00:00",
+    "expires_at": "2025-07-01T14:22:00+00:00"
+  }
+]
+```
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/sessions \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ---
@@ -988,6 +1734,78 @@ OpenID Connect UserInfo endpoint. Returns claims about the authenticated user.
 ```bash
 curl http://localhost:3001/oauth/userinfo \
   -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+### OIDC Discovery
+
+These endpoints are public and do not require authentication. They allow relying parties (downstream services using OIDC) to automatically discover NyxID's provider configuration and verify JWT signatures.
+
+#### GET /.well-known/openid-configuration
+
+Returns the OpenID Connect Provider metadata document. Relying parties use this to auto-configure authorization, token, and userinfo endpoint URLs.
+
+**Auth:** None
+
+**Response (200):**
+
+```json
+{
+  "issuer": "nyxid",
+  "authorization_endpoint": "https://auth.example.com/oauth/authorize",
+  "token_endpoint": "https://auth.example.com/oauth/token",
+  "userinfo_endpoint": "https://auth.example.com/oauth/userinfo",
+  "jwks_uri": "https://auth.example.com/.well-known/jwks.json",
+  "response_types_supported": ["code"],
+  "grant_types_supported": ["authorization_code", "refresh_token"],
+  "subject_types_supported": ["public"],
+  "id_token_signing_alg_values_supported": ["RS256"],
+  "scopes_supported": ["openid", "profile", "email"],
+  "claims_supported": [
+    "sub", "iss", "aud", "exp", "iat",
+    "email", "email_verified", "name", "picture", "nonce"
+  ],
+  "code_challenge_methods_supported": ["S256"],
+  "token_endpoint_auth_methods_supported": ["client_secret_post", "none"]
+}
+```
+
+**Example:**
+
+```bash
+curl https://auth.example.com/.well-known/openid-configuration
+```
+
+---
+
+#### GET /.well-known/jwks.json
+
+Returns the JSON Web Key Set (JWKS) containing the public key(s) used to sign JWTs. Relying parties use this to verify token signatures without needing a shared secret.
+
+**Auth:** None
+
+**Response (200):**
+
+```json
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "use": "sig",
+      "alg": "RS256",
+      "n": "<base64url-encoded modulus>",
+      "e": "AQAB",
+      "kid": "<key-id>"
+    }
+  ]
+}
+```
+
+**Example:**
+
+```bash
+curl https://auth.example.com/.well-known/jwks.json
 ```
 
 ---
@@ -1187,18 +2005,150 @@ Query the audit log with pagination. Entries are returned in reverse chronologic
 }
 ```
 
-**Audit Actions:**
+**Audit Event Types:**
 
-| Action       | Resource Type | Description                        |
-|--------------|---------------|------------------------------------|
-| `register`   | `user`        | New user registration              |
-| `login`      | `session`     | Successful login                   |
-| `logout`     | `session`     | User logout                        |
+| Event Type                | Description                                  |
+|---------------------------|----------------------------------------------|
+| `register`                | New user registration                        |
+| `login`                   | Successful login                             |
+| `logout`                  | User logout                                  |
+| `admin_setup`             | Initial admin created via bootstrap endpoint |
+| `admin_promoted`          | User promoted to admin via CLI               |
+| `service_created`         | Downstream service registered                |
+| `service_updated`         | Downstream service updated                   |
+| `service_deleted`         | Downstream service deactivated               |
+| `oidc_credentials_accessed` | OIDC credentials retrieved                 |
+| `oidc_secret_regenerated` | OIDC client secret regenerated               |
+| `redirect_uris_updated`  | OIDC redirect URIs updated                   |
+| `proxy_request`           | Request forwarded through the proxy           |
 
 **Example:**
 
 ```bash
 curl "http://localhost:3001/api/v1/admin/audit-log?page=1&per_page=25" \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/admin/oauth-clients
+
+Create a new OAuth client. Returns the client secret only at creation time -- it cannot be retrieved again.
+
+**Auth:** Admin
+
+**Request Body:**
+
+| Field           | Type     | Required | Description                                               |
+|-----------------|----------|----------|-----------------------------------------------------------|
+| `name`          | string   | Yes      | Client display name                                       |
+| `redirect_uris` | string[] | Yes     | At least one redirect URI                                 |
+| `client_type`   | string   | No       | `"confidential"` (default) or `"public"`                  |
+
+```json
+{
+  "name": "My Web App",
+  "redirect_uris": ["https://app.example.com/callback"],
+  "client_type": "confidential"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "client_name": "My Web App",
+  "client_type": "confidential",
+  "redirect_uris": ["https://app.example.com/callback"],
+  "allowed_scopes": "openid profile email",
+  "is_active": true,
+  "client_secret": "nyx_secret_abc123...",
+  "created_at": "2025-06-01T10:00:00+00:00"
+}
+```
+
+**Errors:**
+- `1002 forbidden` -- User is not an admin
+- `1008 validation_error` -- Empty name, no redirect URIs, or invalid client_type
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/admin/oauth-clients \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "My Web App",
+    "redirect_uris": ["https://app.example.com/callback"],
+    "client_type": "confidential"
+  }'
+```
+
+---
+
+#### GET /api/v1/admin/oauth-clients
+
+List all registered OAuth clients. Client secrets are never included in the list response.
+
+**Auth:** Admin
+
+**Response (200):**
+
+```json
+{
+  "clients": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "client_name": "My Web App",
+      "client_type": "confidential",
+      "redirect_uris": ["https://app.example.com/callback"],
+      "allowed_scopes": "openid profile email",
+      "is_active": true,
+      "client_secret": null,
+      "created_at": "2025-06-01T10:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/admin/oauth-clients \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### DELETE /api/v1/admin/oauth-clients/{client_id}
+
+Deactivate an OAuth client. The client can no longer be used for authorization after this operation.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter   | Type | Description        |
+|-------------|------|--------------------|
+| `client_id` | UUID | The OAuth client ID |
+
+**Response (200):**
+
+```json
+{
+  "message": "OAuth client deactivated"
+}
+```
+
+**Errors:**
+- `1002 forbidden` -- User is not an admin
+- `1003 not_found` -- Client does not exist
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/admin/oauth-clients/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
   -H "Authorization: Bearer <admin_access_token>"
 ```
 

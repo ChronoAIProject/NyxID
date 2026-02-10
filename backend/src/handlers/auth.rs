@@ -6,7 +6,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
+use mongodb::bson::doc;
+
 use crate::errors::{AppError, AppResult};
+use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::mw::auth::{AuthUser, ACCESS_TOKEN_COOKIE_NAME, SESSION_COOKIE_NAME};
 use crate::services::{audit_service, auth_service, token_service};
 use crate::AppState;
@@ -487,5 +490,92 @@ pub async fn reset_password(
 
     Ok(Json(ResetPasswordResponse {
         message: "Password has been reset successfully".to_string(),
+    }))
+}
+
+// --- Bootstrap Setup ---
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct SetupRequest {
+    #[validate(email(message = "Invalid email address"))]
+    pub email: String,
+    #[validate(length(min = 8, max = 128, message = "Password must be between 8 and 128 characters"))]
+    pub password: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetupResponse {
+    pub user_id: String,
+    pub message: String,
+}
+
+/// POST /api/v1/auth/setup
+///
+/// One-time bootstrap endpoint to create the initial admin user.
+/// Only works when the users collection is empty. After the first admin
+/// is created, this endpoint returns 403 Forbidden.
+pub async fn setup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SetupRequest>,
+) -> AppResult<Json<SetupResponse>> {
+    body.validate()
+        .map_err(|e| AppError::ValidationError(e.to_string()))?;
+
+    // Guard: only allow setup when no users exist
+    let user_count = state
+        .db
+        .collection::<User>(USERS)
+        .count_documents(doc! {})
+        .await?;
+
+    if user_count > 0 {
+        return Err(AppError::Forbidden(
+            "Setup has already been completed. Use the CLI --promote-admin flag to promote existing users.".to_string(),
+        ));
+    }
+
+    // Create the user via the normal registration flow
+    let result = auth_service::register_user(
+        &state.db,
+        &body.email,
+        &body.password,
+        body.display_name.as_deref(),
+    )
+    .await?;
+
+    // Promote to admin and mark email as verified
+    let now = chrono::Utc::now();
+    state
+        .db
+        .collection::<User>(USERS)
+        .update_one(
+            doc! { "_id": &result.user_id },
+            doc! { "$set": {
+                "is_admin": true,
+                "email_verified": true,
+                "updated_at": mongodb::bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(result.user_id.clone()),
+        "admin_setup".to_string(),
+        Some(serde_json::json!({
+            "email": body.email,
+            "method": "bootstrap"
+        })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    tracing::info!(user_id = %result.user_id, email = %body.email, "Initial admin created via bootstrap");
+
+    Ok(Json(SetupResponse {
+        user_id: result.user_id,
+        message: "Admin account created successfully.".to_string(),
     }))
 }

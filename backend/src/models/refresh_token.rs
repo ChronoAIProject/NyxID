@@ -12,8 +12,10 @@ pub struct RefreshToken {
     pub client_id: String,
     pub user_id: String,
     pub session_id: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
     pub revoked: bool,
     pub replaced_by: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }

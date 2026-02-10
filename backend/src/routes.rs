@@ -15,7 +15,8 @@ pub fn build_router() -> Router<AppState> {
         .route("/refresh", post(handlers::auth::refresh))
         .route("/verify-email", post(handlers::auth::verify_email))
         .route("/forgot-password", post(handlers::auth::forgot_password))
-        .route("/reset-password", post(handlers::auth::reset_password));
+        .route("/reset-password", post(handlers::auth::reset_password))
+        .route("/setup", post(handlers::auth::setup));
 
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
@@ -34,12 +35,39 @@ pub fn build_router() -> Router<AppState> {
     let service_routes = Router::new()
         .route("/", get(handlers::services::list_services))
         .route("/", post(handlers::services::create_service))
-        .route("/{service_id}", delete(handlers::services::delete_service));
+        .route("/{service_id}", get(handlers::services::get_service))
+        .route("/{service_id}", put(handlers::services::update_service))
+        .route("/{service_id}", delete(handlers::services::delete_service))
+        .route("/{service_id}/oidc-credentials", get(handlers::services::get_oidc_credentials))
+        .route("/{service_id}/redirect-uris", put(handlers::services::update_redirect_uris))
+        .route("/{service_id}/regenerate-secret", post(handlers::services::regenerate_oidc_secret))
+        .route("/{service_id}/endpoints", get(handlers::endpoints::list_endpoints))
+        .route("/{service_id}/endpoints", post(handlers::endpoints::create_endpoint))
+        .route("/{service_id}/endpoints/{endpoint_id}", put(handlers::endpoints::update_endpoint))
+        .route("/{service_id}/endpoints/{endpoint_id}", delete(handlers::endpoints::delete_endpoint))
+        .route("/{service_id}/discover-endpoints", post(handlers::endpoints::discover_endpoints));
+
+    let session_routes = Router::new()
+        .route("/", get(handlers::sessions::list_sessions));
+
+    let mcp_routes = Router::new()
+        .route("/config", get(handlers::mcp::get_mcp_config));
+
+    let connection_routes = Router::new()
+        .route("/", get(handlers::connections::list_connections))
+        .route("/{service_id}", post(handlers::connections::connect_service))
+        .route(
+            "/{service_id}",
+            delete(handlers::connections::disconnect_service),
+        );
 
     let admin_routes = Router::new()
         .route("/users", get(handlers::admin::list_users))
         .route("/users/{user_id}", get(handlers::admin::get_user))
-        .route("/audit-log", get(handlers::admin::list_audit_log));
+        .route("/audit-log", get(handlers::admin::list_audit_log))
+        .route("/oauth-clients", get(handlers::admin::list_oauth_clients))
+        .route("/oauth-clients", post(handlers::admin::create_oauth_client))
+        .route("/oauth-clients/{client_id}", delete(handlers::admin::delete_oauth_client));
 
     let oauth_routes = Router::new()
         .route("/authorize", get(handlers::oauth::authorize))
@@ -52,11 +80,19 @@ pub fn build_router() -> Router<AppState> {
         .nest("/mfa", mfa_routes)
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)
+        .nest("/sessions", session_routes)
+        .nest("/connections", connection_routes)
+        .nest("/mcp", mcp_routes)
         .nest("/admin", admin_routes)
         .route("/proxy/{service_id}/{*path}", axum::routing::any(handlers::proxy::proxy_request));
 
+    let well_known_routes = Router::new()
+        .route("/openid-configuration", get(handlers::oidc_discovery::openid_configuration))
+        .route("/jwks.json", get(handlers::oidc_discovery::jwks));
+
     Router::new()
         .route("/health", get(handlers::health::health_check))
+        .nest("/.well-known", well_known_routes)
         .nest("/oauth", oauth_routes)
         .nest("/api/v1", api_v1)
 }

@@ -6,11 +6,11 @@ use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
-
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::services::oauth_client_service;
 use crate::AppState;
 
 // --- Request / Response types ---
@@ -217,4 +217,140 @@ pub async fn list_audit_log(
         page,
         per_page,
     }))
+}
+
+// --- OAuth Client Admin ---
+
+#[derive(Debug, Deserialize)]
+pub struct CreateOAuthClientRequest {
+    pub name: String,
+    pub redirect_uris: Vec<String>,
+    pub client_type: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OAuthClientResponse {
+    pub id: String,
+    pub client_name: String,
+    pub client_type: String,
+    pub redirect_uris: Vec<String>,
+    pub allowed_scopes: String,
+    pub is_active: bool,
+    /// Raw client secret -- only returned at creation time.
+    pub client_secret: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OAuthClientListResponse {
+    pub clients: Vec<OAuthClientResponse>,
+}
+
+/// POST /api/v1/admin/oauth-clients
+///
+/// Create a new OAuth client. Requires admin privileges.
+pub async fn create_oauth_client(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<CreateOAuthClientRequest>,
+) -> AppResult<Json<OAuthClientResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    if body.name.is_empty() {
+        return Err(AppError::ValidationError(
+            "Client name is required".to_string(),
+        ));
+    }
+
+    if body.redirect_uris.is_empty() {
+        return Err(AppError::ValidationError(
+            "At least one redirect_uri is required".to_string(),
+        ));
+    }
+
+    let client_type = body.client_type.as_deref().unwrap_or("confidential");
+    if client_type != "confidential" && client_type != "public" {
+        return Err(AppError::ValidationError(
+            "client_type must be 'confidential' or 'public'".to_string(),
+        ));
+    }
+
+    let user_id = auth_user.user_id.to_string();
+    let (client, raw_secret) = oauth_client_service::create_client(
+        &state.db,
+        &body.name,
+        &body.redirect_uris,
+        client_type,
+        &user_id,
+    )
+    .await?;
+
+    tracing::info!(
+        client_id = %client.id,
+        client_name = %client.client_name,
+        created_by = %user_id,
+        "OAuth client created"
+    );
+
+    Ok(Json(OAuthClientResponse {
+        id: client.id.clone(),
+        client_name: client.client_name,
+        client_type: client.client_type,
+        redirect_uris: client.redirect_uris,
+        allowed_scopes: client.allowed_scopes,
+        is_active: client.is_active,
+        client_secret: raw_secret,
+        created_at: client.created_at.to_rfc3339(),
+    }))
+}
+
+/// GET /api/v1/admin/oauth-clients
+///
+/// List all OAuth clients. Requires admin privileges.
+pub async fn list_oauth_clients(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<OAuthClientListResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    let clients = oauth_client_service::list_clients(&state.db).await?;
+
+    let items: Vec<OAuthClientResponse> = clients
+        .into_iter()
+        .map(|c| {
+            OAuthClientResponse {
+                id: c.id,
+                client_name: c.client_name,
+                client_type: c.client_type,
+                redirect_uris: c.redirect_uris,
+                allowed_scopes: c.allowed_scopes,
+                is_active: c.is_active,
+                client_secret: None, // never expose secret in list
+                created_at: c.created_at.to_rfc3339(),
+            }
+        })
+        .collect();
+
+    Ok(Json(OAuthClientListResponse { clients: items }))
+}
+
+/// DELETE /api/v1/admin/oauth-clients/:client_id
+///
+/// Deactivate an OAuth client. Requires admin privileges.
+pub async fn delete_oauth_client(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(client_id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    require_admin(&state, &auth_user).await?;
+
+    oauth_client_service::delete_client(&state.db, &client_id).await?;
+
+    tracing::info!(
+        client_id = %client_id,
+        deactivated_by = %auth_user.user_id,
+        "OAuth client deactivated"
+    );
+
+    Ok(Json(serde_json::json!({ "message": "OAuth client deactivated" })))
 }

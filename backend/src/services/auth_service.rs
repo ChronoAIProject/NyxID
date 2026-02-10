@@ -277,3 +277,45 @@ pub async fn reset_password(
 
     Ok(())
 }
+
+/// Promote an existing user to admin by email address.
+///
+/// Sets `is_admin = true` and `email_verified = true` on the user.
+/// Returns the user ID on success.
+pub async fn promote_user_to_admin(
+    db: &mongodb::Database,
+    email: &str,
+) -> AppResult<String> {
+    let normalized = email.to_lowercase();
+
+    let user = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "email": &normalized })
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("No user found with email: {}", normalized))
+        })?;
+
+    if user.is_admin {
+        return Err(AppError::Conflict(format!(
+            "User {} is already an admin",
+            normalized
+        )));
+    }
+
+    let now = Utc::now();
+    db.collection::<User>(USERS)
+        .update_one(
+            doc! { "_id": &user.id },
+            doc! { "$set": {
+                "is_admin": true,
+                "email_verified": true,
+                "updated_at": bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    tracing::info!(user_id = %user.id, email = %normalized, "User promoted to admin");
+
+    Ok(user.id)
+}

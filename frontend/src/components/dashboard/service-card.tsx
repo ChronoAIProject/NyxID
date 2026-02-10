@@ -1,4 +1,5 @@
 import type { DownstreamService } from "@/types/api";
+import { getAuthTypeLabel, isOidcService } from "@/lib/constants";
 import { formatDate } from "@/lib/utils";
 import {
   Card,
@@ -15,22 +16,20 @@ interface ServiceCardProps {
   readonly service: DownstreamService;
   readonly onDelete: (id: string) => void;
   readonly isDeleting: boolean;
+  readonly onClick: () => void;
 }
-
-const AUTH_TYPE_LABELS: Record<string, string> = {
-  api_key: "API Key",
-  oauth2: "OAuth 2.0",
-  basic: "Basic Auth",
-  bearer: "Bearer Token",
-};
 
 export function ServiceCard({
   service,
   onDelete,
   isDeleting,
+  onClick,
 }: ServiceCardProps) {
   return (
-    <Card className="transition-colors hover:border-border/80">
+    <Card
+      className="cursor-pointer transition-colors hover:border-border/80"
+      onClick={onClick}
+    >
       <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-3">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
@@ -47,7 +46,10 @@ export function ServiceCard({
           variant="ghost"
           size="icon"
           className="h-8 w-8 text-muted-foreground hover:text-destructive"
-          onClick={() => onDelete(service.id)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(service.id);
+          }}
           disabled={isDeleting}
         >
           <Trash2 className="h-4 w-4" />
@@ -56,9 +58,12 @@ export function ServiceCard({
       </CardHeader>
       <CardContent>
         <div className="flex items-center justify-between">
-          <Badge variant="secondary">
-            {AUTH_TYPE_LABELS[service.auth_type] ?? service.auth_type}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary">{getAuthTypeLabel(service)}</Badge>
+            {isOidcService(service) && (
+              <Badge variant="outline">OIDC</Badge>
+            )}
+          </div>
           <span className="text-xs text-muted-foreground">
             Created {formatDate(service.created_at)}
           </span>

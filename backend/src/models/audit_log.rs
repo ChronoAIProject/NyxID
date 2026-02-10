@@ -14,5 +14,6 @@ pub struct AuditLog {
     pub event_data: Option<serde_json::Value>,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }

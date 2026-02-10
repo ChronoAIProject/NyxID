@@ -94,6 +94,14 @@ pub fn create_per_ip_rate_limiter(max_requests: u32, window_secs: u64) -> Shared
 
 /// Extract the client IP address from the request.
 /// Checks X-Forwarded-For, X-Real-IP headers, then falls back to a default.
+///
+/// TODO(SEC-2): X-Forwarded-For and X-Real-IP headers can be spoofed by
+/// clients, allowing rate limit bypass. In production, either:
+/// 1. Configure the reverse proxy to strip/override client-supplied headers
+///    and only trust headers from known proxy IPs, or
+/// 2. Use Axum's `ConnectInfo<SocketAddr>` to get the real peer address
+///    and only fall back to forwarded headers when the peer is a trusted proxy.
+/// Document the required reverse proxy configuration in DEPLOYMENT.md.
 fn extract_client_ip(request: &Request<Body>) -> IpAddr {
     // Try X-Forwarded-For first
     if let Some(forwarded_for) = request.headers().get("x-forwarded-for") {

@@ -11,14 +11,14 @@ pub struct MfaFactor {
     /// Factor type: "totp", "webauthn", "recovery_codes"
     pub factor_type: String,
     /// Encrypted TOTP secret or WebAuthn credential
-    #[serde(skip_serializing)]
     pub secret_encrypted: Option<Vec<u8>>,
-    /// For recovery codes: JSON array of hashed codes (read via MongoDB queries, not Rust field access)
+    /// For recovery codes: JSON array of hashed codes
     #[allow(dead_code)]
-    #[serde(skip_serializing)]
     pub recovery_codes: Option<serde_json::Value>,
     pub is_verified: bool,
     pub is_active: bool,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }

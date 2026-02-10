@@ -19,6 +19,10 @@ This guide covers deploying NyxID in development, staging, and production enviro
 - [Health Checks and Monitoring](#health-checks-and-monitoring)
 - [Backup and Recovery](#backup-and-recovery)
 - [Scaling](#scaling)
+- [OIDC Provider Configuration](#oidc-provider-configuration)
+- [Initial Admin Setup](#initial-admin-setup)
+- [CLI Reference](#cli-reference)
+- [MCP Proxy Deployment](#mcp-proxy-deployment)
 - [Security Hardening Checklist](#security-hardening-checklist)
 - [Troubleshooting](#troubleshooting)
 
@@ -124,102 +128,181 @@ The build produces static files (HTML, JS, CSS) ready to serve from any CDN or s
 
 ## Docker Deployment
 
-### Backend Dockerfile
+Production Dockerfiles are provided for both backend and frontend with multi-stage builds, dependency caching, and non-root users.
 
-Create `backend/Dockerfile`:
+### Building Images
 
-```dockerfile
-# Build stage
-FROM rust:1.85-bookworm AS builder
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY backend/ backend/
-RUN cargo build --release --manifest-path backend/Cargo.toml
+```bash
+# Build backend (context is the repo root for workspace Cargo.toml)
+docker build -f backend/Dockerfile -t nyxid-backend .
 
-# Runtime stage
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/backend/target/release/nyxid /usr/local/bin/nyxid
-EXPOSE 3001
-CMD ["nyxid"]
+# Build frontend
+docker build -f frontend/Dockerfile -t nyxid-frontend frontend/
 ```
 
-### Frontend Dockerfile
+The **backend Dockerfile** (`backend/Dockerfile`) uses a two-stage build:
+1. `rust:1.85-bookworm` builder with dependency caching (copies manifests first, builds deps, then copies source)
+2. `debian:bookworm-slim` runtime with only `ca-certificates` and `curl`, running as non-root user `nyxid`
 
-Create `frontend/Dockerfile`:
+The **frontend Dockerfile** (`frontend/Dockerfile`) uses a two-stage build:
+1. `node:20-alpine` builder with `npm ci` and `npm run build`
+2. `nginx:1.27-alpine` runtime serving the SPA with automatic `envsubst` for `BACKEND_URL`
 
-```dockerfile
-FROM node:20-alpine AS builder
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
-COPY . .
-RUN npm run build
-
-FROM nginx:alpine
-COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-EXPOSE 80
-```
+The frontend nginx config (`frontend/nginx.conf.template`) handles:
+- SPA fallback (`try_files $uri $uri/ /index.html`)
+- Reverse proxy for `/api`, `/oauth`, `/.well-known`, `/health` to the backend
+- Gzip compression and cache headers for hashed assets
+- Security headers
 
 ### Production Docker Compose
 
-Create `docker-compose.prod.yml`:
-
-```yaml
-services:
-  backend:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:3001:3001"
-    env_file:
-      - .env.production
-    volumes:
-      - ./keys:/app/keys:ro
-    depends_on:
-      mongodb:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  frontend:
-    build:
-      context: frontend
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:3000:80"
-
-  mongodb:
-    image: mongo:8.0
-    restart: unless-stopped
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
-      MONGO_INITDB_DATABASE: nyxid
-    volumes:
-      - mongodb_data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-volumes:
-  mongodb_data:
-```
-
-### Running
+A complete production stack is defined in `docker-compose.prod.yml`:
 
 ```bash
+# Create a production env file
+cp .env.example .env.production
+# Edit .env.production with real values (ENCRYPTION_KEY, DATABASE_URL, etc.)
+
+# Generate RSA keys if not already present
+mkdir -p keys
+openssl genrsa -out keys/private.pem 4096
+openssl rsa -in keys/private.pem -pubout -out keys/public.pem
+
+# Set MongoDB root password
+export MONGO_ROOT_PASSWORD=$(openssl rand -base64 24)
+
+# Start all services
 docker compose -f docker-compose.prod.yml up -d
 ```
+
+The compose file starts four services:
+- **backend**: builds from `backend/Dockerfile`, mounts `keys/` read-only, waits for MongoDB health
+- **frontend**: builds from `frontend/Dockerfile`, proxies API requests to backend via `BACKEND_URL` env var
+- **mcp-proxy**: builds from `mcp-proxy/Dockerfile`, connects to backend for OAuth and API proxying, waits for backend health
+- **mongodb**: persistent volume, health check via `mongosh`
+
+### Pushing to a Registry
+
+```bash
+# Tag and push to your container registry
+docker tag nyxid-backend registry.example.com/nyxid/backend:v0.1.0
+docker tag nyxid-frontend registry.example.com/nyxid/frontend:v0.1.0
+
+docker push registry.example.com/nyxid/backend:v0.1.0
+docker push registry.example.com/nyxid/frontend:v0.1.0
+```
+
+---
+
+## Kubernetes Deployment
+
+Kubernetes manifests are provided in the `k8s/` directory for deploying NyxID to a Kubernetes cluster.
+
+### Prerequisites
+
+- Kubernetes cluster (1.27+)
+- `kubectl` configured with cluster access
+- nginx ingress controller installed
+- Container images pushed to an accessible registry
+- RSA key pair generated (see [RSA Key Management](#rsa-key-management))
+
+### Manifests Overview
+
+| File | Resource |
+|------|----------|
+| `k8s/namespace.yaml` | `nyxid` namespace |
+| `k8s/configmap.yaml` | Non-secret configuration (URLs, JWT settings, rate limits) |
+| `k8s/secrets.yaml` | Secret templates (DB credentials, encryption key, JWT keys) |
+| `k8s/backend-deployment.yaml` | Backend Deployment (2 replicas) + ClusterIP Service |
+| `k8s/frontend-deployment.yaml` | Frontend Deployment (2 replicas) + ClusterIP Service |
+| `k8s/mongodb-statefulset.yaml` | MongoDB StatefulSet (1 replica) + headless Service + 10Gi PVC |
+| `k8s/ingress.yaml` | Ingress rules for `auth.example.com` and `app.example.com` |
+
+### Step 1: Create Namespace
+
+```bash
+kubectl apply -f k8s/namespace.yaml
+```
+
+### Step 2: Create Secrets
+
+```bash
+# Create JWT key pair secret from files
+kubectl create secret generic nyxid-jwt-keys \
+  --namespace nyxid \
+  --from-file=private.pem=keys/private.pem \
+  --from-file=public.pem=keys/public.pem
+
+# Create application secrets
+kubectl create secret generic nyxid-secrets \
+  --namespace nyxid \
+  --from-literal=DATABASE_URL='mongodb://nyxid:YOUR_PASSWORD@nyxid-mongodb:27017/nyxid?authSource=admin' \
+  --from-literal=ENCRYPTION_KEY="$(openssl rand -hex 32)"
+
+# Create MongoDB credentials
+kubectl create secret generic nyxid-mongo-secret \
+  --namespace nyxid \
+  --from-literal=MONGO_INITDB_ROOT_USERNAME=nyxid \
+  --from-literal=MONGO_INITDB_ROOT_PASSWORD='YOUR_STRONG_PASSWORD'
+```
+
+### Step 3: Update Configuration
+
+Edit `k8s/configmap.yaml` and replace the placeholder URLs:
+- `BASE_URL`: Your backend's public URL (e.g., `https://auth.yourdomain.com`)
+- `FRONTEND_URL`: Your frontend's public URL (e.g., `https://app.yourdomain.com`)
+- `JWT_ISSUER`: Should match `BASE_URL` hostname
+
+Edit `k8s/ingress.yaml` and replace `auth.example.com` / `app.example.com` with your domains.
+
+### Step 4: Update Image References
+
+Edit `k8s/backend-deployment.yaml` and `k8s/frontend-deployment.yaml` to reference your registry:
+
+```yaml
+image: registry.example.com/nyxid/backend:v0.1.0  # replace
+image: registry.example.com/nyxid/frontend:v0.1.0  # replace
+```
+
+### Step 5: Apply All Manifests
+
+```bash
+kubectl apply -f k8s/
+```
+
+### Step 6: Verify
+
+```bash
+# Check all resources
+kubectl get all -n nyxid
+
+# Check backend health
+kubectl port-forward -n nyxid svc/nyxid-backend 3001:3001
+curl http://localhost:3001/health
+
+# Check logs
+kubectl logs -n nyxid -l app.kubernetes.io/name=nyxid-backend --tail=50
+```
+
+### Scaling
+
+```bash
+# Scale backend horizontally
+kubectl scale deployment nyxid-backend -n nyxid --replicas=4
+
+# Scale frontend
+kubectl scale deployment nyxid-frontend -n nyxid --replicas=3
+```
+
+All backend instances must share the same RSA keys and encryption key (handled automatically via shared K8s secrets). See [Scaling](#scaling) for additional considerations.
+
+### TLS with cert-manager
+
+If using cert-manager for automatic TLS certificates:
+
+1. Install cert-manager and create a `ClusterIssuer`
+2. Uncomment the `cert-manager.io/cluster-issuer` annotation in `k8s/ingress.yaml`
+3. cert-manager will automatically provision and renew certificates
 
 ---
 
@@ -322,6 +405,7 @@ NyxID creates all required collections and indexes automatically on first startu
 | `downstream_services`    | Registered downstream services               |
 | `user_service_connections` | Per-user credential overrides              |
 | `mfa_factors`            | TOTP factors and recovery codes              |
+| `service_endpoints`      | Registered API endpoints per service (MCP tools) |
 | `audit_log`              | Immutable audit trail                        |
 
 ### MongoDB Atlas
@@ -658,6 +742,374 @@ The current rate limiter is per-instance (in-memory). When running multiple inst
 - An external rate limiter (e.g., Redis-backed)
 - Rate limiting at the reverse proxy / load balancer level
 - Accepting that per-instance limits are approximate but still effective
+
+---
+
+## Initial Admin Setup
+
+NyxID ships without a default admin account. You must create the first admin using one of the two methods below.
+
+### Option 1: Bootstrap Endpoint (Recommended for First Deploy)
+
+When the database is empty (zero users), NyxID exposes a one-time setup endpoint:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/auth/setup \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "admin@example.com",
+    "password": "secureadminpassword123",
+    "display_name": "Admin"
+  }'
+```
+
+This creates a user with `is_admin = true` and `email_verified = true`. The endpoint automatically locks itself after the first user is created -- subsequent calls return `403 Forbidden`.
+
+### Option 2: CLI Promote (For Existing Users)
+
+If a user has already registered through the normal flow, promote them to admin via the command line:
+
+```bash
+# Using cargo
+cargo run --manifest-path backend/Cargo.toml -- --promote-admin admin@example.com
+
+# Using the built binary
+./backend/target/release/nyxid --promote-admin admin@example.com
+```
+
+This sets `is_admin = true` and `email_verified = true` on the user. The command exits after completion (does not start the server).
+
+### Verification
+
+After creating the admin, verify by logging in and accessing an admin endpoint:
+
+```bash
+# Login as admin
+curl -X POST http://localhost:3001/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -c cookies.txt \
+  -d '{"email": "admin@example.com", "password": "secureadminpassword123"}'
+
+# Access admin endpoint
+curl http://localhost:3001/api/v1/admin/users \
+  -b cookies.txt
+```
+
+---
+
+## CLI Reference
+
+NyxID supports command-line flags for administrative operations.
+
+```
+nyxid [OPTIONS]
+
+Options:
+    --promote-admin <EMAIL>    Promote an existing user to admin by email, then exit
+    -h, --help                 Print help
+    -V, --version              Print version
+```
+
+### --promote-admin
+
+Promotes an existing user to admin by their email address. Requires a running MongoDB instance (reads `DATABASE_URL` from environment or `.env`).
+
+```bash
+nyxid --promote-admin user@example.com
+```
+
+Behavior:
+- Finds the user by email (case-insensitive)
+- Sets `is_admin = true` and `email_verified = true`
+- Logs an `admin_promoted` audit event
+- Prints the user ID on success
+- Exits with code 0 on success, 1 on failure
+- Does not start the HTTP server
+
+Errors:
+- `No user found with email: ...` -- The email is not registered
+- `User ... is already an admin` -- The user already has admin privileges
+
+---
+
+## OIDC Provider Configuration
+
+NyxID acts as a full OpenID Connect (OIDC) identity provider. Downstream services can delegate authentication to NyxID using the standard Authorization Code flow with PKCE.
+
+### How It Works
+
+1. An admin creates a downstream service in NyxID with `auth_type: "oidc"`.
+2. NyxID auto-provisions an OAuth client and generates a `client_id` and `client_secret`.
+3. The downstream service uses the OIDC discovery endpoint to auto-configure itself.
+4. Users authenticate via NyxID and are redirected back to the downstream service with an authorization code.
+5. The downstream service exchanges the code for access, refresh, and ID tokens.
+
+### Step 1: Create an OIDC Service
+
+```bash
+curl -X POST https://auth.example.com/api/v1/services \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Customer Portal",
+    "base_url": "https://portal.example.com",
+    "auth_type": "oidc"
+  }'
+```
+
+NyxID returns the service with an `oauth_client_id`. The default redirect URI is set to `https://portal.example.com/callback`.
+
+### Step 2: Retrieve OIDC Credentials
+
+```bash
+curl https://auth.example.com/api/v1/services/<service_id>/oidc-credentials \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+Response includes:
+- `client_id` -- The OAuth client identifier
+- `client_secret` -- The client secret (store securely)
+- `redirect_uris` -- Registered callback URLs
+- `issuer`, `authorization_endpoint`, `token_endpoint`, `userinfo_endpoint`, `jwks_uri` -- OIDC endpoints
+
+### Step 3: Configure Redirect URIs (Optional)
+
+If the default `{base_url}/callback` is not correct, update the redirect URIs:
+
+```bash
+curl -X PUT https://auth.example.com/api/v1/services/<service_id>/redirect-uris \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "redirect_uris": [
+      "https://portal.example.com/auth/callback",
+      "https://portal.example.com/api/auth/callback"
+    ]
+  }'
+```
+
+### Step 4: Configure the Downstream Service
+
+The downstream service uses the OIDC discovery URL to auto-configure the authorization flow. The discovery document is available at:
+
+```
+https://auth.example.com/.well-known/openid-configuration
+```
+
+### OIDC Protocol Details
+
+| Parameter            | Value                                                |
+|----------------------|------------------------------------------------------|
+| Flow                 | Authorization Code with PKCE (S256)                  |
+| Response Type        | `code`                                               |
+| Grant Types          | `authorization_code`, `refresh_token`                |
+| Token Signing        | RS256 (RSA SHA-256, 4096-bit key)                    |
+| Scopes               | `openid`, `profile`, `email`                         |
+| Client Auth Methods  | `client_secret_post`, `none` (for public clients)    |
+| ID Token Claims      | `sub`, `iss`, `aud`, `exp`, `iat`, `email`, `email_verified`, `name`, `picture`, `nonce` |
+
+### Example: NextAuth.js Configuration
+
+```javascript
+// pages/api/auth/[...nextauth].js
+import NextAuth from "next-auth";
+
+export default NextAuth({
+  providers: [
+    {
+      id: "nyxid",
+      name: "NyxID",
+      type: "oidc",
+      issuer: "https://auth.example.com",
+      clientId: "<client_id>",
+      clientSecret: "<client_secret>",
+      checks: ["pkce", "state"],
+    },
+  ],
+});
+```
+
+NextAuth.js will automatically fetch the discovery document from `https://auth.example.com/.well-known/openid-configuration` and configure all endpoints.
+
+### Example: Passport.js Configuration
+
+```javascript
+// auth.js
+const { Strategy } = require("openid-client");
+const { Issuer } = require("openid-client");
+
+async function setupAuth(app) {
+  const nyxidIssuer = await Issuer.discover("https://auth.example.com");
+
+  const client = new nyxidIssuer.Client({
+    client_id: "<client_id>",
+    client_secret: "<client_secret>",
+    redirect_uris: ["https://portal.example.com/callback"],
+    response_types: ["code"],
+  });
+
+  app.use(
+    "/auth",
+    new Strategy({ client, usePKCE: true }, (tokenSet, userinfo, done) => {
+      done(null, userinfo);
+    })
+  );
+}
+```
+
+### Secret Rotation
+
+To rotate an OIDC client secret without downtime:
+
+1. Regenerate the secret via the API:
+   ```bash
+   curl -X POST https://auth.example.com/api/v1/services/<service_id>/regenerate-secret \
+     -H "Authorization: Bearer <admin_access_token>"
+   ```
+2. Update the downstream service configuration with the new `client_secret`.
+3. Deploy the downstream service. The old secret is immediately invalidated.
+
+---
+
+## MCP Proxy Deployment
+
+The MCP proxy exposes NyxID-managed downstream services as Model Context Protocol (MCP) tools, allowing AI assistants to interact with registered APIs through a single authenticated endpoint.
+
+### Architecture
+
+```
+AI Client --[MCP/HTTP]--> MCP Proxy --[OAuth 2.1]--> NyxID Backend --[proxy]--> Downstream APIs
+```
+
+The proxy authenticates users via NyxID's OIDC endpoints and dynamically generates MCP tools from the service endpoints registered in NyxID.
+
+### Configuration
+
+| Variable | Description | Example |
+|---|---|---|
+| `NYXID_URL` | NyxID backend URL | `http://backend:3001` (Docker) or `https://auth.example.com` |
+| `NYXID_CLIENT_ID` | OAuth client ID registered in NyxID | `mcp-proxy` |
+| `NYXID_CLIENT_SECRET` | OAuth client secret | (from NyxID admin panel) |
+| `MCP_PORT` | Port for the MCP HTTP server | `3002` |
+
+### Setup
+
+1. Register an OAuth client in NyxID for the MCP proxy (type: confidential, scopes: `openid profile email`).
+2. Configure the environment variables (see above).
+3. Start the proxy:
+
+```bash
+# Development
+cd mcp-proxy
+cp .env.example .env
+# Edit .env with your NyxID credentials
+npm install
+npm run dev
+
+# Production (Docker)
+docker compose -f docker-compose.prod.yml up -d mcp-proxy
+```
+
+### MCP Client Configuration
+
+MCP clients connect to the proxy's Streamable HTTP endpoint:
+
+```
+POST http://localhost:3002/mcp
+```
+
+The proxy serves OAuth 2.1 Protected Resource Metadata at:
+
+```
+GET http://localhost:3002/.well-known/oauth-protected-resource
+```
+
+MCP clients that support OAuth (e.g., Claude Desktop) will automatically discover NyxID as the authorization server and prompt the user to authenticate via the browser.
+
+### How Tools Are Generated
+
+For each active downstream service with registered endpoints, the proxy creates MCP tools following this pattern:
+
+- **Tool name**: `{service_slug}__{endpoint_name}` (e.g., `stripe__list_customers`)
+- **Description**: `[{service_name}] {endpoint_description}`
+- **Input schema**: Derived from endpoint parameters and request body schema
+
+When a tool is called, the proxy:
+1. Resolves the service and endpoint from the tool name.
+2. Substitutes path parameters from tool arguments.
+3. Separates remaining arguments into query parameters and request body.
+4. Forwards the request through NyxID's authenticated proxy (`/api/v1/proxy/{service_id}/{path}`).
+
+### Client Configuration: Claude Code
+
+Add the NyxID MCP server to your Claude Code settings (`~/.claude/settings.json` or project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "nyxid": {
+      "url": "https://mcp.example.com/mcp"
+    }
+  }
+}
+```
+
+Claude Code supports OAuth-based MCP servers natively. On first use, it will open a browser window for authentication via NyxID.
+
+### Client Configuration: Cursor
+
+Add the NyxID MCP server to your Cursor settings (`.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "nyxid": {
+      "url": "https://mcp.example.com/mcp"
+    }
+  }
+}
+```
+
+Cursor will detect the OAuth Protected Resource Metadata at `/.well-known/oauth-protected-resource` and prompt for authentication automatically.
+
+### Health Check
+
+```bash
+curl http://localhost:3002/health
+# {"status":"ok","sessions":0}
+```
+
+### Reverse Proxy
+
+If exposing the MCP proxy externally, add it to your reverse proxy configuration:
+
+```
+# Caddy
+mcp.example.com {
+    reverse_proxy localhost:3002
+}
+```
+
+```nginx
+# Nginx
+server {
+    listen 443 ssl http2;
+    server_name mcp.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3002;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+Note the extended `proxy_read_timeout` -- MCP tool calls that proxy to slow downstream APIs may take longer than the default timeout.
 
 ---
 

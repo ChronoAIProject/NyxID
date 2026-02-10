@@ -219,5 +219,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 
     // ── oauth_clients ── (no special indexes beyond _id)
 
+    // ── service_endpoints ──
+    let endpoints = db.collection::<mongodb::bson::Document>("service_endpoints");
+    endpoints
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "service_id": 1, "is_active": 1 })
+                .build(),
+        )
+        .await?;
+    endpoints
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "service_id": 1, "name": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     Ok(())
 }

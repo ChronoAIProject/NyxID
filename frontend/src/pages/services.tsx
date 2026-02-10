@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import type { DownstreamService } from "@/types/api";
 import {
   useServices,
   useCreateService,
@@ -11,8 +12,10 @@ import {
   type CreateServiceFormData,
   AUTH_TYPES,
 } from "@/schemas/services";
+import { AUTH_TYPE_LABELS } from "@/lib/constants";
 import { ApiError } from "@/lib/api-client";
 import { ServiceCard } from "@/components/dashboard/service-card";
+import { ServiceDetailDialog } from "@/components/dashboard/service-detail-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,23 +39,22 @@ import { Input } from "@/components/ui/input";
 import { Plus, Server } from "lucide-react";
 import { toast } from "sonner";
 
-const AUTH_TYPE_LABELS: Record<string, string> = {
-  api_key: "API Key",
-  oauth2: "OAuth 2.0",
-  basic: "Basic Auth",
-  bearer: "Bearer Token",
-};
-
 export function ServicesPage() {
   const { data: services, isLoading } = useServices();
   const createMutation = useCreateService();
   const deleteMutation = useDeleteService();
-  const [open, setOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [selectedService, setSelectedService] =
+    useState<DownstreamService | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  // CR-11: Track which service is being deleted for per-card loading state
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const form = useForm<CreateServiceFormData>({
     resolver: zodResolver(createServiceSchema),
     defaultValues: {
       name: "",
+      description: "",
       base_url: "",
       auth_type: "api_key",
     },
@@ -62,8 +64,9 @@ export function ServicesPage() {
     try {
       await createMutation.mutateAsync(data);
       toast.success("Service created successfully");
+      // CR-12: Reset form before closing dialog to avoid React unmount race
+      setCreateOpen(false);
       form.reset();
-      setOpen(false);
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
@@ -73,13 +76,26 @@ export function ServicesPage() {
     }
   }
 
+  // CR-11: Track specific deleting ID for per-card loading state
   async function handleDelete(id: string) {
+    setDeletingId(id);
     try {
       await deleteMutation.mutateAsync(id);
       toast.success("Service deleted successfully");
+      if (selectedService?.id === id) {
+        setDetailOpen(false);
+        setSelectedService(null);
+      }
     } catch {
       toast.error("Failed to delete service");
+    } finally {
+      setDeletingId(null);
     }
+  }
+
+  function handleServiceClick(service: DownstreamService) {
+    setSelectedService(service);
+    setDetailOpen(true);
   }
 
   return (
@@ -91,7 +107,7 @@ export function ServicesPage() {
             Manage downstream services and their authentication.
           </p>
         </div>
-        <Dialog open={open} onOpenChange={setOpen}>
+        <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogTrigger asChild>
             <Button>
               <Plus className="mr-2 h-4 w-4" />
@@ -125,6 +141,24 @@ export function ServicesPage() {
                       <FormLabel>Service Name</FormLabel>
                       <FormControl>
                         <Input placeholder="My Service" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name="description"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Description</FormLabel>
+                      <FormControl>
+                        <textarea
+                          className="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                          placeholder="Optional description"
+                          {...field}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -178,7 +212,7 @@ export function ServicesPage() {
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={() => setOpen(false)}
+                    onClick={() => setCreateOpen(false)}
                   >
                     Cancel
                   </Button>
@@ -212,11 +246,18 @@ export function ServicesPage() {
               key={service.id}
               service={service}
               onDelete={(id) => void handleDelete(id)}
-              isDeleting={deleteMutation.isPending}
+              isDeleting={deletingId === service.id}
+              onClick={() => handleServiceClick(service)}
             />
           ))}
         </div>
       )}
+
+      <ServiceDetailDialog
+        service={selectedService}
+        open={detailOpen}
+        onOpenChange={setDetailOpen}
+      />
     </div>
   );
 }

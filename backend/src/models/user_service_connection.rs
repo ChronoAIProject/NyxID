@@ -10,10 +10,11 @@ pub struct UserServiceConnection {
     pub user_id: String,
     pub service_id: String,
     /// Per-user encrypted credential for this service (overrides service-level credential)
-    #[serde(skip_serializing)]
     pub credential_encrypted: Option<Vec<u8>>,
     pub metadata: Option<serde_json::Value>,
     pub is_active: bool,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }

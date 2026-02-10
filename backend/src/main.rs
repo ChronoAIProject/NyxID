@@ -1,4 +1,5 @@
 use axum::{extract::DefaultBodyLimit, extract::Extension, middleware as axum_mw};
+use clap::Parser;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -25,10 +26,23 @@ pub struct AppState {
     pub config: AppConfig,
     pub jwt_keys: JwtKeys,
     pub http_client: reqwest::Client,
+    /// Pre-computed JWK for the JWKS endpoint
+    pub jwk_json: serde_json::Value,
+}
+
+/// NyxID authentication and SSO platform.
+#[derive(Parser)]
+#[command(name = "nyxid", version, about)]
+struct Cli {
+    /// Promote an existing user to admin by email address, then exit.
+    #[arg(long = "promote-admin", value_name = "EMAIL")]
+    promote_admin: Option<String>,
 }
 
 #[tokio::main]
 async fn main() {
+    let cli = Cli::parse();
+
     // Load environment variables from .env file (if present)
     dotenvy::dotenv().ok();
 
@@ -40,23 +54,36 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
-    tracing::info!("Starting NyxID authentication server");
-
     // Load configuration
     let config = AppConfig::from_env();
-    tracing::info!(port = config.port, "Configuration loaded");
-
-    // Validate encryption key at startup
-    config.validate_encryption_key();
 
     // Connect to database
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
 
+    // Handle CLI commands (exit without starting server)
+    if let Some(email) = cli.promote_admin {
+        run_promote_admin(&db, &email).await;
+        return;
+    }
+
+    // --- Server startup ---
+    tracing::info!("Starting NyxID authentication server");
+    tracing::info!(port = config.port, "Configuration loaded");
+
+    // Validate encryption key at startup
+    config.validate_encryption_key();
+
     // Load JWT signing keys
     let jwt_keys = JwtKeys::from_config(&config).expect("Failed to load JWT keys");
-    tracing::info!("JWT keys loaded");
+    tracing::info!("JWT keys loaded (kid={})", jwt_keys.kid);
+
+    // Compute JWK from the public key for the JWKS endpoint
+    let public_pem = std::fs::read_to_string(&config.jwt_public_key_path)
+        .expect("Failed to read public key for JWK");
+    let jwk_json = crypto::jwt::public_key_jwk(&public_pem)
+        .expect("Failed to compute JWK from public key");
 
     // Create a shared reqwest client for connection reuse
     let http_client = reqwest::Client::builder()
@@ -70,6 +97,7 @@ async fn main() {
         config: config.clone(),
         jwt_keys,
         http_client,
+        jwk_json,
     };
 
     // Create rate limiters
@@ -140,4 +168,36 @@ async fn main() {
     axum::serve(listener, app)
         .await
         .expect("Server error");
+}
+
+/// Run the --promote-admin CLI command, then return.
+async fn run_promote_admin(db: &mongodb::Database, email: &str) {
+    use services::{audit_service, auth_service};
+
+    match auth_service::promote_user_to_admin(db, email).await {
+        Ok(user_id) => {
+            audit_service::log_async(
+                db.clone(),
+                Some(user_id.clone()),
+                "admin_promoted".to_string(),
+                Some(serde_json::json!({
+                    "email": email,
+                    "method": "cli"
+                })),
+                None,
+                None,
+            );
+
+            // Brief sleep to allow the async audit log write to complete
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            println!("Successfully promoted user to admin:");
+            println!("  Email:   {email}");
+            println!("  User ID: {user_id}");
+        }
+        Err(e) => {
+            eprintln!("Failed to promote admin: {e}");
+            std::process::exit(1);
+        }
+    }
 }

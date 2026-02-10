@@ -1,0 +1,121 @@
+use chrono::Utc;
+use futures::TryStreamExt;
+use mongodb::bson::{self, doc};
+use uuid::Uuid;
+
+use crate::crypto::token::{generate_random_token, hash_token};
+use crate::errors::{AppError, AppResult};
+use crate::models::oauth_client::{OauthClient, COLLECTION_NAME as OAUTH_CLIENTS};
+
+/// Create a new OAuth client.
+///
+/// Returns the persisted client and, for confidential clients, the raw client
+/// secret (which is only available at creation time -- only the hash is stored).
+pub async fn create_client(
+    db: &mongodb::Database,
+    name: &str,
+    redirect_uris: &[String],
+    client_type: &str,
+    created_by: &str,
+) -> AppResult<(OauthClient, Option<String>)> {
+    let client_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+
+    let (secret_hash, raw_secret) = if client_type == "confidential" {
+        let secret = generate_random_token();
+        let hash = hash_token(&secret);
+        (hash, Some(secret))
+    } else {
+        (String::new(), None)
+    };
+
+    let client = OauthClient {
+        id: client_id,
+        client_name: name.to_string(),
+        client_secret_hash: secret_hash,
+        redirect_uris: redirect_uris.to_vec(),
+        allowed_scopes: "openid profile email".to_string(),
+        grant_types: "authorization_code".to_string(),
+        client_type: client_type.to_string(),
+        is_active: true,
+        created_by: Some(created_by.to_string()),
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.collection::<OauthClient>(OAUTH_CLIENTS)
+        .insert_one(&client)
+        .await?;
+
+    Ok((client, raw_secret))
+}
+
+/// List all OAuth clients (active and inactive).
+pub async fn list_clients(db: &mongodb::Database) -> AppResult<Vec<OauthClient>> {
+    let clients: Vec<OauthClient> = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find(doc! {})
+        .sort(doc! { "created_at": -1 })
+        .await?
+        .try_collect()
+        .await?;
+
+    Ok(clients)
+}
+
+/// Fetch a single OAuth client by ID.
+pub async fn get_client(db: &mongodb::Database, client_id: &str) -> AppResult<OauthClient> {
+    db.collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one(doc! { "_id": client_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("OAuth client not found".to_string()))
+}
+
+/// Update the redirect URIs on an OAuth client.
+pub async fn update_redirect_uris(
+    db: &mongodb::Database,
+    client_id: &str,
+    redirect_uris: &[String],
+) -> AppResult<()> {
+    let now = Utc::now();
+    let result = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .update_one(
+            doc! { "_id": client_id, "is_active": true },
+            doc! { "$set": {
+                "redirect_uris": bson::to_bson(redirect_uris).map_err(|e| {
+                    AppError::Internal(format!("Failed to convert redirect_uris to bson: {e}"))
+                })?,
+                "updated_at": bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("OAuth client not found".to_string()));
+    }
+
+    Ok(())
+}
+
+/// Soft-delete an OAuth client by marking it inactive.
+pub async fn delete_client(db: &mongodb::Database, client_id: &str) -> AppResult<()> {
+    let now = Utc::now();
+
+    let result = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .update_one(
+            doc! { "_id": client_id },
+            doc! { "$set": {
+                "is_active": false,
+                "updated_at": bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("OAuth client not found".to_string()));
+    }
+
+    Ok(())
+}

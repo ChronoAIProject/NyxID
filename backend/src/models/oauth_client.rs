@@ -9,10 +9,9 @@ pub struct OauthClient {
     pub id: String,
     pub client_name: String,
     /// Hashed client secret (SHA-256)
-    #[serde(skip_serializing)]
     pub client_secret_hash: String,
-    /// JSON array of allowed redirect URIs
-    pub redirect_uris: serde_json::Value,
+    /// Allowed redirect URIs
+    pub redirect_uris: Vec<String>,
     /// Space-separated allowed scopes
     pub allowed_scopes: String,
     /// "authorization_code", "client_credentials", etc.
@@ -21,6 +20,8 @@ pub struct OauthClient {
     pub client_type: String,
     pub is_active: bool,
     pub created_by: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }

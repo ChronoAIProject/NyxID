@@ -11,6 +11,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::authorization_code::{AuthorizationCode, COLLECTION_NAME as AUTH_CODES};
 use crate::models::oauth_client::{OauthClient, COLLECTION_NAME as OAUTH_CLIENTS};
 use crate::models::refresh_token::{RefreshToken, COLLECTION_NAME as REFRESH_TOKENS};
+use crate::models::user::{User, COLLECTION_NAME as USERS};
 
 /// Validate an OAuth client and its redirect URI.
 pub async fn validate_client(
@@ -29,10 +30,7 @@ pub async fn validate_client(
     }
 
     // Validate redirect_uri against registered URIs
-    let uris: Vec<String> = serde_json::from_value(client.redirect_uris.clone())
-        .map_err(|_| AppError::Internal("Invalid redirect_uris in database".to_string()))?;
-
-    if !uris.iter().any(|uri| uri == redirect_uri) {
+    if !client.redirect_uris.iter().any(|uri| uri == redirect_uri) {
         return Err(AppError::InvalidRedirectUri);
     }
 
@@ -276,14 +274,21 @@ pub async fn exchange_authorization_code(
 
     // Generate ID token if openid scope was requested
     let id_token = if stored.scope.split_whitespace().any(|s| s == "openid") {
+        // Fetch user to populate claims
+        let user = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &stored.user_id })
+            .await?
+            .ok_or_else(|| AppError::Internal("User not found for ID token".to_string()))?;
+
         Some(crate::crypto::jwt::generate_id_token(
             jwt_keys,
             config,
             &user_uuid,
-            None,  // would be populated from user record
-            None,
-            None,
-            None,
+            Some(&user.email),
+            Some(user.email_verified),
+            user.display_name.as_deref(),
+            user.avatar_url.as_deref(),
             client_id,
             stored.nonce.as_deref(),
         )?)

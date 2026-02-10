@@ -7,7 +7,7 @@ use axum::{
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
-use crate::services::proxy_service;
+use crate::services::{audit_service, proxy_service};
 use crate::AppState;
 
 /// ANY /api/v1/proxy/:service_id/*path
@@ -109,6 +109,21 @@ pub async fn proxy_request(
     let response = response_builder
         .body(Body::from(response_body))
         .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?;
+
+    // Audit log the proxy request
+    audit_service::log_async(
+        state.db.clone(),
+        Some(auth_user.user_id.to_string()),
+        "proxy_request".to_string(),
+        Some(serde_json::json!({
+            "service_id": &service_id,
+            "method": method.as_str(),
+            "path": &path,
+            "response_status": status.as_u16(),
+        })),
+        None,
+        None,
+    );
 
     Ok(response)
 }

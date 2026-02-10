@@ -7,7 +7,10 @@ export function useApiKeys() {
   return useQuery({
     queryKey: ["api-keys"],
     queryFn: async (): Promise<readonly ApiKey[]> => {
-      return api.get<readonly ApiKey[]>("/api-keys");
+      const res = await api.get<{ readonly keys: readonly ApiKey[] }>(
+        "/api-keys",
+      );
+      return res.keys;
     },
   });
 }

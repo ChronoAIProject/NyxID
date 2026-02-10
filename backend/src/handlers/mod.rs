@@ -1,9 +1,15 @@
 pub mod admin;
 pub mod api_keys;
 pub mod auth;
+pub mod connections;
+pub mod endpoints;
 pub mod health;
+pub mod mcp;
 pub mod mfa;
 pub mod oauth;
+pub mod oidc_discovery;
 pub mod proxy;
 pub mod services;
+mod services_helpers;
+pub mod sessions;
 pub mod users;

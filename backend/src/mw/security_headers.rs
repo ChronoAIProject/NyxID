@@ -70,5 +70,15 @@ pub async fn security_headers_middleware(
         "1; mode=block".parse().unwrap(),
     );
 
+    // Prevent caching of API responses (SEC-6: protects credential endpoints)
+    headers.insert(
+        header::CACHE_CONTROL,
+        "no-store, no-cache, must-revalidate".parse().unwrap(),
+    );
+    headers.insert(
+        header::PRAGMA,
+        "no-cache".parse().unwrap(),
+    );
+
     response
 }

@@ -31,19 +31,71 @@ export interface ApiKeyCreateResponse {
 
 export interface OAuthClient {
   readonly id: string;
-  readonly name: string;
-  readonly redirect_uris: readonly string[];
-  readonly scopes: readonly string[];
-  readonly grant_types: readonly string[];
+  readonly client_name: string;
   readonly client_type: "public" | "confidential";
+  readonly redirect_uris: readonly string[];
+  readonly allowed_scopes: string;
+  readonly is_active: boolean;
+  readonly client_secret: string | null;
+  readonly created_at: string;
 }
 
 export interface DownstreamService {
   readonly id: string;
   readonly name: string;
+  readonly slug: string;
+  readonly description: string | null;
   readonly base_url: string;
-  readonly auth_type: "api_key" | "oauth2" | "basic" | "bearer";
+  readonly auth_method: string;
+  readonly auth_type: string | null;
+  readonly auth_key_name: string;
+  readonly is_active: boolean;
+  readonly oauth_client_id: string | null;
+  readonly api_spec_url: string | null;
+  readonly created_by: string;
   readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface ServiceEndpoint {
+  readonly id: string;
+  readonly service_id: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly method: string;
+  readonly path: string;
+  readonly parameters: unknown | null;
+  readonly request_body_schema: unknown | null;
+  readonly response_description: string | null;
+  readonly is_active: boolean;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface DiscoverEndpointsResponse {
+  readonly endpoints: readonly ServiceEndpoint[];
+  readonly message: string;
+}
+
+export interface OidcCredentials {
+  readonly client_id: string;
+  readonly client_secret: string;
+  readonly redirect_uris: readonly string[];
+  readonly allowed_scopes: string;
+  readonly issuer: string;
+  readonly authorization_endpoint: string;
+  readonly token_endpoint: string;
+  readonly userinfo_endpoint: string;
+  readonly jwks_uri: string;
+}
+
+export interface RegenerateSecretResponse {
+  readonly client_secret: string;
+  readonly message: string;
+}
+
+export interface RedirectUrisResponse {
+  readonly redirect_uris: readonly string[];
 }
 
 export interface UserServiceConnection {
