@@ -100,6 +100,44 @@ handlers/ --> services/ --> models/
 - Sensitive fields (encrypted data, password hashes) are excluded from response structs
 - Timestamps are formatted as RFC 3339 strings in responses
 
+### Admin Endpoint Patterns
+
+Admin endpoints follow a consistent pattern for access control and self-protection:
+
+```rust
+pub async fn admin_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Json(body): Json<ActionRequest>,
+) -> AppResult<Json<ActionResponse>> {
+    // 1. Verify admin status (DB check, not just JWT claim)
+    require_admin(&state, &auth_user).await?;
+
+    // 2. Self-protection check (where applicable)
+    let admin_id = auth_user.user_id.to_string();
+    if admin_id == user_id {
+        return Err(AppError::ValidationError("Cannot modify yourself".to_string()));
+    }
+
+    // 3. Call service layer
+    admin_user_service::some_action(&state.db, &admin_id, &user_id, ...).await?;
+
+    // 4. Audit log with actor, target, IP, and user-agent
+    audit_service::log_async(
+        state.db.clone(),
+        Some(admin_id),
+        "admin.user.action".to_string(),
+        Some(serde_json::json!({ "target_user_id": &user_id })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    Ok(Json(ActionResponse { ... }))
+}
+```
+
 ### Audit Logging
 
 All significant actions are audit-logged via `audit_service::log_async()`:

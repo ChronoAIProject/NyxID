@@ -17,6 +17,8 @@ pub struct UserProfileResponse {
     pub avatar_url: Option<String>,
     pub email_verified: bool,
     pub mfa_enabled: bool,
+    pub is_admin: bool,
+    pub is_active: bool,
     pub created_at: String,
     pub last_login_at: Option<String>,
 }
@@ -61,6 +63,8 @@ pub async fn get_me(
         avatar_url: user_model.avatar_url,
         email_verified: user_model.email_verified,
         mfa_enabled: user_model.mfa_enabled,
+        is_admin: user_model.is_admin,
+        is_active: user_model.is_active,
         created_at: user_model.created_at.to_rfc3339(),
         last_login_at: user_model.last_login_at.map(|t| t.to_rfc3339()),
     }))

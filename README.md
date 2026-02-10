@@ -72,10 +72,15 @@ It provides a complete identity layer: user registration, session management, Op
 - Single source of truth for mapping users to downstream APIs
 
 ### Administration
-- User listing with pagination
-- Per-user detail views
-- Audit log with action, resource, IP, and user-agent tracking
-- Admin-only access control
+- Full admin user management: list, view, edit, delete users
+- Role management: promote/demote admin privileges (with self-protection)
+- Account control: enable/disable users with automatic session and API key revocation
+- Force password reset with session revocation
+- Manual email verification
+- Per-user session listing and bulk session revocation
+- Cascade user deletion across 8 related collections (audit logs preserved)
+- Audit log with action, resource, IP, and user-agent tracking (filterable by user)
+- OAuth client management (create, list, deactivate)
 
 ### Credential Broker
 - Admin-managed provider registry (OpenAI, Anthropic, Google AI, Mistral, Cohere, etc.)
@@ -280,9 +285,18 @@ For the full API reference with request/response schemas and example curl comman
 | GET    | `/oauth/authorize`                   | Required | OIDC authorization endpoint          |
 | POST   | `/oauth/token`                       | None     | OIDC token endpoint                  |
 | GET    | `/oauth/userinfo`                    | Required | OIDC userinfo endpoint               |
-| GET    | `/api/v1/admin/users`                | Admin    | List all users (paginated)           |
+| GET    | `/api/v1/admin/users`                | Admin    | List users (paginated, searchable)   |
+| POST   | `/api/v1/admin/users`                | Admin    | Create a new user                    |
 | GET    | `/api/v1/admin/users/{user_id}`      | Admin    | Get user details                     |
-| GET    | `/api/v1/admin/audit-log`            | Admin    | Query audit log (paginated)          |
+| PUT    | `/api/v1/admin/users/{user_id}`      | Admin    | Edit user profile                    |
+| PATCH  | `/api/v1/admin/users/{user_id}/role` | Admin    | Toggle admin role                    |
+| PATCH  | `/api/v1/admin/users/{user_id}/status`| Admin   | Enable/disable user                  |
+| POST   | `/api/v1/admin/users/{user_id}/reset-password` | Admin | Force password reset        |
+| DELETE | `/api/v1/admin/users/{user_id}`      | Admin    | Delete user (cascade)                |
+| PATCH  | `/api/v1/admin/users/{user_id}/verify-email` | Admin | Manual email verification    |
+| GET    | `/api/v1/admin/users/{user_id}/sessions` | Admin | List user sessions                |
+| DELETE | `/api/v1/admin/users/{user_id}/sessions` | Admin | Revoke all user sessions         |
+| GET    | `/api/v1/admin/audit-log`            | Admin    | Query audit log (paginated, filterable) |
 | GET    | `/api/v1/providers`                  | Required | List provider configurations          |
 | POST   | `/api/v1/providers`                  | Admin    | Register a provider                   |
 | GET    | `/api/v1/providers/{id}`             | Required | Get a provider                        |
@@ -569,7 +583,7 @@ NyxID/
 |       |   |-- proxy.rs        Reverse proxy handler (+ identity + delegation)
 |       |   |-- mcp.rs          MCP config endpoint
 |       |   |-- oauth.rs        OIDC authorize, token, userinfo
-|       |   |-- admin.rs        Admin user/audit endpoints
+|       |   |-- admin.rs        Admin user management, audit log, OAuth client endpoints
 |       |   |-- mfa.rs          MFA setup and verification
 |       |   `-- health.rs       Health check
 |       |-- services/           Business logic layer
@@ -585,6 +599,7 @@ NyxID/
 |       |   |-- identity_service.rs Identity propagation headers + JWT assertions
 |       |   |-- oauth_flow.rs       OAuth2 utilities (PKCE, token exchange, refresh)
 |       |   |-- mfa_service.rs      TOTP provisioning, verification
+|       |   |-- admin_user_service.rs Admin user CRUD, cascade delete, session revocation
 |       |   `-- audit_service.rs    Async audit log insertion
 |       `-- mw/                 Middleware
 |           |-- auth.rs         AuthUser extractor (Bearer / cookie / API key)
@@ -600,14 +615,18 @@ NyxID/
         |-- lib/                API client, utilities
         |-- stores/             Zustand auth state store
         |-- types/              TypeScript API type definitions
+        |   |-- api.ts
+        |   `-- admin.ts       Admin-specific types
         |-- schemas/            Zod validation schemas
+        |   `-- admin.ts       Admin form schemas
         |-- hooks/              React Query hooks
+        |   `-- use-admin.ts   Admin user management hooks
         |-- components/
         |   |-- ui/             16 shadcn/ui primitives
         |   |-- auth/           Login, register, MFA forms
         |   |-- dashboard/      Sidebar, header, tables, cards
         |   `-- layout/         Auth and dashboard layout shells
-        `-- pages/              Route pages (login, register, dashboard, etc.)
+        `-- pages/              Route pages (login, register, dashboard, admin-users, admin-user-detail, etc.)
 ```
 
 ---

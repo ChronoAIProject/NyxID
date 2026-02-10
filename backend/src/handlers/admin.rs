@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
+    http::{header, HeaderMap},
     Json,
 };
 use futures::TryStreamExt;
@@ -10,15 +11,23 @@ use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::user::{User, COLLECTION_NAME as USERS};
-use crate::services::oauth_client_service;
+use crate::services::{admin_user_service, audit_service, oauth_client_service};
 use crate::AppState;
 
 // --- Request / Response types ---
 
 #[derive(Debug, Deserialize)]
-pub struct PaginationQuery {
+pub struct UserListQuery {
     pub page: Option<u64>,
     pub per_page: Option<u64>,
+    pub search: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditLogQuery {
+    pub page: Option<u64>,
+    pub per_page: Option<u64>,
+    pub user_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -26,6 +35,7 @@ pub struct AdminUserItem {
     pub id: String,
     pub email: String,
     pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
     pub email_verified: bool,
     pub is_active: bool,
     pub is_admin: bool,
@@ -47,7 +57,9 @@ pub struct AuditLogItem {
     pub id: String,
     pub user_id: Option<String>,
     pub event_type: String,
+    pub event_data: Option<serde_json::Value>,
     pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
     pub created_at: String,
 }
 
@@ -57,6 +69,94 @@ pub struct AuditLogListResponse {
     pub total: u64,
     pub page: u64,
     pub per_page: u64,
+}
+
+// --- New request/response types for admin user management ---
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUserRequest {
+    pub email: String,
+    pub password: String,
+    pub display_name: Option<String>,
+    pub role: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateUserResponse {
+    pub id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub is_admin: bool,
+    pub is_active: bool,
+    pub email_verified: bool,
+    pub created_at: String,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateUserRequest {
+    pub display_name: Option<String>,
+    pub email: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetRoleRequest {
+    pub is_admin: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetStatusRequest {
+    pub is_active: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminActionResponse {
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoleUpdateResponse {
+    pub id: String,
+    pub is_admin: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatusUpdateResponse {
+    pub id: String,
+    pub is_active: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VerifyEmailResponse {
+    pub id: String,
+    pub email_verified: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminSessionItem {
+    pub id: String,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub created_at: String,
+    pub expires_at: String,
+    pub last_active_at: String,
+    pub revoked: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminSessionListResponse {
+    pub sessions: Vec<AdminSessionItem>,
+    pub total: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RevokeSessionsResponse {
+    pub revoked_count: u64,
+    pub message: String,
 }
 
 // --- Helpers ---
@@ -81,7 +181,107 @@ async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> 
     Ok(())
 }
 
+/// Extract the client IP from headers (X-Forwarded-For) or return None.
+fn extract_ip(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Extract the User-Agent header.
+fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+}
+
+/// Convert a User model into an AdminUserItem response struct.
+fn user_to_admin_item(u: User) -> AdminUserItem {
+    AdminUserItem {
+        id: u.id,
+        email: u.email,
+        display_name: u.display_name,
+        avatar_url: u.avatar_url,
+        email_verified: u.email_verified,
+        is_active: u.is_active,
+        is_admin: u.is_admin,
+        mfa_enabled: u.mfa_enabled,
+        created_at: u.created_at.to_rfc3339(),
+        last_login_at: u.last_login_at.map(|t| t.to_rfc3339()),
+    }
+}
+
 // --- Handlers ---
+
+/// POST /api/v1/admin/users
+///
+/// Create a new user (admin only). The created account is pre-verified and active.
+pub async fn create_user(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    Json(body): Json<CreateUserRequest>,
+) -> AppResult<Json<CreateUserResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    // Validate email format
+    let email = body.email.trim().to_string();
+    if email.is_empty() {
+        return Err(AppError::ValidationError(
+            "Email is required".to_string(),
+        ));
+    }
+
+    // Validate password minimum length
+    if body.password.len() < 8 {
+        return Err(AppError::ValidationError(
+            "Password must be at least 8 characters".to_string(),
+        ));
+    }
+
+    // Validate role
+    if body.role != "admin" && body.role != "user" {
+        return Err(AppError::ValidationError(
+            "Role must be 'admin' or 'user'".to_string(),
+        ));
+    }
+
+    let user = admin_user_service::create_user(
+        &state.db,
+        &email,
+        &body.password,
+        body.display_name.as_deref(),
+        &body.role,
+    )
+    .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(auth_user.user_id.to_string()),
+        "admin.user.created".to_string(),
+        Some(serde_json::json!({
+            "target_user_id": &user.id,
+            "target_email": &user.email,
+            "is_admin": user.is_admin,
+        })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    Ok(Json(CreateUserResponse {
+        id: user.id,
+        email: user.email,
+        display_name: user.display_name,
+        is_admin: user.is_admin,
+        is_active: user.is_active,
+        email_verified: user.email_verified,
+        created_at: user.created_at.to_rfc3339(),
+        message: "User created successfully".to_string(),
+    }))
+}
 
 /// GET /api/v1/admin/users
 ///
@@ -89,24 +289,32 @@ async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> 
 pub async fn list_users(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Query(pagination): Query<PaginationQuery>,
+    Query(query): Query<UserListQuery>,
 ) -> AppResult<Json<AdminUserListResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    let page = pagination.page.unwrap_or(1).max(1);
-    let per_page = pagination.per_page.unwrap_or(50).min(100);
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(50).min(100);
     let offset = (page - 1) * per_page;
+
+    let filter = match query.search.as_deref() {
+        Some(s) if !s.is_empty() => {
+            let escaped = regex::escape(s);
+            doc! { "email": { "$regex": &escaped, "$options": "i" } }
+        }
+        _ => doc! {},
+    };
 
     let total = state
         .db
         .collection::<User>(USERS)
-        .count_documents(doc! {})
+        .count_documents(filter.clone())
         .await?;
 
     let users: Vec<User> = state
         .db
         .collection::<User>(USERS)
-        .find(doc! {})
+        .find(filter)
         .sort(doc! { "created_at": -1 })
         .skip(offset)
         .limit(per_page as i64)
@@ -114,20 +322,7 @@ pub async fn list_users(
         .try_collect()
         .await?;
 
-    let items: Vec<AdminUserItem> = users
-        .into_iter()
-        .map(|u| AdminUserItem {
-            id: u.id,
-            email: u.email,
-            display_name: u.display_name,
-            email_verified: u.email_verified,
-            is_active: u.is_active,
-            is_admin: u.is_admin,
-            mfa_enabled: u.mfa_enabled,
-            created_at: u.created_at.to_rfc3339(),
-            last_login_at: u.last_login_at.map(|t| t.to_rfc3339()),
-        })
-        .collect();
+    let items: Vec<AdminUserItem> = users.into_iter().map(user_to_admin_item).collect();
 
     Ok(Json(AdminUserListResponse {
         users: items,
@@ -147,52 +342,333 @@ pub async fn get_user(
 ) -> AppResult<Json<AdminUserItem>> {
     require_admin(&state, &auth_user).await?;
 
-    let user_id_str = user_id;
-
     let user_model = state
         .db
         .collection::<User>(USERS)
-        .find_one(doc! { "_id": &user_id_str })
+        .find_one(doc! { "_id": &user_id })
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    Ok(Json(AdminUserItem {
-        id: user_model.id,
-        email: user_model.email,
-        display_name: user_model.display_name,
-        email_verified: user_model.email_verified,
-        is_active: user_model.is_active,
-        is_admin: user_model.is_admin,
-        mfa_enabled: user_model.mfa_enabled,
-        created_at: user_model.created_at.to_rfc3339(),
-        last_login_at: user_model.last_login_at.map(|t| t.to_rfc3339()),
+    Ok(Json(user_to_admin_item(user_model)))
+}
+
+/// PUT /api/v1/admin/users/:user_id
+///
+/// Edit a user's profile fields (admin only).
+pub async fn update_user(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Json(body): Json<UpdateUserRequest>,
+) -> AppResult<Json<AdminUserItem>> {
+    require_admin(&state, &auth_user).await?;
+
+    let updated = admin_user_service::update_user(
+        &state.db,
+        &user_id,
+        body.display_name.as_deref(),
+        body.email.as_deref(),
+        body.avatar_url.as_deref(),
+    )
+    .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(auth_user.user_id.to_string()),
+        "admin.user.updated".to_string(),
+        Some(serde_json::json!({
+            "target_user_id": &user_id,
+            "target_email": &updated.email,
+            "changes": {
+                "display_name": body.display_name,
+                "email": body.email,
+                "avatar_url": body.avatar_url,
+            }
+        })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    Ok(Json(user_to_admin_item(updated)))
+}
+
+/// PATCH /api/v1/admin/users/:user_id/role
+///
+/// Toggle admin role for a user (admin only, cannot change own role).
+pub async fn set_user_role(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Json(body): Json<SetRoleRequest>,
+) -> AppResult<Json<RoleUpdateResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    let admin_id = auth_user.user_id.to_string();
+
+    admin_user_service::set_admin_role(&state.db, &admin_id, &user_id, body.is_admin)
+        .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(admin_id),
+        "admin.user.role_changed".to_string(),
+        Some(serde_json::json!({
+            "target_user_id": &user_id,
+            "is_admin": body.is_admin,
+        })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    Ok(Json(RoleUpdateResponse {
+        id: user_id,
+        is_admin: body.is_admin,
+        message: "User admin role updated".to_string(),
+    }))
+}
+
+/// PATCH /api/v1/admin/users/:user_id/status
+///
+/// Toggle active status for a user (admin only, cannot change own status).
+/// When disabling, all sessions are revoked.
+pub async fn set_user_status(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+    Json(body): Json<SetStatusRequest>,
+) -> AppResult<Json<StatusUpdateResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    let admin_id = auth_user.user_id.to_string();
+
+    admin_user_service::set_user_active(&state.db, &admin_id, &user_id, body.is_active)
+        .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(admin_id),
+        "admin.user.status_changed".to_string(),
+        Some(serde_json::json!({
+            "target_user_id": &user_id,
+            "is_active": body.is_active,
+        })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    Ok(Json(StatusUpdateResponse {
+        id: user_id,
+        is_active: body.is_active,
+        message: "User status updated".to_string(),
+    }))
+}
+
+/// POST /api/v1/admin/users/:user_id/reset-password
+///
+/// Force a password reset for a user (admin only). Revokes all sessions.
+pub async fn force_password_reset(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+) -> AppResult<Json<AdminActionResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    let token = admin_user_service::force_password_reset(&state.db, &user_id).await?;
+
+    #[cfg(debug_assertions)]
+    if let Some(ref t) = token {
+        tracing::debug!(token = %t, user_id = %user_id, "Admin-initiated password reset token (dev only)");
+    }
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(auth_user.user_id.to_string()),
+        "admin.user.password_reset".to_string(),
+        Some(serde_json::json!({ "target_user_id": &user_id })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    Ok(Json(AdminActionResponse {
+        message: "Password reset initiated".to_string(),
+    }))
+}
+
+/// DELETE /api/v1/admin/users/:user_id
+///
+/// Delete a user with full cascade cleanup (admin only, cannot delete self).
+pub async fn delete_user(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+) -> AppResult<Json<AdminActionResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    let admin_id = auth_user.user_id.to_string();
+
+    // Fetch user email before deletion for audit log
+    let target = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+    let target_email = target.email.clone();
+
+    admin_user_service::delete_user_cascade(&state.db, &admin_id, &user_id).await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(admin_id),
+        "admin.user.deleted".to_string(),
+        Some(serde_json::json!({
+            "target_user_id": &user_id,
+            "target_email": &target_email,
+        })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    Ok(Json(AdminActionResponse {
+        message: "User deleted".to_string(),
+    }))
+}
+
+/// PATCH /api/v1/admin/users/:user_id/verify-email
+///
+/// Manually verify a user's email (admin only).
+pub async fn verify_user_email(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+) -> AppResult<Json<VerifyEmailResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    admin_user_service::verify_email(&state.db, &user_id).await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(auth_user.user_id.to_string()),
+        "admin.user.email_verified".to_string(),
+        Some(serde_json::json!({ "target_user_id": &user_id })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    Ok(Json(VerifyEmailResponse {
+        id: user_id,
+        email_verified: true,
+        message: "Email verified".to_string(),
+    }))
+}
+
+/// GET /api/v1/admin/users/:user_id/sessions
+///
+/// List all sessions for a user (admin only).
+pub async fn list_user_sessions(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(user_id): Path<String>,
+) -> AppResult<Json<AdminSessionListResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    let sessions = admin_user_service::list_user_sessions(&state.db, &user_id).await?;
+
+    let total = sessions.len() as u64;
+    let items: Vec<AdminSessionItem> = sessions
+        .into_iter()
+        .map(|s| AdminSessionItem {
+            id: s.id,
+            ip_address: s.ip_address,
+            user_agent: s.user_agent,
+            created_at: s.created_at.to_rfc3339(),
+            expires_at: s.expires_at.to_rfc3339(),
+            last_active_at: s.last_active_at.to_rfc3339(),
+            revoked: s.revoked,
+        })
+        .collect();
+
+    Ok(Json(AdminSessionListResponse {
+        sessions: items,
+        total,
+    }))
+}
+
+/// DELETE /api/v1/admin/users/:user_id/sessions
+///
+/// Revoke all sessions for a user (admin only).
+pub async fn revoke_user_sessions(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+    Path(user_id): Path<String>,
+) -> AppResult<Json<RevokeSessionsResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    // Verify user exists
+    let _target = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let revoked_count =
+        admin_user_service::revoke_all_user_sessions(&state.db, &user_id).await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(auth_user.user_id.to_string()),
+        "admin.user.sessions_revoked".to_string(),
+        Some(serde_json::json!({
+            "target_user_id": &user_id,
+            "revoked_count": revoked_count,
+        })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    Ok(Json(RevokeSessionsResponse {
+        revoked_count,
+        message: "All sessions revoked".to_string(),
     }))
 }
 
 /// GET /api/v1/admin/audit-log
 ///
-/// Query the audit log (admin only). Supports pagination.
+/// Query the audit log (admin only). Supports pagination and user_id filter.
 pub async fn list_audit_log(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Query(pagination): Query<PaginationQuery>,
+    Query(query): Query<AuditLogQuery>,
 ) -> AppResult<Json<AuditLogListResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    let page = pagination.page.unwrap_or(1).max(1);
-    let per_page = pagination.per_page.unwrap_or(50).min(100);
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(50).min(100);
     let offset = (page - 1) * per_page;
+
+    let mut filter = doc! {};
+    if let Some(ref uid) = query.user_id {
+        filter.insert("user_id", uid);
+    }
 
     let total = state
         .db
         .collection::<AuditLog>(AUDIT_LOG)
-        .count_documents(doc! {})
+        .count_documents(filter.clone())
         .await?;
 
     let entries: Vec<AuditLog> = state
         .db
         .collection::<AuditLog>(AUDIT_LOG)
-        .find(doc! {})
+        .find(filter)
         .sort(doc! { "created_at": -1 })
         .skip(offset)
         .limit(per_page as i64)
@@ -206,7 +682,9 @@ pub async fn list_audit_log(
             id: e.id,
             user_id: e.user_id,
             event_type: e.event_type,
+            event_data: e.event_data,
             ip_address: e.ip_address,
+            user_agent: e.user_agent,
             created_at: e.created_at.to_rfc3339(),
         })
         .collect();

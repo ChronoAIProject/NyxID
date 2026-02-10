@@ -28,6 +28,8 @@ import { ProvidersCallbackPage } from "@/pages/providers-callback";
 import { ProviderListPage } from "@/pages/provider-list";
 import { ProviderDetailPage } from "@/pages/provider-detail";
 import { ProviderEditPage } from "@/pages/provider-edit";
+import { AdminUsersPage } from "@/pages/admin-users";
+import { AdminUserDetailPage } from "@/pages/admin-user-detail";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -164,6 +166,33 @@ const providerEditRoute = createRoute({
   component: ProviderEditPage,
 });
 
+const adminLayout = createRoute({
+  path: "/admin",
+  getParentRoute: () => dashboardLayout,
+  beforeLoad: () => {
+    const { user, isAuthenticated, isLoading } = useAuthStore.getState();
+    if (!isAuthenticated && !isLoading) {
+      throw redirect({ to: "/login" });
+    }
+    if (!isLoading && (!user || !user.is_admin)) {
+      throw redirect({ to: "/" });
+    }
+  },
+  component: () => <Outlet />,
+});
+
+const adminUsersRoute = createRoute({
+  path: "users",
+  getParentRoute: () => adminLayout,
+  component: AdminUsersPage,
+});
+
+const adminUserDetailRoute = createRoute({
+  path: "users/$userId",
+  getParentRoute: () => adminLayout,
+  component: AdminUserDetailPage,
+});
+
 const routeTree = rootRoute.addChildren([
   authLayout.addChildren([loginRoute, registerRoute]),
   dashboardLayout.addChildren([
@@ -184,6 +213,7 @@ const routeTree = rootRoute.addChildren([
     ]),
     settingsRoute,
     guideRoute,
+    adminLayout.addChildren([adminUsersRoute, adminUserDetailRoute]),
   ]),
 ]);
 

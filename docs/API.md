@@ -2677,20 +2677,21 @@ curl -X POST http://localhost:3001/api/v1/mfa/verify-setup \
 
 ### Admin
 
-All admin endpoints require the authenticated user to have `is_admin = true`.
+All admin endpoints require the authenticated user to have `is_admin = true`. Admin endpoints include self-protection: admins cannot change their own role, disable themselves, or delete themselves.
 
 #### GET /api/v1/admin/users
 
-List all users with pagination.
+List all users with pagination and optional email search.
 
 **Auth:** Admin
 
 **Query Parameters:**
 
-| Parameter  | Type    | Default | Description                     |
-|------------|---------|---------|---------------------------------|
-| `page`     | integer | `1`     | Page number (1-indexed)         |
-| `per_page` | integer | `50`    | Items per page (max 100)        |
+| Parameter  | Type    | Default | Description                          |
+|------------|---------|---------|--------------------------------------|
+| `page`     | integer | `1`     | Page number (1-indexed)              |
+| `per_page` | integer | `50`    | Items per page (max 100)             |
+| `search`   | string  | --      | Case-insensitive email search filter |
 
 **Response (200):**
 
@@ -2701,6 +2702,7 @@ List all users with pagination.
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "email": "user@example.com",
       "display_name": "Jane Doe",
+      "avatar_url": null,
       "email_verified": true,
       "is_active": true,
       "is_admin": false,
@@ -2718,8 +2720,63 @@ List all users with pagination.
 **Example:**
 
 ```bash
+# List users
 curl "http://localhost:3001/api/v1/admin/users?page=1&per_page=25" \
   -H "Authorization: Bearer <admin_access_token>"
+
+# Search by email
+curl "http://localhost:3001/api/v1/admin/users?search=jane" \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/admin/users
+
+Create a new user. Admin-created accounts are pre-verified (`email_verified: true`) and active (`is_active: true`).
+
+**Auth:** Admin
+
+**Request Body:**
+
+| Field          | Type   | Required | Description                                      |
+|----------------|--------|----------|--------------------------------------------------|
+| `email`        | string | Yes      | User email address                               |
+| `password`     | string | Yes      | Password (8-128 characters)                      |
+| `display_name` | string | No       | Display name (max 200 characters)                |
+| `role`         | string | Yes      | `"admin"` or `"user"`                            |
+
+**Response (200):**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "email": "newuser@example.com",
+  "display_name": "Jane Doe",
+  "is_admin": false,
+  "is_active": true,
+  "email_verified": true,
+  "created_at": "2025-06-15T10:30:00+00:00",
+  "message": "User created successfully"
+}
+```
+
+**Errors:**
+- `1004 conflict` -- Email already in use
+- `1008 validation_error` -- Invalid email, password too short/long, or invalid role
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/admin/users \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "newuser@example.com",
+    "password": "securepassword123",
+    "display_name": "Jane Doe",
+    "role": "user"
+  }'
 ```
 
 ---
@@ -2743,6 +2800,7 @@ Get detailed information about a specific user.
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "email": "user@example.com",
   "display_name": "Jane Doe",
+  "avatar_url": null,
   "email_verified": true,
   "is_active": true,
   "is_admin": false,
@@ -2764,18 +2822,352 @@ curl http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-4466554400
 
 ---
 
+#### PUT /api/v1/admin/users/{user_id}
+
+Edit a user's profile fields. Only provided fields are updated.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `user_id` | UUID | The user ID |
+
+**Request Body:**
+
+| Field          | Type   | Required | Description                                |
+|----------------|--------|----------|--------------------------------------------|
+| `display_name` | string | No       | New display name (max 200 chars)           |
+| `email`        | string | No       | New email (validated, unique check)        |
+| `avatar_url`   | string | No       | New avatar URL (must use https://, max 2048 chars) |
+
+```json
+{
+  "display_name": "Jane Smith",
+  "email": "jane.smith@example.com"
+}
+```
+
+**Response (200):**
+
+Returns the updated user object (same shape as GET response).
+
+**Errors:**
+- `1003 not_found` -- User does not exist
+- `1008 validation_error` -- Invalid email format, email already in use, display name too long, or invalid avatar URL
+
+**Example:**
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"display_name": "Jane Smith"}'
+```
+
+---
+
+#### PATCH /api/v1/admin/users/{user_id}/role
+
+Toggle admin role for a user. Self-protection: an admin cannot change their own role.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `user_id` | UUID | The user ID |
+
+**Request Body:**
+
+| Field      | Type    | Required | Description           |
+|------------|---------|----------|-----------------------|
+| `is_admin` | boolean | Yes      | New admin role status |
+
+```json
+{
+  "is_admin": true
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "is_admin": true,
+  "message": "User admin role updated"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- User does not exist
+- `1008 validation_error` -- Cannot change your own admin role
+
+**Example:**
+
+```bash
+curl -X PATCH http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-446655440000/role \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"is_admin": true}'
+```
+
+---
+
+#### PATCH /api/v1/admin/users/{user_id}/status
+
+Enable or disable a user account. Self-protection: an admin cannot change their own status. When disabling a user, all their sessions are revoked, all refresh tokens are invalidated, and all API keys are deactivated, effectively locking them out immediately (except for any in-flight JWT access tokens, which expire within 15 minutes).
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `user_id` | UUID | The user ID |
+
+**Request Body:**
+
+| Field       | Type    | Required | Description               |
+|-------------|---------|----------|---------------------------|
+| `is_active` | boolean | Yes      | New active status         |
+
+```json
+{
+  "is_active": false
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "is_active": false,
+  "message": "User status updated"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- User does not exist
+- `1008 validation_error` -- Cannot change your own active status
+
+**Example:**
+
+```bash
+curl -X PATCH http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-446655440000/status \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"is_active": false}'
+```
+
+---
+
+#### POST /api/v1/admin/users/{user_id}/reset-password
+
+Force a password reset for a user. Generates a reset token and revokes all existing sessions. Does not work for social login only accounts (no password set).
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `user_id` | UUID | The user ID |
+
+**Response (200):**
+
+```json
+{
+  "message": "Password reset initiated"
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- User has no password (social login only)
+- `1003 not_found` -- User does not exist
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-446655440000/reset-password \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### DELETE /api/v1/admin/users/{user_id}
+
+Delete a user and cascade-delete all related data. Self-protection: an admin cannot delete themselves. Audit log entries referencing the deleted user are preserved (orphaned reference).
+
+**Cascade delete** removes documents from 8 collections:
+- `sessions`
+- `refresh_tokens`
+- `api_keys`
+- `user_service_connections`
+- `user_provider_tokens`
+- `mfa_factors`
+- `authorization_codes`
+- `oauth_states`
+
+The deletion follows a two-phase approach: the user is first marked inactive (preventing authentication during cleanup), then related documents are deleted, and finally the user document itself is removed.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `user_id` | UUID | The user ID |
+
+**Response (200):**
+
+```json
+{
+  "message": "User deleted"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- User does not exist
+- `1008 validation_error` -- Cannot delete yourself
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### PATCH /api/v1/admin/users/{user_id}/verify-email
+
+Manually verify a user's email address. Clears any pending verification token.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `user_id` | UUID | The user ID |
+
+**Response (200):**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "email_verified": true,
+  "message": "Email verified"
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Email already verified
+- `1003 not_found` -- User does not exist
+
+**Example:**
+
+```bash
+curl -X PATCH http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-446655440000/verify-email \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### GET /api/v1/admin/users/{user_id}/sessions
+
+List all sessions for a user (including revoked and expired), sorted by creation time descending.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `user_id` | UUID | The user ID |
+
+**Response (200):**
+
+```json
+{
+  "sessions": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "ip_address": "203.0.113.42",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)...",
+      "created_at": "2025-06-01T14:22:00+00:00",
+      "expires_at": "2025-07-01T14:22:00+00:00",
+      "last_active_at": "2025-06-01T15:00:00+00:00",
+      "revoked": false
+    }
+  ],
+  "total": 3
+}
+```
+
+**Errors:**
+- `1003 not_found` -- User does not exist
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-446655440000/sessions \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### DELETE /api/v1/admin/users/{user_id}/sessions
+
+Revoke all active sessions and refresh tokens for a user, effectively logging them out of all devices.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `user_id` | UUID | The user ID |
+
+**Response (200):**
+
+```json
+{
+  "revoked_count": 3,
+  "message": "All sessions revoked"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- User does not exist
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/admin/users/550e8400-e29b-41d4-a716-446655440000/sessions \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
 #### GET /api/v1/admin/audit-log
 
-Query the audit log with pagination. Entries are returned in reverse chronological order.
+Query the audit log with pagination. Entries are returned in reverse chronological order. Supports filtering by user ID.
 
 **Auth:** Admin
 
 **Query Parameters:**
 
-| Parameter  | Type    | Default | Description                     |
-|------------|---------|---------|---------------------------------|
-| `page`     | integer | `1`     | Page number (1-indexed)         |
-| `per_page` | integer | `50`    | Items per page (max 100)        |
+| Parameter  | Type    | Default | Description                              |
+|------------|---------|---------|------------------------------------------|
+| `page`     | integer | `1`     | Page number (1-indexed)                  |
+| `per_page` | integer | `50`    | Items per page (max 100)                 |
+| `user_id`  | string  | --      | Filter entries by acting user ID         |
 
 **Response (200):**
 
@@ -2785,10 +3177,13 @@ Query the audit log with pagination. Entries are returned in reverse chronologic
     {
       "id": "entry-uuid-here",
       "user_id": "550e8400-e29b-41d4-a716-446655440000",
-      "action": "login",
-      "resource_type": "session",
-      "resource_id": "session-uuid-here",
+      "event_type": "admin.user.deleted",
+      "event_data": {
+        "target_user_id": "660e8400-e29b-41d4-a716-446655440000",
+        "target_email": "deleted-user@example.com"
+      },
       "ip_address": "203.0.113.42",
+      "user_agent": "Mozilla/5.0...",
       "created_at": "2025-06-01T14:22:00+00:00"
     }
   ],
@@ -2807,6 +3202,13 @@ Query the audit log with pagination. Entries are returned in reverse chronologic
 | `logout`                       | User logout                                  |
 | `admin_setup`                  | Initial admin created via bootstrap endpoint |
 | `admin_promoted`               | User promoted to admin via CLI               |
+| `admin.user.updated`           | Admin edited a user's profile                |
+| `admin.user.role_changed`      | Admin changed a user's admin role            |
+| `admin.user.status_changed`    | Admin enabled/disabled a user account        |
+| `admin.user.password_reset`    | Admin forced a password reset                |
+| `admin.user.deleted`           | Admin deleted a user (cascade)               |
+| `admin.user.email_verified`    | Admin manually verified a user's email       |
+| `admin.user.sessions_revoked`  | Admin revoked all sessions for a user        |
 | `service_created`              | Downstream service registered                |
 | `service_updated`              | Downstream service updated                   |
 | `service_deleted`              | Downstream service deactivated               |
@@ -2832,7 +3234,12 @@ Query the audit log with pagination. Entries are returned in reverse chronologic
 **Example:**
 
 ```bash
+# Query all audit entries
 curl "http://localhost:3001/api/v1/admin/audit-log?page=1&per_page=25" \
+  -H "Authorization: Bearer <admin_access_token>"
+
+# Filter by acting user
+curl "http://localhost:3001/api/v1/admin/audit-log?user_id=550e8400-e29b-41d4-a716-446655440000" \
   -H "Authorization: Bearer <admin_access_token>"
 ```
 

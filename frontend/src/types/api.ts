@@ -5,6 +5,8 @@ export interface User {
   readonly avatar_url: string | null;
   readonly email_verified: boolean;
   readonly mfa_enabled: boolean;
+  readonly is_admin: boolean;
+  readonly is_active: boolean;
   readonly created_at: string;
 }
 

@@ -155,7 +155,7 @@ Handlers are thin HTTP boundary functions. They:
 | `services.rs` | list_services, create_service, delete_service                   |
 | `proxy.rs`    | proxy_request (wildcard, all HTTP methods)                      |
 | `oauth.rs`    | authorize, token, userinfo                                      |
-| `admin.rs`    | list_users, get_user, list_audit_log                            |
+| `admin.rs`    | list_users, get_user, update_user, set_user_role, set_user_status, force_password_reset, delete_user, verify_user_email, list_user_sessions, revoke_user_sessions, list_audit_log, oauth client CRUD |
 | `health.rs`   | health_check                                                    |
 | `mfa.rs`      | setup, verify_setup                                             |
 | `providers.rs`| list, create, get, update, delete provider configs              |
@@ -174,6 +174,7 @@ The service layer contains all business logic. Services receive database connect
 | `key_service.rs`    | API key creation (prefix + SHA-256 hash), listing, deletion (soft deactivation), rotation (atomic deactivate + recreate) |
 | `proxy_service.rs`  | Downstream service resolution, credential decryption, request forwarding with credential injection (header/bearer/query/basic), header allowlist enforcement |
 | `mfa_service.rs`    | TOTP secret generation with QR provisioning, code verification against encrypted secrets, recovery code management |
+| `admin_user_service.rs` | Admin user CRUD (update profile, set role, set status), cascade user deletion across 8 collections, force password reset, manual email verification, session listing and bulk revocation |
 | `audit_service.rs`  | Asynchronous audit log insertion (fire-and-forget via `tokio::spawn`), captures user, action, resource, IP, user-agent |
 | `provider_service.rs` | Provider registry CRUD, slug uniqueness, encrypted OAuth credential storage |
 | `user_token_service.rs` | User provider token lifecycle: API key storage, OAuth flow initiation/callback, token refresh with 5-min buffer, token retrieval with lazy refresh |
@@ -233,17 +234,20 @@ frontend/src/
 |   `-- auth-store.ts     Zustand store for auth state (user, tokens, login/logout)
 |
 |-- types/
-|   `-- api.ts            TypeScript types matching backend JSON schemas
+|   |-- api.ts            TypeScript types matching backend JSON schemas
+|   `-- admin.ts          Admin-specific types (user list, sessions, actions)
 |
 |-- schemas/
 |   |-- auth.ts           Zod schemas for login/register forms
 |   |-- api-keys.ts       Zod schemas for API key forms
-|   `-- services.ts       Zod schemas for service forms
+|   |-- services.ts       Zod schemas for service forms
+|   `-- admin.ts          Zod schemas for admin user management forms
 |
 |-- hooks/
 |   |-- use-auth.ts       React Query hooks for auth operations
 |   |-- use-api-keys.ts   React Query hooks for API key CRUD
-|   `-- use-services.ts   React Query hooks for service operations
+|   |-- use-services.ts   React Query hooks for service operations
+|   `-- use-admin.ts      React Query hooks for admin user management
 |
 |-- components/
 |   |-- ui/               16 shadcn/ui primitives (Button, Card, Dialog, etc.)
@@ -260,7 +264,9 @@ frontend/src/
     |-- api-keys.tsx
     |-- services.tsx
     |-- connections.tsx
-    `-- settings.tsx
+    |-- settings.tsx
+    |-- admin-users.tsx       Admin user list (search, pagination, status badges)
+    `-- admin-user-detail.tsx Admin user detail (edit, actions, sessions)
 ```
 
 ### Key Frontend Patterns

@@ -1,5 +1,5 @@
 use axum::{
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 
@@ -109,11 +109,20 @@ pub fn build_router() -> Router<AppState> {
         );
 
     let admin_routes = Router::new()
-        .route("/users", get(handlers::admin::list_users))
-        .route("/users/{user_id}", get(handlers::admin::get_user))
+        .route("/users", get(handlers::admin::list_users)
+            .post(handlers::admin::create_user))
+        .route("/users/{user_id}", get(handlers::admin::get_user)
+            .put(handlers::admin::update_user)
+            .delete(handlers::admin::delete_user))
+        .route("/users/{user_id}/role", patch(handlers::admin::set_user_role))
+        .route("/users/{user_id}/status", patch(handlers::admin::set_user_status))
+        .route("/users/{user_id}/reset-password", post(handlers::admin::force_password_reset))
+        .route("/users/{user_id}/verify-email", patch(handlers::admin::verify_user_email))
+        .route("/users/{user_id}/sessions", get(handlers::admin::list_user_sessions)
+            .delete(handlers::admin::revoke_user_sessions))
         .route("/audit-log", get(handlers::admin::list_audit_log))
-        .route("/oauth-clients", get(handlers::admin::list_oauth_clients))
-        .route("/oauth-clients", post(handlers::admin::create_oauth_client))
+        .route("/oauth-clients", get(handlers::admin::list_oauth_clients)
+            .post(handlers::admin::create_oauth_client))
         .route("/oauth-clients/{client_id}", delete(handlers::admin::delete_oauth_client));
 
     let oauth_routes = Router::new()

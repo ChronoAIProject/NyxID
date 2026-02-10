@@ -8,8 +8,10 @@ import {
   Settings,
   BookOpen,
   Shield,
+  Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAuthStore } from "@/stores/auth-store";
 import { Separator } from "@/components/ui/separator";
 
 const NAV_ITEMS = [
@@ -22,9 +24,14 @@ const NAV_ITEMS = [
   { to: "/guide", icon: BookOpen, label: "Guide" },
 ] as const;
 
+const ADMIN_NAV_ITEMS = [
+  { to: "/admin/users", icon: Users, label: "User Management" },
+] as const;
+
 export function Sidebar() {
   const routerState = useRouterState();
   const navigate = useNavigate();
+  const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
 
   return (
@@ -63,6 +70,38 @@ export function Sidebar() {
           );
         })}
       </nav>
+
+      {user?.is_admin && (
+        <>
+          <Separator />
+          <div className="px-4 pt-2">
+            <p className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Admin
+            </p>
+          </div>
+          <nav className="space-y-1 px-4 pb-2">
+            {ADMIN_NAV_ITEMS.map((item) => {
+              const isActive = currentPath.startsWith(item.to);
+              return (
+                <button
+                  key={item.to}
+                  type="button"
+                  onClick={() => void navigate({ to: item.to as string })}
+                  className={cn(
+                    "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                    isActive
+                      ? "bg-primary/10 text-primary"
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                  )}
+                >
+                  <item.icon className="h-4 w-4" />
+                  {item.label}
+                </button>
+              );
+            })}
+          </nav>
+        </>
+      )}
 
       <Separator />
 

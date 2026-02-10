@@ -12,6 +12,7 @@ This document details NyxID's security architecture, threat mitigations, and ope
 - [Identity Propagation Security](#identity-propagation-security)
 - [Proxy Security](#proxy-security)
 - [Credential Broker Security](#credential-broker-security)
+- [Admin Access Control](#admin-access-control)
 - [Authentication Security](#authentication-security)
 - [HTTP Security Headers](#http-security-headers)
 - [Rate Limiting](#rate-limiting)
@@ -231,6 +232,61 @@ To prevent security header injection via credential delegation, the following he
 
 ---
 
+## Admin Access Control
+
+### Admin Privilege Enforcement
+
+All admin endpoints (`/api/v1/admin/*`) verify `is_admin = true` by querying the user record from the database on each request. This ensures admin status is checked against the current database state, not a cached JWT claim.
+
+### Self-Protection Mechanisms
+
+Admins are prevented from performing destructive actions on their own account:
+
+| Action                | Self-protection                                    |
+|-----------------------|----------------------------------------------------|
+| Change admin role     | `admin_user_id != target_user_id` enforced         |
+| Change active status  | `admin_user_id != target_user_id` enforced         |
+| Delete user           | `admin_user_id != target_user_id` enforced         |
+
+These checks prevent an admin from accidentally (or maliciously) locking themselves out or removing their own account.
+
+### Session and Credential Revocation on User Disable
+
+When an admin disables a user (`is_active = false`), the following are immediately revoked:
+
+1. **All sessions** -- Marked as `revoked = true` in the `sessions` collection
+2. **All refresh tokens** -- Marked as `revoked = true` in the `refresh_tokens` collection
+3. **All API keys** -- Marked as `is_active = false` in the `api_keys` collection
+
+Additionally, the `AuthUser` middleware extractor checks `is_active` on every request for session-based and API-key-based authentication. This means disabled users are locked out on their next request.
+
+### Known Limitation: JWT Access Token Survival
+
+JWT access tokens are stateless and not checked against the database. A disabled user's existing JWT access token remains valid until it expires (default: 15 minutes). This is a deliberate trade-off between performance (no DB lookup per request for JWT auth) and immediate revocation. For time-sensitive lockouts, admins should also revoke all sessions via the session revocation endpoint.
+
+### Cascade User Deletion
+
+When deleting a user, a two-phase approach ensures consistency:
+
+1. **Phase 1:** Mark user as `is_active = false` (prevents authentication during cleanup)
+2. **Phase 2:** Delete related documents from 8 collections: `sessions`, `refresh_tokens`, `api_keys`, `user_service_connections`, `user_provider_tokens`, `mfa_factors`, `authorization_codes`, `oauth_states`
+3. **Phase 3:** Delete the user document itself
+
+Audit log entries referencing the deleted user are preserved with an orphaned `user_id` reference for traceability.
+
+### Admin Action Audit Logging
+
+All admin user management actions are recorded in the audit log with:
+
+- **Actor:** The admin performing the action (`user_id`)
+- **Target:** The user being acted upon (`target_user_id`)
+- **Action details:** Specific changes made (e.g., role change, status change)
+- **Client metadata:** IP address and user-agent of the admin
+
+Admin audit event types: `admin.user.updated`, `admin.user.role_changed`, `admin.user.status_changed`, `admin.user.password_reset`, `admin.user.deleted`, `admin.user.email_verified`, `admin.user.sessions_revoked`.
+
+---
+
 ## Authentication Security
 
 ### Password Hashing
@@ -334,6 +390,10 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 | Error message info leakage      | Internal errors never expose details in responses    |
 | Provider error leakage          | OAuth error bodies truncated to 200 chars            |
 | Timing attacks on auth          | Constant-time comparison for token verification      |
+| Admin privilege escalation      | Self-protection checks on role/status/delete         |
+| Admin lockout                   | Cannot disable/delete own account                    |
+| Orphaned data after user delete | Cascade delete across 8 collections; audit preserved |
+| Disabled user continued access  | Session + refresh token + API key revocation on disable; JWT expires within 15 min |
 
 ---
 
@@ -365,9 +425,13 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 ### If Suspicious Activity Is Detected
 
 1. Review the audit log: `GET /api/v1/admin/audit-log`
-2. Check for unusual `proxy_request` patterns or `provider_token_connected` events
-3. Deactivate compromised user accounts via admin API
-4. Rotate affected credentials
+2. Filter by specific user: `GET /api/v1/admin/audit-log?user_id=<suspect_id>`
+3. Check for unusual `proxy_request` patterns or `provider_token_connected` events
+4. Check for admin action events: `admin.user.role_changed`, `admin.user.deleted`
+5. Disable compromised user accounts: `PATCH /api/v1/admin/users/<user_id>/status` with `{"is_active": false}` (automatically revokes sessions, refresh tokens, and API keys)
+6. If needed, force password reset: `POST /api/v1/admin/users/<user_id>/reset-password`
+7. Revoke all sessions: `DELETE /api/v1/admin/users/<user_id>/sessions`
+8. Rotate affected credentials
 
 ---
 

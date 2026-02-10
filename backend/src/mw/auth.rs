@@ -201,6 +201,25 @@ impl FromRequestParts<AppState> for AuthUser {
                     AppError::Internal("Invalid user_id in API key".to_string())
                 })?;
 
+                // Verify the user account is still active
+                let user_model = state
+                    .db
+                    .collection::<User>(USERS)
+                    .find_one(doc! { "_id": &user_id_str })
+                    .await
+                    .map_err(|e| {
+                        AppError::Internal(format!("User lookup failed: {e}"))
+                    })?;
+
+                match user_model {
+                    Some(u) if u.is_active => {}
+                    _ => {
+                        return Err(AppError::Unauthorized(
+                            "User account is inactive".to_string(),
+                        ));
+                    }
+                }
+
                 return Ok(AuthUser {
                     user_id,
                     session_id: None,

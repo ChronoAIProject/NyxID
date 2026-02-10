@@ -1,3 +1,4 @@
+pub mod admin_user_service;
 pub mod audit_service;
 pub mod auth_service;
 pub mod connection_service;
