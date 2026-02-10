@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nyxid
+  labels:
+    app.kubernetes.io/name: nyxid
+    app.kubernetes.io/part-of: nyxid

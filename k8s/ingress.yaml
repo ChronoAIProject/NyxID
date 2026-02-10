@@ -1,0 +1,91 @@
+# Ingress for NyxID
+# Requires: nginx ingress controller (or adjust annotations for your controller)
+#
+# For TLS, either:
+#   1. Use cert-manager with a ClusterIssuer (recommended)
+#   2. Create TLS secrets manually:
+#      kubectl create secret tls nyxid-backend-tls --cert=tls.crt --key=tls.key -n nyxid
+#      kubectl create secret tls nyxid-frontend-tls --cert=tls.crt --key=tls.key -n nyxid
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nyxid-backend-ingress
+  namespace: nyxid
+  labels:
+    app.kubernetes.io/name: nyxid
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: nyxid
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    # Uncomment for cert-manager:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - auth.example.com
+      secretName: nyxid-backend-tls
+  rules:
+    - host: auth.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: nyxid-backend
+                port:
+                  number: 3001
+          - path: /oauth
+            pathType: Prefix
+            backend:
+              service:
+                name: nyxid-backend
+                port:
+                  number: 3001
+          - path: /.well-known
+            pathType: Prefix
+            backend:
+              service:
+                name: nyxid-backend
+                port:
+                  number: 3001
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: nyxid-backend
+                port:
+                  number: 3001
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nyxid-frontend-ingress
+  namespace: nyxid
+  labels:
+    app.kubernetes.io/name: nyxid
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: nyxid
+  annotations:
+    # Uncomment for cert-manager:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.example.com
+      secretName: nyxid-frontend-tls
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nyxid-frontend
+                port:
+                  number: 80

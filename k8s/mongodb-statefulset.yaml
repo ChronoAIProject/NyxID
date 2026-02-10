@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nyxid-mongodb
+  namespace: nyxid
+  labels:
+    app.kubernetes.io/name: nyxid-mongodb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: nyxid
+spec:
+  serviceName: nyxid-mongodb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nyxid-mongodb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nyxid-mongodb
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: nyxid
+    spec:
+      containers:
+        - name: mongodb
+          image: mongo:8.0
+          ports:
+            - containerPort: 27017
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: nyxid-mongo-secret
+          env:
+            - name: MONGO_INITDB_DATABASE
+              value: nyxid
+          volumeMounts:
+            - name: mongodb-data
+              mountPath: /data/db
+          livenessProbe:
+            exec:
+              command:
+                - mongosh
+                - --eval
+                - "db.adminCommand('ping')"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - mongosh
+                - --eval
+                - "db.adminCommand('ping')"
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+  volumeClaimTemplates:
+    - metadata:
+        name: mongodb-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nyxid-mongodb
+  namespace: nyxid
+  labels:
+    app.kubernetes.io/name: nyxid-mongodb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: nyxid
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: nyxid-mongodb
+  ports:
+    - port: 27017
+      targetPort: 27017
+      protocol: TCP

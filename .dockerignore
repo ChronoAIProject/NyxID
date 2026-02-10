@@ -1,0 +1,14 @@
+target/
+frontend/node_modules/
+frontend/dist/
+.git/
+.env
+.env.*
+!.env.example
+keys/
+docs/
+k8s/
+node_modules/
+SERVICES_OVERHAUL_PLAN.md
+CODE_REVIEW_FINDINGS.md
+SECURITY_REVIEW_FINDINGS.md

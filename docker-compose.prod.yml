@@ -1,0 +1,72 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: nyxid-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3001:3001"
+    env_file:
+      - .env.production
+    volumes:
+      - ./keys:/app/keys:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+    container_name: nyxid-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:80"
+    environment:
+      BACKEND_URL: http://backend:3001
+    depends_on:
+      - backend
+
+  mcp-proxy:
+    build:
+      context: mcp-proxy
+      dockerfile: Dockerfile
+    container_name: nyxid-mcp-proxy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3002:3002"
+    environment:
+      NYXID_URL: http://backend:3001
+      NYXID_CLIENT_ID: ${MCP_CLIENT_ID:?MCP_CLIENT_ID is required}
+      NYXID_CLIENT_SECRET: ${MCP_CLIENT_SECRET:?MCP_CLIENT_SECRET is required}
+      MCP_PORT: "3002"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  mongodb:
+    image: mongo:8.0
+    container_name: nyxid-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-nyxid}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD is required}
+      MONGO_INITDB_DATABASE: nyxid
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mongodb_data:
