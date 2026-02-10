@@ -10,3 +10,4 @@ pub mod service_endpoint;
 pub mod session;
 pub mod user;
 pub mod user_service_connection;
+pub mod mcp_session;

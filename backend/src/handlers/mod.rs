@@ -5,6 +5,7 @@ pub mod connections;
 pub mod endpoints;
 pub mod health;
 pub mod mcp;
+pub mod mcp_transport;
 pub mod mfa;
 pub mod oauth;
 pub mod oidc_discovery;

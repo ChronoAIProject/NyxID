@@ -15,9 +15,12 @@ mod mw;
 mod routes;
 mod services;
 
+use std::sync::Arc;
+
 use crate::db::DbHandle;
 use config::AppConfig;
 use crypto::jwt::JwtKeys;
+use models::mcp_session::McpSessionStore;
 
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
@@ -28,6 +31,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Pre-computed JWK for the JWKS endpoint
     pub jwk_json: serde_json::Value,
+    /// In-memory MCP session store (ephemeral, not persisted)
+    pub mcp_sessions: Arc<McpSessionStore>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -68,6 +73,11 @@ async fn main() {
         return;
     }
 
+    // Seed default OAuth clients (idempotent)
+    services::oauth_client_service::seed_default_clients(&db)
+        .await
+        .expect("Failed to seed default OAuth clients");
+
     // --- Server startup ---
     tracing::info!("Starting NyxID authentication server");
     tracing::info!(port = config.port, "Configuration loaded");
@@ -91,6 +101,9 @@ async fn main() {
         .build()
         .expect("Failed to create HTTP client");
 
+    // Create MCP session store
+    let mcp_sessions = Arc::new(McpSessionStore::new());
+
     // Create shared state
     let state = AppState {
         db,
@@ -98,6 +111,7 @@ async fn main() {
         jwt_keys,
         http_client,
         jwk_json,
+        mcp_sessions: mcp_sessions.clone(),
     };
 
     // Create rate limiters
@@ -117,6 +131,16 @@ async fn main() {
         loop {
             interval.tick().await;
             cleanup_limiter.cleanup();
+        }
+    });
+
+    // Spawn background cleanup task for MCP session reaper (every 5 min, 1 hour idle max)
+    let mcp_sessions_for_reaper = mcp_sessions.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            mcp_sessions_for_reaper.reap_expired(std::time::Duration::from_secs(3600));
         }
     });
 

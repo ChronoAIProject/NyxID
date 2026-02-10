@@ -20,6 +20,8 @@ pub struct McpConfigResponse {
     pub user_id: String,
     pub proxy_base_url: String,
     pub services: Vec<McpServiceConfig>,
+    pub total_services: usize,
+    pub total_endpoints: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -29,6 +31,7 @@ pub struct McpServiceConfig {
     pub service_slug: String,
     pub description: Option<String>,
     pub base_url: String,
+    pub service_category: String,
     pub endpoints: Vec<McpEndpointConfig>,
 }
 
@@ -49,8 +52,8 @@ pub struct McpEndpointConfig {
 /// GET /api/v1/mcp/config
 ///
 /// Returns the MCP tool configuration for the authenticated user.
-/// Includes all services the user is connected to, along with their
-/// registered endpoints (tools) and the proxy base URL.
+/// Only includes services where the user has a valid connection with
+/// satisfied credentials.
 pub async fn get_mcp_config(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -73,6 +76,8 @@ pub async fn get_mcp_config(
             user_id,
             proxy_base_url: build_proxy_base_url(&state.config.base_url),
             services: vec![],
+            total_services: 0,
+            total_endpoints: 0,
         }));
     }
 
@@ -85,18 +90,48 @@ pub async fn get_mcp_config(
         .try_collect()
         .await?;
 
-    // 3. Fetch active endpoints for all connected services in one query
-    let active_service_ids: Vec<&str> = services.iter().map(|s| s.id.as_str()).collect();
-    let all_endpoints: Vec<ServiceEndpoint> = state
-        .db
-        .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
-        .find(doc! {
-            "service_id": { "$in": &active_service_ids },
-            "is_active": true,
+    // 3. Filter: only include services where credentials are satisfied
+    let conn_map: HashMap<&str, &UserServiceConnection> = connections
+        .iter()
+        .map(|c| (c.service_id.as_str(), c))
+        .collect();
+
+    let valid_services: Vec<&DownstreamService> = services
+        .iter()
+        .filter(|svc| {
+            // Skip provider services
+            if svc.service_category == "provider" {
+                return false;
+            }
+            match conn_map.get(svc.id.as_str()) {
+                Some(conn) => {
+                    if svc.requires_user_credential {
+                        conn.credential_encrypted.is_some()
+                    } else {
+                        true
+                    }
+                }
+                None => false,
+            }
         })
-        .await?
-        .try_collect()
-        .await?;
+        .collect();
+
+    // 4. Fetch active endpoints for valid services in one query
+    let valid_service_ids: Vec<&str> = valid_services.iter().map(|s| s.id.as_str()).collect();
+    let all_endpoints: Vec<ServiceEndpoint> = if valid_service_ids.is_empty() {
+        vec![]
+    } else {
+        state
+            .db
+            .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .find(doc! {
+                "service_id": { "$in": &valid_service_ids },
+                "is_active": true,
+            })
+            .await?
+            .try_collect()
+            .await?
+    };
 
     // Group endpoints by service_id
     let mut endpoints_by_service: HashMap<&str, Vec<&ServiceEndpoint>> = HashMap::new();
@@ -107,8 +142,8 @@ pub async fn get_mcp_config(
             .push(ep);
     }
 
-    // 4. Build response
-    let mcp_services: Vec<McpServiceConfig> = services
+    // 5. Build response
+    let mcp_services: Vec<McpServiceConfig> = valid_services
         .into_iter()
         .map(|svc| {
             let endpoints = endpoints_by_service
@@ -130,20 +165,29 @@ pub async fn get_mcp_config(
                 .unwrap_or_default();
 
             McpServiceConfig {
-                service_id: svc.id,
-                service_name: svc.name,
-                service_slug: svc.slug,
-                description: svc.description,
-                base_url: svc.base_url,
+                service_id: svc.id.clone(),
+                service_name: svc.name.clone(),
+                service_slug: svc.slug.clone(),
+                description: svc.description.clone(),
+                // TODO(SEC-L1): Consider whether base_url needs to be exposed in the MCP config.
+                // The MCP proxy routes through NyxID's proxy endpoint anyway, so base_url may
+                // not be needed. Removing it would prevent leaking internal service URLs.
+                base_url: svc.base_url.clone(),
+                service_category: svc.service_category.clone(),
                 endpoints,
             }
         })
         .collect();
 
+    let total_endpoints: usize = mcp_services.iter().map(|s| s.endpoints.len()).sum();
+    let total_services = mcp_services.len();
+
     Ok(Json(McpConfigResponse {
         user_id,
         proxy_base_url: build_proxy_base_url(&state.config.base_url),
         services: mcp_services,
+        total_services,
+        total_endpoints,
     }))
 }
 

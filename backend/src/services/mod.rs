@@ -1,6 +1,8 @@
 pub mod audit_service;
 pub mod auth_service;
+pub mod connection_service;
 pub mod key_service;
+pub mod mcp_service;
 pub mod mfa_service;
 pub mod oauth_client_service;
 pub mod oauth_service;

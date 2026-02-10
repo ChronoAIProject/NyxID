@@ -59,6 +59,10 @@ pub fn build_router() -> Router<AppState> {
         .route(
             "/{service_id}",
             delete(handlers::connections::disconnect_service),
+        )
+        .route(
+            "/{service_id}/credential",
+            put(handlers::connections::update_connection_credential),
         );
 
     let admin_routes = Router::new()
@@ -88,11 +92,20 @@ pub fn build_router() -> Router<AppState> {
 
     let well_known_routes = Router::new()
         .route("/openid-configuration", get(handlers::oidc_discovery::openid_configuration))
-        .route("/jwks.json", get(handlers::oidc_discovery::jwks));
+        .route("/oauth-authorization-server", get(handlers::oidc_discovery::oauth_authorization_server_metadata))
+        .route("/jwks.json", get(handlers::oidc_discovery::jwks))
+        .route("/oauth-protected-resource", get(handlers::oidc_discovery::oauth_protected_resource));
 
     Router::new()
         .route("/health", get(handlers::health::health_check))
         .nest("/.well-known", well_known_routes)
         .nest("/oauth", oauth_routes)
         .nest("/api/v1", api_v1)
+        // MCP StreamableHTTP endpoint (root level, not under /api/v1)
+        .route(
+            "/mcp",
+            post(handlers::mcp_transport::mcp_post)
+                .get(handlers::mcp_transport::mcp_get)
+                .delete(handlers::mcp_transport::mcp_delete),
+        )
 }
