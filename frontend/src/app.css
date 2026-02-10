@@ -46,6 +46,12 @@
   border-color: var(--color-border);
 }
 
+html,
+body {
+  overflow: hidden;
+  height: 100%;
+}
+
 body {
   font-family: var(--font-sans);
 }

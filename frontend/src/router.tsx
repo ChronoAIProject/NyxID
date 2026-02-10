@@ -16,6 +16,9 @@ import { RegisterPage } from "@/pages/register";
 import { DashboardPage } from "@/pages/dashboard";
 import { ApiKeysPage } from "@/pages/api-keys";
 import { ServicesPage } from "@/pages/services";
+import { ServiceListPage } from "@/pages/service-list";
+import { ServiceDetailPage } from "@/pages/service-detail";
+import { ServiceEditPage } from "@/pages/service-edit";
 import { ConnectionsPage } from "@/pages/connections";
 import { SettingsPage } from "@/pages/settings";
 
@@ -76,10 +79,28 @@ const apiKeysRoute = createRoute({
   component: ApiKeysPage,
 });
 
-const servicesRoute = createRoute({
+const servicesLayout = createRoute({
   path: "/services",
   getParentRoute: () => dashboardLayout,
   component: ServicesPage,
+});
+
+const servicesIndexRoute = createRoute({
+  path: "/",
+  getParentRoute: () => servicesLayout,
+  component: ServiceListPage,
+});
+
+const serviceDetailRoute = createRoute({
+  path: "$serviceId",
+  getParentRoute: () => servicesLayout,
+  component: ServiceDetailPage,
+});
+
+const serviceEditRoute = createRoute({
+  path: "$serviceId/edit",
+  getParentRoute: () => servicesLayout,
+  component: ServiceEditPage,
 });
 
 const connectionsRoute = createRoute({
@@ -99,7 +120,11 @@ const routeTree = rootRoute.addChildren([
   dashboardLayout.addChildren([
     dashboardIndexRoute,
     apiKeysRoute,
-    servicesRoute,
+    servicesLayout.addChildren([
+      servicesIndexRoute,
+      serviceDetailRoute,
+      serviceEditRoute,
+    ]),
     connectionsRoute,
     settingsRoute,
   ]),

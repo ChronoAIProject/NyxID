@@ -21,7 +21,9 @@ function getPageTitle(pathname: string): string {
     "/connections": "Connections",
     "/settings": "Settings",
   };
-  return titles[pathname] ?? "Dashboard";
+  // Match on first path segment to handle nested routes (e.g. /services/abc)
+  const segment = "/" + (pathname.split("/")[1] ?? "");
+  return titles[segment] ?? "Dashboard";
 }
 
 function getInitials(name: string | null, email: string): string {

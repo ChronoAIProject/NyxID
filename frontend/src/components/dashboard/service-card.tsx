@@ -1,3 +1,4 @@
+import { useNavigate } from "@tanstack/react-router";
 import type { DownstreamService } from "@/types/api";
 import { getAuthTypeLabel, isOidcService } from "@/lib/constants";
 import { formatDate } from "@/lib/utils";
@@ -16,19 +17,24 @@ interface ServiceCardProps {
   readonly service: DownstreamService;
   readonly onDelete: (id: string) => void;
   readonly isDeleting: boolean;
-  readonly onClick: () => void;
 }
 
 export function ServiceCard({
   service,
   onDelete,
   isDeleting,
-  onClick,
 }: ServiceCardProps) {
+  const navigate = useNavigate();
+
   return (
     <Card
       className="cursor-pointer transition-colors hover:border-border/80"
-      onClick={onClick}
+      onClick={() =>
+        void navigate({
+          to: "/services/$serviceId",
+          params: { serviceId: service.id },
+        })
+      }
     >
       <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-3">
         <div className="flex items-center gap-3">

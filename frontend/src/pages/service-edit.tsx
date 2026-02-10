@@ -1,22 +1,15 @@
 import { useEffect } from "react";
+import { useNavigate, useParams } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import type { DownstreamService } from "@/types/api";
-import { useUpdateService } from "@/hooks/use-services";
+import { useService, useUpdateService } from "@/hooks/use-services";
 import {
   updateServiceSchema,
   type UpdateServiceFormData,
 } from "@/schemas/services";
 import { getAuthTypeLabel } from "@/lib/constants";
 import { ApiError } from "@/lib/api-client";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { PageHeader } from "@/components/shared/page-header";
 import {
   Form,
   FormControl,
@@ -28,33 +21,28 @@ import {
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 
-interface ServiceEditDialogProps {
-  readonly service: DownstreamService;
-  readonly open: boolean;
-  readonly onOpenChange: (open: boolean) => void;
-}
-
-export function ServiceEditDialog({
-  service,
-  open,
-  onOpenChange,
-}: ServiceEditDialogProps) {
+export function ServiceEditPage() {
+  const { serviceId } = useParams({ strict: false }) as { serviceId: string };
+  const navigate = useNavigate();
+  const { data: service, isLoading, error } = useService(serviceId);
   const updateMutation = useUpdateService();
 
   const form = useForm<UpdateServiceFormData>({
     resolver: zodResolver(updateServiceSchema),
     defaultValues: {
-      name: service.name,
-      description: service.description ?? "",
-      base_url: service.base_url,
-      api_spec_url: service.api_spec_url ?? "",
+      name: "",
+      description: "",
+      base_url: "",
+      api_spec_url: "",
     },
   });
 
   useEffect(() => {
-    if (open) {
+    if (service) {
       form.reset({
         name: service.name,
         description: service.description ?? "",
@@ -62,38 +50,72 @@ export function ServiceEditDialog({
         api_spec_url: service.api_spec_url ?? "",
       });
     }
-    // CR-15: form has a stable reference in react-hook-form; omit from deps
-    // to avoid unnecessary effect re-fires
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, service]);
+  }, [service]);
 
   async function onSubmit(data: UpdateServiceFormData) {
+    if (!service) return;
     try {
       await updateMutation.mutateAsync({
         serviceId: service.id,
         data,
       });
       toast.success("Service updated");
-      onOpenChange(false);
-    } catch (error) {
-      if (error instanceof ApiError) {
-        form.setError("root", { message: error.message });
+      void navigate({
+        to: "/services/$serviceId",
+        params: { serviceId },
+      });
+    } catch (err) {
+      if (err instanceof ApiError) {
+        form.setError("root", { message: err.message });
       } else {
         toast.error("Failed to update service");
       }
     }
   }
 
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Edit Service</DialogTitle>
-          <DialogDescription>
-            Update the configuration for {service.name}.
-          </DialogDescription>
-        </DialogHeader>
+  if (isLoading) {
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-10 w-64" />
+        <Skeleton className="h-96 w-full" />
+      </div>
+    );
+  }
 
+  if (error || !service) {
+    return (
+      <div className="flex flex-col items-center justify-center py-16 text-center">
+        <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
+        <h3 className="mb-2 text-lg font-semibold">Service not found</h3>
+        <p className="mb-4 text-sm text-muted-foreground">
+          The service you are trying to edit does not exist or has been deleted.
+        </p>
+        <Button
+          variant="outline"
+          onClick={() => void navigate({ to: "/services" })}
+        >
+          Back to Services
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        breadcrumbs={[
+          { label: "Services", to: "/services" },
+          {
+            label: service.name,
+            to: `/services/${serviceId}`,
+          },
+          { label: "Edit" },
+        ]}
+        title={`Edit ${service.name}`}
+      />
+
+      <div className="max-w-2xl">
         <Form {...form}>
           <form
             onSubmit={form.handleSubmit(onSubmit)}
@@ -182,21 +204,26 @@ export function ServiceEditDialog({
               </p>
             </div>
 
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-              >
-                Cancel
-              </Button>
+            <div className="flex items-center gap-3 pt-4">
               <Button type="submit" isLoading={updateMutation.isPending}>
                 Save changes
               </Button>
-            </DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() =>
+                  void navigate({
+                    to: "/services/$serviceId",
+                    params: { serviceId },
+                  })
+                }
+              >
+                Cancel
+              </Button>
+            </div>
           </form>
         </Form>
-      </DialogContent>
-    </Dialog>
+      </div>
+    </div>
   );
 }
