@@ -82,4 +82,43 @@ mod tests {
         let (_, key2, _) = generate_api_key();
         assert_ne!(key1, key2);
     }
+
+    #[test]
+    fn test_hash_different_inputs_differ() {
+        let hash1 = hash_token("input-a");
+        let hash2 = hash_token("input-b");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_empty_string() {
+        let hash = hash_token("");
+        assert_eq!(hash.len(), 64); // SHA-256 is always 64 hex chars
+    }
+
+    #[test]
+    fn test_api_key_hash_matches_full_key() {
+        let (_, full_key, hash) = generate_api_key();
+        let recomputed = hash_token(&full_key);
+        assert_eq!(hash, recomputed);
+    }
+
+    #[test]
+    fn test_random_tokens_unique() {
+        let t1 = generate_random_token();
+        let t2 = generate_random_token();
+        assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn test_random_token_is_hex() {
+        let token = generate_random_token();
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_api_key_prefix_is_hex() {
+        let (prefix, _, _) = generate_api_key();
+        assert!(prefix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
 }

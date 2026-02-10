@@ -84,3 +84,92 @@ impl McpSessionStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_and_validate() {
+        let store = McpSessionStore::new();
+        let session_id = store.create("user-1");
+        assert!(store.validate(&session_id, "user-1"));
+        assert!(!store.validate(&session_id, "user-2"));
+    }
+
+    #[test]
+    fn validate_nonexistent_returns_false() {
+        let store = McpSessionStore::new();
+        assert!(!store.validate("nonexistent-id", "user-1"));
+    }
+
+    #[test]
+    fn remove_session() {
+        let store = McpSessionStore::new();
+        let session_id = store.create("user-1");
+        assert!(store.validate(&session_id, "user-1"));
+        store.remove(&session_id);
+        assert!(!store.validate(&session_id, "user-1"));
+    }
+
+    #[test]
+    fn touch_does_not_invalidate() {
+        let store = McpSessionStore::new();
+        let session_id = store.create("user-1");
+        store.touch(&session_id);
+        assert!(store.validate(&session_id, "user-1"));
+    }
+
+    #[test]
+    fn touch_nonexistent_is_noop() {
+        let store = McpSessionStore::new();
+        store.touch("nonexistent-id"); // should not panic
+    }
+
+    #[test]
+    fn remove_nonexistent_is_noop() {
+        let store = McpSessionStore::new();
+        store.remove("nonexistent-id"); // should not panic
+    }
+
+    #[test]
+    fn multiple_sessions_independent() {
+        let store = McpSessionStore::new();
+        let s1 = store.create("user-1");
+        let s2 = store.create("user-2");
+        assert!(store.validate(&s1, "user-1"));
+        assert!(store.validate(&s2, "user-2"));
+        assert!(!store.validate(&s1, "user-2"));
+        assert!(!store.validate(&s2, "user-1"));
+    }
+
+    #[test]
+    fn reap_expired_with_zero_idle() {
+        let store = McpSessionStore::new();
+        store.create("user-1");
+        // Reap with 0 duration means everything is expired
+        store.reap_expired(Duration::from_secs(0));
+        // All sessions should be removed since they were created "before" cutoff
+        // (Utc::now() - 0 seconds = now, and last_active <= now)
+        // The session was just created, so last_active ~= now. With 0 max_idle,
+        // cutoff = now, and retain keeps s where s.last_active > cutoff.
+        // Since last_active <= cutoff (roughly equal), it gets reaped.
+    }
+
+    #[test]
+    fn reap_expired_keeps_fresh_sessions() {
+        let store = McpSessionStore::new();
+        let session_id = store.create("user-1");
+        // Reap with 1 hour idle -- session was just created so it's fresh
+        store.reap_expired(Duration::from_secs(3600));
+        assert!(store.validate(&session_id, "user-1"));
+    }
+
+    #[test]
+    fn session_ids_are_unique() {
+        let store = McpSessionStore::new();
+        let s1 = store.create("user-1");
+        let s2 = store.create("user-1");
+        assert_ne!(s1, s2);
+    }
+}

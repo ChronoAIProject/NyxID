@@ -36,6 +36,7 @@ impl FromRequestParts<AppState> for AuthUser {
     /// Checks in order:
     /// 1. Authorization header (Bearer token)
     /// 2. Session cookie
+    #[allow(clippy::manual_async_fn)]
     fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
@@ -98,7 +99,7 @@ impl FromRequestParts<AppState> for AuthUser {
             let session_token = parse_cookie(cookie_header, SESSION_COOKIE_NAME);
 
             if let Some(token) = session_token {
-                let token_hash = hash_token(&token);
+                let token_hash = hash_token(token);
 
                 let session = state
                     .db
@@ -107,8 +108,8 @@ impl FromRequestParts<AppState> for AuthUser {
                     .await
                     .map_err(|e| AppError::Internal(format!("Session lookup failed: {e}")))?;
 
-                if let Some(sess) = session {
-                    if sess.expires_at > chrono::Utc::now() {
+                if let Some(sess) = session
+                    && sess.expires_at > chrono::Utc::now() {
                         let user_id = Uuid::parse_str(&sess.user_id).map_err(|_| {
                             AppError::Internal("Invalid user_id in session".to_string())
                         })?;
@@ -142,14 +143,13 @@ impl FromRequestParts<AppState> for AuthUser {
                             }
                         }
                     }
-                }
             }
 
             // Also try access token cookie
             let access_token = parse_cookie(cookie_header, ACCESS_TOKEN_COOKIE_NAME);
 
             if let Some(token) = access_token {
-                let claims = jwt::verify_token(&state.jwt_keys, &state.config, &token)?;
+                let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)?;
 
                 if claims.token_type != "access" {
                     return Err(AppError::Unauthorized(
@@ -243,6 +243,7 @@ pub struct OptionalAuthUser(pub Option<AuthUser>);
 impl FromRequestParts<AppState> for OptionalAuthUser {
     type Rejection = std::convert::Infallible;
 
+    #[allow(clippy::manual_async_fn)]
     fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
@@ -274,4 +275,57 @@ fn parse_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
             None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_cookie_single() {
+        assert_eq!(parse_cookie("nyx_session=abc123", "nyx_session"), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_cookie_multiple() {
+        let header = "theme=dark; nyx_session=token123; lang=en";
+        assert_eq!(parse_cookie(header, "nyx_session"), Some("token123"));
+        assert_eq!(parse_cookie(header, "theme"), Some("dark"));
+        assert_eq!(parse_cookie(header, "lang"), Some("en"));
+    }
+
+    #[test]
+    fn parse_cookie_missing() {
+        assert_eq!(parse_cookie("other=value", "nyx_session"), None);
+    }
+
+    #[test]
+    fn parse_cookie_empty_header() {
+        assert_eq!(parse_cookie("", "nyx_session"), None);
+    }
+
+    #[test]
+    fn parse_cookie_with_spaces() {
+        let header = " nyx_session = abc123 ; theme = dark ";
+        assert_eq!(parse_cookie(header, "nyx_session"), Some("abc123"));
+        assert_eq!(parse_cookie(header, "theme"), Some("dark"));
+    }
+
+    #[test]
+    fn parse_cookie_value_with_equals() {
+        // Cookie values can contain '=' (e.g. base64 tokens)
+        let header = "nyx_session=abc=def=";
+        // split_once only splits on first '=', so value is "abc=def="
+        assert_eq!(parse_cookie(header, "nyx_session"), Some("abc=def="));
+    }
+
+    #[test]
+    fn session_cookie_name_constant() {
+        assert_eq!(SESSION_COOKIE_NAME, "nyx_session");
+    }
+
+    #[test]
+    fn access_token_cookie_name_constant() {
+        assert_eq!(ACCESS_TOKEN_COOKIE_NAME, "nyx_access_token");
+    }
 }

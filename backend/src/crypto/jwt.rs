@@ -206,6 +206,7 @@ pub fn generate_refresh_token(
 }
 
 /// Generate an OIDC ID token.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_id_token(
     keys: &JwtKeys,
     config: &AppConfig,
@@ -292,4 +293,225 @@ pub fn verify_token(keys: &JwtKeys, config: &AppConfig, token: &str) -> Result<C
     })?;
 
     Ok(token_data.claims)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsa::pkcs1::EncodeRsaPrivateKey;
+
+    /// Generate a test RSA key pair (2048-bit for speed) and return JwtKeys + AppConfig.
+    fn test_keys_and_config() -> (JwtKeys, AppConfig) {
+        let mut rng = rand::thread_rng();
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let public_key = private_key.to_public_key();
+
+        let private_pem = private_key
+            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+            .unwrap();
+        let public_pem = public_key
+            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+            .unwrap();
+
+        let encoding = EncodingKey::from_rsa_pem(private_pem.as_bytes()).unwrap();
+        let decoding = DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap();
+
+        let n_bytes = public_key.n().to_bytes_be();
+        let mut hasher = Sha256::new();
+        hasher.update(&n_bytes);
+        let kid = hex::encode(&hasher.finalize()[..8]);
+
+        let keys = JwtKeys { encoding, decoding, kid };
+
+        let config = AppConfig {
+            port: 3001,
+            base_url: "http://localhost:3001".to_string(),
+            frontend_url: "http://localhost:3000".to_string(),
+            database_url: "mongodb://localhost:27017/nyxid".to_string(),
+            database_max_connections: 10,
+            environment: "development".to_string(),
+            jwt_private_key_path: "keys/private.pem".to_string(),
+            jwt_public_key_path: "keys/public.pem".to_string(),
+            jwt_issuer: "nyxid".to_string(),
+            jwt_access_ttl_secs: 900,
+            jwt_refresh_ttl_secs: 604800,
+            google_client_id: None,
+            google_client_secret: None,
+            github_client_id: None,
+            github_client_secret: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_username: None,
+            smtp_password: None,
+            smtp_from_address: None,
+            encryption_key: "ab".repeat(32),
+            rate_limit_per_second: 10,
+            rate_limit_burst: 30,
+        };
+
+        (keys, config)
+    }
+
+    #[test]
+    fn generate_and_verify_access_token() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_access_token(&keys, &config, &user_id, "openid profile").unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.token_type, "access");
+        assert_eq!(claims.scope, "openid profile");
+        assert_eq!(claims.iss, "nyxid");
+    }
+
+    #[test]
+    fn generate_and_verify_refresh_token() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let (token, jti) = generate_refresh_token(&keys, &config, &user_id).unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.token_type, "refresh");
+        assert_eq!(claims.jti, jti);
+        assert!(claims.scope.is_empty());
+    }
+
+    #[test]
+    fn verify_token_rejects_invalid_token() {
+        let (keys, config) = test_keys_and_config();
+        let result = verify_token(&keys, &config, "invalid.jwt.token");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn verify_token_rejects_expired_token() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let now = Utc::now().timestamp();
+
+        let claims = Claims {
+            sub: user_id.to_string(),
+            iss: config.jwt_issuer.clone(),
+            aud: config.base_url.clone(),
+            exp: now - 3600, // expired 1 hour ago
+            iat: now - 7200,
+            jti: Uuid::new_v4().to_string(),
+            scope: String::new(),
+            token_type: "access".to_string(),
+        };
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(keys.kid.clone());
+        let token = encode(&header, &claims, &keys.encoding).unwrap();
+
+        let result = verify_token(&keys, &config, &token);
+        assert!(matches!(result, Err(AppError::TokenExpired)));
+    }
+
+    #[test]
+    fn access_token_has_kid_header() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_access_token(&keys, &config, &user_id, "openid").unwrap();
+
+        // Decode header without validation to check kid
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert_eq!(header.kid, Some(keys.kid.clone()));
+        assert_eq!(header.alg, Algorithm::RS256);
+    }
+
+    #[test]
+    fn generate_id_token_basic() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_id_token(
+            &keys,
+            &config,
+            &user_id,
+            Some("user@example.com"),
+            Some(true),
+            Some("Test User"),
+            None,
+            "test-client",
+            Some("nonce123"),
+            None,
+        )
+        .unwrap();
+
+        // Verify we can decode it (use lenient validation since audience differs)
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_issuer(&[&config.jwt_issuer]);
+        validation.set_audience(&["test-client"]);
+        let decoded = decode::<IdTokenClaims>(&token, &keys.decoding, &validation).unwrap();
+        assert_eq!(decoded.claims.sub, user_id.to_string());
+        assert_eq!(decoded.claims.email, Some("user@example.com".to_string()));
+        assert_eq!(decoded.claims.nonce, Some("nonce123".to_string()));
+    }
+
+    #[test]
+    fn generate_id_token_with_at_hash() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let access_token = generate_access_token(&keys, &config, &user_id, "openid").unwrap();
+
+        let id_token = generate_id_token(
+            &keys,
+            &config,
+            &user_id,
+            None,
+            None,
+            None,
+            None,
+            "test-client",
+            None,
+            Some(&access_token),
+        )
+        .unwrap();
+
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_issuer(&[&config.jwt_issuer]);
+        validation.set_audience(&["test-client"]);
+        let decoded = decode::<IdTokenClaims>(&id_token, &keys.decoding, &validation).unwrap();
+        assert!(decoded.claims.at_hash.is_some());
+    }
+
+    #[test]
+    fn claims_serde_roundtrip() {
+        let claims = Claims {
+            sub: "user-123".to_string(),
+            iss: "nyxid".to_string(),
+            aud: "http://localhost:3001".to_string(),
+            exp: 1700000000,
+            iat: 1699999000,
+            jti: "jti-abc".to_string(),
+            scope: "openid profile".to_string(),
+            token_type: "access".to_string(),
+        };
+        let json = serde_json::to_string(&claims).unwrap();
+        let restored: Claims = serde_json::from_str(&json).unwrap();
+        assert_eq!(claims.sub, restored.sub);
+        assert_eq!(claims.token_type, restored.token_type);
+    }
+
+    #[test]
+    fn id_token_claims_skip_none_at_hash() {
+        let claims = IdTokenClaims {
+            sub: "user-123".to_string(),
+            iss: "nyxid".to_string(),
+            aud: "client-1".to_string(),
+            exp: 1700000000,
+            iat: 1699999000,
+            email: None,
+            email_verified: None,
+            name: None,
+            picture: None,
+            nonce: None,
+            at_hash: None,
+        };
+        let json = serde_json::to_value(&claims).unwrap();
+        // at_hash should be absent when None (skip_serializing_if)
+        assert!(json.get("at_hash").is_none());
+    }
 }

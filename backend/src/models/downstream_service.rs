@@ -75,3 +75,92 @@ fn default_identity_propagation_mode() -> String {
 fn default_true() -> bool {
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_name() {
+        assert_eq!(COLLECTION_NAME, "downstream_services");
+    }
+
+    #[test]
+    fn default_values() {
+        assert_eq!(default_service_category(), "connection");
+        assert_eq!(default_identity_propagation_mode(), "none");
+        assert!(default_true());
+    }
+
+    #[test]
+    fn bson_roundtrip() {
+        let svc = DownstreamService {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "Test Service".to_string(),
+            slug: "test-service".to_string(),
+            description: Some("A test service".to_string()),
+            base_url: "https://api.example.com".to_string(),
+            auth_method: "header".to_string(),
+            auth_key_name: "Authorization".to_string(),
+            credential_encrypted: vec![1, 2, 3],
+            auth_type: Some("bearer".to_string()),
+            api_spec_url: None,
+            oauth_client_id: None,
+            service_category: "connection".to_string(),
+            requires_user_credential: true,
+            is_active: true,
+            created_by: "admin".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let doc = bson::to_document(&svc).expect("serialize");
+        let restored: DownstreamService = bson::from_document(doc).expect("deserialize");
+        assert_eq!(svc.id, restored.id);
+        assert_eq!(svc.slug, restored.slug);
+        assert_eq!(svc.service_category, restored.service_category);
+    }
+
+    #[test]
+    fn bson_deserialize_applies_defaults() {
+        // Serialize a full struct, then remove default fields from the doc,
+        // and verify they get their defaults on deserialization.
+        let svc = DownstreamService {
+            id: "test-id".to_string(),
+            name: "Svc".to_string(),
+            slug: "svc".to_string(),
+            description: None,
+            base_url: "https://example.com".to_string(),
+            auth_method: "header".to_string(),
+            auth_key_name: "Authorization".to_string(),
+            credential_encrypted: vec![1],
+            auth_type: None,
+            api_spec_url: None,
+            oauth_client_id: None,
+            service_category: "connection".to_string(),
+            requires_user_credential: true,
+            is_active: true,
+            created_by: "admin".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mut doc = bson::to_document(&svc).expect("serialize");
+        // Remove the fields that have #[serde(default = ...)]
+        doc.remove("service_category");
+        doc.remove("requires_user_credential");
+        doc.remove("identity_propagation_mode");
+        let restored: DownstreamService = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.service_category, "connection");
+        assert_eq!(restored.identity_propagation_mode, "none");
+        assert!(restored.requires_user_credential);
+    }
+}

@@ -22,3 +22,33 @@ pub struct ServiceProviderRequirement {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_name() {
+        assert_eq!(COLLECTION_NAME, "service_provider_requirements");
+    }
+
+    #[test]
+    fn bson_roundtrip() {
+        let req = ServiceProviderRequirement {
+            id: uuid::Uuid::new_v4().to_string(),
+            service_id: uuid::Uuid::new_v4().to_string(),
+            provider_config_id: uuid::Uuid::new_v4().to_string(),
+            required: true,
+            scopes: Some(vec!["read".to_string(), "write".to_string()]),
+            injection_method: "bearer".to_string(),
+            injection_key: Some("Authorization".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let doc = bson::to_document(&req).expect("serialize");
+        let restored: ServiceProviderRequirement = bson::from_document(doc).expect("deserialize");
+        assert_eq!(req.id, restored.id);
+        assert!(restored.required);
+        assert_eq!(restored.scopes.unwrap().len(), 2);
+    }
+}

@@ -224,17 +224,163 @@ fn extract_request_body_swagger2(
     };
 
     // Check operation-level first, then path-level
-    if let Some(params) = operation.get("parameters") {
-        if let Some(schema) = find_body_param(params) {
+    if let Some(params) = operation.get("parameters")
+        && let Some(schema) = find_body_param(params) {
             return Some(schema);
         }
-    }
 
-    if let Some(params) = path_obj.get("parameters") {
-        if let Some(schema) = find_body_param(&params) {
+    if let Some(params) = path_obj.get("parameters")
+        && let Some(schema) = find_body_param(params) {
             return Some(schema);
         }
-    }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_name_simple() {
+        assert_eq!(sanitize_name("getUser"), "getuser");
+    }
+
+    #[test]
+    fn sanitize_name_replaces_special_chars() {
+        assert_eq!(sanitize_name("get-user-by-id"), "get_user_by_id");
+    }
+
+    #[test]
+    fn sanitize_name_strips_leading_underscores() {
+        assert_eq!(sanitize_name("__hidden"), "hidden");
+    }
+
+    #[test]
+    fn sanitize_name_digit_prefix() {
+        assert_eq!(sanitize_name("123action"), "op_123action");
+    }
+
+    #[test]
+    fn sanitize_name_empty_after_clean() {
+        assert_eq!(sanitize_name("___"), "unnamed_endpoint");
+    }
+
+    #[test]
+    fn generate_name_basic() {
+        assert_eq!(generate_name("get", "/users"), "get_users");
+    }
+
+    #[test]
+    fn generate_name_with_path_params() {
+        assert_eq!(generate_name("get", "/users/{id}"), "get_users_by_id");
+    }
+
+    #[test]
+    fn generate_name_nested_path() {
+        assert_eq!(
+            generate_name("post", "/users/{userId}/posts"),
+            "post_users_by_userid_posts"
+        );
+    }
+
+    #[test]
+    fn extract_name_with_operation_id() {
+        let op = serde_json::json!({"operationId": "listUsers"});
+        assert_eq!(extract_name(&op, "get", "/users"), "listusers");
+    }
+
+    #[test]
+    fn extract_name_without_operation_id() {
+        let op = serde_json::json!({"summary": "Get users"});
+        assert_eq!(extract_name(&op, "get", "/users"), "get_users");
+    }
+
+    #[test]
+    fn extract_description_from_summary() {
+        let op = serde_json::json!({"summary": "List all users"});
+        assert_eq!(extract_description(&op), Some("List all users".to_string()));
+    }
+
+    #[test]
+    fn extract_description_from_description_field() {
+        let op = serde_json::json!({"description": "Detailed description"});
+        assert_eq!(extract_description(&op), Some("Detailed description".to_string()));
+    }
+
+    #[test]
+    fn extract_description_prefers_summary() {
+        let op = serde_json::json!({"summary": "Short", "description": "Long"});
+        assert_eq!(extract_description(&op), Some("Short".to_string()));
+    }
+
+    #[test]
+    fn extract_description_none() {
+        let op = serde_json::json!({});
+        assert_eq!(extract_description(&op), None);
+    }
+
+    #[test]
+    fn extract_parameters_merges_path_and_op_level() {
+        let path_obj: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
+            serde_json::json!({
+                "parameters": [{"name": "id", "in": "path"}],
+                "get": {
+                    "parameters": [{"name": "limit", "in": "query"}]
+                }
+            }),
+        )
+        .unwrap();
+        let operation = &path_obj["get"];
+        let params = extract_parameters(operation, &path_obj);
+        let arr = params.unwrap();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn extract_parameters_none_when_empty() {
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"get": {}})).unwrap();
+        let operation = &path_obj["get"];
+        let params = extract_parameters(operation, &path_obj);
+        assert!(params.is_none());
+    }
+
+    #[test]
+    fn extract_request_body_openapi3_found() {
+        let op = serde_json::json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {"type": "object"}
+                    }
+                }
+            }
+        });
+        let schema = extract_request_body_openapi3(&op);
+        assert!(schema.is_some());
+        assert_eq!(schema.unwrap()["type"], "object");
+    }
+
+    #[test]
+    fn extract_request_body_openapi3_missing() {
+        let op = serde_json::json!({});
+        assert!(extract_request_body_openapi3(&op).is_none());
+    }
+
+    #[test]
+    fn extract_request_body_swagger2_from_body_param() {
+        let op = serde_json::json!({
+            "parameters": [
+                {"in": "body", "schema": {"type": "object"}},
+                {"in": "query", "name": "limit"}
+            ]
+        });
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        let schema = extract_request_body_swagger2(&op, &path_obj);
+        assert!(schema.is_some());
+        assert_eq!(schema.unwrap()["type"], "object");
+    }
 }

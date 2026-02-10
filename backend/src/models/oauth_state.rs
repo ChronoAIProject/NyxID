@@ -24,3 +24,51 @@ pub struct OAuthState {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_name() {
+        assert_eq!(COLLECTION_NAME, "oauth_states");
+    }
+
+    #[test]
+    fn bson_roundtrip() {
+        let state = OAuthState {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            provider_config_id: uuid::Uuid::new_v4().to_string(),
+            code_verifier: Some("verifier123".to_string()),
+            device_code_encrypted: None,
+            user_code_encrypted: None,
+            poll_interval: None,
+            expires_at: Utc::now(),
+            created_at: Utc::now(),
+        };
+        let doc = bson::to_document(&state).expect("serialize");
+        let restored: OAuthState = bson::from_document(doc).expect("deserialize");
+        assert_eq!(state.id, restored.id);
+        assert_eq!(state.code_verifier, restored.code_verifier);
+    }
+
+    #[test]
+    fn bson_roundtrip_device_code_flow() {
+        let state = OAuthState {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            provider_config_id: uuid::Uuid::new_v4().to_string(),
+            code_verifier: None,
+            device_code_encrypted: Some("encrypted_device_code".to_string()),
+            user_code_encrypted: Some("encrypted_user_code".to_string()),
+            poll_interval: Some(5),
+            expires_at: Utc::now(),
+            created_at: Utc::now(),
+        };
+        let doc = bson::to_document(&state).expect("serialize");
+        let restored: OAuthState = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.poll_interval, Some(5));
+        assert!(restored.device_code_encrypted.is_some());
+    }
+}

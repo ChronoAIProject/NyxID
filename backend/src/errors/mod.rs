@@ -165,3 +165,110 @@ impl IntoResponse for AppError {
 
 /// Convenience type alias for handler return types.
 pub type AppResult<T> = Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_codes() {
+        assert_eq!(AppError::BadRequest("x".into()).status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(AppError::Unauthorized("x".into()).status_code(), StatusCode::UNAUTHORIZED);
+        assert_eq!(AppError::Forbidden("x".into()).status_code(), StatusCode::FORBIDDEN);
+        assert_eq!(AppError::NotFound("x".into()).status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(AppError::Conflict("x".into()).status_code(), StatusCode::CONFLICT);
+        assert_eq!(AppError::RateLimited.status_code(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(AppError::Internal("x".into()).status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(AppError::ValidationError("x".into()).status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(AppError::AuthenticationFailed("x".into()).status_code(), StatusCode::UNAUTHORIZED);
+        assert_eq!(AppError::TokenExpired.status_code(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            AppError::MfaRequired { session_token: "tok".into() }.status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(AppError::PkceVerificationFailed.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(AppError::InvalidRedirectUri.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(AppError::InvalidScope("x".into()).status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn error_codes_unique() {
+        let codes = vec![
+            AppError::BadRequest("".into()).error_code(),
+            AppError::Unauthorized("".into()).error_code(),
+            AppError::Forbidden("".into()).error_code(),
+            AppError::NotFound("".into()).error_code(),
+            AppError::Conflict("".into()).error_code(),
+            AppError::RateLimited.error_code(),
+            AppError::Internal("".into()).error_code(),
+            AppError::ValidationError("".into()).error_code(),
+            AppError::AuthenticationFailed("".into()).error_code(),
+            AppError::TokenExpired.error_code(),
+            AppError::MfaRequired { session_token: "".into() }.error_code(),
+            AppError::PkceVerificationFailed.error_code(),
+            AppError::InvalidRedirectUri.error_code(),
+            AppError::InvalidScope("".into()).error_code(),
+        ];
+        let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
+        // DatabaseError (1007) shares no code with any other variant
+        assert_eq!(codes.len(), unique.len(), "All error codes should be unique");
+    }
+
+    #[test]
+    fn error_keys() {
+        assert_eq!(AppError::BadRequest("".into()).error_key(), "bad_request");
+        assert_eq!(AppError::Unauthorized("".into()).error_key(), "unauthorized");
+        assert_eq!(AppError::Forbidden("".into()).error_key(), "forbidden");
+        assert_eq!(AppError::NotFound("".into()).error_key(), "not_found");
+        assert_eq!(AppError::Conflict("".into()).error_key(), "conflict");
+        assert_eq!(AppError::RateLimited.error_key(), "rate_limited");
+        assert_eq!(AppError::Internal("".into()).error_key(), "internal_error");
+        assert_eq!(AppError::ValidationError("".into()).error_key(), "validation_error");
+        assert_eq!(AppError::AuthenticationFailed("".into()).error_key(), "authentication_failed");
+        assert_eq!(AppError::TokenExpired.error_key(), "token_expired");
+        assert_eq!(
+            AppError::MfaRequired { session_token: "".into() }.error_key(),
+            "mfa_required"
+        );
+        assert_eq!(AppError::PkceVerificationFailed.error_key(), "pkce_verification_failed");
+        assert_eq!(AppError::InvalidRedirectUri.error_key(), "invalid_redirect_uri");
+        assert_eq!(AppError::InvalidScope("".into()).error_key(), "invalid_scope");
+    }
+
+    #[test]
+    fn display_messages() {
+        assert_eq!(format!("{}", AppError::BadRequest("oops".into())), "Bad request: oops");
+        assert_eq!(format!("{}", AppError::TokenExpired), "Token expired");
+        assert_eq!(format!("{}", AppError::RateLimited), "Rate limited");
+        assert_eq!(format!("{}", AppError::PkceVerificationFailed), "PKCE verification failed");
+        assert_eq!(format!("{}", AppError::InvalidRedirectUri), "Invalid redirect URI");
+        assert_eq!(format!("{}", AppError::MfaRequired { session_token: "t".into() }), "MFA required");
+    }
+
+    #[test]
+    fn error_response_serialization() {
+        let resp = ErrorResponse {
+            error: "bad_request".to_string(),
+            error_code: 1000,
+            message: "Invalid input".to_string(),
+            session_token: None,
+        };
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["error"], "bad_request");
+        assert_eq!(json["error_code"], 1000);
+        // session_token should be omitted when None (skip_serializing_if)
+        assert!(json.get("session_token").is_none());
+    }
+
+    #[test]
+    fn error_response_with_session_token() {
+        let resp = ErrorResponse {
+            error: "mfa_required".to_string(),
+            error_code: 2002,
+            message: "MFA verification required".to_string(),
+            session_token: Some("mfa-session-tok".to_string()),
+        };
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["session_token"], "mfa-session-tok");
+    }
+}

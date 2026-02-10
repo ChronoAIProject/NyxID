@@ -42,3 +42,67 @@ pub struct UserProviderToken {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_name() {
+        assert_eq!(COLLECTION_NAME, "user_provider_tokens");
+    }
+
+    #[test]
+    fn bson_roundtrip_oauth2_token() {
+        let token = UserProviderToken {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            provider_config_id: uuid::Uuid::new_v4().to_string(),
+            token_type: "oauth2".to_string(),
+            access_token_encrypted: Some(vec![1, 2, 3]),
+            refresh_token_encrypted: Some(vec![4, 5, 6]),
+            token_scopes: Some("openid email".to_string()),
+            expires_at: Some(Utc::now()),
+            api_key_encrypted: None,
+            status: "active".to_string(),
+            last_refreshed_at: Some(Utc::now()),
+            last_used_at: None,
+            error_message: None,
+            label: Some("My Google Token".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let doc = bson::to_document(&token).expect("serialize");
+        let restored: UserProviderToken = bson::from_document(doc).expect("deserialize");
+        assert_eq!(token.id, restored.id);
+        assert_eq!(restored.token_type, "oauth2");
+        assert!(restored.expires_at.is_some());
+        assert!(restored.last_refreshed_at.is_some());
+    }
+
+    #[test]
+    fn bson_roundtrip_api_key_token() {
+        let token = UserProviderToken {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            provider_config_id: uuid::Uuid::new_v4().to_string(),
+            token_type: "api_key".to_string(),
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            api_key_encrypted: Some(vec![7, 8, 9]),
+            status: "active".to_string(),
+            last_refreshed_at: None,
+            last_used_at: None,
+            error_message: None,
+            label: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let doc = bson::to_document(&token).expect("serialize");
+        let restored: UserProviderToken = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.token_type, "api_key");
+        assert!(restored.api_key_encrypted.is_some());
+    }
+}

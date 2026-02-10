@@ -161,3 +161,112 @@ impl AppConfig {
             && !self.base_url.starts_with("http://127.0.0.1")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a minimal AppConfig for testing pure methods.
+    fn make_config(base_url: &str, environment: &str, encryption_key: &str) -> AppConfig {
+        AppConfig {
+            port: 3001,
+            base_url: base_url.to_string(),
+            frontend_url: "http://localhost:3000".to_string(),
+            database_url: "mongodb://localhost:27017/nyxid".to_string(),
+            database_max_connections: 10,
+            environment: environment.to_string(),
+            jwt_private_key_path: "keys/private.pem".to_string(),
+            jwt_public_key_path: "keys/public.pem".to_string(),
+            jwt_issuer: "nyxid".to_string(),
+            jwt_access_ttl_secs: 900,
+            jwt_refresh_ttl_secs: 604800,
+            google_client_id: None,
+            google_client_secret: None,
+            github_client_id: None,
+            github_client_secret: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_username: None,
+            smtp_password: None,
+            smtp_from_address: None,
+            encryption_key: encryption_key.to_string(),
+            rate_limit_per_second: 10,
+            rate_limit_burst: 30,
+        }
+    }
+
+    #[test]
+    fn is_development_true() {
+        let cfg = make_config("http://localhost:3001", "development", "aa".repeat(32).as_str());
+        assert!(cfg.is_development());
+        let cfg2 = make_config("http://localhost:3001", "dev", "aa".repeat(32).as_str());
+        assert!(cfg2.is_development());
+    }
+
+    #[test]
+    fn is_development_false_for_production() {
+        let cfg = make_config("https://auth.example.com", "production", "aa".repeat(32).as_str());
+        assert!(!cfg.is_development());
+    }
+
+    #[test]
+    fn is_production_true() {
+        let cfg = make_config("https://auth.example.com", "production", "aa".repeat(32).as_str());
+        assert!(cfg.is_production());
+    }
+
+    #[test]
+    fn is_production_false() {
+        let cfg = make_config("http://localhost:3001", "development", "aa".repeat(32).as_str());
+        assert!(!cfg.is_production());
+    }
+
+    #[test]
+    fn secure_cookies_for_https() {
+        let cfg = make_config("https://auth.example.com", "production", "aa".repeat(32).as_str());
+        assert!(cfg.use_secure_cookies());
+    }
+
+    #[test]
+    fn no_secure_cookies_for_localhost() {
+        let cfg = make_config("http://localhost:3001", "development", "aa".repeat(32).as_str());
+        assert!(!cfg.use_secure_cookies());
+    }
+
+    #[test]
+    fn no_secure_cookies_for_127_0_0_1() {
+        let cfg = make_config("http://127.0.0.1:3001", "development", "aa".repeat(32).as_str());
+        assert!(!cfg.use_secure_cookies());
+    }
+
+    #[test]
+    fn validate_encryption_key_valid() {
+        // 64 hex chars = 32 bytes, not all zeros
+        let key = "ab".repeat(32);
+        let cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.validate_encryption_key(); // should not panic
+    }
+
+    #[test]
+    #[should_panic(expected = "must be exactly 64 hex characters")]
+    fn validate_encryption_key_too_short() {
+        let cfg = make_config("http://localhost:3001", "dev", "abcd");
+        cfg.validate_encryption_key();
+    }
+
+    #[test]
+    #[should_panic(expected = "not valid hexadecimal")]
+    fn validate_encryption_key_not_hex() {
+        let key = "zz".repeat(32); // not valid hex
+        let cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.validate_encryption_key();
+    }
+
+    #[test]
+    #[should_panic(expected = "all zeros")]
+    fn validate_encryption_key_all_zeros() {
+        let key = "00".repeat(32);
+        let cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.validate_encryption_key();
+    }
+}

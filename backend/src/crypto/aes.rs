@@ -126,4 +126,60 @@ mod tests {
         let result = encrypt(b"test", &short_key);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_decrypt_invalid_key_length() {
+        let short_key = [0u8; 16];
+        let result = decrypt(b"some-data-longer-than-12", &short_key);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_ciphertext_too_short() {
+        let key = [0xAAu8; 32];
+        let short_data = [0u8; 5]; // less than NONCE_SIZE (12)
+        let result = decrypt(&short_data, &key);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encrypt_empty_plaintext() {
+        let key = [0xBBu8; 32];
+        let encrypted = encrypt(b"", &key).unwrap();
+        let decrypted = decrypt(&encrypted, &key).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn test_encrypt_large_plaintext() {
+        let key = [0xCCu8; 32];
+        let plaintext = vec![0x42u8; 10_000];
+        let encrypted = encrypt(&plaintext, &key).unwrap();
+        let decrypted = decrypt(&encrypted, &key).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_tampered_ciphertext_fails() {
+        let key = [0xDDu8; 32];
+        let plaintext = b"important data";
+        let mut encrypted = encrypt(plaintext, &key).unwrap();
+        // Flip a byte in the ciphertext portion (after nonce)
+        let last = encrypted.len() - 1;
+        encrypted[last] ^= 0xFF;
+        assert!(decrypt(&encrypted, &key).is_err());
+    }
+
+    #[test]
+    fn test_parse_hex_key_valid() {
+        let hex_key = "ab".repeat(32); // 64 hex chars = 32 bytes
+        let bytes = parse_hex_key(&hex_key).unwrap();
+        assert_eq!(bytes.len(), 32);
+    }
+
+    #[test]
+    fn test_parse_hex_key_invalid() {
+        let result = parse_hex_key("not-hex-at-all!");
+        assert!(result.is_err());
+    }
 }

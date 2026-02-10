@@ -25,3 +25,35 @@ pub struct OauthClient {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_name() {
+        assert_eq!(COLLECTION_NAME, "oauth_clients");
+    }
+
+    #[test]
+    fn bson_roundtrip() {
+        let client = OauthClient {
+            id: "default-client".to_string(),
+            client_name: "Test Client".to_string(),
+            client_secret_hash: "abc123".to_string(),
+            redirect_uris: vec!["http://localhost:3000/callback".to_string()],
+            allowed_scopes: "openid profile email".to_string(),
+            grant_types: "authorization_code".to_string(),
+            client_type: "confidential".to_string(),
+            is_active: true,
+            created_by: Some("admin".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let doc = bson::to_document(&client).expect("serialize");
+        let restored: OauthClient = bson::from_document(doc).expect("deserialize");
+        assert_eq!(client.id, restored.id);
+        assert_eq!(client.redirect_uris.len(), restored.redirect_uris.len());
+        assert_eq!(client.client_type, restored.client_type);
+    }
+}

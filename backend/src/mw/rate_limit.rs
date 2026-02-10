@@ -101,27 +101,22 @@ pub fn create_per_ip_rate_limiter(max_requests: u32, window_secs: u64) -> Shared
 ///    and only trust headers from known proxy IPs, or
 /// 2. Use Axum's `ConnectInfo<SocketAddr>` to get the real peer address
 ///    and only fall back to forwarded headers when the peer is a trusted proxy.
-/// Document the required reverse proxy configuration in DEPLOYMENT.md.
+///    Document the required reverse proxy configuration in DEPLOYMENT.md.
 fn extract_client_ip(request: &Request<Body>) -> IpAddr {
     // Try X-Forwarded-For first
-    if let Some(forwarded_for) = request.headers().get("x-forwarded-for") {
-        if let Ok(value) = forwarded_for.to_str() {
-            if let Some(first_ip) = value.split(',').next() {
-                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+    if let Some(forwarded_for) = request.headers().get("x-forwarded-for")
+        && let Ok(value) = forwarded_for.to_str()
+            && let Some(first_ip) = value.split(',').next()
+                && let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
                     return ip;
                 }
-            }
-        }
-    }
 
     // Try X-Real-IP
-    if let Some(real_ip) = request.headers().get("x-real-ip") {
-        if let Ok(value) = real_ip.to_str() {
-            if let Ok(ip) = value.trim().parse::<IpAddr>() {
+    if let Some(real_ip) = request.headers().get("x-real-ip")
+        && let Ok(value) = real_ip.to_str()
+            && let Ok(ip) = value.trim().parse::<IpAddr>() {
                 return ip;
             }
-        }
-    }
 
     // Fallback to loopback (in production, the reverse proxy should always set headers)
     IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
@@ -159,4 +154,112 @@ pub async fn rate_limit_middleware(
     }
 
     Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn per_ip_allows_under_limit() {
+        let limiter = PerIpRateLimiter::new(3, 60);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        assert!(limiter.check(ip));
+        assert!(limiter.check(ip));
+        assert!(limiter.check(ip));
+    }
+
+    #[test]
+    fn per_ip_blocks_over_limit() {
+        let limiter = PerIpRateLimiter::new(2, 60);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        assert!(limiter.check(ip));
+        assert!(limiter.check(ip));
+        assert!(!limiter.check(ip));
+    }
+
+    #[test]
+    fn per_ip_different_ips_independent() {
+        let limiter = PerIpRateLimiter::new(1, 60);
+        let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        assert!(limiter.check(ip1));
+        assert!(!limiter.check(ip1));
+        assert!(limiter.check(ip2));
+    }
+
+    #[test]
+    fn per_ip_ipv6_works() {
+        let limiter = PerIpRateLimiter::new(1, 60);
+        let ip = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        assert!(limiter.check(ip));
+        assert!(!limiter.check(ip));
+    }
+
+    #[test]
+    fn cleanup_does_not_panic() {
+        let limiter = PerIpRateLimiter::new(100, 0);
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        limiter.check(ip);
+        limiter.cleanup();
+    }
+
+    #[test]
+    fn create_rate_limiter_does_not_panic() {
+        let _limiter = create_rate_limiter(10, 30);
+    }
+
+    #[test]
+    fn create_per_ip_rate_limiter_does_not_panic() {
+        let _limiter = create_per_ip_rate_limiter(30, 1);
+    }
+
+    #[test]
+    fn extract_client_ip_x_forwarded_for() {
+        let req = Request::builder()
+            .header("x-forwarded-for", "203.0.113.50, 70.41.3.18")
+            .body(Body::empty())
+            .unwrap();
+        let ip = extract_client_ip(&req);
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 50)));
+    }
+
+    #[test]
+    fn extract_client_ip_x_real_ip() {
+        let req = Request::builder()
+            .header("x-real-ip", "198.51.100.22")
+            .body(Body::empty())
+            .unwrap();
+        let ip = extract_client_ip(&req);
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 22)));
+    }
+
+    #[test]
+    fn extract_client_ip_fallback_to_localhost() {
+        let req = Request::builder().body(Body::empty()).unwrap();
+        let ip = extract_client_ip(&req);
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn extract_client_ip_invalid_header_falls_through() {
+        let req = Request::builder()
+            .header("x-forwarded-for", "not-an-ip")
+            .body(Body::empty())
+            .unwrap();
+        let ip = extract_client_ip(&req);
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn extract_client_ip_prefers_forwarded_for_over_real_ip() {
+        let req = Request::builder()
+            .header("x-forwarded-for", "1.2.3.4")
+            .header("x-real-ip", "5.6.7.8")
+            .body(Body::empty())
+            .unwrap();
+        let ip = extract_client_ip(&req);
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
+    }
 }

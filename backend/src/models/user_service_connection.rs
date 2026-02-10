@@ -26,3 +26,33 @@ pub struct UserServiceConnection {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_name() {
+        assert_eq!(COLLECTION_NAME, "user_service_connections");
+    }
+
+    #[test]
+    fn bson_roundtrip() {
+        let conn = UserServiceConnection {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            service_id: uuid::Uuid::new_v4().to_string(),
+            credential_encrypted: Some(vec![10, 20, 30]),
+            credential_type: Some("api_key".to_string()),
+            credential_label: Some("My Key".to_string()),
+            metadata: Some(serde_json::json!({"env": "production"})),
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let doc = bson::to_document(&conn).expect("serialize");
+        let restored: UserServiceConnection = bson::from_document(doc).expect("deserialize");
+        assert_eq!(conn.id, restored.id);
+        assert_eq!(conn.credential_type, restored.credential_type);
+    }
+}

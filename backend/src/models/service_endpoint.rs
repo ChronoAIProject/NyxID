@@ -24,3 +24,35 @@ pub struct ServiceEndpoint {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collection_name() {
+        assert_eq!(COLLECTION_NAME, "service_endpoints");
+    }
+
+    #[test]
+    fn bson_roundtrip() {
+        let endpoint = ServiceEndpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            service_id: uuid::Uuid::new_v4().to_string(),
+            name: "get_users".to_string(),
+            description: Some("List users".to_string()),
+            method: "GET".to_string(),
+            path: "/users".to_string(),
+            parameters: Some(serde_json::json!([{"name": "limit", "in": "query"}])),
+            request_body_schema: None,
+            response_description: Some("200 OK".to_string()),
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let doc = bson::to_document(&endpoint).expect("serialize");
+        let restored: ServiceEndpoint = bson::from_document(doc).expect("deserialize");
+        assert_eq!(endpoint.id, restored.id);
+        assert_eq!(endpoint.method, restored.method);
+    }
+}
