@@ -15,6 +15,8 @@ export default defineConfig({
     proxy: {
       "/api": "http://localhost:3001",
       "/oauth": "http://localhost:3001",
+      "/mcp": "http://localhost:3001",
+      "/.well-known": "http://localhost:3001",
     },
   },
 })

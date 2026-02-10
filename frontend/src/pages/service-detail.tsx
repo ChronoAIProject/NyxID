@@ -1,6 +1,11 @@
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useService, useDeleteService } from "@/hooks/use-services";
-import { isOidcService, getAuthTypeLabel } from "@/lib/constants";
+import {
+  isOidcService,
+  isConnectable,
+  getAuthTypeLabel,
+  SERVICE_CATEGORY_LABELS,
+} from "@/lib/constants";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -107,6 +112,11 @@ export function ServiceDetailPage() {
           badge
         />
         <DetailRow
+          label="Category"
+          value={SERVICE_CATEGORY_LABELS[service.service_category] ?? service.service_category}
+          badge
+        />
+        <DetailRow
           label="Status"
           value={service.is_active ? "Active" : "Inactive"}
           badge
@@ -128,24 +138,25 @@ export function ServiceDetailPage() {
         </>
       )}
 
-      <Separator />
-      <DetailSection title="API Endpoints">
-        <EndpointList
-          serviceId={service.id}
-          hasApiSpecUrl={
-            service.api_spec_url !== null &&
-            service.api_spec_url !== undefined
-          }
-        />
-      </DetailSection>
+      {isConnectable(service) && !oidc && (
+        <>
+          <Separator />
+          <DetailSection title="API Endpoints">
+            <EndpointList
+              serviceId={service.id}
+              hasApiSpecUrl={
+                service.api_spec_url !== null &&
+                service.api_spec_url !== undefined
+              }
+            />
+          </DetailSection>
 
-      <Separator />
-      <DetailSection title="MCP Connection">
-        <McpConnectionInfo
-          serviceSlug={service.slug}
-          serviceName={service.name}
-        />
-      </DetailSection>
+          <Separator />
+          <DetailSection title="MCP Connection">
+            <McpConnectionInfo />
+          </DetailSection>
+        </>
+      )}
     </div>
   );
 }

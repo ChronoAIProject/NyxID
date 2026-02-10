@@ -1,31 +1,19 @@
 import { useState } from "react";
+import { usePublicConfig } from "@/hooks/use-public-config";
 import { copyToClipboard } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Check, Copy } from "lucide-react";
 import { toast } from "sonner";
 
-interface McpConnectionInfoProps {
-  readonly serviceSlug: string;
-  readonly serviceName: string;
-}
-
-function buildMcpProxyUrl(serviceSlug: string): string {
-  const origin = typeof window !== "undefined" ? window.location.origin : "";
-  return `${origin}/api/v1/mcp/${serviceSlug}`;
-}
-
-function buildCursorConfig(
-  serviceSlug: string,
-  serviceName: string,
-): string {
-  const url = buildMcpProxyUrl(serviceSlug);
+function buildCursorConfig(mcpUrl: string): string {
   return JSON.stringify(
     {
       mcpServers: {
-        [serviceSlug]: {
-          url,
-          description: serviceName,
+        nyxid: {
+          url: mcpUrl,
+          description: "NyxID MCP Proxy",
         },
       },
     },
@@ -34,18 +22,14 @@ function buildCursorConfig(
   );
 }
 
-function buildClaudeCodeConfig(
-  serviceSlug: string,
-  serviceName: string,
-): string {
-  const url = buildMcpProxyUrl(serviceSlug);
+function buildClaudeCodeConfig(mcpUrl: string): string {
   return JSON.stringify(
     {
       mcpServers: {
-        [serviceSlug]: {
+        nyxid: {
           command: "npx",
-          args: ["-y", "@anthropic-ai/mcp-proxy", url],
-          description: serviceName,
+          args: ["-y", "@anthropic-ai/mcp-proxy", mcpUrl],
+          description: "NyxID MCP Proxy",
         },
       },
     },
@@ -85,25 +69,36 @@ function CopyButton({ text, label }: { readonly text: string; readonly label: st
   );
 }
 
-export function McpConnectionInfo({
-  serviceSlug,
-  serviceName,
-}: McpConnectionInfoProps) {
-  const proxyUrl = buildMcpProxyUrl(serviceSlug);
-  const cursorConfig = buildCursorConfig(serviceSlug, serviceName);
-  const claudeCodeConfig = buildClaudeCodeConfig(serviceSlug, serviceName);
+export function McpConnectionInfo() {
+  const { data: config, isLoading } = usePublicConfig();
+
+  if (isLoading) {
+    return <Skeleton className="h-64 w-full" />;
+  }
+
+  const mcpUrl = config?.mcp_url ?? `${window.location.origin}/mcp`;
+  const cursorConfig = buildCursorConfig(mcpUrl);
+  const claudeCodeConfig = buildClaudeCodeConfig(mcpUrl);
 
   return (
     <div className="space-y-4">
+      <div className="rounded-md border border-border/50 bg-muted/30 p-3">
+        <p className="text-xs text-muted-foreground">
+          NyxID exposes a single MCP endpoint that provides tools for all your
+          connected services. Connect your MCP client once and it will
+          automatically discover tools from every service you have enabled.
+        </p>
+      </div>
+
       <div>
         <p className="mb-1 text-xs font-medium text-muted-foreground">
           MCP Proxy URL
         </p>
         <div className="relative">
           <code className="block rounded bg-muted px-3 py-2 pr-10 text-xs break-all">
-            {proxyUrl}
+            {mcpUrl}
           </code>
-          <CopyButton text={proxyUrl} label="MCP proxy URL" />
+          <CopyButton text={mcpUrl} label="MCP proxy URL" />
         </div>
       </div>
 
@@ -144,10 +139,10 @@ export function McpConnectionInfo({
       <div className="rounded-md border border-border/50 bg-muted/30 p-3">
         <p className="text-xs font-medium mb-1">How it works</p>
         <p className="text-xs text-muted-foreground">
-          NyxID acts as an MCP proxy that authenticates requests via OAuth.
-          When an MCP client connects, NyxID handles the OAuth authorization
-          flow with the downstream service and proxies tool calls to the
-          service's API endpoints on behalf of the authenticated user.
+          When an MCP client connects, NyxID authenticates via OAuth in your
+          browser. Once authenticated, the proxy exposes tools from all your
+          connected services. Tool calls are forwarded to each service's API
+          with your credentials injected automatically.
         </p>
       </div>
     </div>

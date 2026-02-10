@@ -21,6 +21,7 @@ import { ServiceDetailPage } from "@/pages/service-detail";
 import { ServiceEditPage } from "@/pages/service-edit";
 import { ConnectionsPage } from "@/pages/connections";
 import { SettingsPage } from "@/pages/settings";
+import { GuidePage } from "@/pages/guide";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -115,6 +116,12 @@ const settingsRoute = createRoute({
   component: SettingsPage,
 });
 
+const guideRoute = createRoute({
+  path: "/guide",
+  getParentRoute: () => dashboardLayout,
+  component: GuidePage,
+});
+
 const routeTree = rootRoute.addChildren([
   authLayout.addChildren([loginRoute, registerRoute]),
   dashboardLayout.addChildren([
@@ -127,6 +134,7 @@ const routeTree = rootRoute.addChildren([
     ]),
     connectionsRoute,
     settingsRoute,
+    guideRoute,
   ]),
 ]);
 

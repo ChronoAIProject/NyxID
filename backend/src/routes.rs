@@ -88,6 +88,7 @@ pub fn build_router() -> Router<AppState> {
         .nest("/connections", connection_routes)
         .nest("/mcp", mcp_routes)
         .nest("/admin", admin_routes)
+        .route("/public/config", get(handlers::health::public_config))
         .route("/proxy/{service_id}/{*path}", axum::routing::any(handlers::proxy::proxy_request));
 
     let well_known_routes = Router::new()

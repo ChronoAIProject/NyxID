@@ -5,6 +5,7 @@ import {
   Server,
   Link2,
   Settings,
+  BookOpen,
   Shield,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -16,6 +17,7 @@ const NAV_ITEMS = [
   { to: "/services", icon: Server, label: "Services" },
   { to: "/connections", icon: Link2, label: "Connections" },
   { to: "/settings", icon: Settings, label: "Settings" },
+  { to: "/guide", icon: BookOpen, label: "Guide" },
 ] as const;
 
 export function Sidebar() {

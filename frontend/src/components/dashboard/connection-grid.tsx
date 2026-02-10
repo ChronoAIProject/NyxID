@@ -9,6 +9,7 @@ import {
 } from "@/hooks/use-services";
 import {
   isConnectable,
+  isOidcService,
   getCredentialInputType,
   SERVICE_CATEGORY_LABELS,
 } from "@/lib/constants";
@@ -123,8 +124,10 @@ export function ConnectionGrid() {
     );
   }
 
-  // Filter: only connectable services (exclude providers)
-  const connectableServices = services?.filter(isConnectable) ?? [];
+  // Filter: only connectable services (exclude providers and OIDC)
+  const connectableServices = services?.filter(
+    (s) => isConnectable(s) && !isOidcService(s),
+  ) ?? [];
 
   if (connectableServices.length === 0) {
     return (

@@ -171,3 +171,8 @@ export interface MfaVerifyRequest {
   readonly code: string;
   readonly mfa_token: string;
 }
+
+export interface PublicConfig {
+  readonly mcp_url: string;
+  readonly version: string;
+}
