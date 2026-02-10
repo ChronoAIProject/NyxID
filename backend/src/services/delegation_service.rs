@@ -12,6 +12,7 @@ use crate::services::user_token_service;
 
 /// A resolved credential ready for injection into a proxied request.
 pub struct DelegatedCredential {
+    #[allow(dead_code)]
     pub provider_slug: String,
     pub injection_method: String,
     pub injection_key: String,

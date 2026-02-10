@@ -53,7 +53,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
         mfa_token: mfaToken,
       });
       if (returnTo && returnTo.startsWith(BACKEND_URL + "/")) {
-        window.location.href = returnTo;
+        window.location.assign(returnTo);
         return;
       }
       void navigate({ to: "/" as string });

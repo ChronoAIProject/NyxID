@@ -257,8 +257,8 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
     let mut required: Vec<serde_json::Value> = Vec::new();
 
     // -- URL / query / header parameters --
-    if let Some(params_value) = &endpoint.parameters {
-        if let Some(params) = params_value.as_array() {
+    if let Some(params_value) = &endpoint.parameters
+        && let Some(params) = params_value.as_array() {
             for param in params {
                 let name = match param.get("name").and_then(|v| v.as_str()) {
                     Some(n) if !n.is_empty() => n,
@@ -311,7 +311,6 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
                 }
             }
         }
-    }
 
     // -- Request body schema --
     if let Some(body_schema) = &endpoint.request_body_schema {
@@ -402,8 +401,8 @@ pub fn build_proxy_args(
     let mut path_params = HashSet::new();
     let mut query_param_names = HashSet::new();
 
-    if let Some(params_value) = &endpoint.parameters {
-        if let Some(params) = params_value.as_array() {
+    if let Some(params_value) = &endpoint.parameters
+        && let Some(params) = params_value.as_array() {
             for param in params {
                 let name = param
                     .get("name")
@@ -420,7 +419,6 @@ pub fn build_proxy_args(
                 }
             }
         }
-    }
 
     if let Some(args_obj) = args.as_object() {
         for (key, value) in args_obj {
@@ -495,6 +493,7 @@ pub fn build_proxy_args(
 ///
 /// Builds identity headers and resolves delegated credentials (CR-8),
 /// matching the behavior of `handlers/proxy.rs`.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_tool(
     http_client: &reqwest::Client,
     db: &mongodb::Database,

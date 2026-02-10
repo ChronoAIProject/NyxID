@@ -60,14 +60,13 @@ pub fn build_identity_headers(
         ));
     }
 
-    if service.identity_include_name {
-        if let Some(ref name) = user.display_name {
+    if service.identity_include_name
+        && let Some(ref name) = user.display_name {
             headers.push((
                 "X-NyxID-User-Name".to_string(),
                 sanitize_header_value(name),
             ));
         }
-    }
 
     headers
 }

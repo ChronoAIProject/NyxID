@@ -86,13 +86,12 @@ pub async fn create_user(
     }
 
     // Validate display name length
-    if let Some(name) = display_name {
-        if name.len() > 200 {
+    if let Some(name) = display_name
+        && name.len() > 200 {
             return Err(AppError::ValidationError(
                 "Display name must be 200 characters or less".to_string(),
             ));
         }
-    }
 
     let password_hash = password::hash_password(password_raw)?;
     let now = Utc::now();

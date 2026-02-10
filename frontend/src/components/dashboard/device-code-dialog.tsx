@@ -37,9 +37,9 @@ export function DeviceCodeDialog({
   const [step, setStep] = useState<FlowStep>("requesting");
   const [userCode, setUserCode] = useState("");
   const [verificationUri, setVerificationUri] = useState("");
-  const [stateToken, setStateToken] = useState("");
-  const [pollInterval, setPollInterval] = useState(5);
-  const [expiresIn, setExpiresIn] = useState(0);
+  const [, setStateToken] = useState("");
+  const [, setPollInterval] = useState(5);
+  const [, setExpiresIn] = useState(0);
   const [secondsRemaining, setSecondsRemaining] = useState(0);
   const [errorMessage, setErrorMessage] = useState("");
 

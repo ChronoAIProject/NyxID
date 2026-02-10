@@ -6,7 +6,6 @@ import { useProvider, useUpdateProvider } from "@/hooks/use-providers";
 import {
   updateProviderSchema,
   type UpdateProviderFormData,
-  PROVIDER_TYPES,
 } from "@/schemas/providers";
 import { ApiError } from "@/lib/api-client";
 import { PageHeader } from "@/components/shared/page-header";
@@ -117,7 +116,8 @@ export function ProviderEditPage() {
   async function onSubmit(data: UpdateProviderFormData) {
     if (!provider) return;
     try {
-      const { slug: _slug, provider_type: _pt, ...updateFields } = data;
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { slug: _, provider_type: _providerType, ...updateFields } = data;
       const cleaned = stripEmptyStrings({
         ...updateFields,
         default_scopes: splitScopes(data.default_scopes),

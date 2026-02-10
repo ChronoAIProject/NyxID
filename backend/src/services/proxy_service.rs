@@ -109,6 +109,7 @@ pub async fn resolve_proxy_target(
 ///
 /// Uses an allowlist for headers to prevent leaking sensitive data.
 /// Preserves the original HTTP method for all auth methods including query auth.
+#[allow(clippy::too_many_arguments)]
 pub async fn forward_request(
     client: &Client,
     target: &ProxyTarget,

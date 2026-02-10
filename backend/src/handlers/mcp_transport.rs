@@ -149,6 +149,7 @@ async fn authenticate_mcp(state: &AppState, headers: &HeaderMap) -> Result<Strin
 }
 
 /// Extract the `Mcp-Session-Id` header value.
+#[allow(clippy::result_large_err)]
 fn require_session(headers: &HeaderMap) -> Result<String, Response> {
     headers
         .get("mcp-session-id")
@@ -158,6 +159,7 @@ fn require_session(headers: &HeaderMap) -> Result<String, Response> {
 }
 
 /// Validate session exists and belongs to user, then touch it.
+#[allow(clippy::result_large_err)]
 fn validate_session(
     state: &AppState,
     session_id: &str,

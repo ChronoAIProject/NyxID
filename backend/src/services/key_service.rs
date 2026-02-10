@@ -191,11 +191,10 @@ pub async fn validate_api_key(
         .ok_or_else(|| AppError::Unauthorized("Invalid API key".to_string()))?;
 
     // Check expiration
-    if let Some(expires_at) = key.expires_at {
-        if expires_at < Utc::now() {
+    if let Some(expires_at) = key.expires_at
+        && expires_at < Utc::now() {
             return Err(AppError::Unauthorized("API key has expired".to_string()));
         }
-    }
 
     // Update last_used_at
     let user_id = key.user_id.clone();

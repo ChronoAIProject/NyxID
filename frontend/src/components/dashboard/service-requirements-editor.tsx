@@ -1,4 +1,4 @@
-import type { ServiceProviderRequirement, ProviderConfig } from "@/types/api";
+import type { ProviderConfig } from "@/types/api";
 import { useProviders, useServiceRequirements } from "@/hooks/use-providers";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";

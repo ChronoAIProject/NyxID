@@ -49,7 +49,7 @@ export function LoginForm({ returnTo }: LoginFormProps) {
           returnTo &&
           returnTo.startsWith(BACKEND_URL + "/")
         ) {
-          window.location.href = returnTo;
+          window.location.assign(returnTo);
           return;
         }
         void navigate({ to: "/" as string });

@@ -358,6 +358,7 @@ pub struct ProviderUpdateInput {
 }
 
 /// Create a new provider configuration. Admin only.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_provider(
     db: &mongodb::Database,
     encryption_key: &[u8],
@@ -434,8 +435,8 @@ pub async fn create_provider(
         client_secret_encrypted: client_secret_enc,
         supports_pkce: oauth_config
             .as_ref()
-            .map_or(false, |o| o.supports_pkce)
-            || device_code_config.as_ref().map_or(false, |d| d.supports_pkce),
+            .is_some_and(|o| o.supports_pkce)
+            || device_code_config.as_ref().is_some_and(|d| d.supports_pkce),
         device_code_url: device_code_config.as_ref().map(|d| d.device_code_url.clone()),
         device_token_url: device_code_config.as_ref().map(|d| d.device_token_url.clone()),
         device_verification_url: device_code_config
@@ -486,6 +487,7 @@ pub async fn get_provider(
 }
 
 /// Get a single provider by slug.
+#[allow(dead_code)]
 pub async fn get_provider_by_slug(
     db: &mongodb::Database,
     slug: &str,

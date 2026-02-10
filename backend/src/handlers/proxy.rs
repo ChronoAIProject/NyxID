@@ -161,11 +161,9 @@ pub async fn proxy_request(
     let mut reqwest_headers = reqwest::header::HeaderMap::new();
     for (name, value) in headers.iter() {
         if let Ok(reqwest_name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
-        {
-            if let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
+            && let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
                 reqwest_headers.insert(reqwest_name, reqwest_value);
             }
-        }
     }
 
     // Reuse the shared reqwest::Client from AppState for connection pooling
@@ -191,17 +189,14 @@ pub async fn proxy_request(
     // Forward only allowlisted response headers
     for (name, value) in downstream_response.headers().iter() {
         let name_lower = name.as_str().to_lowercase();
-        if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str()) {
-            if let Ok(header_name) =
+        if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
+            && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            {
-                if let Ok(header_value) =
+                && let Ok(header_value) =
                     axum::http::header::HeaderValue::from_bytes(value.as_bytes())
                 {
                     response_builder = response_builder.header(header_name, header_value);
                 }
-            }
-        }
     }
 
     let response_body = downstream_response

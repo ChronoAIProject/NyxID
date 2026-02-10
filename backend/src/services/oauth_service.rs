@@ -61,6 +61,7 @@ pub fn validate_scopes(requested: &str, allowed: &str) -> AppResult<String> {
 }
 
 /// Create an authorization code for the OAuth authorization code flow.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_authorization_code(
     db: &mongodb::Database,
     client_id: &str,
@@ -137,6 +138,7 @@ fn validate_client_secret(
 /// Implements PKCE verification (S256 only) and client_secret validation
 /// for confidential clients. Persists the refresh token to the database
 /// and implements code replay detection.
+#[allow(clippy::too_many_arguments)]
 pub async fn exchange_authorization_code(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -170,8 +172,8 @@ pub async fn exchange_authorization_code(
                 .find_one(doc! { "code_hash": &code_hash, "client_id": client_id })
                 .await?;
 
-            if let Some(ref used_code) = maybe_used {
-                if used_code.used {
+            if let Some(ref used_code) = maybe_used
+                && used_code.used {
                     tracing::warn!(
                         client_id = %client_id,
                         user_id = %used_code.user_id,
@@ -194,7 +196,6 @@ pub async fn exchange_authorization_code(
                         "Authorization code has already been used".to_string(),
                     ));
                 }
-            }
 
             return Err(AppError::BadRequest(
                 "Invalid authorization code".to_string(),

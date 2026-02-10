@@ -508,8 +508,8 @@ pub async fn poll_device_code(
 
     if !status_code.is_success() {
         // Try to parse RFC 8628 error response as fallback
-        if let Ok(resp_data) = response.json::<serde_json::Value>().await {
-            if let Some(error) = resp_data["error"].as_str() {
+        if let Ok(resp_data) = response.json::<serde_json::Value>().await
+            && let Some(error) = resp_data["error"].as_str() {
                 match error {
                     "authorization_pending" => {
                         return Ok(DeviceCodePollResult {
@@ -551,7 +551,6 @@ pub async fn poll_device_code(
                     _ => {}
                 }
             }
-        }
         return Err(AppError::Internal(format!(
             "Device code poll returned unexpected status: {status_code}"
         )));
@@ -845,6 +844,7 @@ pub async fn handle_oauth_callback(
         tracing::error!(
             provider_id = %provider_id,
             status = %status,
+            body = %body,
             "OAuth token exchange returned error"
         );
         return Err(AppError::Internal(format!(
@@ -961,7 +961,7 @@ pub async fn get_active_token(
             // Check if token needs refresh (5-minute buffer)
             let needs_refresh = token
                 .expires_at
-                .map_or(false, |exp| exp <= now + Duration::minutes(5));
+                .is_some_and(|exp| exp <= now + Duration::minutes(5));
 
             if needs_refresh && token.refresh_token_encrypted.is_some() {
                 match oauth_flow::refresh_oauth_token(db, encryption_key, &token).await {

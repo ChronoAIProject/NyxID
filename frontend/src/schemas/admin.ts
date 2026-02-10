@@ -29,7 +29,7 @@ export const createUserSchema = z.object({
     .optional()
     .or(z.literal("")),
   role: z.enum(["admin", "user"], {
-    required_error: "Role is required",
+    error: "Role is required",
   }),
 });
 
