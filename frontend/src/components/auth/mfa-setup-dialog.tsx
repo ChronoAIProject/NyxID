@@ -6,7 +6,7 @@ import { mfaVerifySchema, type MfaVerifyFormData } from "@/schemas/auth";
 import { useMfaSetup } from "@/hooks/use-auth";
 import { api } from "@/lib/api-client";
 import { ApiError } from "@/lib/api-client";
-import type { MfaSetupResponse } from "@/types/api";
+import type { MfaSetupResponse, MfaConfirmResponse } from "@/types/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { copyToClipboard } from "@/lib/utils";
 import {
@@ -39,6 +39,7 @@ interface MfaSetupDialogProps {
 export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
   const [step, setStep] = useState<MfaStep>("setup");
   const [setupData, setSetupData] = useState<MfaSetupResponse | null>(null);
+  const [recoveryCodes, setRecoveryCodes] = useState<readonly string[]>([]);
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const setupMutation = useMfaSetup();
@@ -82,9 +83,10 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
 
   async function onVerify(data: MfaVerifyFormData) {
     try {
-      await api.post<void>("/auth/mfa/confirm", {
+      const result = await api.post<MfaConfirmResponse>("/auth/mfa/confirm", {
         code: data.code,
       });
+      setRecoveryCodes(result.recovery_codes);
       void queryClient.invalidateQueries({ queryKey: ["user"] });
       setStep("recovery");
       toast.success("MFA enabled successfully");
@@ -111,6 +113,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
   function handleClose() {
     setStep("setup");
     setSetupData(null);
+    setRecoveryCodes([]);
     setQrDataUrl("");
     form.reset();
     onOpenChange(false);
@@ -221,14 +224,14 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
           </div>
         )}
 
-        {step === "recovery" && setupData && (
+        {step === "recovery" && recoveryCodes.length > 0 && (
           <div className="space-y-4">
             <div
               className="grid grid-cols-2 gap-2"
               role="list"
               aria-label="Recovery codes"
             >
-              {setupData.recovery_codes.map((code, index) => (
+              {recoveryCodes.map((code, index) => (
                 <button
                   key={code}
                   type="button"

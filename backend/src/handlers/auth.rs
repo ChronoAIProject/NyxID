@@ -1,5 +1,7 @@
+use std::net::SocketAddr;
+
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{header, HeaderMap},
     Json,
 };
@@ -60,17 +62,36 @@ pub struct LogoutResponse {
 
 // --- Helper functions ---
 
-/// Extract the client IP from headers (X-Forwarded-For) or return None.
-fn extract_ip(headers: &HeaderMap) -> Option<String> {
-    headers
+/// Extract the client IP from proxy headers, falling back to the TCP peer address.
+///
+/// Checks (in order): X-Forwarded-For, X-Real-IP, then the peer socket address.
+pub(crate) fn extract_ip(headers: &HeaderMap, peer_addr: Option<SocketAddr>) -> Option<String> {
+    // 1. X-Forwarded-For (first IP in the chain)
+    if let Some(forwarded) = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
         .filter(|s| !s.is_empty())
+    {
+        return Some(forwarded);
+    }
+
+    // 2. X-Real-IP
+    if let Some(real_ip) = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(real_ip);
+    }
+
+    // 3. TCP peer address
+    peer_addr.map(|addr| addr.ip().to_string())
 }
 
 /// Extract the User-Agent header.
-fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -79,7 +100,7 @@ fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
 
 /// Build a Set-Cookie header value for an HttpOnly, SameSite=Lax cookie.
 /// The Secure flag is set based on the deployment environment.
-fn build_cookie(name: &str, value: &str, max_age_secs: i64, path: &str, secure: bool) -> String {
+pub(crate) fn build_cookie(name: &str, value: &str, max_age_secs: i64, path: &str, secure: bool) -> String {
     let secure_flag = if secure { "; Secure" } else { "" };
     format!(
         "{}={}; HttpOnly; SameSite=Lax; Path={}; Max-Age={}{}",
@@ -104,6 +125,7 @@ fn clear_cookie(name: &str, path: &str, secure: bool) -> String {
 /// verification link (when SMTP is configured).
 pub async fn register(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> AppResult<Json<RegisterResponse>> {
@@ -123,7 +145,7 @@ pub async fn register(
         Some(result.user_id.clone()),
         "register".to_string(),
         Some(serde_json::json!({ "email": body.email })),
-        extract_ip(&headers),
+        extract_ip(&headers, Some(peer)),
         extract_user_agent(&headers),
     );
 
@@ -146,6 +168,7 @@ pub async fn register(
 /// On success, sets HttpOnly cookies and returns the access token.
 pub async fn login(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> AppResult<(HeaderMap, Json<LoginResponse>)> {
@@ -202,7 +225,7 @@ pub async fn login(
         }
     }
 
-    let ip = extract_ip(&headers);
+    let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
 
     let tokens = token_service::create_session_and_issue_tokens(
@@ -279,6 +302,7 @@ pub async fn login(
 /// Revoke the current session and clear all auth cookies.
 pub async fn logout(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
     headers: HeaderMap,
 ) -> AppResult<(HeaderMap, Json<LogoutResponse>)> {
@@ -291,7 +315,7 @@ pub async fn logout(
         Some(auth_user.user_id.to_string()),
         "logout".to_string(),
         None,
-        extract_ip(&headers),
+        extract_ip(&headers, Some(peer)),
         extract_user_agent(&headers),
     );
 
@@ -517,6 +541,7 @@ pub struct SetupResponse {
 /// is created, this endpoint returns 403 Forbidden.
 pub async fn setup(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<SetupRequest>,
 ) -> AppResult<Json<SetupResponse>> {
@@ -568,7 +593,7 @@ pub async fn setup(
             "email": body.email,
             "method": "bootstrap"
         })),
-        extract_ip(&headers),
+        extract_ip(&headers, Some(peer)),
         extract_user_agent(&headers),
     );
 

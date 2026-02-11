@@ -134,8 +134,13 @@ export interface AuditLogEntry {
 }
 
 export interface MfaSetupResponse {
+  readonly factor_id: string;
   readonly secret: string;
   readonly qr_code_url: string;
+}
+
+export interface MfaConfirmResponse {
+  readonly message: string;
   readonly recovery_codes: readonly string[];
 }
 

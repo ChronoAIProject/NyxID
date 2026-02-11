@@ -8,6 +8,12 @@ use crate::AppState;
 
 /// Build the complete application router with all route groups.
 pub fn build_router() -> Router<AppState> {
+    let mfa_routes = Router::new()
+        .route("/setup", post(handlers::mfa::setup))
+        .route("/confirm", post(handlers::mfa::confirm))
+        .route("/verify", post(handlers::mfa::verify))
+        .route("/disable", post(handlers::mfa::disable));
+
     let auth_routes = Router::new()
         .route("/register", post(handlers::auth::register))
         .route("/login", post(handlers::auth::login))
@@ -16,11 +22,8 @@ pub fn build_router() -> Router<AppState> {
         .route("/verify-email", post(handlers::auth::verify_email))
         .route("/forgot-password", post(handlers::auth::forgot_password))
         .route("/reset-password", post(handlers::auth::reset_password))
-        .route("/setup", post(handlers::auth::setup));
-
-    let mfa_routes = Router::new()
-        .route("/setup", post(handlers::mfa::setup))
-        .route("/verify-setup", post(handlers::mfa::verify_setup));
+        .route("/setup", post(handlers::auth::setup))
+        .nest("/mfa", mfa_routes);
 
     let user_routes = Router::new()
         .route("/me", get(handlers::users::get_me))
@@ -134,7 +137,6 @@ pub fn build_router() -> Router<AppState> {
     let api_v1 = Router::new()
         .nest("/auth", auth_routes)
         .nest("/users", user_routes)
-        .nest("/mfa", mfa_routes)
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)
         .nest("/sessions", session_routes)
