@@ -232,6 +232,7 @@ pub async fn create_service(
         Some("api_key") => "header".to_string(),
         Some("oauth2") | Some("bearer") => "bearer".to_string(),
         Some("basic") => "basic".to_string(),
+        Some("none") => "none".to_string(),
         Some(other) => other.to_string(),
         None => "header".to_string(),
     };
@@ -241,13 +242,14 @@ pub async fn create_service(
             "bearer" => "Authorization".to_string(),
             "basic" => "Authorization".to_string(),
             "query" => "api_key".to_string(),
+            "none" => String::new(),
             _ => "X-API-Key".to_string(),
         }
     });
 
     let credential = body.credential.clone().unwrap_or_default();
 
-    let valid_methods = ["header", "bearer", "query", "basic", "oidc"];
+    let valid_methods = ["header", "bearer", "query", "basic", "oidc", "none"];
     if !valid_methods.contains(&auth_method.as_str()) {
         return Err(AppError::ValidationError(format!(
             "auth_method must be one of: {}",
@@ -304,6 +306,9 @@ pub async fn create_service(
     let service_category = if auth_method == "oidc" {
         // OIDC services are always providers
         "provider".to_string()
+    } else if auth_method == "none" {
+        // No-auth services are always internal (auto-connected)
+        "internal".to_string()
     } else {
         match body.service_category.as_deref() {
             Some("provider") => {

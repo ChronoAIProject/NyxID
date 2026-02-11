@@ -59,29 +59,53 @@ pub async fn resolve_proxy_target(
         ));
     }
 
-    // Require an active user connection
+    // Check for user connection (required for credential services, optional for auto-connect)
     let user_conn = db
         .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
         .find_one(doc! {
             "user_id": user_id,
             "service_id": service_id,
-            "is_active": true,
         })
-        .await?
-        .ok_or_else(|| {
-            AppError::Forbidden(
-                "You must connect to this service before making requests".to_string(),
-            )
-        })?;
+        .await?;
+
+    // If user has explicitly disconnected (is_active: false), block access
+    if let Some(ref conn) = user_conn {
+        if !conn.is_active {
+            return Err(AppError::Forbidden(
+                "You have disconnected from this service".to_string(),
+            ));
+        }
+    }
+
+    // For services requiring user credentials, a connection record is mandatory
+    if service.requires_user_credential && user_conn.is_none() {
+        return Err(AppError::Forbidden(
+            "You must connect to this service before making requests".to_string(),
+        ));
+    }
+
+    // No-auth services: skip credential handling entirely
+    if service.auth_method == "none" {
+        return Ok(ProxyTarget {
+            base_url: service.base_url.clone(),
+            auth_method: service.auth_method.clone(),
+            auth_key_name: service.auth_key_name.clone(),
+            credential: String::new(),
+            service,
+        });
+    }
 
     // Determine which credential to use
     let credential_encrypted = if service.requires_user_credential {
         // Connection services: must have per-user credential
-        user_conn.credential_encrypted.ok_or_else(|| {
-            AppError::BadRequest(
-                "Connection is missing credential. Please reconnect with your API key.".to_string(),
-            )
-        })?
+        user_conn
+            .and_then(|c| c.credential_encrypted)
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "Connection is missing credential. Please reconnect with your API key."
+                        .to_string(),
+                )
+            })?
     } else {
         // Internal services: use master credential
         service.credential_encrypted.clone()
@@ -154,6 +178,9 @@ pub async fn forward_request(
 
     // Inject credentials based on auth method
     match target.auth_method.as_str() {
+        "none" => {
+            // No credential injection
+        }
         "header" => {
             request = request.header(&target.auth_key_name, &target.credential);
         }

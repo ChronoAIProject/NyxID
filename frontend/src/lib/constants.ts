@@ -1,6 +1,7 @@
 import type { DownstreamService } from "@/types/api";
 
 export const AUTH_TYPE_LABELS: Readonly<Record<string, string>> = {
+  none: "No Auth",
   api_key: "API Key",
   oauth2: "OAuth 2.0",
   basic: "Basic Auth",

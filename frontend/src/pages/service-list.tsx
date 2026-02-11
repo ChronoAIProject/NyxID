@@ -179,11 +179,14 @@ export function ServiceListPage() {
                           value={field.value}
                           onChange={(e) => {
                             field.onChange(e);
-                            // Auto-set category to provider for OIDC
+                            // Auto-set category based on auth type
                             if (e.target.value === "oidc") {
                               form.setValue("service_category", "provider");
+                            } else if (e.target.value === "none") {
+                              form.setValue("service_category", "internal");
                             } else if (
-                              form.getValues("service_category") === "provider"
+                              form.getValues("service_category") === "provider" ||
+                              form.getValues("service_category") === "internal"
                             ) {
                               form.setValue("service_category", "connection");
                             }
@@ -203,7 +206,7 @@ export function ServiceListPage() {
                   )}
                 />
 
-                {form.watch("auth_type") !== "oidc" && (
+                {form.watch("auth_type") !== "oidc" && form.watch("auth_type") !== "none" && (
                   <FormField
                     control={form.control}
                     name="service_category"

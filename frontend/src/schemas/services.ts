@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const AUTH_TYPES = [
+  "none",
   "api_key",
   "oauth2",
   "basic",

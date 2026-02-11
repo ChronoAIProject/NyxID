@@ -126,18 +126,32 @@ fn extract_client_ip(request: &Request<Body>) -> IpAddr {
 ///
 /// Expects both `SharedPerIpRateLimiter` and `SharedRateLimiter` as layer Extensions.
 /// Returns 429 Too Many Requests when the limit is exceeded.
+/// Paths exempt from rate limiting (authenticated via other means).
+const RATE_LIMIT_EXEMPT_PATHS: &[&str] = &[
+    "/mcp",
+    "/.well-known/",
+    "/health",
+];
+
 pub async fn rate_limit_middleware(
     Extension(per_ip_limiter): Extension<SharedPerIpRateLimiter>,
     Extension(global_limiter): Extension<SharedRateLimiter>,
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, AppError> {
+    let path = request.uri().path();
+
+    // Skip rate limiting for exempt paths (MCP has its own auth + session management)
+    if RATE_LIMIT_EXEMPT_PATHS.iter().any(|p| path.starts_with(p)) {
+        return Ok(next.run(request).await);
+    }
+
     let client_ip = extract_client_ip(&request);
 
     // Check per-IP rate limit first
     if !per_ip_limiter.check(client_ip) {
         tracing::warn!(
-            path = %request.uri().path(),
+            path = %path,
             ip = %client_ip,
             "Per-IP rate limit exceeded"
         );
@@ -147,7 +161,7 @@ pub async fn rate_limit_middleware(
     // Also check global rate limit as a safety net
     if global_limiter.check().is_err() {
         tracing::warn!(
-            path = %request.uri().path(),
+            path = %path,
             "Global rate limit exceeded"
         );
         return Err(AppError::RateLimited);

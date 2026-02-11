@@ -46,61 +46,101 @@ pub struct McpToolDefinition {
 // Load user tools (shared by MCP transport + REST /api/v1/mcp/config)
 // ---------------------------------------------------------------------------
 
-/// Fetch the authenticated user's connected services and their active endpoints.
+/// Fetch the authenticated user's available MCP tools.
+///
+/// Includes:
+/// - Services the user has explicitly connected to (with valid credentials)
+/// - Auto-connected services (`requires_user_credential == false`) unless user opted out
 ///
 /// Filters out provider services and connections with unsatisfied credentials.
 pub async fn load_user_tools(
     db: &mongodb::Database,
     user_id: &str,
 ) -> AppResult<Vec<McpToolService>> {
-    // 1. Active connections for this user
+    // 1. All connections for this user (active and inactive, for opt-out detection)
     let connections: Vec<UserServiceConnection> = db
         .collection::<UserServiceConnection>(CONNECTIONS)
-        .find(doc! { "user_id": user_id, "is_active": true })
+        .find(doc! { "user_id": user_id })
         .await?
         .try_collect()
         .await?;
 
-    let service_ids: Vec<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
-
-    if service_ids.is_empty() {
-        return Ok(vec![]);
-    }
-
-    // 2. Matching active downstream services
-    let services: Vec<DownstreamService> = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(doc! { "_id": { "$in": &service_ids }, "is_active": true })
-        .await?
-        .try_collect()
-        .await?;
-
-    // 3. Filter: credentials satisfied, exclude providers
     let conn_map: HashMap<&str, &UserServiceConnection> = connections
         .iter()
         .map(|c| (c.service_id.as_str(), c))
         .collect();
 
-    let valid_services: Vec<&DownstreamService> = services
+    // 2. Explicitly connected services (active connections)
+    let connected_ids: Vec<&str> = connections
         .iter()
-        .filter(|svc| {
-            if svc.service_category == "provider" {
-                return false;
-            }
-            match conn_map.get(svc.id.as_str()) {
-                Some(conn) => {
-                    if svc.requires_user_credential {
-                        conn.credential_encrypted.is_some()
-                    } else {
-                        true
-                    }
-                }
-                None => false,
-            }
-        })
+        .filter(|c| c.is_active)
+        .map(|c| c.service_id.as_str())
         .collect();
 
-    // 4. Active endpoints for valid services (single batch query)
+    // 3. Auto-connect: services that don't require user credentials
+    let auto_services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(doc! {
+            "is_active": true,
+            "requires_user_credential": false,
+            "service_category": { "$ne": "provider" },
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    // 4. Explicitly connected services
+    let connected_services: Vec<DownstreamService> = if connected_ids.is_empty() {
+        vec![]
+    } else {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find(doc! { "_id": { "$in": &connected_ids }, "is_active": true })
+            .await?
+            .try_collect()
+            .await?
+    };
+
+    // 5. Merge and deduplicate, applying filters
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut valid_services: Vec<&DownstreamService> = Vec::new();
+
+    // Add explicitly connected services (credential check)
+    for svc in &connected_services {
+        if svc.service_category == "provider" {
+            continue;
+        }
+        if svc.requires_user_credential {
+            // Must have credential in connection
+            if let Some(conn) = conn_map.get(svc.id.as_str()) {
+                if conn.credential_encrypted.is_none() {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+        if seen_ids.insert(svc.id.clone()) {
+            valid_services.push(svc);
+        }
+    }
+
+    // Add auto-connect services (skip if user opted out)
+    for svc in &auto_services {
+        if seen_ids.contains(&svc.id) {
+            continue; // Already included from explicit connections
+        }
+        // Check if user has explicitly disconnected (opt-out)
+        if let Some(conn) = conn_map.get(svc.id.as_str()) {
+            if !conn.is_active {
+                continue; // User opted out
+            }
+        }
+        if seen_ids.insert(svc.id.clone()) {
+            valid_services.push(svc);
+        }
+    }
+
+    // 6. Active endpoints for valid services (single batch query)
     let valid_ids: Vec<&str> = valid_services.iter().map(|s| s.id.as_str()).collect();
     let all_endpoints: Vec<ServiceEndpoint> = if valid_ids.is_empty() {
         vec![]
@@ -115,7 +155,7 @@ pub async fn load_user_tools(
             .await?
     };
 
-    // 5. Group endpoints by service_id
+    // 7. Group endpoints by service_id
     let mut eps_by_svc: HashMap<&str, Vec<&ServiceEndpoint>> = HashMap::new();
     for ep in &all_endpoints {
         eps_by_svc
@@ -124,7 +164,7 @@ pub async fn load_user_tools(
             .push(ep);
     }
 
-    // 6. Assemble result
+    // 8. Assemble result
     let result = valid_services
         .into_iter()
         .map(|svc| {
@@ -162,7 +202,14 @@ pub async fn load_user_tools(
 
 /// Generate MCP tool definitions from loaded services.
 /// Always includes the three `nyx__` meta-tools.
-pub fn generate_tool_definitions(services: &[McpToolService]) -> Vec<McpToolDefinition> {
+///
+/// `activated_service_ids` controls which services' tools are included:
+/// - `None` = include all services (backward compat for REST /mcp/config)
+/// - `Some(set)` = include only services whose ID is in the set
+pub fn generate_tool_definitions(
+    services: &[McpToolService],
+    activated_service_ids: Option<&HashSet<String>>,
+) -> Vec<McpToolDefinition> {
     let mut tools = Vec::new();
 
     // -- Meta-tools (always present) --
@@ -229,8 +276,15 @@ pub fn generate_tool_definitions(services: &[McpToolService]) -> Vec<McpToolDefi
         }),
     });
 
-    // -- Per-service tools --
+    // -- Per-service tools (filtered by activated set) --
     for service in services {
+        let included = match activated_service_ids {
+            Some(ids) => ids.contains(&service.service_id),
+            None => true, // No filter = include all
+        };
+        if !included {
+            continue;
+        }
         for endpoint in &service.endpoints {
             let name = format!("{}__{}", service.service_slug, endpoint.name);
             let description = format!(
@@ -615,22 +669,52 @@ pub async fn execute_tool(
 
 const MAX_SEARCH_RESULTS: usize = 25;
 
-/// Search the user's tools by keyword, returning matching tool definitions.
-pub fn search_tools<'a>(tools: &'a [McpToolDefinition], query: &str) -> Vec<&'a McpToolDefinition> {
-    let q_lower = query.to_lowercase();
+/// Result of searching all tools across all services.
+pub struct SearchResult {
+    pub matches: Vec<McpToolDefinition>,
+    /// Service IDs that had matching tools (for activation).
+    pub matched_service_ids: Vec<String>,
+}
 
-    tools
-        .iter()
-        .filter(|t| {
-            // Skip meta-tools from search results
-            if t.name.starts_with("nyx__") {
-                return false;
+/// Search ALL user tools (regardless of activation state) and return matches
+/// plus the service IDs they belong to.
+pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResult {
+    let q_lower = query.to_lowercase();
+    let mut matches = Vec::new();
+    let mut matched_ids: HashSet<String> = HashSet::new();
+
+    for service in services {
+        for endpoint in &service.endpoints {
+            let name = format!("{}__{}", service.service_slug, endpoint.name);
+            let description = format!(
+                "[{}] {}",
+                service.service_name,
+                endpoint.description.as_deref().unwrap_or(&endpoint.name),
+            );
+
+            if name.to_lowercase().contains(&q_lower)
+                || description.to_lowercase().contains(&q_lower)
+            {
+                matched_ids.insert(service.service_id.clone());
+                matches.push(McpToolDefinition {
+                    name,
+                    description,
+                    input_schema: build_input_schema(endpoint),
+                });
+                if matches.len() >= MAX_SEARCH_RESULTS {
+                    break;
+                }
             }
-            t.name.to_lowercase().contains(&q_lower)
-                || t.description.to_lowercase().contains(&q_lower)
-        })
-        .take(MAX_SEARCH_RESULTS)
-        .collect()
+        }
+        if matches.len() >= MAX_SEARCH_RESULTS {
+            break;
+        }
+    }
+
+    SearchResult {
+        matches,
+        matched_service_ids: matched_ids.into_iter().collect(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +742,9 @@ pub async fn discover_services(
 
     let mut filter = doc! { "is_active": true, "service_category": { "$ne": "provider" } };
     if let Some(cat) = category {
+        if cat == "provider" {
+            return Ok(serde_json::json!({ "services": [], "count": 0 }));
+        }
         filter.insert("service_category", cat);
     }
 
@@ -730,6 +817,171 @@ pub async fn connect_service(
         "status": "connected",
         "service_name": result.service_name,
         "connected_at": result.connected_at.to_rfc3339(),
-        "note": "Re-list tools (tools/list) to see new endpoints for this service.",
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_endpoint(name: &str, description: &str) -> McpToolEndpoint {
+        McpToolEndpoint {
+            name: name.to_string(),
+            description: Some(description.to_string()),
+            method: "GET".to_string(),
+            path: format!("/{name}"),
+            parameters: None,
+            request_body_schema: None,
+        }
+    }
+
+    fn make_service(id: &str, name: &str, slug: &str, endpoints: Vec<McpToolEndpoint>) -> McpToolService {
+        McpToolService {
+            service_id: id.to_string(),
+            service_name: name.to_string(),
+            service_slug: slug.to_string(),
+            endpoints,
+        }
+    }
+
+    // -- search_all_tools tests --
+
+    #[test]
+    fn search_all_tools_empty_query_matches_everything() {
+        let services = vec![make_service(
+            "svc-1",
+            "Weather",
+            "weather",
+            vec![make_endpoint("get_forecast", "Get weather forecast")],
+        )];
+
+        let result = search_all_tools(&services, "");
+        // Empty string is contained in everything, so all tools should match
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matched_service_ids.len(), 1);
+    }
+
+    #[test]
+    fn search_all_tools_respects_max_results() {
+        let endpoints: Vec<McpToolEndpoint> = (0..30)
+            .map(|i| make_endpoint(&format!("ep_{i}"), &format!("Endpoint {i} does stuff")))
+            .collect();
+        let services = vec![make_service("svc-1", "BigService", "big", endpoints)];
+
+        let result = search_all_tools(&services, "stuff");
+        assert_eq!(result.matches.len(), MAX_SEARCH_RESULTS);
+    }
+
+    #[test]
+    fn search_all_tools_multi_service_matching() {
+        let services = vec![
+            make_service(
+                "svc-1",
+                "Weather",
+                "weather",
+                vec![make_endpoint("get_forecast", "Get weather forecast")],
+            ),
+            make_service(
+                "svc-2",
+                "News",
+                "news",
+                vec![make_endpoint("get_weather_news", "Get weather-related news")],
+            ),
+        ];
+
+        let result = search_all_tools(&services, "weather");
+        assert_eq!(result.matches.len(), 2);
+        assert_eq!(result.matched_service_ids.len(), 2);
+        assert!(result.matched_service_ids.contains(&"svc-1".to_string()));
+        assert!(result.matched_service_ids.contains(&"svc-2".to_string()));
+    }
+
+    #[test]
+    fn search_all_tools_no_match() {
+        let services = vec![make_service(
+            "svc-1",
+            "Weather",
+            "weather",
+            vec![make_endpoint("get_forecast", "Get weather forecast")],
+        )];
+
+        let result = search_all_tools(&services, "zzz_nonexistent_zzz");
+        assert!(result.matches.is_empty());
+        assert!(result.matched_service_ids.is_empty());
+    }
+
+    // -- generate_tool_definitions tests --
+
+    #[test]
+    fn generate_tool_definitions_with_empty_activation_set() {
+        let services = vec![make_service(
+            "svc-1",
+            "Weather",
+            "weather",
+            vec![make_endpoint("get_forecast", "Get weather forecast")],
+        )];
+
+        let empty_set = HashSet::new();
+        let tools = generate_tool_definitions(&services, Some(&empty_set));
+
+        // Should only have the 3 meta-tools
+        assert_eq!(tools.len(), 3);
+        assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
+    }
+
+    #[test]
+    fn generate_tool_definitions_with_subset_activation() {
+        let services = vec![
+            make_service(
+                "svc-1",
+                "Weather",
+                "weather",
+                vec![make_endpoint("get_forecast", "Get weather forecast")],
+            ),
+            make_service(
+                "svc-2",
+                "News",
+                "news",
+                vec![make_endpoint("headlines", "Get headlines")],
+            ),
+        ];
+
+        let mut activated = HashSet::new();
+        activated.insert("svc-1".to_string());
+        let tools = generate_tool_definitions(&services, Some(&activated));
+
+        // 3 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 4);
+        assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
+        assert!(!tools.iter().any(|t| t.name == "news__headlines"));
+    }
+
+    #[test]
+    fn generate_tool_definitions_with_none_returns_all() {
+        let services = vec![
+            make_service(
+                "svc-1",
+                "Weather",
+                "weather",
+                vec![make_endpoint("get_forecast", "Get weather forecast")],
+            ),
+            make_service(
+                "svc-2",
+                "News",
+                "news",
+                vec![make_endpoint("headlines", "Get headlines")],
+            ),
+        ];
+
+        let tools = generate_tool_definitions(&services, None);
+
+        // 3 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 5);
+        assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
+        assert!(tools.iter().any(|t| t.name == "news__headlines"));
+    }
 }
