@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
-use crate::services::{audit_service, oauth_service};
+use crate::services::{audit_service, oauth_client_service, oauth_service};
 use crate::AppState;
 
 // --- Request / Response types ---
@@ -389,4 +389,85 @@ pub async fn userinfo(
         name: user.display_name,
         picture: user.avatar_url,
     }))
+}
+
+// --- Dynamic Client Registration (RFC 7591) ---
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct RegisterClientRequest {
+    pub client_name: Option<String>,
+    pub redirect_uris: Option<Vec<String>>,
+    pub grant_types: Option<Vec<String>>,
+    pub response_types: Option<Vec<String>>,
+    pub token_endpoint_auth_method: Option<String>,
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterClientResponse {
+    pub client_id: String,
+    pub client_name: String,
+    pub redirect_uris: Vec<String>,
+    pub grant_types: Vec<String>,
+    pub response_types: Vec<String>,
+    pub token_endpoint_auth_method: String,
+    pub scope: String,
+    pub client_id_issued_at: i64,
+}
+
+/// POST /oauth/register
+///
+/// RFC 7591 Dynamic Client Registration. MCP clients (Cursor, Claude Code, etc.)
+/// call this endpoint to register themselves before starting the OAuth flow.
+/// Only public clients (PKCE-based, no secret) are created via this endpoint.
+pub async fn register_client(
+    State(state): State<AppState>,
+    Json(body): Json<RegisterClientRequest>,
+) -> AppResult<(StatusCode, Json<RegisterClientResponse>)> {
+    let client_name = body
+        .client_name
+        .unwrap_or_else(|| "Dynamic MCP Client".to_string());
+
+    let redirect_uris = body.redirect_uris.unwrap_or_default();
+
+    let auth_method = body
+        .token_endpoint_auth_method
+        .as_deref()
+        .unwrap_or("none");
+
+    if auth_method != "none" {
+        return Err(AppError::BadRequest(
+            "Only token_endpoint_auth_method=none (public clients) is supported for dynamic registration".to_string(),
+        ));
+    }
+
+    let (client, _secret) = oauth_client_service::create_client(
+        &state.db,
+        &client_name,
+        &redirect_uris,
+        "public",
+        "dynamic_registration",
+    )
+    .await?;
+
+    tracing::info!(
+        client_id = %client.id,
+        client_name = %client.client_name,
+        "Dynamic OAuth client registered"
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(RegisterClientResponse {
+            client_id: client.id,
+            client_name: client.client_name,
+            redirect_uris: client.redirect_uris,
+            grant_types: vec!["authorization_code".to_string()],
+            response_types: vec!["code".to_string()],
+            token_endpoint_auth_method: "none".to_string(),
+            scope: client.allowed_scopes,
+            client_id_issued_at: client.created_at.timestamp(),
+        }),
+    ))
 }

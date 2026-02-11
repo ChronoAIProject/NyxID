@@ -128,7 +128,8 @@ pub fn build_router() -> Router<AppState> {
     let oauth_routes = Router::new()
         .route("/authorize", get(handlers::oauth::authorize))
         .route("/token", post(handlers::oauth::token))
-        .route("/userinfo", get(handlers::oauth::userinfo));
+        .route("/userinfo", get(handlers::oauth::userinfo))
+        .route("/register", post(handlers::oauth::register_client));
 
     let api_v1 = Router::new()
         .nest("/auth", auth_routes)

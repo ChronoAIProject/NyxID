@@ -38,13 +38,13 @@ pub async fn oauth_authorization_server_metadata(
     let base = &state.config.base_url;
 
     Json(serde_json::json!({
-        "issuer": state.config.jwt_issuer,
+        "issuer": base,
         "authorization_endpoint": format!("{base}/oauth/authorize"),
         "token_endpoint": format!("{base}/oauth/token"),
+        "registration_endpoint": format!("{base}/oauth/register"),
         "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
         "userinfo_endpoint": format!("{base}/oauth/userinfo"),
         "jwks_uri": format!("{base}/.well-known/jwks.json"),
-        "registration_endpoint": null,
         "scopes_supported": ["openid", "profile", "email"],
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
@@ -52,7 +52,6 @@ pub async fn oauth_authorization_server_metadata(
         "code_challenge_methods_supported": ["S256"],
         "id_token_signing_alg_values_supported": ["RS256"],
         "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash"],
-        "service_documentation": null,
     }))
 }
 
