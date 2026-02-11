@@ -13,6 +13,7 @@ This document describes the system architecture, component design, data flows, a
 - [Data Flow Diagrams](#data-flow-diagrams)
 - [Database Schema](#database-schema)
 - [Security Architecture](#security-architecture)
+- [RBAC Model](#rbac-model)
 - [Credential Broker](#credential-broker)
 - [LLM Gateway](#llm-gateway)
 - [Identity Propagation](#identity-propagation)
@@ -83,7 +84,7 @@ This document describes the system architecture, component design, data flows, a
              |
     +--------v---------+
     |  MongoDB 8.0     |
-    |  (14 collections)|
+    |  (17 collections)|
     +------------------+
 ```
 
@@ -157,6 +158,10 @@ Handlers are thin HTTP boundary functions. They:
 | `proxy.rs`    | proxy_request (wildcard, all HTTP methods)                      |
 | `oauth.rs`    | authorize, token, userinfo                                      |
 | `admin.rs`    | list_users, get_user, update_user, set_user_role, set_user_status, force_password_reset, delete_user, verify_user_email, list_user_sessions, revoke_user_sessions, list_audit_log, oauth client CRUD |
+| `admin_roles.rs` | list_roles, create_role, get_role, update_role, delete_role, get_user_roles, assign_role, revoke_role |
+| `admin_groups.rs` | list_groups, create_group, get_group, update_group, delete_group, get_members, add_member, remove_member, get_user_groups |
+| `admin_helpers.rs` | require_admin, extract_ip, extract_user_agent (shared admin utilities) |
+| `consent.rs`  | list_my_consents, revoke_my_consent                             |
 | `health.rs`   | health_check                                                    |
 | `mfa.rs`      | setup, verify_setup                                             |
 | `providers.rs`| list, create, get, update, delete provider configs              |
@@ -177,6 +182,10 @@ The service layer contains all business logic. Services receive database connect
 | `proxy_service.rs`  | Downstream service resolution, credential decryption, request forwarding with credential injection (header/bearer/query/basic), header allowlist enforcement |
 | `mfa_service.rs`    | TOTP secret generation with QR provisioning, code verification against encrypted secrets, recovery code management |
 | `admin_user_service.rs` | Admin user CRUD (update profile, set role, set status), cascade user deletion across 8 collections, force password reset, manual email verification, session listing and bulk revocation |
+| `role_service.rs`   | Role CRUD (slug uniqueness, system role protection), user role assignment/revocation, system role seeding at startup |
+| `group_service.rs`  | Group CRUD (slug uniqueness), membership management (add/remove members via `group_ids` on User), user group queries |
+| `consent_service.rs`| Consent creation (upsert by user+client), user consent listing, consent revocation |
+| `rbac_helpers.rs`   | Resolves effective RBAC for a user: direct roles + group-inherited roles, deduplication, permission aggregation |
 | `audit_service.rs`  | Asynchronous audit log insertion (fire-and-forget via `tokio::spawn`), captures user, action, resource, IP, user-agent |
 | `provider_service.rs` | Provider registry CRUD, slug uniqueness, encrypted OAuth credential storage |
 | `user_token_service.rs` | User provider token lifecycle: API key storage, OAuth flow initiation/callback, token refresh with 5-min buffer, token retrieval with lazy refresh |
@@ -556,6 +565,18 @@ Client                     NyxID Backend                     Downstream
         |
         |    +-------------------+
         +--->| oauth_states      |
+        |    +-------------------+
+        |
+        |    +-------------------+
+        +--->| roles             |<--+
+        |    +-------------------+   |
+        |                            |
+        |    +-------------------+   |
+        +--->| groups            |---+  (groups.role_ids -> roles)
+        |    +-------------------+
+        |
+        |    +-------------------+
+        +--->| consents          |
              +-------------------+
 ```
 
@@ -579,6 +600,8 @@ The core user identity collection. Password hash is nullable to support social-o
 | `password_reset_expires_at`| ISO 8601 date       | NULLABLE        | Reset token expiration          |
 | `is_active`               | boolean                | NOT NULL, DEFAULT true  | Account active status    |
 | `is_admin`                | boolean                | NOT NULL, DEFAULT false | Admin privilege flag     |
+| `role_ids`                | array                  | NOT NULL, DEFAULT []    | Directly-assigned role IDs |
+| `group_ids`               | array                  | NOT NULL, DEFAULT []    | Group membership IDs     |
 | `mfa_enabled`             | boolean                | NOT NULL, DEFAULT false | MFA enabled flag         |
 | `created_at`              | ISO 8601 date          | NOT NULL        | Account creation time           |
 | `updated_at`              | ISO 8601 date          | NOT NULL        | Last profile update             |
@@ -851,6 +874,107 @@ Temporary OAuth state records for provider OAuth flows. Used for CSRF protection
 | `created_at`         | ISO 8601 date | NOT NULL        | Creation timestamp              |
 
 **Indexes:** `expires_at` (TTL)
+
+#### roles
+
+Role definitions for RBAC. Roles have permission string tags and can be scoped to a specific OAuth client. System roles (`admin`, `user`) are seeded at startup and cannot be deleted or renamed.
+
+| Field         | Type          | Constraints       | Description                   |
+|---------------|---------------|-------------------|-------------------------------|
+| `_id`         | UUID (string) | PK                | Role identifier               |
+| `name`        | string        | NOT NULL          | Human-readable name           |
+| `slug`        | string        | NOT NULL, UNIQUE  | URL-safe identifier           |
+| `description` | string        | NULLABLE          | Role description              |
+| `permissions` | array         | NOT NULL          | Permission string tags        |
+| `is_default`  | boolean       | NOT NULL          | Auto-assigned to new users    |
+| `is_system`   | boolean       | NOT NULL          | Protected from deletion/rename|
+| `client_id`   | UUID (string) | NULLABLE          | Scoped to an OAuth client     |
+| `created_at`  | ISO 8601 date | NOT NULL          | Creation timestamp            |
+| `updated_at`  | ISO 8601 date | NOT NULL          | Last update                   |
+
+**Indexes:** `slug` (unique)
+
+#### groups
+
+Group definitions for RBAC. Groups inherit roles, and all group members receive those roles. Groups can form hierarchies via `parent_group_id`.
+
+| Field             | Type          | Constraints       | Description                   |
+|-------------------|---------------|-------------------|-------------------------------|
+| `_id`             | UUID (string) | PK                | Group identifier              |
+| `name`            | string        | NOT NULL          | Human-readable name           |
+| `slug`            | string        | NOT NULL, UNIQUE  | URL-safe identifier           |
+| `description`     | string        | NULLABLE          | Group description             |
+| `role_ids`        | array         | NOT NULL          | Role IDs inherited by members |
+| `parent_group_id` | UUID (string) | NULLABLE          | Parent group (for hierarchy)  |
+| `created_at`      | ISO 8601 date | NOT NULL          | Creation timestamp            |
+| `updated_at`      | ISO 8601 date | NOT NULL          | Last update                   |
+
+**Indexes:** `slug` (unique)
+
+Users reference groups via `group_ids` array on the User document. Members are queried with `{"group_ids": "<group_id>"}`.
+
+#### consents
+
+OAuth consent records tracking which scopes a user has granted to each client application.
+
+| Field        | Type          | Constraints       | Description                   |
+|--------------|---------------|-------------------|-------------------------------|
+| `_id`        | UUID (string) | PK                | Consent identifier            |
+| `user_id`    | UUID (string) | NOT NULL          | User who granted consent      |
+| `client_id`  | UUID (string) | NOT NULL          | OAuth client                  |
+| `scopes`     | string        | NOT NULL          | Space-separated granted scopes|
+| `granted_at` | ISO 8601 date | NOT NULL          | Consent grant timestamp       |
+| `expires_at` | ISO 8601 date | NULLABLE          | Optional consent expiration   |
+
+**Indexes:** `(user_id, client_id)` (unique)
+
+---
+
+## RBAC Model
+
+NyxID implements a role-based access control (RBAC) model with group inheritance, similar to Keycloak's realm/client role system.
+
+### Core Concepts
+
+- **Roles** contain permission string tags (e.g., `users:read`, `content:write`)
+- **Groups** inherit roles: all group members automatically receive the group's roles
+- **Users** can have roles assigned directly or inherited via group membership
+- **System roles** (`admin`, `user`) are seeded at startup and protected from deletion
+
+### Role Types
+
+| Type         | Description                                          | Example       |
+|--------------|------------------------------------------------------|---------------|
+| Realm role   | `client_id` is null; applies globally                | `admin`, `user` |
+| Client role  | `client_id` set; scoped to a specific OAuth client   | `editor` for app X |
+
+### Claims Pipeline
+
+When a token is issued (via login or OAuth), RBAC claims are resolved and injected:
+
+```
+User Document
+  |
+  |-- user.role_ids --> Direct roles
+  |-- user.group_ids --> Groups --> group.role_ids --> Inherited roles
+  |
+  v
+rbac_helpers::resolve_user_rbac()
+  |
+  |-- Deduplicate roles (direct + inherited)
+  |-- Collect all permissions from all effective roles
+  |-- Return { role_slugs, group_slugs, permissions }
+  |
+  v
+token_service / oauth_service
+  |
+  |-- If "roles" scope requested:
+  |     Add "roles": [...slugs], "permissions": [...perms] to JWT
+  |-- If "groups" scope requested:
+  |     Add "groups": [...slugs] to JWT
+```
+
+The `roles` and `groups` scopes control whether RBAC claims appear in access tokens, ID tokens, and the UserInfo response. The introspection endpoint also returns these claims when present on the token.
 
 ---
 

@@ -13,6 +13,13 @@ import {
   useVerifyUserEmail,
   useRevokeUserSessions,
 } from "@/hooks/use-admin";
+import {
+  useUserRoles,
+  useUserGroups,
+  useRoles,
+  useAssignRole,
+  useRevokeRole,
+} from "@/hooks/use-rbac";
 import { useAuthStore } from "@/stores/auth-store";
 import { updateUserSchema, type UpdateUserFormData } from "@/schemas/admin";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
@@ -396,6 +403,14 @@ export function AdminUserDetailPage() {
 
       <Separator />
 
+      <UserRolesSection userId={userId} />
+
+      <Separator />
+
+      <UserGroupsSection userId={userId} />
+
+      <Separator />
+
       <DetailSection title="Sessions">
         {sessions.length === 0 ? (
           <p className="text-sm text-muted-foreground">No sessions found.</p>
@@ -610,6 +625,209 @@ export function AdminUserDetailPage() {
         onConfirm={() => void handleVerifyEmail()}
       />
     </div>
+  );
+}
+
+function UserRolesSection({ userId }: { readonly userId: string }) {
+  const { data: userRolesData, isLoading } = useUserRoles(userId);
+  const { data: allRolesData } = useRoles();
+  const assignMutation = useAssignRole();
+  const revokeMutation = useRevokeRole();
+  const [assignOpen, setAssignOpen] = useState(false);
+  const [selectedRoleId, setSelectedRoleId] = useState("");
+
+  const directRoles = userRolesData?.direct_roles ?? [];
+  const inheritedRoles = userRolesData?.inherited_roles ?? [];
+  const effectivePermissions = userRolesData?.effective_permissions ?? [];
+  const allRoles = allRolesData?.roles ?? [];
+
+  const assignedRoleIds = new Set(directRoles.map((r) => r.id));
+  const availableRoles = allRoles.filter((r) => !assignedRoleIds.has(r.id));
+
+  async function handleAssign() {
+    if (!selectedRoleId) return;
+    try {
+      await assignMutation.mutateAsync({ userId, roleId: selectedRoleId });
+      toast.success("Role assigned");
+      setSelectedRoleId("");
+      setAssignOpen(false);
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to assign role",
+      );
+    }
+  }
+
+  async function handleRevoke(roleId: string) {
+    try {
+      await revokeMutation.mutateAsync({ userId, roleId });
+      toast.success("Role revoked");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to revoke role",
+      );
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <DetailSection title="Roles">
+        <Skeleton className="h-20 w-full" />
+      </DetailSection>
+    );
+  }
+
+  return (
+    <DetailSection title="Roles">
+      <div className="mb-3">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => setAssignOpen(true)}
+        >
+          Assign Role
+        </Button>
+      </div>
+
+      {directRoles.length > 0 && (
+        <div className="mb-3">
+          <p className="mb-1 text-xs font-medium text-muted-foreground">
+            Direct Roles
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {directRoles.map((role) => (
+              <Badge
+                key={role.id}
+                variant="default"
+                className="gap-1"
+              >
+                {role.name}
+                {!role.is_system && (
+                  <button
+                    type="button"
+                    className="ml-1 rounded-full hover:bg-primary-foreground/20 disabled:opacity-50"
+                    onClick={() => void handleRevoke(role.id)}
+                    disabled={revokeMutation.isPending}
+                    aria-label={`Revoke ${role.name}`}
+                  >
+                    x
+                  </button>
+                )}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {inheritedRoles.length > 0 && (
+        <div className="mb-3">
+          <p className="mb-1 text-xs font-medium text-muted-foreground">
+            Inherited from Groups
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {inheritedRoles.map((role) => (
+              <Badge key={role.id} variant="secondary">
+                {role.name}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {effectivePermissions.length > 0 && (
+        <div>
+          <p className="mb-1 text-xs font-medium text-muted-foreground">
+            Effective Permissions
+          </p>
+          <div className="flex flex-wrap gap-1">
+            {effectivePermissions.map((perm) => (
+              <Badge
+                key={perm}
+                variant="outline"
+                className="font-mono text-xs"
+              >
+                {perm}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {directRoles.length === 0 && inheritedRoles.length === 0 && (
+        <p className="text-sm text-muted-foreground">No roles assigned.</p>
+      )}
+
+      <Dialog open={assignOpen} onOpenChange={setAssignOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Assign Role</DialogTitle>
+            <DialogDescription>
+              Select a role to assign to this user.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <select
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              value={selectedRoleId}
+              onChange={(e) => setSelectedRoleId(e.target.value)}
+            >
+              <option value="">Select a role...</option>
+              {availableRoles.map((role) => (
+                <option key={role.id} value={role.id}>
+                  {role.name} ({role.slug})
+                </option>
+              ))}
+            </select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAssignOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleAssign()}
+              disabled={!selectedRoleId}
+              isLoading={assignMutation.isPending}
+            >
+              Assign Role
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </DetailSection>
+  );
+}
+
+function UserGroupsSection({ userId }: { readonly userId: string }) {
+  const { data: userGroupsData, isLoading } = useUserGroups(userId);
+  const groups = userGroupsData?.groups ?? [];
+
+  if (isLoading) {
+    return (
+      <DetailSection title="Groups">
+        <Skeleton className="h-20 w-full" />
+      </DetailSection>
+    );
+  }
+
+  return (
+    <DetailSection title="Groups">
+      {groups.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No group memberships.</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {groups.map((group) => (
+            <Badge key={group.id} variant="outline">
+              {group.name}
+              {group.roles.length > 0 && (
+                <span className="ml-1 text-muted-foreground">
+                  ({group.roles.map((r) => r.name).join(", ")})
+                </span>
+              )}
+            </Badge>
+          ))}
+        </div>
+      )}
+    </DetailSection>
   );
 }
 

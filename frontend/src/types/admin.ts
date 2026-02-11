@@ -7,6 +7,8 @@ export interface AdminUser {
   readonly is_active: boolean;
   readonly is_admin: boolean;
   readonly mfa_enabled: boolean;
+  readonly role_ids?: readonly string[];
+  readonly group_ids?: readonly string[];
   readonly created_at: string;
   readonly last_login_at: string | null;
 }

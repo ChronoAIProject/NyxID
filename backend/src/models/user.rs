@@ -20,6 +20,10 @@ pub struct User {
     pub password_reset_expires_at: Option<DateTime<Utc>>,
     pub is_active: bool,
     pub is_admin: bool,
+    #[serde(default)]
+    pub role_ids: Vec<String>,
+    #[serde(default)]
+    pub group_ids: Vec<String>,
     pub mfa_enabled: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -51,6 +55,8 @@ mod tests {
             password_reset_expires_at: None,
             is_active: true,
             is_admin: false,
+            role_ids: vec![],
+            group_ids: vec![],
             mfa_enabled: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),

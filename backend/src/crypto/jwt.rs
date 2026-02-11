@@ -41,6 +41,18 @@ pub struct Claims {
     pub scope: String,
     /// Token type: "access", "refresh", or "id"
     pub token_type: String,
+    /// User's roles (present when "roles" scope is requested)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
+    /// User's groups (present when "groups" scope is requested)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<String>>,
+    /// Flattened permissions from all roles (present when "roles" scope is requested)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<String>>,
+    /// Session ID (stable across token refreshes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
 }
 
 /// ID token claims following OpenID Connect Core.
@@ -58,6 +70,24 @@ pub struct IdTokenClaims {
     pub nonce: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at_hash: Option<String>,
+    /// User's roles (present when "roles" scope is requested)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
+    /// User's groups (present when "groups" scope is requested)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<String>>,
+    /// Authentication Context Class Reference
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acr: Option<String>,
+    /// Authentication Methods References
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amr: Option<Vec<String>>,
+    /// Time of authentication (Unix timestamp)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_time: Option<i64>,
+    /// Session ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
 }
 
 impl JwtKeys {
@@ -149,12 +179,21 @@ pub fn generate_rsa_keypair(private_path: &str, public_path: &str) -> Result<(),
     Ok(())
 }
 
+/// Optional RBAC data to embed in JWT claims.
+pub struct RbacClaimData {
+    pub roles: Option<Vec<String>>,
+    pub groups: Option<Vec<String>>,
+    pub permissions: Option<Vec<String>>,
+    pub sid: Option<String>,
+}
+
 /// Generate an access token for the given user.
 pub fn generate_access_token(
     keys: &JwtKeys,
     config: &AppConfig,
     user_id: &Uuid,
     scope: &str,
+    rbac: Option<&RbacClaimData>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
@@ -167,6 +206,10 @@ pub fn generate_access_token(
         jti: Uuid::new_v4().to_string(),
         scope: scope.to_string(),
         token_type: "access".to_string(),
+        roles: rbac.and_then(|r| r.roles.clone()),
+        groups: rbac.and_then(|r| r.groups.clone()),
+        permissions: rbac.and_then(|r| r.permissions.clone()),
+        sid: rbac.and_then(|r| r.sid.clone()),
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -194,6 +237,10 @@ pub fn generate_refresh_token(
         jti: jti.clone(),
         scope: String::new(),
         token_type: "refresh".to_string(),
+        roles: None,
+        groups: None,
+        permissions: None,
+        sid: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -203,6 +250,16 @@ pub fn generate_refresh_token(
         .map_err(|e| AppError::Internal(format!("Failed to encode refresh token: {e}")))?;
 
     Ok((token, jti))
+}
+
+/// Optional auth context data to embed in ID token claims.
+pub struct IdTokenAuthContext {
+    pub roles: Option<Vec<String>>,
+    pub groups: Option<Vec<String>>,
+    pub acr: Option<String>,
+    pub amr: Option<Vec<String>>,
+    pub auth_time: Option<i64>,
+    pub sid: Option<String>,
 }
 
 /// Generate an OIDC ID token.
@@ -218,6 +275,7 @@ pub fn generate_id_token(
     audience: &str,
     nonce: Option<&str>,
     access_token: Option<&str>,
+    auth_ctx: Option<&IdTokenAuthContext>,
 ) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
@@ -242,6 +300,12 @@ pub fn generate_id_token(
         picture: picture.map(String::from),
         nonce: nonce.map(String::from),
         at_hash,
+        roles: auth_ctx.and_then(|c| c.roles.clone()),
+        groups: auth_ctx.and_then(|c| c.groups.clone()),
+        acr: auth_ctx.and_then(|c| c.acr.clone()),
+        amr: auth_ctx.and_then(|c| c.amr.clone()),
+        auth_time: auth_ctx.and_then(|c| c.auth_time),
+        sid: auth_ctx.and_then(|c| c.sid.clone()),
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -356,7 +420,7 @@ mod tests {
     fn generate_and_verify_access_token() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid profile").unwrap();
+        let token = generate_access_token(&keys, &config, &user_id, "openid profile", None).unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.sub, user_id.to_string());
@@ -400,6 +464,10 @@ mod tests {
             jti: Uuid::new_v4().to_string(),
             scope: String::new(),
             token_type: "access".to_string(),
+            roles: None,
+            groups: None,
+            permissions: None,
+            sid: None,
         };
 
         let mut header = Header::new(Algorithm::RS256);
@@ -414,7 +482,7 @@ mod tests {
     fn access_token_has_kid_header() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid").unwrap();
+        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
 
         // Decode header without validation to check kid
         let header = jsonwebtoken::decode_header(&token).unwrap();
@@ -437,6 +505,7 @@ mod tests {
             "test-client",
             Some("nonce123"),
             None,
+            None,
         )
         .unwrap();
 
@@ -454,7 +523,7 @@ mod tests {
     fn generate_id_token_with_at_hash() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let access_token = generate_access_token(&keys, &config, &user_id, "openid").unwrap();
+        let access_token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
 
         let id_token = generate_id_token(
             &keys,
@@ -467,6 +536,7 @@ mod tests {
             "test-client",
             None,
             Some(&access_token),
+            None,
         )
         .unwrap();
 
@@ -488,6 +558,10 @@ mod tests {
             jti: "jti-abc".to_string(),
             scope: "openid profile".to_string(),
             token_type: "access".to_string(),
+            roles: None,
+            groups: None,
+            permissions: None,
+            sid: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
         let restored: Claims = serde_json::from_str(&json).unwrap();
@@ -509,9 +583,22 @@ mod tests {
             picture: None,
             nonce: None,
             at_hash: None,
+            roles: None,
+            groups: None,
+            acr: None,
+            amr: None,
+            auth_time: None,
+            sid: None,
         };
         let json = serde_json::to_value(&claims).unwrap();
         // at_hash should be absent when None (skip_serializing_if)
         assert!(json.get("at_hash").is_none());
+        // New optional fields should also be absent when None
+        assert!(json.get("roles").is_none());
+        assert!(json.get("groups").is_none());
+        assert!(json.get("acr").is_none());
+        assert!(json.get("amr").is_none());
+        assert!(json.get("auth_time").is_none());
+        assert!(json.get("sid").is_none());
     }
 }

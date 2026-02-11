@@ -1,6 +1,10 @@
 pub mod admin;
+pub mod admin_groups;
+pub mod admin_helpers;
+pub mod admin_roles;
 pub mod api_keys;
 pub mod auth;
+pub mod consent;
 pub mod connections;
 pub mod endpoints;
 pub mod health;

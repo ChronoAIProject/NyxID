@@ -82,6 +82,29 @@ It provides a complete identity layer: user registration, session management, Op
 - Audit log with action, resource, IP, and user-agent tracking (filterable by user)
 - OAuth client management (create, list, deactivate)
 
+### Roles and Groups (RBAC)
+- Role definitions with permission string tags (e.g., `users:read`, `users:write`)
+- Realm-level and client-scoped roles
+- System roles (`admin`, `user`) seeded at startup and protected from deletion
+- Default roles auto-assigned to new users
+- Groups with role inheritance: all group members inherit the group's roles
+- Hierarchical groups with optional parent-child relationships
+- Direct role assignment to users and indirect assignment via group membership
+- Effective permissions computed from direct roles + group-inherited roles
+- New scopes (`roles`, `groups`) control whether RBAC claims appear in tokens
+- Admin CRUD for roles, groups, role assignment, and group membership
+
+### Token Introspection and Revocation
+- Token introspection endpoint (RFC 7662): validates access and refresh tokens, returns active status with claims
+- Token revocation endpoint (RFC 7009): revokes refresh tokens; access tokens expire naturally
+- Both endpoints require client authentication (`client_id` + `client_secret`)
+- Introspection response includes RBAC claims (`roles`, `groups`, `permissions`) when present
+
+### User Consent Management
+- Users can view all OAuth consents granted to third-party applications
+- Per-client consent revocation without disconnecting from the application
+- Consent records track granted scopes, grant time, and optional expiration
+
 ### Credential Broker
 - Admin-managed provider registry (OpenAI, Anthropic, Google AI, Mistral, Cohere, etc.)
 - Users connect by entering API keys or completing OAuth2 flows
@@ -167,7 +190,7 @@ It provides a complete identity layer: user registration, session management, Op
                                   |
                          +--------v---------+
                          |  MongoDB 8.0     |
-                         |  (14 collections)|
+                         |  (17 collections)|
                          +------------------+
 ```
 
@@ -310,6 +333,27 @@ For the full API reference with request/response schemas and example curl comman
 | GET    | `/api/v1/admin/users/{user_id}/sessions` | Admin | List user sessions                |
 | DELETE | `/api/v1/admin/users/{user_id}/sessions` | Admin | Revoke all user sessions         |
 | GET    | `/api/v1/admin/audit-log`            | Admin    | Query audit log (paginated, filterable) |
+| GET    | `/api/v1/admin/roles`                | Admin    | List all roles                        |
+| POST   | `/api/v1/admin/roles`                | Admin    | Create a role                         |
+| GET    | `/api/v1/admin/roles/{role_id}`      | Admin    | Get role details                      |
+| PUT    | `/api/v1/admin/roles/{role_id}`      | Admin    | Update a role                         |
+| DELETE | `/api/v1/admin/roles/{role_id}`      | Admin    | Delete a role                         |
+| GET    | `/api/v1/admin/users/{user_id}/roles`| Admin    | Get user's direct and inherited roles |
+| POST   | `/api/v1/admin/users/{user_id}/roles/{role_id}` | Admin | Assign role to user       |
+| DELETE | `/api/v1/admin/users/{user_id}/roles/{role_id}` | Admin | Revoke role from user     |
+| GET    | `/api/v1/admin/groups`               | Admin    | List all groups                       |
+| POST   | `/api/v1/admin/groups`               | Admin    | Create a group                        |
+| GET    | `/api/v1/admin/groups/{group_id}`    | Admin    | Get group details                     |
+| PUT    | `/api/v1/admin/groups/{group_id}`    | Admin    | Update a group                        |
+| DELETE | `/api/v1/admin/groups/{group_id}`    | Admin    | Delete a group                        |
+| GET    | `/api/v1/admin/groups/{group_id}/members` | Admin | List group members                |
+| POST   | `/api/v1/admin/groups/{group_id}/members/{user_id}` | Admin | Add member to group  |
+| DELETE | `/api/v1/admin/groups/{group_id}/members/{user_id}` | Admin | Remove member from group |
+| GET    | `/api/v1/admin/users/{user_id}/groups`| Admin   | Get user's groups                     |
+| POST   | `/oauth/introspect`                  | None*    | Token introspection (RFC 7662)        |
+| POST   | `/oauth/revoke`                      | None*    | Token revocation (RFC 7009)           |
+| GET    | `/api/v1/users/me/consents`          | Required | List user's OAuth consents            |
+| DELETE | `/api/v1/users/me/consents/{client_id}` | Required | Revoke consent for a client       |
 | GET    | `/api/v1/providers`                  | Required | List provider configurations          |
 | POST   | `/api/v1/providers`                  | Admin    | Register a provider                   |
 | GET    | `/api/v1/providers/{id}`             | Required | Get a provider                        |
@@ -414,7 +458,7 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 
 ## Database Schema
 
-NyxID uses 14 MongoDB collections:
+NyxID uses 17 MongoDB collections:
 
 | Collection                 | Description                                          |
 |----------------------------|------------------------------------------------------|
@@ -432,6 +476,9 @@ NyxID uses 14 MongoDB collections:
 | `user_provider_tokens`     | Per-user encrypted provider tokens (API keys/OAuth)  |
 | `service_provider_requirements` | Provider token requirements per service          |
 | `oauth_states`             | Temporary OAuth state for provider flows             |
+| `roles`                    | Role definitions with permissions and scoping        |
+| `groups`                   | Group definitions with role inheritance               |
+| `consents`                 | User OAuth consent records per client                 |
 | `audit_log`                | Immutable audit trail of security events             |
 
 All documents use UUID identifiers, ISO 8601 timestamps, and appropriate indexes for query patterns.
@@ -587,7 +634,7 @@ NyxID/
 |       |   |-- jwt.rs          RS256 JWT signing, verification, key management
 |       |   |-- aes.rs          AES-256-GCM encryption and decryption
 |       |   `-- token.rs        Random token generation, SHA-256 hashing
-|       |-- models/             MongoDB document definitions (10 modules)
+|       |-- models/             MongoDB document definitions (13 modules, incl. role, group, consent)
 |       |-- handlers/           HTTP handler functions by domain
 |       |   |-- auth.rs         Register, login, logout, refresh, verify-email, forgot/reset-password
 |       |   |-- users.rs        Get/update user profile
@@ -602,6 +649,10 @@ NyxID/
 |       |   |-- mcp.rs          MCP config endpoint
 |       |   |-- oauth.rs        OIDC authorize, token, userinfo
 |       |   |-- admin.rs        Admin user management, audit log, OAuth client endpoints
+|       |   |-- admin_roles.rs  Admin role CRUD + user role assignment
+|       |   |-- admin_groups.rs Admin group CRUD + membership management
+|       |   |-- admin_helpers.rs Shared admin handler helpers (require_admin, IP/UA extraction)
+|       |   |-- consent.rs      User consent listing and revocation
 |       |   |-- mfa.rs          MFA setup and verification
 |       |   `-- health.rs       Health check
 |       |-- services/           Business logic layer
@@ -619,6 +670,10 @@ NyxID/
 |       |   |-- oauth_flow.rs       OAuth2 utilities (PKCE, token exchange, refresh)
 |       |   |-- mfa_service.rs      TOTP provisioning, verification
 |       |   |-- admin_user_service.rs Admin user CRUD, cascade delete, session revocation
+|       |   |-- role_service.rs     Role CRUD, assignment, system role seeding
+|       |   |-- group_service.rs    Group CRUD, membership management
+|       |   |-- consent_service.rs  Consent creation, listing, revocation
+|       |   |-- rbac_helpers.rs     Resolve effective roles/groups/permissions for a user
 |       |   `-- audit_service.rs    Async audit log insertion
 |       `-- mw/                 Middleware
 |           |-- auth.rs         AuthUser extractor (Bearer / cookie / API key)
@@ -635,18 +690,28 @@ NyxID/
         |-- stores/             Zustand auth state store
         |-- types/              TypeScript API type definitions
         |   |-- api.ts
-        |   `-- admin.ts       Admin-specific types
+        |   |-- admin.ts       Admin-specific types
+        |   `-- rbac.ts        RBAC types (roles, groups, consents)
         |-- schemas/            Zod validation schemas
-        |   `-- admin.ts       Admin form schemas
+        |   |-- admin.ts       Admin form schemas
+        |   `-- rbac.ts        RBAC form schemas (role, group)
         |-- hooks/              React Query hooks
         |   |-- use-admin.ts   Admin user management hooks
+        |   |-- use-rbac.ts    Role and group management hooks
+        |   |-- use-consents.ts Consent management hooks
         |   `-- use-llm-gateway.ts LLM gateway status hook
         |-- components/
         |   |-- ui/             16 shadcn/ui primitives
         |   |-- auth/           Login, register, MFA forms
         |   |-- dashboard/      Sidebar, header, tables, cards
         |   `-- layout/         Auth and dashboard layout shells
-        `-- pages/              Route pages (login, register, dashboard, admin-users, admin-user-detail, etc.)
+        `-- pages/              Route pages
+            |-- admin-roles.tsx    Admin role list
+            |-- admin-role-detail.tsx  Admin role detail
+            |-- admin-groups.tsx   Admin group list
+            |-- admin-group-detail.tsx Admin group detail with member management
+            |-- consents.tsx       User consent management
+            `-- (login, register, dashboard, admin-users, admin-user-detail, etc.)
 ```
 
 ---

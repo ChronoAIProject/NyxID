@@ -9,6 +9,9 @@ import {
   BookOpen,
   Shield,
   Users,
+  ShieldCheck,
+  UsersRound,
+  KeyRound,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
@@ -21,12 +24,34 @@ const NAV_ITEMS = [
   { to: "/connections", icon: Link2, label: "Connections" },
   { to: "/providers", icon: Plug, label: "Providers" },
   { to: "/settings", icon: Settings, label: "Settings" },
+  { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
   { to: "/guide", icon: BookOpen, label: "Guide" },
 ] as const;
 
 const ADMIN_NAV_ITEMS = [
-  { to: "/admin/users", icon: Users, label: "User Management" },
+  { to: "/admin/users", icon: Users, label: "Users" },
+  { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },
+  { to: "/admin/groups", icon: UsersRound, label: "Groups" },
 ] as const;
+
+/** Check if a nav item is the best (most specific) match for the current path. */
+function isNavActive(
+  itemTo: string,
+  currentPath: string,
+  allItems: readonly { readonly to: string }[],
+): boolean {
+  if (itemTo === "/") return currentPath === "/";
+  const matches =
+    currentPath === itemTo || currentPath.startsWith(itemTo + "/");
+  if (!matches) return false;
+  // Only highlight if no more-specific sibling also matches
+  return !allItems.some(
+    (other) =>
+      other.to !== itemTo &&
+      other.to.length > itemTo.length &&
+      (currentPath === other.to || currentPath.startsWith(other.to + "/")),
+  );
+}
 
 export function Sidebar() {
   const routerState = useRouterState();
@@ -47,10 +72,7 @@ export function Sidebar() {
 
       <nav className="flex-1 space-y-1 p-4">
         {NAV_ITEMS.map((item) => {
-          const isActive =
-            item.to === "/"
-              ? currentPath === "/"
-              : currentPath.startsWith(item.to);
+          const isActive = isNavActive(item.to, currentPath, NAV_ITEMS);
 
           return (
             <button
@@ -81,7 +103,7 @@ export function Sidebar() {
           </div>
           <nav className="space-y-1 px-4 pb-2">
             {ADMIN_NAV_ITEMS.map((item) => {
-              const isActive = currentPath.startsWith(item.to);
+              const isActive = isNavActive(item.to, currentPath, ADMIN_NAV_ITEMS);
               return (
                 <button
                   key={item.to}

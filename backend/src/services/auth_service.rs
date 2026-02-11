@@ -79,6 +79,8 @@ pub async fn register_user(
         password_reset_expires_at: None,
         is_active: true,
         is_admin: false,
+        role_ids: vec![],
+        group_ids: vec![],
         mfa_enabled: false,
         created_at: now,
         updated_at: now,

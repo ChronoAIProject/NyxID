@@ -64,6 +64,30 @@ pub enum AppError {
 
     #[error("Invalid scope: {0}")]
     InvalidScope(String),
+
+    #[error("Role not found: {0}")]
+    RoleNotFound(String),
+
+    #[error("Group not found: {0}")]
+    GroupNotFound(String),
+
+    #[error("Consent not found")]
+    ConsentNotFound,
+
+    #[error("Role already assigned")]
+    RoleAlreadyAssigned,
+
+    #[error("User already a member of this group")]
+    GroupMembershipExists,
+
+    #[error("Cannot modify system role: {0}")]
+    SystemRoleProtected(String),
+
+    #[error("Duplicate slug: {0}")]
+    DuplicateSlug(String),
+
+    #[error("Circular group hierarchy detected")]
+    CircularGroupHierarchy,
 }
 
 impl AppError {
@@ -81,6 +105,13 @@ impl AppError {
             Self::PkceVerificationFailed
             | Self::InvalidRedirectUri
             | Self::InvalidScope(_) => StatusCode::BAD_REQUEST,
+            Self::RoleNotFound(_) | Self::GroupNotFound(_) | Self::ConsentNotFound => {
+                StatusCode::NOT_FOUND
+            }
+            Self::RoleAlreadyAssigned | Self::GroupMembershipExists => StatusCode::CONFLICT,
+            Self::SystemRoleProtected(_) => StatusCode::FORBIDDEN,
+            Self::DuplicateSlug(_) => StatusCode::CONFLICT,
+            Self::CircularGroupHierarchy => StatusCode::BAD_REQUEST,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -102,6 +133,14 @@ impl AppError {
             Self::PkceVerificationFailed => 3000,
             Self::InvalidRedirectUri => 3001,
             Self::InvalidScope(_) => 3002,
+            Self::RoleNotFound(_) => 4000,
+            Self::GroupNotFound(_) => 4001,
+            Self::ConsentNotFound => 4002,
+            Self::RoleAlreadyAssigned => 4003,
+            Self::GroupMembershipExists => 4004,
+            Self::SystemRoleProtected(_) => 4005,
+            Self::DuplicateSlug(_) => 4006,
+            Self::CircularGroupHierarchy => 4007,
         }
     }
 
@@ -122,6 +161,14 @@ impl AppError {
             Self::PkceVerificationFailed => "pkce_verification_failed",
             Self::InvalidRedirectUri => "invalid_redirect_uri",
             Self::InvalidScope(_) => "invalid_scope",
+            Self::RoleNotFound(_) => "role_not_found",
+            Self::GroupNotFound(_) => "group_not_found",
+            Self::ConsentNotFound => "consent_not_found",
+            Self::RoleAlreadyAssigned => "role_already_assigned",
+            Self::GroupMembershipExists => "group_membership_exists",
+            Self::SystemRoleProtected(_) => "system_role_protected",
+            Self::DuplicateSlug(_) => "duplicate_slug",
+            Self::CircularGroupHierarchy => "circular_group_hierarchy",
         }
     }
 }
@@ -189,6 +236,14 @@ mod tests {
         assert_eq!(AppError::PkceVerificationFailed.status_code(), StatusCode::BAD_REQUEST);
         assert_eq!(AppError::InvalidRedirectUri.status_code(), StatusCode::BAD_REQUEST);
         assert_eq!(AppError::InvalidScope("x".into()).status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(AppError::RoleNotFound("x".into()).status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(AppError::GroupNotFound("x".into()).status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(AppError::ConsentNotFound.status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(AppError::RoleAlreadyAssigned.status_code(), StatusCode::CONFLICT);
+        assert_eq!(AppError::GroupMembershipExists.status_code(), StatusCode::CONFLICT);
+        assert_eq!(AppError::SystemRoleProtected("x".into()).status_code(), StatusCode::FORBIDDEN);
+        assert_eq!(AppError::DuplicateSlug("x".into()).status_code(), StatusCode::CONFLICT);
+        assert_eq!(AppError::CircularGroupHierarchy.status_code(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -208,9 +263,16 @@ mod tests {
             AppError::PkceVerificationFailed.error_code(),
             AppError::InvalidRedirectUri.error_code(),
             AppError::InvalidScope("".into()).error_code(),
+            AppError::RoleNotFound("".into()).error_code(),
+            AppError::GroupNotFound("".into()).error_code(),
+            AppError::ConsentNotFound.error_code(),
+            AppError::RoleAlreadyAssigned.error_code(),
+            AppError::GroupMembershipExists.error_code(),
+            AppError::SystemRoleProtected("".into()).error_code(),
+            AppError::DuplicateSlug("".into()).error_code(),
+            AppError::CircularGroupHierarchy.error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
-        // DatabaseError (1007) shares no code with any other variant
         assert_eq!(codes.len(), unique.len(), "All error codes should be unique");
     }
 
@@ -233,6 +295,14 @@ mod tests {
         assert_eq!(AppError::PkceVerificationFailed.error_key(), "pkce_verification_failed");
         assert_eq!(AppError::InvalidRedirectUri.error_key(), "invalid_redirect_uri");
         assert_eq!(AppError::InvalidScope("".into()).error_key(), "invalid_scope");
+        assert_eq!(AppError::RoleNotFound("".into()).error_key(), "role_not_found");
+        assert_eq!(AppError::GroupNotFound("".into()).error_key(), "group_not_found");
+        assert_eq!(AppError::ConsentNotFound.error_key(), "consent_not_found");
+        assert_eq!(AppError::RoleAlreadyAssigned.error_key(), "role_already_assigned");
+        assert_eq!(AppError::GroupMembershipExists.error_key(), "group_membership_exists");
+        assert_eq!(AppError::SystemRoleProtected("".into()).error_key(), "system_role_protected");
+        assert_eq!(AppError::DuplicateSlug("".into()).error_key(), "duplicate_slug");
+        assert_eq!(AppError::CircularGroupHierarchy.error_key(), "circular_group_hierarchy");
     }
 
     #[test]

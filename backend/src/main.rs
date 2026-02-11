@@ -88,6 +88,11 @@ async fn main() {
         .await
         .expect("Failed to seed default LLM services");
 
+    // Seed system roles for RBAC (idempotent)
+    services::role_service::seed_system_roles(&db)
+        .await
+        .expect("Failed to seed system roles");
+
     // --- Server startup ---
     tracing::info!("Starting NyxID authentication server");
     tracing::info!(port = config.port, "Configuration loaded");

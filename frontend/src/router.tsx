@@ -30,6 +30,11 @@ import { ProviderDetailPage } from "@/pages/provider-detail";
 import { ProviderEditPage } from "@/pages/provider-edit";
 import { AdminUsersPage } from "@/pages/admin-users";
 import { AdminUserDetailPage } from "@/pages/admin-user-detail";
+import { AdminRolesPage } from "@/pages/admin-roles";
+import { AdminRoleDetailPage } from "@/pages/admin-role-detail";
+import { AdminGroupsPage } from "@/pages/admin-groups";
+import { AdminGroupDetailPage } from "@/pages/admin-group-detail";
+import { ConsentsPage } from "@/pages/consents";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -130,6 +135,12 @@ const guideRoute = createRoute({
   component: GuidePage,
 });
 
+const consentsRoute = createRoute({
+  path: "/settings/consents",
+  getParentRoute: () => dashboardLayout,
+  component: ConsentsPage,
+});
+
 const providersLayout = createRoute({
   path: "/providers",
   getParentRoute: () => dashboardLayout,
@@ -193,6 +204,30 @@ const adminUserDetailRoute = createRoute({
   component: AdminUserDetailPage,
 });
 
+const adminRolesRoute = createRoute({
+  path: "roles",
+  getParentRoute: () => adminLayout,
+  component: AdminRolesPage,
+});
+
+const adminRoleDetailRoute = createRoute({
+  path: "roles/$roleId",
+  getParentRoute: () => adminLayout,
+  component: AdminRoleDetailPage,
+});
+
+const adminGroupsRoute = createRoute({
+  path: "groups",
+  getParentRoute: () => adminLayout,
+  component: AdminGroupsPage,
+});
+
+const adminGroupDetailRoute = createRoute({
+  path: "groups/$groupId",
+  getParentRoute: () => adminLayout,
+  component: AdminGroupDetailPage,
+});
+
 const routeTree = rootRoute.addChildren([
   authLayout.addChildren([loginRoute, registerRoute]),
   dashboardLayout.addChildren([
@@ -212,8 +247,16 @@ const routeTree = rootRoute.addChildren([
       providerEditRoute,
     ]),
     settingsRoute,
+    consentsRoute,
     guideRoute,
-    adminLayout.addChildren([adminUsersRoute, adminUserDetailRoute]),
+    adminLayout.addChildren([
+      adminUsersRoute,
+      adminUserDetailRoute,
+      adminRolesRoute,
+      adminRoleDetailRoute,
+      adminGroupsRoute,
+      adminGroupDetailRoute,
+    ]),
   ]),
 ]);
 

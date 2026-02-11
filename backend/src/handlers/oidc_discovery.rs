@@ -21,8 +21,10 @@ pub async fn openid_configuration(
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["RS256"],
-        "scopes_supported": ["openid", "profile", "email"],
-        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash"],
+        "introspection_endpoint": format!("{base}/oauth/introspect"),
+        "revocation_endpoint": format!("{base}/oauth/revoke"),
+        "scopes_supported": ["openid", "profile", "email", "roles", "groups"],
+        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash", "roles", "groups", "permissions", "acr", "amr", "auth_time", "sid"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
     }))
@@ -45,13 +47,15 @@ pub async fn oauth_authorization_server_metadata(
         "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
         "userinfo_endpoint": format!("{base}/oauth/userinfo"),
         "jwks_uri": format!("{base}/.well-known/jwks.json"),
-        "scopes_supported": ["openid", "profile", "email"],
+        "introspection_endpoint": format!("{base}/oauth/introspect"),
+        "revocation_endpoint": format!("{base}/oauth/revoke"),
+        "scopes_supported": ["openid", "profile", "email", "roles", "groups"],
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "id_token_signing_alg_values_supported": ["RS256"],
-        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash"],
+        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash", "roles", "groups", "permissions", "acr", "amr", "auth_time", "sid"],
     }))
 }
 

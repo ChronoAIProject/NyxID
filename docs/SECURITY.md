@@ -13,6 +13,9 @@ This document details NyxID's security architecture, threat mitigations, and ope
 - [Proxy Security](#proxy-security)
 - [Credential Broker Security](#credential-broker-security)
 - [Admin Access Control](#admin-access-control)
+- [RBAC Security](#rbac-security)
+- [Token Introspection and Revocation Security](#token-introspection-and-revocation-security)
+- [Consent Flow Security](#consent-flow-security)
 - [Authentication Security](#authentication-security)
 - [HTTP Security Headers](#http-security-headers)
 - [Rate Limiting](#rate-limiting)
@@ -285,6 +288,84 @@ All admin user management actions are recorded in the audit log with:
 
 Admin audit event types: `admin.user.updated`, `admin.user.role_changed`, `admin.user.status_changed`, `admin.user.password_reset`, `admin.user.deleted`, `admin.user.email_verified`, `admin.user.sessions_revoked`.
 
+RBAC audit event types: `admin.role.created`, `admin.role.updated`, `admin.role.deleted`, `admin.role.assigned`, `admin.role.revoked`, `admin.group.created`, `admin.group.updated`, `admin.group.deleted`, `admin.group.member_added`, `admin.group.member_removed`.
+
+---
+
+## RBAC Security
+
+### System Role Protection
+
+System roles (`admin`, `user`) are seeded at startup with `is_system = true`. They cannot be:
+- **Deleted** -- `delete_role()` rejects deletion of system roles
+- **Renamed** -- `update_role()` prevents changing the `name` or `slug` of system roles
+- **De-flagged** -- The `is_system` field cannot be modified via the API
+
+### Admin-Only Endpoints
+
+All RBAC management endpoints (`/api/v1/admin/roles/*`, `/api/v1/admin/groups/*`) require the `is_admin = true` check, which queries the user record from the database on each request (not cached from JWT claims).
+
+### Permission Model
+
+Permissions are opaque string tags (e.g., `users:read`, `content:write`). NyxID stores and propagates them but does not enforce them internally. Consuming applications are responsible for interpreting permission strings.
+
+### Role Assignment Security
+
+- Only admins can assign or revoke roles via the API
+- Role assignment is additive: assigning a role that is already assigned returns a conflict error
+- Revoking a role only removes the direct assignment; group-inherited roles are not affected
+
+### Group Membership Security
+
+- Group membership is stored as `group_ids` on the User document
+- Adding a user to a group is an admin-only operation
+- Removing a user from a group removes the group's inherited roles from the user's effective permissions
+
+### Audit Trail
+
+All RBAC operations (role CRUD, role assignment/revocation, group CRUD, member add/remove) are recorded in the audit log with the admin's user ID, the target resource, client IP, and user-agent.
+
+---
+
+## Token Introspection and Revocation Security
+
+### Client Authentication Requirement
+
+Both the introspection (`POST /oauth/introspect`) and revocation (`POST /oauth/revoke`) endpoints require client authentication via `client_id` and `client_secret` in the request body.
+
+- **Introspection:** Returns `{"active": false}` if client authentication fails (never reveals token validity to unauthorized callers)
+- **Revocation:** Returns `200 OK` regardless of authentication result (per RFC 7009, to prevent information leakage)
+
+### Introspection Response Security
+
+- The response includes RBAC claims (`roles`, `groups`, `permissions`) only when the token was issued with those scopes
+- The `username` field (user email) is fetched from the database, not from the token, ensuring it reflects the current state
+- Revoked refresh tokens return `{"active": false}` (checked against the database)
+
+### Revocation Limitations
+
+- **Refresh tokens:** Revoked immediately in the database (`revoked = true`)
+- **Access tokens:** Cannot be explicitly revoked (stateless JWTs). They expire naturally within the configured TTL (default: 15 minutes). This is a deliberate trade-off consistent with the existing session revocation model.
+
+---
+
+## Consent Flow Security
+
+### IDOR Prevention
+
+Consent endpoints use the authenticated user's ID from the `AuthUser` middleware extractor, not from request parameters. This prevents insecure direct object reference (IDOR) attacks where a user could attempt to view or revoke another user's consents.
+
+### Consent Scoping
+
+- `GET /api/v1/users/me/consents` returns only consents belonging to the authenticated user
+- `DELETE /api/v1/users/me/consents/{client_id}` deletes only the consent matching both the authenticated user's ID and the specified client ID
+
+### Consent Lifecycle
+
+- Consents are created or updated (upserted) during the OAuth authorization flow
+- Revoking a consent does not invalidate existing tokens; it only prevents automatic re-authorization on the next OAuth flow
+- Consent records include the granted scopes and optional expiration for audit purposes
+
 ---
 
 ## Authentication Security
@@ -368,6 +449,8 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 | Session tokens                 | High        | SHA-256 hashed in DB                 |
 | API keys                       | High        | SHA-256 hashed, prefix-only display  |
 | User PII (email, name)         | Medium      | Access control, audit logging        |
+| RBAC assignments (roles/groups)| Medium      | Admin-only modification, audit logging |
+| OAuth consent records          | Medium      | User-scoped access, IDOR prevention  |
 
 ### Threat Mitigations
 
@@ -394,6 +477,10 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 | Admin lockout                   | Cannot disable/delete own account                    |
 | Orphaned data after user delete | Cascade delete across 8 collections; audit preserved |
 | Disabled user continued access  | Session + refresh token + API key revocation on disable; JWT expires within 15 min |
+| RBAC system role tampering      | System roles protected from deletion/rename; `is_system` not modifiable via API |
+| Unauthorized RBAC modification  | All RBAC endpoints require `is_admin = true` (database check, not JWT claim) |
+| Token introspection info leak   | Returns `{"active": false}` for unauthenticated callers |
+| Consent IDOR                    | User ID taken from auth context, not request parameters |
 
 ---
 

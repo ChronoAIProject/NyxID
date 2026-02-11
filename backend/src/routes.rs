@@ -27,7 +27,9 @@ pub fn build_router() -> Router<AppState> {
 
     let user_routes = Router::new()
         .route("/me", get(handlers::users::get_me))
-        .route("/me", put(handlers::users::update_me));
+        .route("/me", put(handlers::users::update_me))
+        .route("/me/consents", get(handlers::consent::list_my_consents))
+        .route("/me/consents/{client_id}", delete(handlers::consent::revoke_my_consent));
 
     let api_key_routes = Router::new()
         .route("/", get(handlers::api_keys::list_keys))
@@ -138,16 +140,38 @@ pub fn build_router() -> Router<AppState> {
         .route("/users/{user_id}/verify-email", patch(handlers::admin::verify_user_email))
         .route("/users/{user_id}/sessions", get(handlers::admin::list_user_sessions)
             .delete(handlers::admin::revoke_user_sessions))
+        .route("/users/{user_id}/roles", get(handlers::admin_roles::get_user_roles))
+        .route("/users/{user_id}/roles/{role_id}",
+            post(handlers::admin_roles::assign_role)
+            .delete(handlers::admin_roles::revoke_role))
+        .route("/users/{user_id}/groups", get(handlers::admin_groups::get_user_groups))
+        .route("/roles", get(handlers::admin_roles::list_roles)
+            .post(handlers::admin_roles::create_role))
+        .route("/roles/{role_id}", get(handlers::admin_roles::get_role)
+            .put(handlers::admin_roles::update_role)
+            .delete(handlers::admin_roles::delete_role))
+        .route("/groups", get(handlers::admin_groups::list_groups)
+            .post(handlers::admin_groups::create_group))
+        .route("/groups/{group_id}", get(handlers::admin_groups::get_group)
+            .put(handlers::admin_groups::update_group)
+            .delete(handlers::admin_groups::delete_group))
+        .route("/groups/{group_id}/members", get(handlers::admin_groups::get_members))
+        .route("/groups/{group_id}/members/{user_id}",
+            post(handlers::admin_groups::add_member)
+            .delete(handlers::admin_groups::remove_member))
         .route("/audit-log", get(handlers::admin::list_audit_log))
         .route("/oauth-clients", get(handlers::admin::list_oauth_clients)
             .post(handlers::admin::create_oauth_client))
-        .route("/oauth-clients/{client_id}", delete(handlers::admin::delete_oauth_client));
+        .route("/oauth-clients/{client_id}", delete(handlers::admin::delete_oauth_client))
+        .route("/oauth-clients/{client_id}/consents", get(handlers::admin::list_client_consents));
 
     let oauth_routes = Router::new()
         .route("/authorize", get(handlers::oauth::authorize))
         .route("/token", post(handlers::oauth::token))
         .route("/userinfo", get(handlers::oauth::userinfo))
-        .route("/register", post(handlers::oauth::register_client));
+        .route("/register", post(handlers::oauth::register_client))
+        .route("/introspect", post(handlers::oauth::introspect))
+        .route("/revoke", post(handlers::oauth::revoke));
 
     let api_v1 = Router::new()
         .nest("/auth", auth_routes)

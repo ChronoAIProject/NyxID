@@ -20,6 +20,8 @@ use crate::AppState;
 pub struct AuthUser {
     pub user_id: Uuid,
     pub session_id: Option<Uuid>,
+    /// Space-separated scopes from the access token (empty for session/API key auth).
+    pub scope: String,
 }
 
 /// Name of the session cookie.
@@ -85,6 +87,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     return Ok(AuthUser {
                         user_id,
                         session_id: None,
+                        scope: claims.scope,
                     });
                 }
             }
@@ -129,9 +132,15 @@ impl FromRequestParts<AppState> for AuthUser {
 
                         match user_model {
                             Some(u) if u.is_active => {
+                                // Session-based auth uses an empty scope string.
+                                // RBAC-scoped claims (roles, groups) are only
+                                // included in OAuth tokens that explicitly request
+                                // those scopes. Session users can retrieve RBAC
+                                // data via the /oauth/userinfo endpoint instead.
                                 return Ok(AuthUser {
                                     user_id,
                                     session_id: Some(session_id),
+                                    scope: String::new(),
                                 });
                             }
                             _ => {
@@ -185,6 +194,7 @@ impl FromRequestParts<AppState> for AuthUser {
                 return Ok(AuthUser {
                     user_id,
                     session_id: None,
+                    scope: claims.scope,
                 });
             }
 
@@ -223,6 +233,7 @@ impl FromRequestParts<AppState> for AuthUser {
                 return Ok(AuthUser {
                     user_id,
                     session_id: None,
+                    scope: String::new(),
                 });
             }
 

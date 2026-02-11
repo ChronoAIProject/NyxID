@@ -26,8 +26,13 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [LLM Gateway](#llm-gateway)
   - [MFA](#mfa-multi-factor-authentication)
   - [OAuth / OpenID Connect](#oauth--openid-connect)
+  - [Token Introspection](#token-introspection)
+  - [Token Revocation](#token-revocation)
+  - [User Consents](#user-consents)
   - [OIDC Discovery](#oidc-discovery)
   - [Admin](#admin)
+  - [Admin Roles](#admin-roles)
+  - [Admin Groups](#admin-groups)
 
 ---
 
@@ -2650,7 +2655,7 @@ Authorization endpoint. Validates the OAuth client and parameters, then issues a
 | `response_type`         | string | Yes      | Must be `code`                           |
 | `client_id`             | string | Yes      | UUID of the registered OAuth client      |
 | `redirect_uri`          | string | Yes      | Must match a registered redirect URI     |
-| `scope`                 | string | No       | Space-separated scopes (default: `openid profile email`) |
+| `scope`                 | string | No       | Space-separated scopes (default: `openid profile email`). Additional scopes: `roles` (include RBAC roles and permissions in tokens), `groups` (include group memberships in tokens) |
 | `state`                 | string | No       | Opaque value for CSRF protection         |
 | `code_challenge`        | string | Yes      | PKCE code challenge (base64url-encoded SHA-256) |
 | `code_challenge_method` | string | No       | Must be `S256` if provided               |
@@ -2759,7 +2764,7 @@ curl -X POST http://localhost:3001/oauth/token \
 
 #### GET /oauth/userinfo
 
-OpenID Connect UserInfo endpoint. Returns claims about the authenticated user.
+OpenID Connect UserInfo endpoint. Returns claims about the authenticated user. When the access token's scope includes `roles` or `groups`, the response includes RBAC claims.
 
 **Auth:** Required (Bearer token issued by the `/oauth/token` endpoint)
 
@@ -2771,14 +2776,174 @@ OpenID Connect UserInfo endpoint. Returns claims about the authenticated user.
   "email": "user@example.com",
   "email_verified": true,
   "name": "Jane Doe",
-  "picture": "https://example.com/avatar.jpg"
+  "picture": "https://example.com/avatar.jpg",
+  "roles": ["admin", "editor"],
+  "groups": ["engineering"],
+  "permissions": ["users:read", "users:write", "content:read", "content:write"]
+}
+```
+
+The `roles`, `groups`, and `permissions` fields are only present when the corresponding scopes (`roles`, `groups`) were requested during authorization.
+
+**Example:**
+
+```bash
+curl http://localhost:3001/oauth/userinfo \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+### Token Introspection
+
+#### POST /oauth/introspect
+
+Token introspection endpoint per [RFC 7662](https://tools.ietf.org/html/rfc7662). Validates a token and returns its active status with associated claims. The request body is `application/x-www-form-urlencoded`.
+
+**Auth:** None (client authenticates via `client_id` and `client_secret` in the request body)
+
+**Request Body (form-encoded):**
+
+| Field             | Type   | Required | Description                              |
+|-------------------|--------|----------|------------------------------------------|
+| `token`           | string | Yes      | The token to introspect                  |
+| `token_type_hint` | string | No       | `access_token` or `refresh_token`        |
+| `client_id`       | string | Yes      | OAuth client ID                          |
+| `client_secret`   | string | No       | OAuth client secret (required for confidential clients) |
+
+**Response (200) -- Active token:**
+
+```json
+{
+  "active": true,
+  "scope": "openid profile email roles",
+  "username": "user@example.com",
+  "token_type": "access",
+  "exp": 1717200000,
+  "iat": 1717199100,
+  "sub": "550e8400-e29b-41d4-a716-446655440000",
+  "iss": "nyxid",
+  "jti": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "roles": ["admin", "editor"],
+  "groups": ["engineering"],
+  "permissions": ["users:read", "users:write"]
+}
+```
+
+**Response (200) -- Inactive/invalid token:**
+
+```json
+{
+  "active": false
+}
+```
+
+The endpoint always returns 200. Invalid tokens, expired tokens, revoked tokens, and requests with invalid client credentials all return `{"active": false}`.
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/oauth/introspect \
+  -d "token=eyJhbGciOiJSUzI1NiIs..." \
+  -d "client_id=client-uuid-here" \
+  -d "client_secret=client-secret-here"
+```
+
+---
+
+### Token Revocation
+
+#### POST /oauth/revoke
+
+Token revocation endpoint per [RFC 7009](https://tools.ietf.org/html/rfc7009). Revokes a token so it can no longer be used. The request body is `application/x-www-form-urlencoded`.
+
+**Auth:** None (client authenticates via `client_id` and `client_secret` in the request body)
+
+**Request Body (form-encoded):**
+
+| Field             | Type   | Required | Description                              |
+|-------------------|--------|----------|------------------------------------------|
+| `token`           | string | Yes      | The token to revoke                      |
+| `token_type_hint` | string | No       | `access_token` or `refresh_token`        |
+| `client_id`       | string | Yes      | OAuth client ID                          |
+| `client_secret`   | string | No       | OAuth client secret (required for confidential clients) |
+
+**Response:** Always returns `200 OK` with an empty body, per RFC 7009. This applies even if the token is invalid, already revoked, or client authentication fails.
+
+Refresh tokens are revoked in the database (marked `revoked = true`). Access tokens are stateless JWTs and cannot be explicitly revoked; they expire naturally (default: 15 minutes).
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/oauth/revoke \
+  -d "token=eyJhbGciOiJSUzI1NiIs..." \
+  -d "client_id=client-uuid-here" \
+  -d "client_secret=client-secret-here"
+```
+
+---
+
+### User Consents
+
+#### GET /api/v1/users/me/consents
+
+List all OAuth consents the current user has granted to third-party applications.
+
+**Auth:** Required
+
+**Response (200):**
+
+```json
+{
+  "consents": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "client_id": "client-uuid-here",
+      "client_name": "My Web App",
+      "scopes": "openid profile email",
+      "granted_at": "2025-06-01T10:00:00+00:00",
+      "expires_at": null
+    }
+  ]
 }
 ```
 
 **Example:**
 
 ```bash
-curl http://localhost:3001/oauth/userinfo \
+curl http://localhost:3001/api/v1/users/me/consents \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### DELETE /api/v1/users/me/consents/{client_id}
+
+Revoke an OAuth consent for a specific client. The user will be prompted to re-authorize on the next OAuth flow with this client.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter   | Type   | Description             |
+|-------------|--------|-------------------------|
+| `client_id` | string | The OAuth client ID     |
+
+**Response (200):**
+
+```json
+{
+  "message": "Consent revoked"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- No consent found for this client
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/users/me/consents/client-uuid-here \
   -H "Authorization: Bearer <access_token>"
 ```
 
@@ -3621,6 +3786,644 @@ curl -X DELETE http://localhost:3001/api/v1/admin/oauth-clients/a1b2c3d4-e5f6-78
 
 ---
 
+### Admin Roles
+
+All admin role endpoints require the authenticated user to have `is_admin = true`.
+
+#### GET /api/v1/admin/roles
+
+List all roles. Optionally filter by OAuth client scope.
+
+**Auth:** Admin
+
+**Query Parameters:**
+
+| Parameter   | Type   | Default | Description                                 |
+|-------------|--------|---------|---------------------------------------------|
+| `client_id` | string | --      | Filter roles scoped to a specific client    |
+
+**Response (200):**
+
+```json
+{
+  "roles": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "name": "Admin",
+      "slug": "admin",
+      "description": "Full system administrator",
+      "permissions": ["users:read", "users:write", "admin:*"],
+      "is_default": false,
+      "is_system": true,
+      "client_id": null,
+      "created_at": "2025-06-01T10:00:00+00:00",
+      "updated_at": "2025-06-01T10:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/admin/roles \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/admin/roles
+
+Create a new role.
+
+**Auth:** Admin
+
+**Request Body:**
+
+| Field         | Type     | Required | Description                                       |
+|---------------|----------|----------|---------------------------------------------------|
+| `name`        | string   | Yes      | Human-readable name                               |
+| `slug`        | string   | Yes      | URL-safe identifier (must be unique)              |
+| `description` | string   | No       | Role description                                  |
+| `permissions` | string[] | Yes      | Permission tags (e.g., `["users:read"]`)          |
+| `is_default`  | boolean  | No       | Auto-assign to new users (default: false)         |
+| `client_id`   | string   | No       | Scope to a specific OAuth client                  |
+
+**Response (200):** Returns the created role object (same shape as list response items).
+
+**Errors:**
+- `1004 conflict` -- Slug already exists
+- `1008 validation_error` -- Name or slug is empty
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/admin/roles \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Editor",
+    "slug": "editor",
+    "description": "Can edit content",
+    "permissions": ["content:read", "content:write"]
+  }'
+```
+
+---
+
+#### GET /api/v1/admin/roles/{role_id}
+
+Get a single role by ID.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description   |
+|-----------|--------|---------------|
+| `role_id` | string | The role ID   |
+
+**Response (200):** Returns the role object.
+
+**Errors:**
+- `1003 not_found` -- Role does not exist
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/admin/roles/role-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### PUT /api/v1/admin/roles/{role_id}
+
+Update a role. System roles (`admin`, `user`) cannot be renamed or have their slug changed.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description   |
+|-----------|--------|---------------|
+| `role_id` | string | The role ID   |
+
+**Request Body (all fields optional):**
+
+| Field         | Type     | Description                            |
+|---------------|----------|----------------------------------------|
+| `name`        | string   | New name                               |
+| `slug`        | string   | New slug                               |
+| `description` | string   | New description                        |
+| `permissions` | string[] | New permissions list (replaces existing)|
+| `is_default`  | boolean  | New default flag                       |
+
+**Response (200):** Returns the updated role object.
+
+**Errors:**
+- `1002 forbidden` -- Cannot modify system role name/slug
+- `1003 not_found` -- Role does not exist
+
+**Example:**
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/admin/roles/role-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "permissions": ["content:read", "content:write", "content:delete"]
+  }'
+```
+
+---
+
+#### DELETE /api/v1/admin/roles/{role_id}
+
+Delete a role. System roles cannot be deleted.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description   |
+|-----------|--------|---------------|
+| `role_id` | string | The role ID   |
+
+**Response (200):**
+
+```json
+{
+  "message": "Role deleted"
+}
+```
+
+**Errors:**
+- `1002 forbidden` -- Cannot delete system role
+- `1003 not_found` -- Role does not exist
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/admin/roles/role-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### GET /api/v1/admin/users/{user_id}/roles
+
+Get a user's direct roles, inherited roles (via group membership), and effective permissions.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description   |
+|-----------|--------|---------------|
+| `user_id` | string | The user ID   |
+
+**Response (200):**
+
+```json
+{
+  "direct_roles": [
+    {
+      "id": "...",
+      "name": "Editor",
+      "slug": "editor",
+      "permissions": ["content:read", "content:write"],
+      "is_default": false,
+      "is_system": false,
+      "client_id": null,
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ],
+  "inherited_roles": [
+    {
+      "id": "...",
+      "name": "Viewer",
+      "slug": "viewer",
+      "permissions": ["content:read"],
+      "is_default": true,
+      "is_system": false,
+      "client_id": null,
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ],
+  "effective_permissions": ["content:read", "content:write"]
+}
+```
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/admin/users/user-uuid-here/roles \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/admin/users/{user_id}/roles/{role_id}
+
+Assign a role directly to a user.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description   |
+|-----------|--------|---------------|
+| `user_id` | string | The user ID   |
+| `role_id` | string | The role ID   |
+
+**Response (200):**
+
+```json
+{
+  "message": "Role assigned"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- User or role does not exist
+- `1004 conflict` -- Role already assigned
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/admin/users/user-uuid-here/roles/role-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### DELETE /api/v1/admin/users/{user_id}/roles/{role_id}
+
+Revoke a directly-assigned role from a user.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description   |
+|-----------|--------|---------------|
+| `user_id` | string | The user ID   |
+| `role_id` | string | The role ID   |
+
+**Response (200):**
+
+```json
+{
+  "message": "Role revoked"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- User does not have this role
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/admin/users/user-uuid-here/roles/role-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+### Admin Groups
+
+All admin group endpoints require the authenticated user to have `is_admin = true`.
+
+#### GET /api/v1/admin/groups
+
+List all groups with their associated roles and member counts.
+
+**Auth:** Admin
+
+**Response (200):**
+
+```json
+{
+  "groups": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "name": "Engineering",
+      "slug": "engineering",
+      "description": "Engineering team",
+      "roles": [
+        {
+          "id": "...",
+          "name": "Developer",
+          "slug": "developer",
+          "permissions": ["code:read", "code:write"],
+          "is_default": false,
+          "is_system": false,
+          "client_id": null,
+          "created_at": "...",
+          "updated_at": "..."
+        }
+      ],
+      "parent_group_id": null,
+      "member_count": 12,
+      "created_at": "2025-06-01T10:00:00+00:00",
+      "updated_at": "2025-06-01T10:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/admin/groups \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/admin/groups
+
+Create a new group.
+
+**Auth:** Admin
+
+**Request Body:**
+
+| Field             | Type     | Required | Description                                  |
+|-------------------|----------|----------|----------------------------------------------|
+| `name`            | string   | Yes      | Human-readable name                          |
+| `slug`            | string   | Yes      | URL-safe identifier (must be unique)         |
+| `description`     | string   | No       | Group description                            |
+| `role_ids`        | string[] | No       | Role IDs to attach (members inherit these)   |
+| `parent_group_id` | string   | No       | Parent group ID for hierarchy                |
+
+**Response (200):** Returns the created group object (same shape as list response items).
+
+**Errors:**
+- `1004 conflict` -- Slug already exists
+- `1008 validation_error` -- Name or slug is empty
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/admin/groups \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Engineering",
+    "slug": "engineering",
+    "description": "Engineering team",
+    "role_ids": ["role-uuid-here"]
+  }'
+```
+
+---
+
+#### GET /api/v1/admin/groups/{group_id}
+
+Get a single group by ID, including its roles and member count.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter  | Type   | Description    |
+|------------|--------|----------------|
+| `group_id` | string | The group ID   |
+
+**Response (200):** Returns the group object.
+
+**Errors:**
+- `1003 not_found` -- Group does not exist
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/admin/groups/group-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### PUT /api/v1/admin/groups/{group_id}
+
+Update a group.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter  | Type   | Description    |
+|------------|--------|----------------|
+| `group_id` | string | The group ID   |
+
+**Request Body (all fields optional):**
+
+| Field             | Type     | Description                                  |
+|-------------------|----------|----------------------------------------------|
+| `name`            | string   | New name                                     |
+| `slug`            | string   | New slug                                     |
+| `description`     | string   | New description                              |
+| `role_ids`        | string[] | New role IDs (replaces existing)             |
+| `parent_group_id` | string   | New parent group ID (empty string to unset)  |
+
+**Response (200):** Returns the updated group object.
+
+**Errors:**
+- `1003 not_found` -- Group does not exist
+
+**Example:**
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/admin/groups/group-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "role_ids": ["role-uuid-1", "role-uuid-2"]
+  }'
+```
+
+---
+
+#### DELETE /api/v1/admin/groups/{group_id}
+
+Delete a group. Members are not deleted, but lose the group's inherited roles.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter  | Type   | Description    |
+|------------|--------|----------------|
+| `group_id` | string | The group ID   |
+
+**Response (200):**
+
+```json
+{
+  "message": "Group deleted"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Group does not exist
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/admin/groups/group-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### GET /api/v1/admin/groups/{group_id}/members
+
+List all members of a group.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter  | Type   | Description    |
+|------------|--------|----------------|
+| `group_id` | string | The group ID   |
+
+**Response (200):**
+
+```json
+{
+  "members": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "email": "user@example.com",
+      "display_name": "Jane Doe"
+    }
+  ],
+  "total": 1
+}
+```
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/admin/groups/group-uuid-here/members \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/admin/groups/{group_id}/members/{user_id}
+
+Add a user to a group. The user inherits the group's roles.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter  | Type   | Description    |
+|------------|--------|----------------|
+| `group_id` | string | The group ID   |
+| `user_id`  | string | The user ID    |
+
+**Response (200):**
+
+```json
+{
+  "message": "Member added"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Group or user does not exist
+- `1004 conflict` -- User is already a member
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/admin/groups/group-uuid-here/members/user-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### DELETE /api/v1/admin/groups/{group_id}/members/{user_id}
+
+Remove a user from a group. The user loses the group's inherited roles.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter  | Type   | Description    |
+|------------|--------|----------------|
+| `group_id` | string | The group ID   |
+| `user_id`  | string | The user ID    |
+
+**Response (200):**
+
+```json
+{
+  "message": "Member removed"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- User is not a member of this group
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/admin/groups/group-uuid-here/members/user-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### GET /api/v1/admin/users/{user_id}/groups
+
+Get all groups a user belongs to.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description   |
+|-----------|--------|---------------|
+| `user_id` | string | The user ID   |
+
+**Response (200):**
+
+```json
+{
+  "groups": [
+    {
+      "id": "...",
+      "name": "Engineering",
+      "slug": "engineering",
+      "description": "Engineering team",
+      "roles": [...],
+      "parent_group_id": null,
+      "member_count": 12,
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ]
+}
+```
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/admin/users/user-uuid-here/groups \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
 ## JWT Token Format
 
 All JWTs are signed with RS256 (RSA SHA-256) using a 4096-bit key pair.
@@ -3629,14 +4432,25 @@ All JWTs are signed with RS256 (RSA SHA-256) using a 4096-bit key pair.
 
 | Claim        | Type   | Description                       |
 |--------------|--------|-----------------------------------|
-| `sub`        | string | User ID (UUID)                    |
-| `iss`        | string | Issuer (matches `JWT_ISSUER`)     |
-| `aud`        | string | Audience (matches `BASE_URL`)     |
-| `exp`        | number | Expiration (Unix timestamp)       |
-| `iat`        | number | Issued at (Unix timestamp)        |
-| `jti`        | string | Unique token ID (UUID)            |
-| `scope`      | string | Space-separated scopes            |
-| `token_type` | string | `"access"`                        |
+| Claim         | Type     | Description                                       |
+|---------------|----------|---------------------------------------------------|
+| `sub`         | string   | User ID (UUID)                                    |
+| `iss`         | string   | Issuer (matches `JWT_ISSUER`)                     |
+| `aud`         | string   | Audience (matches `BASE_URL`)                     |
+| `exp`         | number   | Expiration (Unix timestamp)                       |
+| `iat`         | number   | Issued at (Unix timestamp)                        |
+| `jti`         | string   | Unique token ID (UUID)                            |
+| `scope`       | string   | Space-separated scopes                            |
+| `token_type`  | string   | `"access"`                                        |
+| `roles`       | string[] | Role slugs (present when `roles` scope requested) |
+| `groups`      | string[] | Group slugs (present when `groups` scope requested)|
+| `permissions` | string[] | Effective permissions (present when `roles` scope requested) |
+| `acr`         | string   | Authentication Context Class Reference            |
+| `amr`         | string[] | Authentication Methods References                 |
+| `auth_time`   | number   | Time of authentication (Unix timestamp)           |
+| `sid`         | string   | Session ID                                        |
+
+The `roles`, `groups`, and `permissions` claims are only included when the corresponding scopes (`roles`, `groups`) are requested in the OAuth authorization flow.
 
 ### Refresh Token Claims
 
@@ -3644,6 +4458,7 @@ Same structure as access tokens, but:
 - `token_type` is `"refresh"`
 - `scope` is empty
 - `exp` uses `JWT_REFRESH_TTL_SECS` (default: 7 days)
+- RBAC claims (`roles`, `groups`, `permissions`) are not included
 
 ---
 

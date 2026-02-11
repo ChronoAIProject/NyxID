@@ -11,7 +11,7 @@ use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::user::{User, COLLECTION_NAME as USERS};
-use crate::services::{admin_user_service, audit_service, oauth_client_service};
+use crate::services::{admin_user_service, audit_service, consent_service, oauth_client_service};
 use crate::AppState;
 
 // --- Request / Response types ---
@@ -831,4 +831,55 @@ pub async fn delete_oauth_client(
     );
 
     Ok(Json(serde_json::json!({ "message": "OAuth client deactivated" })))
+}
+
+// --- Client Consents ---
+
+#[derive(Debug, Serialize)]
+pub struct ClientConsentItem {
+    pub id: String,
+    pub user_id: String,
+    pub user_email: Option<String>,
+    pub scopes: String,
+    pub granted_at: String,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClientConsentListResponse {
+    pub consents: Vec<ClientConsentItem>,
+}
+
+/// GET /api/v1/admin/oauth-clients/:client_id/consents
+///
+/// List all user consents granted to a specific OAuth client.
+pub async fn list_client_consents(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(client_id): Path<String>,
+) -> AppResult<Json<ClientConsentListResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    let consents = consent_service::list_client_consents(&state.db, &client_id).await?;
+
+    let mut items = Vec::with_capacity(consents.len());
+    for c in consents {
+        let user_email = state
+            .db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &c.user_id })
+            .await?
+            .map(|u| u.email);
+
+        items.push(ClientConsentItem {
+            id: c.id,
+            user_id: c.user_id,
+            user_email,
+            scopes: c.scopes,
+            granted_at: c.granted_at.to_rfc3339(),
+            expires_at: c.expires_at.map(|t| t.to_rfc3339()),
+        });
+    }
+
+    Ok(Json(ClientConsentListResponse { consents: items }))
 }

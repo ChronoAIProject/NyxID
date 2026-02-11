@@ -345,5 +345,60 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── roles ──
+    let roles = db.collection::<mongodb::bson::Document>("roles");
+    roles
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "slug": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    roles
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "client_id": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+
+    // ── groups ──
+    let groups = db.collection::<mongodb::bson::Document>("groups");
+    groups
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "slug": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    groups
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "parent_group_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    // ── consents ──
+    let consents = db.collection::<mongodb::bson::Document>("consents");
+    consents
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "client_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    consents
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1 })
+                .build(),
+        )
+        .await?;
+
     Ok(())
 }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
-use crate::services::{audit_service, oauth_client_service, oauth_service};
+use crate::services::{audit_service, consent_service, oauth_client_service, oauth_service};
 use crate::AppState;
 
 // --- Request / Response types ---
@@ -56,10 +56,69 @@ pub struct TokenResponse {
 #[derive(Debug, Serialize)]
 pub struct UserinfoResponse {
     pub sub: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub email_verified: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub picture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<String>>,
+}
+
+// --- Introspection / Revocation types ---
+
+#[derive(Debug, Deserialize)]
+pub struct IntrospectRequest {
+    pub token: String,
+    #[allow(dead_code)]
+    pub token_type_hint: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IntrospectResponse {
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exp: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iat: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iss: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeRequest {
+    pub token: String,
+    #[allow(dead_code)]
+    pub token_type_hint: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
 }
 
 // --- Handlers ---
@@ -164,10 +223,29 @@ async fn authorize_inner(
                 Ok(redirect_302(&login_url))
             }
             Some(auth_user) => {
-                // TODO: When third-party clients are supported, display a consent
-                // screen here. Currently only first-party clients exist, so
-                // auto-granting is acceptable. Implement per-user consent storage
-                // keyed by (user_id, client_id, scope) when adding third-party support.
+                let user_id_str = auth_user.user_id.to_string();
+
+                // Check existing consent; auto-grant if not yet recorded.
+                // When a third-party consent UI is added, replace the
+                // auto-grant with a redirect to the consent screen.
+                if consent_service::check_consent(
+                    &state.db,
+                    &user_id_str,
+                    &params.client_id,
+                    &validated_scope,
+                )
+                .await?
+                .is_none()
+                {
+                    consent_service::grant_consent(
+                        &state.db,
+                        &user_id_str,
+                        &params.client_id,
+                        &validated_scope,
+                    )
+                    .await?;
+                }
+
                 let code =
                     issue_authorization_code(state, &auth_user, params, &validated_scope)
                         .await?;
@@ -189,6 +267,27 @@ async fn authorize_inner(
         let auth_user = opt_auth.0.ok_or_else(|| {
             AppError::Unauthorized("Authentication required".to_string())
         })?;
+
+        let user_id_str = auth_user.user_id.to_string();
+
+        // Record consent (auto-grant for API mode; same logic as browser mode)
+        if consent_service::check_consent(
+            &state.db,
+            &user_id_str,
+            &params.client_id,
+            &validated_scope,
+        )
+        .await?
+        .is_none()
+        {
+            consent_service::grant_consent(
+                &state.db,
+                &user_id_str,
+                &params.client_id,
+                &validated_scope,
+            )
+            .await?;
+        }
 
         let code =
             issue_authorization_code(state, &auth_user, params, &validated_scope).await?;
@@ -390,7 +489,7 @@ pub async fn token(
                 .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing client_id parameter".to_string()))?;
 
-            let (access_token, refresh_token, id_token) =
+            let (access_token, refresh_token, id_token, granted_scope) =
                 oauth_service::exchange_authorization_code(
                     &state.db,
                     &state.config,
@@ -409,7 +508,7 @@ pub async fn token(
                 expires_in: state.config.jwt_access_ttl_secs,
                 refresh_token: Some(refresh_token),
                 id_token,
-                scope: Some("openid profile email".to_string()),
+                scope: Some(granted_scope),
             }))
         }
         "refresh_token" => {
@@ -444,6 +543,7 @@ pub async fn token(
 /// GET /oauth/userinfo
 ///
 /// OpenID Connect UserInfo Endpoint. Returns claims about the authenticated user.
+/// Includes roles/groups/permissions if the token's scope includes those scopes.
 pub async fn userinfo(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -456,13 +556,193 @@ pub async fn userinfo(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    // Check scopes from the access token claims
+    let scopes: Vec<&str> = auth_user.scope.split_whitespace().collect();
+    let include_roles = scopes.contains(&"roles");
+    let include_groups = scopes.contains(&"groups");
+
+    let (roles, groups, permissions) = if include_roles || include_groups {
+        let rbac =
+            crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id_str).await?;
+        (
+            if include_roles {
+                Some(rbac.role_slugs)
+            } else {
+                None
+            },
+            if include_groups {
+                Some(rbac.group_slugs)
+            } else {
+                None
+            },
+            if include_roles {
+                Some(rbac.permissions)
+            } else {
+                None
+            },
+        )
+    } else {
+        (None, None, None)
+    };
+
     Ok(Json(UserinfoResponse {
         sub: user.id.to_string(),
         email: Some(user.email),
         email_verified: Some(user.email_verified),
         name: user.display_name,
         picture: user.avatar_url,
+        roles,
+        groups,
+        permissions,
     }))
+}
+
+/// POST /oauth/introspect
+///
+/// RFC 7662 Token Introspection. Authenticates the calling client before
+/// returning token metadata. Returns `{"active": false}` for unauthenticated
+/// or unauthorized callers.
+pub async fn introspect(
+    State(state): State<AppState>,
+    Form(body): Form<IntrospectRequest>,
+) -> Json<IntrospectResponse> {
+    let inactive = IntrospectResponse {
+        active: false,
+        scope: None,
+        client_id: None,
+        username: None,
+        token_type: None,
+        exp: None,
+        iat: None,
+        sub: None,
+        iss: None,
+        jti: None,
+        roles: None,
+        groups: None,
+        permissions: None,
+    };
+
+    // Authenticate the calling client (RFC 7662 requirement)
+    let caller_client_id = match body.client_id.as_deref() {
+        Some(id) if !id.is_empty() => id,
+        _ => return Json(inactive),
+    };
+
+    if oauth_service::authenticate_client(
+        &state.db,
+        caller_client_id,
+        body.client_secret.as_deref(),
+    )
+    .await
+    .is_err()
+    {
+        return Json(inactive);
+    }
+
+    // Try to verify the token
+    let claims = match crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &body.token)
+    {
+        Ok(c) => c,
+        Err(_) => return Json(inactive),
+    };
+
+    // For refresh tokens, check if revoked in the database
+    if claims.token_type == "refresh" {
+        let stored = state
+            .db
+            .collection::<crate::models::refresh_token::RefreshToken>(
+                crate::models::refresh_token::COLLECTION_NAME,
+            )
+            .find_one(doc! { "jti": &claims.jti })
+            .await;
+
+        match stored {
+            Ok(Some(rt)) if rt.revoked => return Json(inactive),
+            Err(_) => return Json(inactive),
+            _ => {}
+        }
+    }
+
+    // Fetch user email for username field
+    let username = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &claims.sub })
+        .await
+        .ok()
+        .flatten()
+        .map(|u| u.email);
+
+    Json(IntrospectResponse {
+        active: true,
+        scope: Some(claims.scope),
+        client_id: None,
+        username,
+        token_type: Some(claims.token_type),
+        exp: Some(claims.exp),
+        iat: Some(claims.iat),
+        sub: Some(claims.sub),
+        iss: Some(claims.iss),
+        jti: Some(claims.jti),
+        roles: claims.roles,
+        groups: claims.groups,
+        permissions: claims.permissions,
+    })
+}
+
+/// POST /oauth/revoke
+///
+/// RFC 7009 Token Revocation. Authenticates the calling client before
+/// revoking the token. Always returns 200 per the spec.
+pub async fn revoke(
+    State(state): State<AppState>,
+    Form(body): Form<RevokeRequest>,
+) -> StatusCode {
+    // Authenticate the calling client (RFC 7009 requirement).
+    // Per the spec, always return 200 even if authentication fails.
+    let caller_client_id = match body.client_id.as_deref() {
+        Some(id) if !id.is_empty() => id,
+        _ => return StatusCode::OK,
+    };
+
+    if oauth_service::authenticate_client(
+        &state.db,
+        caller_client_id,
+        body.client_secret.as_deref(),
+    )
+    .await
+    .is_err()
+    {
+        return StatusCode::OK;
+    }
+
+    // Try to decode to get JTI for revocation
+    let claims = match crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &body.token)
+    {
+        Ok(c) => c,
+        // Per RFC 7009, return 200 even if the token is invalid
+        Err(_) => return StatusCode::OK,
+    };
+
+    if claims.token_type == "refresh" {
+        // Revoke the refresh token in the database
+        let _ = state
+            .db
+            .collection::<crate::models::refresh_token::RefreshToken>(
+                crate::models::refresh_token::COLLECTION_NAME,
+            )
+            .update_one(
+                doc! { "jti": &claims.jti, "revoked": false },
+                doc! { "$set": { "revoked": true } },
+            )
+            .await;
+    }
+
+    // Access tokens are JWTs -- they cannot be directly revoked without a blacklist.
+    // Per RFC 7009, the server SHOULD revoke the token if possible. Since access tokens
+    // are short-lived and stateless, we simply return 200.
+
+    StatusCode::OK
 }
 
 // --- Dynamic Client Registration (RFC 7591) ---

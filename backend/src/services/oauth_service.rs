@@ -98,6 +98,32 @@ pub async fn create_authorization_code(
     Ok(code)
 }
 
+/// Authenticate a client by client_id and client_secret.
+///
+/// Used by introspection (RFC 7662) and revocation (RFC 7009) endpoints.
+/// Public clients (PKCE-based, no secret) only need a valid client_id.
+pub async fn authenticate_client(
+    db: &mongodb::Database,
+    client_id: &str,
+    client_secret: Option<&str>,
+) -> AppResult<OauthClient> {
+    let client = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one(doc! { "_id": client_id })
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Invalid client credentials".to_string()))?;
+
+    if !client.is_active {
+        return Err(AppError::Unauthorized(
+            "OAuth client is inactive".to_string(),
+        ));
+    }
+
+    validate_client_secret(&client, client_secret)?;
+
+    Ok(client)
+}
+
 /// Constant-time comparison using the `subtle` crate.
 ///
 /// Prevents timing attacks by ensuring the comparison time does not
@@ -138,6 +164,8 @@ fn validate_client_secret(
 /// Implements PKCE verification (S256 only) and client_secret validation
 /// for confidential clients. Persists the refresh token to the database
 /// and implements code replay detection.
+///
+/// Returns (access_token, refresh_token, id_token, granted_scope).
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_authorization_code(
     db: &mongodb::Database,
@@ -148,7 +176,7 @@ pub async fn exchange_authorization_code(
     redirect_uri: &str,
     code_verifier: Option<&str>,
     client_secret: Option<&str>,
-) -> AppResult<(String, String, Option<String>)> {
+) -> AppResult<(String, String, Option<String>, String)> {
     let code_hash = hash_token(code);
 
     // Atomically claim the authorization code (prevents TOCTOU race condition).
@@ -255,9 +283,17 @@ pub async fn exchange_authorization_code(
         AppError::Internal(format!("Invalid user_id in authorization code: {e}"))
     })?;
 
-    // Generate tokens
+    // Resolve RBAC data filtered by the granted scope
+    let rbac_data = crate::services::rbac_helpers::build_rbac_claim_data(
+        db,
+        &stored.user_id,
+        &stored.scope,
+    )
+    .await?;
+
+    // Generate tokens with RBAC claims
     let access_token = crate::crypto::jwt::generate_access_token(
-        jwt_keys, config, &user_uuid, &stored.scope,
+        jwt_keys, config, &user_uuid, &stored.scope, Some(&rbac_data),
     )?;
 
     let (refresh_token_jwt, refresh_jti) = crate::crypto::jwt::generate_refresh_token(
@@ -294,6 +330,14 @@ pub async fn exchange_authorization_code(
             .await?
             .ok_or_else(|| AppError::Internal("User not found for ID token".to_string()))?;
 
+        // Build RBAC auth context for the ID token
+        let auth_ctx = crate::services::rbac_helpers::build_id_token_auth_context(
+            db,
+            &stored.user_id,
+            &stored.scope,
+        )
+        .await?;
+
         Some(crate::crypto::jwt::generate_id_token(
             jwt_keys,
             config,
@@ -305,12 +349,14 @@ pub async fn exchange_authorization_code(
             client_id,
             stored.nonce.as_deref(),
             Some(&access_token),
+            Some(&auth_ctx),
         )?)
     } else {
         None
     };
 
-    Ok((access_token, refresh_token_jwt, id_token))
+    let granted_scope = stored.scope.clone();
+    Ok((access_token, refresh_token_jwt, id_token, granted_scope))
 }
 
 /// Check whether a redirect URI is a loopback address per RFC 8252 section 7.3.

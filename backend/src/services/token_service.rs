@@ -54,9 +54,12 @@ pub async fn create_session_and_issue_tokens(
         .insert_one(&new_session)
         .await?;
 
-    // Generate JWT access token
+    // Resolve RBAC data and inject into the access token based on scope
+    let scope = "openid profile email";
+    let rbac_data =
+        crate::services::rbac_helpers::build_rbac_claim_data(db, user_id, scope).await?;
     let access_token =
-        jwt::generate_access_token(jwt_keys, config, &user_uuid, "openid profile email")?;
+        jwt::generate_access_token(jwt_keys, config, &user_uuid, scope, Some(&rbac_data))?;
 
     // Generate refresh token
     let (refresh_token_jwt, refresh_jti) =
@@ -175,8 +178,12 @@ pub async fn refresh_tokens(
     let session_id = stored.session_id.clone();
     let now = Utc::now();
 
-    // Issue new access token
-    let new_access = jwt::generate_access_token(jwt_keys, config, &user_id, "openid profile email")?;
+    // Resolve RBAC data and inject into the refreshed access token
+    let scope = "openid profile email";
+    let rbac_data =
+        crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
+    let new_access =
+        jwt::generate_access_token(jwt_keys, config, &user_id, scope, Some(&rbac_data))?;
 
     // Issue new refresh token (rotation)
     let (new_refresh_jwt, new_jti) = jwt::generate_refresh_token(jwt_keys, config, &user_id)?;
