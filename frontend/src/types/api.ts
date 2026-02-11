@@ -263,3 +263,16 @@ export interface UserTokenListResponse {
 export interface ProviderListResponse {
   readonly providers: readonly ProviderConfig[];
 }
+
+export interface LlmProviderStatus {
+  readonly provider_slug: string;
+  readonly provider_name: string;
+  readonly status: "ready" | "not_connected" | "expired";
+  readonly proxy_url: string;
+}
+
+export interface LlmStatusResponse {
+  readonly providers: readonly LlmProviderStatus[];
+  readonly gateway_url: string;
+  readonly supported_models: readonly string[];
+}

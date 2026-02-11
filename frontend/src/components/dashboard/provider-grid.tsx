@@ -8,6 +8,7 @@ import {
   useDisconnectProvider,
   useRefreshProviderToken,
 } from "@/hooks/use-providers";
+import { useLlmStatus } from "@/hooks/use-llm-gateway";
 import { ProviderCard } from "./provider-card";
 import { ApiKeyDialog } from "./api-key-dialog";
 import { DeviceCodeDialog } from "./device-code-dialog";
@@ -19,6 +20,7 @@ import { ApiError } from "@/lib/api-client";
 export function ProviderGrid() {
   const { data: providers, isLoading: providersLoading } = useProviders();
   const { data: tokens, isLoading: tokensLoading } = useMyProviderTokens();
+  const { data: llmStatus } = useLlmStatus();
   const connectApiKeyMutation = useConnectApiKey();
   const initiateOAuthMutation = useInitiateOAuth();
   const disconnectMutation = useDisconnectProvider();
@@ -144,6 +146,12 @@ export function ProviderGrid() {
     tokens?.map((t) => [t.provider_id, t]) ?? [],
   );
 
+  const llmStatusBySlug = new Map(
+    llmStatus?.providers.map((s) => [s.provider_slug, s]) ?? [],
+  );
+
+  const gatewayUrl = llmStatus?.gateway_url ?? "";
+
   return (
     <>
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -154,6 +162,8 @@ export function ProviderGrid() {
               key={provider.id}
               provider={provider}
               token={tokensByProviderId.get(provider.id)}
+              llmStatus={llmStatusBySlug.get(provider.slug)}
+              gatewayUrl={gatewayUrl}
               onConnect={handleConnect}
               onDisconnect={(id) => void handleDisconnect(id)}
               onRefresh={(id) => void handleRefresh(id)}

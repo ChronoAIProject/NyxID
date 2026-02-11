@@ -1,5 +1,10 @@
-import type { ProviderConfig, UserProviderToken } from "@/types/api";
+import type {
+  ProviderConfig,
+  UserProviderToken,
+  LlmProviderStatus,
+} from "@/types/api";
 import { ProviderStatusBadge } from "./provider-status-badge";
+import { LlmReadyBadge } from "./llm-ready-badge";
 import { getProviderBrand, hasKnownBrand } from "@/lib/provider-branding";
 import { formatDate } from "@/lib/utils";
 import {
@@ -22,6 +27,8 @@ import {
 interface ProviderCardProps {
   readonly provider: ProviderConfig;
   readonly token: UserProviderToken | undefined;
+  readonly llmStatus: LlmProviderStatus | undefined;
+  readonly gatewayUrl: string;
   readonly onConnect: (provider: ProviderConfig) => void;
   readonly onDisconnect: (providerId: string) => void;
   readonly onRefresh: (providerId: string) => void;
@@ -33,6 +40,8 @@ interface ProviderCardProps {
 export function ProviderCard({
   provider,
   token,
+  llmStatus,
+  gatewayUrl,
   onConnect,
   onDisconnect,
   onRefresh,
@@ -109,6 +118,9 @@ export function ProviderCard({
               <ProviderStatusBadge status={token.status} />
             ) : (
               <Badge variant="secondary">Not Connected</Badge>
+            )}
+            {llmStatus?.status === "ready" && (
+              <LlmReadyBadge llmStatus={llmStatus} gatewayUrl={gatewayUrl} />
             )}
             <Badge variant="outline" className="text-[10px]">
               {provider.provider_type === "api_key"

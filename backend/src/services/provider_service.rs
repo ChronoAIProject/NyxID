@@ -5,7 +5,13 @@ use uuid::Uuid;
 
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
+use crate::models::downstream_service::{
+    DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES,
+};
 use crate::models::provider_config::{ProviderConfig, COLLECTION_NAME};
+use crate::models::service_provider_requirement::{
+    ServiceProviderRequirement, COLLECTION_NAME as REQUIREMENTS,
+};
 use crate::models::user_provider_token::COLLECTION_NAME as USER_PROVIDER_TOKENS;
 
 /// Seed default AI provider configurations at startup (idempotent).
@@ -299,6 +305,163 @@ pub async fn seed_default_providers(
 
     if seeded_count > 0 {
         tracing::info!(count = seeded_count, "Default provider seeding complete");
+    }
+
+    Ok(())
+}
+
+struct LlmServiceSeed {
+    provider_slug: &'static str,
+    service_slug: &'static str,
+    service_name: &'static str,
+    base_url: &'static str,
+    injection_method: &'static str,
+    injection_key: &'static str,
+}
+
+const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
+    LlmServiceSeed {
+        provider_slug: "openai",
+        service_slug: "llm-openai",
+        service_name: "OpenAI API",
+        base_url: "https://api.openai.com/v1",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    LlmServiceSeed {
+        provider_slug: "openai-codex",
+        service_slug: "llm-openai-codex",
+        service_name: "OpenAI Codex API",
+        base_url: "https://api.openai.com/v1",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    LlmServiceSeed {
+        provider_slug: "anthropic",
+        service_slug: "llm-anthropic",
+        service_name: "Anthropic API",
+        base_url: "https://api.anthropic.com/v1",
+        injection_method: "header",
+        injection_key: "x-api-key",
+    },
+    LlmServiceSeed {
+        provider_slug: "google-ai",
+        service_slug: "llm-google-ai",
+        service_name: "Google AI API",
+        base_url: "https://generativelanguage.googleapis.com/v1beta",
+        injection_method: "query",
+        injection_key: "key",
+    },
+    LlmServiceSeed {
+        provider_slug: "mistral",
+        service_slug: "llm-mistral",
+        service_name: "Mistral AI API",
+        base_url: "https://api.mistral.ai/v1",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    LlmServiceSeed {
+        provider_slug: "cohere",
+        service_slug: "llm-cohere",
+        service_name: "Cohere API",
+        base_url: "https://api.cohere.com/v2",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+];
+
+/// Seed downstream services for each LLM provider (idempotent).
+///
+/// Creates a `DownstreamService` and a `ServiceProviderRequirement` for each
+/// seeded provider that does not yet have a corresponding downstream service.
+pub async fn seed_default_llm_services(
+    db: &mongodb::Database,
+    encryption_key_hex: &str,
+) -> AppResult<()> {
+    let encryption_key = aes::parse_hex_key(encryption_key_hex)?;
+    let provider_col = db.collection::<ProviderConfig>(COLLECTION_NAME);
+    let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    let req_col = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+    let now = Utc::now();
+    let mut seeded_count: u32 = 0;
+
+    for seed in LLM_SERVICE_SEEDS {
+        // Find the provider by slug
+        let provider = match provider_col
+            .find_one(doc! { "slug": seed.provider_slug })
+            .await?
+        {
+            Some(p) => p,
+            None => continue, // Provider not seeded yet, skip
+        };
+
+        // Check if a downstream service already exists for this provider
+        let existing = service_col
+            .find_one(doc! { "provider_config_id": &provider.id })
+            .await?;
+
+        if existing.is_some() {
+            continue; // Already seeded
+        }
+
+        // Create an empty encrypted credential (field is required)
+        let empty_credential = aes::encrypt(b"", &encryption_key)?;
+
+        let service_id = Uuid::new_v4().to_string();
+
+        let service = DownstreamService {
+            id: service_id.clone(),
+            name: seed.service_name.to_string(),
+            slug: seed.service_slug.to_string(),
+            description: Some(format!("{} proxied via NyxID LLM gateway", seed.service_name)),
+            base_url: seed.base_url.to_string(),
+            auth_method: "none".to_string(),
+            auth_key_name: String::new(),
+            credential_encrypted: empty_credential,
+            auth_type: None,
+            api_spec_url: None,
+            oauth_client_id: None,
+            service_category: "internal".to_string(),
+            requires_user_credential: false,
+            is_active: true,
+            created_by: "system".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            provider_config_id: Some(provider.id.clone()),
+            created_at: now,
+            updated_at: now,
+        };
+
+        service_col.insert_one(&service).await?;
+
+        // Create the ServiceProviderRequirement linking this service to its provider
+        let requirement = ServiceProviderRequirement {
+            id: Uuid::new_v4().to_string(),
+            service_id: service_id.clone(),
+            provider_config_id: provider.id.clone(),
+            required: true,
+            scopes: None,
+            injection_method: seed.injection_method.to_string(),
+            injection_key: Some(seed.injection_key.to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+
+        req_col.insert_one(&requirement).await?;
+
+        tracing::info!(
+            slug = seed.service_slug,
+            provider = seed.provider_slug,
+            "Seeded LLM downstream service"
+        );
+        seeded_count += 1;
+    }
+
+    if seeded_count > 0 {
+        tracing::info!(count = seeded_count, "LLM downstream service seeding complete");
     }
 
     Ok(())

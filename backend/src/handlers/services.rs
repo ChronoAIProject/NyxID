@@ -349,6 +349,7 @@ pub async fn create_service(
         identity_include_email: false,
         identity_include_name: false,
         identity_jwt_audience: None,
+        provider_config_id: None,
         created_at: now,
         updated_at: now,
     };

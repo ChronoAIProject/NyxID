@@ -59,6 +59,11 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_jwt_audience: Option<String>,
 
+    /// Optional link to a ProviderConfig for auto-seeded LLM services.
+    /// When set, this service was auto-created for the provider's API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_config_id: Option<String>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -116,6 +121,7 @@ mod tests {
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            provider_config_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -151,6 +157,7 @@ mod tests {
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            provider_config_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

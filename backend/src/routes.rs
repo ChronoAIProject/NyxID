@@ -111,6 +111,21 @@ pub fn build_router() -> Router<AppState> {
             post(handlers::user_tokens::manual_refresh),
         );
 
+    // TODO(M-7): LLM endpoints share the global rate limiter. Consider adding a
+    // dedicated, more restrictive per-user rate limiter for LLM routes (e.g., 5
+    // req/s per user) to prevent API quota burn and separate LLM traffic from
+    // lightweight auth requests.
+    let llm_routes = Router::new()
+        .route("/status", get(handlers::llm_gateway::llm_status))
+        .route(
+            "/gateway/v1/{*path}",
+            axum::routing::any(handlers::llm_gateway::gateway_request),
+        )
+        .route(
+            "/{provider_slug}/v1/{*path}",
+            axum::routing::any(handlers::llm_gateway::llm_proxy_request),
+        );
+
     let admin_routes = Router::new()
         .route("/users", get(handlers::admin::list_users)
             .post(handlers::admin::create_user))
@@ -143,6 +158,7 @@ pub fn build_router() -> Router<AppState> {
         .nest("/connections", connection_routes)
         .nest("/providers", provider_routes)
         .nest("/mcp", mcp_routes)
+        .nest("/llm", llm_routes)
         .nest("/admin", admin_routes)
         .route("/public/config", get(handlers::health::public_config))
         .route("/proxy/{service_id}/{*path}", axum::routing::any(handlers::proxy::proxy_request));

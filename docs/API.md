@@ -23,6 +23,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
   - [Proxy](#proxy)
+  - [LLM Gateway](#llm-gateway)
   - [MFA](#mfa-multi-factor-authentication)
   - [OAuth / OpenID Connect](#oauth--openid-connect)
   - [OIDC Discovery](#oidc-discovery)
@@ -2376,6 +2377,258 @@ curl -X POST http://localhost:3001/api/v1/proxy/d1e2f3a4-b5c6-7890-1234-567890ab
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '{"event": "page_view", "page": "/home"}'
+```
+
+---
+
+### LLM Gateway
+
+The LLM Gateway provides unified access to multiple LLM providers through NyxID. Users connect their provider credentials (API keys or OAuth tokens) via the Providers endpoints, and the gateway handles routing, credential injection, and format translation.
+
+Three access modes are available:
+1. **Provider-specific proxy** -- Direct passthrough to a specific provider's API
+2. **OpenAI-compatible gateway** -- Routes by model name and translates between API formats
+3. **Status endpoint** -- Check which providers are ready for the current user
+
+Streaming (`"stream": true`) is not yet supported. All requests must set `stream: false` or omit the field.
+
+#### GET /api/v1/llm/status
+
+Return which LLM providers the authenticated user can use, along with their proxy URLs.
+
+**Auth:** Required
+
+**Response (200):**
+
+```json
+{
+  "providers": [
+    {
+      "provider_slug": "openai",
+      "provider_name": "OpenAI",
+      "status": "ready",
+      "proxy_url": "http://localhost:3001/api/v1/llm/openai/v1"
+    },
+    {
+      "provider_slug": "anthropic",
+      "provider_name": "Anthropic",
+      "status": "not_connected",
+      "proxy_url": "http://localhost:3001/api/v1/llm/anthropic/v1"
+    }
+  ],
+  "gateway_url": "http://localhost:3001/api/v1/llm/gateway/v1",
+  "supported_models": [
+    "gpt-*", "o1-*", "o3-*", "o4-*", "chatgpt-*",
+    "claude-*", "gemini-*",
+    "mistral-*", "codestral-*", "pixtral-*", "ministral-*", "open-mistral-*",
+    "command-*", "embed-*", "rerank-*"
+  ]
+}
+```
+
+**Response Fields:**
+
+| Field               | Type   | Description                                           |
+|---------------------|--------|-------------------------------------------------------|
+| `providers`         | array  | Per-provider status entries                           |
+| `providers[].provider_slug` | string | Provider identifier (e.g., `openai`, `anthropic`) |
+| `providers[].provider_name` | string | Display name                                    |
+| `providers[].status` | string | `ready`, `not_connected`, or `expired`               |
+| `providers[].proxy_url` | string | Direct proxy URL for this provider               |
+| `gateway_url`       | string | OpenAI-compatible gateway URL                        |
+| `supported_models`  | array  | Model name prefixes the gateway can route            |
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/llm/status \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### ANY /api/v1/llm/{provider_slug}/v1/{*path}
+
+Forward any HTTP request to a specific LLM provider's API. NyxID resolves the auto-seeded downstream service for the provider, injects the user's stored credential, and proxies the request. No request or response translation is applied -- the request is forwarded as-is.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter       | Type   | Description                                         |
+|-----------------|--------|-----------------------------------------------------|
+| `provider_slug` | string | Provider identifier: `openai`, `openai-codex`, `anthropic`, `google-ai`, `mistral`, `cohere` |
+| `*path`         | string | API path to forward (e.g., `chat/completions`)      |
+
+**Supported Methods:** GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
+
+**Request:** The request body, query parameters, and allowed headers are forwarded to the provider's API. The user's stored credential is injected automatically using the provider's configured auth method.
+
+**Response:** The provider's response status code, allowed headers, and body are returned directly.
+
+**Limits:** Request body limited to 10 MB. Response body limited to 50 MB.
+
+**Errors:**
+- `1003 not_found` -- Provider slug not found
+- `1000 bad_request` -- Provider credentials not available (user has not connected)
+- `1000 bad_request` -- Streaming not yet supported
+- `1006 internal_error` -- Auto-seeded LLM service not configured for provider
+
+**Example (OpenAI):**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/llm/openai/v1/chat/completions \
+  -H "Authorization: Bearer <nyxid_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_tokens": 100
+  }'
+```
+
+**Example (Anthropic native format):**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/llm/anthropic/v1/messages \
+  -H "Authorization: Bearer <nyxid_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-5-20250929",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_tokens": 100
+  }'
+```
+
+---
+
+#### ANY /api/v1/llm/gateway/v1/{*path}
+
+OpenAI-compatible gateway. Accepts requests in OpenAI chat completions format, determines the target provider from the `model` field, translates the request/response format if needed, and returns the result in OpenAI format.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter | Type   | Description                                           |
+|-----------|--------|-------------------------------------------------------|
+| `*path`   | string | API path (typically `chat/completions`)               |
+
+**Request Body:**
+
+The request body must be valid JSON with a `model` field. The gateway uses the model name to determine which provider to route to.
+
+| Field       | Type   | Required | Description                                        |
+|-------------|--------|----------|----------------------------------------------------|
+| `model`     | string | Yes      | Model name (determines routing)                    |
+| `messages`  | array  | Yes      | Chat messages in OpenAI format                     |
+| `max_tokens`| number | No       | Maximum tokens to generate (defaults to 4096 for Anthropic) |
+| `temperature`| number| No       | Sampling temperature                               |
+| `stream`    | boolean| No       | Must be `false` or omitted (streaming not yet supported) |
+
+**Model-to-Provider Routing:**
+
+| Model Prefix | Provider | Notes |
+|-------------|----------|-------|
+| `gpt-*`, `o1-*`, `o3-*`, `o4-*`, `chatgpt-*` | OpenAI | Falls back to OpenAI Codex if OpenAI not connected |
+| `claude-*` | Anthropic | Request/response translated automatically |
+| `gemini-*` | Google AI | Routed through Google's OpenAI-compatible endpoint |
+| `mistral-*`, `codestral-*`, `pixtral-*`, `ministral-*`, `open-mistral-*` | Mistral | Native OpenAI-compatible format |
+| `command-*`, `embed-*`, `rerank-*` | Cohere | Native format passthrough |
+
+**Format Translation (Anthropic):**
+
+When routing to Anthropic, the gateway automatically:
+- Extracts `system` role messages into Anthropic's top-level `system` field
+- Maps `stop` to `stop_sequences`
+- Changes path from `chat/completions` to `messages`
+- Adds `anthropic-version: 2023-06-01` header
+- Translates the response back to OpenAI format (content, usage, finish_reason)
+
+**Response (200):** OpenAI chat completion format regardless of the target provider.
+
+```json
+{
+  "id": "chatcmpl-msg_01XFDUDYJgAACzvnptvVoYEL",
+  "object": "chat.completion",
+  "created": 1234567890,
+  "model": "claude-sonnet-4-5-20250929",
+  "choices": [{
+    "index": 0,
+    "message": {"role": "assistant", "content": "Hello! How can I help?"},
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 10,
+    "total_tokens": 35
+  }
+}
+```
+
+**Error Response (gateway errors):**
+
+When the upstream provider returns an error, the gateway wraps it in OpenAI error format:
+
+```json
+{
+  "error": {
+    "message": "Error message from upstream provider",
+    "type": "gateway_error",
+    "code": 400
+  }
+}
+```
+
+**Errors:**
+- `1008 validation_error` -- Request body missing or `model` field not present
+- `1000 bad_request` -- Unknown model (cannot determine provider), provider not connected, streaming not supported, or invalid JSON body
+
+**Example (OpenAI model):**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/llm/gateway/v1/chat/completions \
+  -H "Authorization: Bearer <nyxid_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "Hello"}
+    ],
+    "max_tokens": 100
+  }'
+```
+
+**Example (Anthropic model via gateway):**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/llm/gateway/v1/chat/completions \
+  -H "Authorization: Bearer <nyxid_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-5-20250929",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "Hello"}
+    ],
+    "max_tokens": 1024
+  }'
+```
+
+**Example (Google AI model via gateway):**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/llm/gateway/v1/chat/completions \
+  -H "Authorization: Bearer <nyxid_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.0-flash",
+    "messages": [
+      {"role": "user", "content": "Hello"}
+    ],
+    "max_tokens": 100
+  }'
 ```
 
 ---

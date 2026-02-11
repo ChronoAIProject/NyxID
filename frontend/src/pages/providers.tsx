@@ -1,10 +1,13 @@
 import { useNavigate } from "@tanstack/react-router";
 import { ProviderGrid } from "@/components/dashboard/provider-grid";
+import { GatewayInfoCard } from "@/components/dashboard/gateway-info-card";
+import { useLlmStatus } from "@/hooks/use-llm-gateway";
 import { Button } from "@/components/ui/button";
 import { Settings } from "lucide-react";
 
 export function ProvidersPage() {
   const navigate = useNavigate();
+  const { data: llmStatus } = useLlmStatus();
 
   return (
     <div className="space-y-6">
@@ -23,6 +26,8 @@ export function ProvidersPage() {
           Manage Providers
         </Button>
       </div>
+
+      {llmStatus !== undefined && <GatewayInfoCard llmStatus={llmStatus} />}
 
       <ProviderGrid />
     </div>

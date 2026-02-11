@@ -83,6 +83,11 @@ async fn main() {
         .await
         .expect("Failed to seed default providers");
 
+    // Seed downstream services for LLM providers (idempotent)
+    services::provider_service::seed_default_llm_services(&db, &config.encryption_key)
+        .await
+        .expect("Failed to seed default LLM services");
+
     // --- Server startup ---
     tracing::info!("Starting NyxID authentication server");
     tracing::info!(port = config.port, "Configuration loaded");

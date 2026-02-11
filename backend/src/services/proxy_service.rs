@@ -24,7 +24,9 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "accept",
     "accept-language",
     "accept-encoding",
-    "content-length",
+    // content-length intentionally excluded: reqwest recalculates it from the
+    // actual body, and forwarding the original value causes mismatches when
+    // middleware or translators modify the request body.
     "user-agent",
     "x-request-id",
     "x-correlation-id",

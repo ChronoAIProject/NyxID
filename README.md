@@ -90,6 +90,17 @@ It provides a complete identity layer: user registration, session management, Op
 - Lazy OAuth token refresh with 5-minute buffer before expiry
 - Token lifecycle tracking: active, expired, revoked, refresh_failed
 
+### LLM Gateway
+- Unified LLM access through NyxID: proxy requests to any supported LLM provider using stored credentials
+- **Provider-specific endpoint:** `ANY /api/v1/llm/{provider_slug}/v1/{*path}` -- passthrough proxy to a specific provider's API
+- **OpenAI-compatible gateway:** `ANY /api/v1/llm/gateway/v1/{*path}` -- routes requests by `model` field and translates between API formats
+- **Status endpoint:** `GET /api/v1/llm/status` -- per-user provider readiness with proxy URLs
+- Auto-seeded downstream services for 6 LLM providers at startup (no manual configuration required)
+- Model-to-provider routing based on model name prefix (e.g., `gpt-*` to OpenAI, `claude-*` to Anthropic)
+- Automatic Anthropic format translation: send OpenAI-format requests to Claude models through the gateway
+- Google AI routed through its OpenAI-compatible endpoint automatically
+- Supported providers: OpenAI, OpenAI Codex (OAuth), Anthropic, Google AI, Mistral, Cohere
+
 ### Identity Propagation
 - Forward authenticated user identity to downstream services during proxy requests
 - Four modes: `none`, `headers`, `jwt`, `both`
@@ -134,6 +145,7 @@ It provides a complete identity layer: user registration, session management, Op
                          |  |  api_keys     |  CRUD /api/v1/api-keys
                          |  |  services     |  CRUD /api/v1/services
                          |  |  proxy        |  ANY  /api/v1/proxy/:id/*
+                         |  |  llm_gateway  |  ANY  /api/v1/llm/*
                          |  |  oauth        |  /oauth/authorize, /token, /userinfo
                          |  |  admin        |  /api/v1/admin/*
                          |  +---------------+
@@ -144,6 +156,7 @@ It provides a complete identity layer: user registration, session management, Op
                          |  |  oauth_service|  OIDC code exchange, client validation
                          |  |  key_service  |  API key CRUD, hashing
                          |  |  proxy_service|  Target resolution, request forwarding
+                         |  |  llm_gateway  |  Model routing, format translation
                          |  |  mfa_service  |  TOTP generation, verification
                          |  |  audit_service|  Async audit log insertion
                          |  +---------------+
@@ -313,6 +326,9 @@ For the full API reference with request/response schemas and example curl comman
 | DELETE | `/api/v1/services/{id}/requirements/{rid}` | Admin | Remove a provider requirement    |
 | POST   | `/api/v1/mfa/setup`                  | Required | Begin TOTP MFA enrollment            |
 | POST   | `/api/v1/mfa/verify-setup`           | Required | Complete TOTP MFA enrollment         |
+| GET    | `/api/v1/llm/status`                 | Required | LLM provider readiness per user      |
+| ANY    | `/api/v1/llm/{provider_slug}/v1/{*path}` | Required | Proxy to LLM provider           |
+| ANY    | `/api/v1/llm/gateway/v1/{*path}`     | Required | OpenAI-compatible LLM gateway        |
 
 ---
 
@@ -408,7 +424,7 @@ NyxID uses 14 MongoDB collections:
 | `authorization_codes`      | Short-lived OIDC authorization codes                 |
 | `refresh_tokens`           | Issued refresh tokens with rotation chain tracking   |
 | `api_keys`                 | User-scoped API keys (hashed, with prefix)           |
-| `downstream_services`      | Registered downstream services for proxying          |
+| `downstream_services`      | Registered downstream services for proxying (includes auto-seeded LLM services via `provider_config_id`) |
 | `user_service_connections` | Per-user connections and encrypted credentials for downstream services |
 | `mfa_factors`              | TOTP factors and encrypted recovery codes            |
 | `service_endpoints`        | Registered API endpoints per service (MCP tools)     |
@@ -582,6 +598,7 @@ NyxID/
 |       |   |-- user_tokens.rs  User provider token management (API key + OAuth)
 |       |   |-- service_requirements.rs  Service provider requirement management
 |       |   |-- proxy.rs        Reverse proxy handler (+ identity + delegation)
+|       |   |-- llm_gateway.rs  LLM gateway handlers (proxy, gateway, status)
 |       |   |-- mcp.rs          MCP config endpoint
 |       |   |-- oauth.rs        OIDC authorize, token, userinfo
 |       |   |-- admin.rs        Admin user management, audit log, OAuth client endpoints
@@ -597,6 +614,7 @@ NyxID/
 |       |   |-- provider_service.rs Provider registry CRUD, encrypted credential storage
 |       |   |-- user_token_service.rs User provider token lifecycle (API key + OAuth)
 |       |   |-- delegation_service.rs Credential delegation resolution for proxy
+|       |   |-- llm_gateway_service.rs LLM gateway: model routing, format translation
 |       |   |-- identity_service.rs Identity propagation headers + JWT assertions
 |       |   |-- oauth_flow.rs       OAuth2 utilities (PKCE, token exchange, refresh)
 |       |   |-- mfa_service.rs      TOTP provisioning, verification
@@ -621,7 +639,8 @@ NyxID/
         |-- schemas/            Zod validation schemas
         |   `-- admin.ts       Admin form schemas
         |-- hooks/              React Query hooks
-        |   `-- use-admin.ts   Admin user management hooks
+        |   |-- use-admin.ts   Admin user management hooks
+        |   `-- use-llm-gateway.ts LLM gateway status hook
         |-- components/
         |   |-- ui/             16 shadcn/ui primitives
         |   |-- auth/           Login, register, MFA forms

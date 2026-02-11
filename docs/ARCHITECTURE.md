@@ -14,6 +14,7 @@ This document describes the system architecture, component design, data flows, a
 - [Database Schema](#database-schema)
 - [Security Architecture](#security-architecture)
 - [Credential Broker](#credential-broker)
+- [LLM Gateway](#llm-gateway)
 - [Identity Propagation](#identity-propagation)
 - [Deployment Architecture](#deployment-architecture)
 
@@ -161,6 +162,7 @@ Handlers are thin HTTP boundary functions. They:
 | `providers.rs`| list, create, get, update, delete provider configs              |
 | `user_tokens.rs` | list tokens, connect API key/OAuth, disconnect, refresh      |
 | `service_requirements.rs` | list, add, remove service provider requirements      |
+| `llm_gateway.rs` | llm_status, llm_proxy_request, gateway_request                  |
 
 #### 4. Service Layer (`services/`)
 
@@ -180,6 +182,7 @@ The service layer contains all business logic. Services receive database connect
 | `user_token_service.rs` | User provider token lifecycle: API key storage, OAuth flow initiation/callback, token refresh with 5-min buffer, token retrieval with lazy refresh |
 | `delegation_service.rs` | Resolves delegated provider credentials for proxy injection, batch provider queries (N+1 fix), required vs. optional enforcement |
 | `identity_service.rs` | Builds identity propagation headers (CRLF-sanitized), generates short-lived RS256 identity assertion JWTs (60s TTL) |
+| `llm_gateway_service.rs` | LLM gateway: provider slug resolution, model-to-provider routing, translator trait with Anthropic/Google AI/passthrough implementations |
 | `oauth_flow.rs`     | OAuth2 utilities: PKCE code verifier/challenge generation, token exchange with no-redirect HTTP client, token refresh |
 
 #### 5. Crypto Layer (`crypto/`)
@@ -697,10 +700,15 @@ Registered services that NyxID can proxy requests to. Credentials are encrypted 
 | `auth_method`          | string        | NOT NULL        | header/bearer/query/basic     |
 | `auth_key_name`        | string        | NOT NULL        | Header name or query param    |
 | `credential_encrypted` | binary        | NOT NULL        | AES-256-GCM encrypted credential|
+| `service_category`     | string        | NOT NULL        | `connection`, `internal`, or `provider` |
+| `requires_user_credential` | boolean   | NOT NULL        | Whether users must supply credentials |
+| `provider_config_id`   | UUID (string) | NULLABLE, SPARSE| Link to auto-seeded provider (LLM gateway) |
 | `is_active`            | boolean       | NOT NULL, DEFAULT true | Active status           |
 | `created_by`           | UUID (string) | NOT NULL        | Admin who created it          |
 | `created_at`           | ISO 8601 date | NOT NULL        | Creation timestamp            |
 | `updated_at`           | ISO 8601 date | NOT NULL        | Last update                   |
+
+**Indexes:** `slug` (unique), `provider_config_id` (sparse, unique)
 
 #### user_service_connections
 
@@ -899,6 +907,92 @@ NyxID supports two provider authentication models:
 |---------------|-------------------|-----------------------------------|
 | `api_key`     | User enters key   | OpenAI, Anthropic, Mistral, Cohere|
 | `oauth2`      | OAuth2 flow       | Google AI (Vertex), Azure OpenAI  |
+
+---
+
+## LLM Gateway
+
+The LLM Gateway extends NyxID's credential broker and proxy infrastructure to provide unified access to multiple LLM providers. Users connect their credentials once, and NyxID handles routing, credential injection, and format translation.
+
+### Auto-Seeding
+
+At startup, `provider_service::seed_default_llm_services()` idempotently creates a `DownstreamService` and `ServiceProviderRequirement` for each of the 6 supported LLM providers:
+
+| Provider Slug | Service Slug | Base URL | Auth Method |
+|---------------|-------------|----------|-------------|
+| `openai` | `llm-openai` | `https://api.openai.com/v1` | Bearer |
+| `openai-codex` | `llm-openai-codex` | `https://api.openai.com/v1` | Bearer |
+| `anthropic` | `llm-anthropic` | `https://api.anthropic.com/v1` | Header (`x-api-key`) |
+| `google-ai` | `llm-google-ai` | `https://generativelanguage.googleapis.com/v1beta` | Query (`key`) |
+| `mistral` | `llm-mistral` | `https://api.mistral.ai/v1` | Bearer |
+| `cohere` | `llm-cohere` | `https://api.cohere.com/v2` | Bearer |
+
+Each auto-seeded service has `provider_config_id` set to link it back to its provider configuration. Seeding is idempotent: existing services are not duplicated on restart.
+
+### Architecture
+
+```
+Client
+  |
+  |  POST /api/v1/llm/gateway/v1/chat/completions
+  |  {"model": "claude-sonnet-4-5-20250929", ...}
+  |
+  v
++---------------------------------------------------------------+
+| LLM Gateway Handler (llm_gateway.rs)                          |
+|                                                                |
+|  1. Extract "model" from request body                          |
+|  2. resolve_provider_for_model() -> "anthropic"                |
+|  3. resolve_provider_slug_with_fallback() -> check user token  |
+|  4. resolve_llm_service_by_slug() -> DownstreamService         |
+|  5. get_translator("anthropic") -> AnthropicTranslator         |
+|  6. translate_request() -> Anthropic format                    |
+|  7. proxy_service::forward_request() -> send to Anthropic      |
+|  8. translate_response() -> OpenAI format                      |
++---------------------------------------------------------------+
+  |
+  v
+Anthropic API (https://api.anthropic.com/v1/messages)
+```
+
+### Translation Layer
+
+The gateway uses a `LlmTranslator` trait to handle format differences between providers:
+
+| Provider | Translator | Needs Translation | Gateway Base URL Override |
+|----------|-----------|-------------------|--------------------------|
+| OpenAI, OpenAI Codex, Mistral, Cohere | `PassthroughTranslator` | No | No |
+| Anthropic | `AnthropicTranslator` | Yes | No |
+| Google AI | `GoogleAiTranslator` | No | Yes (`/v1beta/openai`) |
+
+**Anthropic translation** converts between OpenAI and Anthropic formats:
+- Request: extracts `system` messages, maps `stop` to `stop_sequences`, changes path `chat/completions` to `messages`, adds `anthropic-version` header
+- Response: maps `content[].text` to `choices[].message.content`, maps `stop_reason` to `finish_reason`, converts usage fields, wraps in OpenAI envelope
+
+### Model-to-Provider Routing
+
+The gateway determines the target provider from the model name using prefix matching:
+
+| Model Prefix | Provider |
+|-------------|----------|
+| `gpt-*`, `o1-*`, `o3-*`, `o4-*`, `chatgpt-*` | `openai` (falls back to `openai-codex`) |
+| `claude-*` | `anthropic` |
+| `gemini-*` | `google-ai` |
+| `mistral-*`, `codestral-*`, `pixtral-*`, `ministral-*`, `open-mistral-*` | `mistral` |
+| `command-*`, `embed-*`, `rerank-*` | `cohere` |
+
+For OpenAI models, the gateway prefers the `openai` provider (API key) and falls back to `openai-codex` (OAuth token) if the user has not connected an OpenAI API key.
+
+### New Files
+
+| File | Description |
+|------|-------------|
+| `backend/src/services/llm_gateway_service.rs` | Gateway logic: slug resolution, model mapping, translator trait and implementations |
+| `backend/src/handlers/llm_gateway.rs` | HTTP handlers for `/api/v1/llm/*` routes |
+| `frontend/src/hooks/use-llm-gateway.ts` | TanStack Query hook for LLM status |
+| `frontend/src/components/dashboard/llm-ready-badge.tsx` | "Ready to Use" badge with proxy URL popover |
+| `frontend/src/components/dashboard/gateway-info-card.tsx` | Gateway info card on providers page |
+| `frontend/src/components/shared/copyable-field.tsx` | Copyable text field component |
 
 ---
 

@@ -4,6 +4,7 @@ pub mod auth;
 pub mod connections;
 pub mod endpoints;
 pub mod health;
+pub mod llm_gateway;
 pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;

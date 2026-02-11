@@ -63,6 +63,7 @@ export function useConnectApiKey() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
       void queryClient.invalidateQueries({ queryKey: ["providers"] });
+      void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
     },
   });
 }
@@ -111,6 +112,7 @@ export function usePollDeviceCode() {
       if (data.status === "complete") {
         void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
         void queryClient.invalidateQueries({ queryKey: ["providers"] });
+        void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
       }
     },
   });
@@ -126,6 +128,7 @@ export function useDisconnectProvider() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
       void queryClient.invalidateQueries({ queryKey: ["providers"] });
+      void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
     },
   });
 }
@@ -139,6 +142,7 @@ export function useRefreshProviderToken() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
+      void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
     },
   });
 }

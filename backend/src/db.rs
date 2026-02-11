@@ -197,6 +197,20 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    services
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "provider_config_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .sparse(true)
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── user_service_connections ──
     let usc = db.collection::<mongodb::bson::Document>("user_service_connections");
     usc.create_index(

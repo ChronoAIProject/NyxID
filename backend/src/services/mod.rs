@@ -5,6 +5,7 @@ pub mod connection_service;
 pub mod delegation_service;
 pub mod identity_service;
 pub mod key_service;
+pub mod llm_gateway_service;
 pub mod mcp_service;
 pub mod mfa_service;
 pub mod oauth_flow;
