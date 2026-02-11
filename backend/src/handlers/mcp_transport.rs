@@ -7,8 +7,10 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
+use tokio_stream::StreamExt;
 
 use crate::crypto::{aes, jwt};
+use crate::models::mcp_session;
 use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::services::{audit_service, mcp_service};
 use crate::AppState;
@@ -174,6 +176,26 @@ fn validate_session(
 }
 
 // ---------------------------------------------------------------------------
+// Notification helper
+// ---------------------------------------------------------------------------
+
+/// Send a `notifications/tools/list_changed` JSON-RPC notification
+/// to the session's SSE stream.
+fn send_tools_list_changed(state: &AppState, session_id: &str) {
+    let notification = serde_json::json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "method": "notifications/tools/list_changed",
+    });
+
+    if !state.mcp_sessions.send_notification(session_id, notification) {
+        tracing::debug!(
+            session_id,
+            "Failed to send tools/list_changed notification (no SSE listener)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /mcp -- JSON-RPC request handler
 // ---------------------------------------------------------------------------
 
@@ -211,7 +233,7 @@ pub async fn mcp_post(
             if let Err(r) = validate_session(&state, &sid, &user_id, request.id.clone()) {
                 return r;
             }
-            handle_tools_list(&state, &user_id, &request).await
+            handle_tools_list(&state, &user_id, &sid, &request).await
         }
 
         "tools/call" => {
@@ -222,7 +244,7 @@ pub async fn mcp_post(
             if let Err(r) = validate_session(&state, &sid, &user_id, request.id.clone()) {
                 return r;
             }
-            handle_tools_call(&state, &user_id, &request).await
+            handle_tools_call(&state, &user_id, &sid, &request).await
         }
 
         "ping" => rpc_success(request.id, serde_json::json!({})),
@@ -250,9 +272,27 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
         return r;
     }
 
-    // No server-initiated events currently. The stream stays open with
-    // periodic keepalive comments until the client disconnects.
-    let stream = futures::stream::pending::<Result<Event, Infallible>>();
+    // Take the notification receiver for this session.
+    // If already taken (reconnect), create a new channel pair.
+    let rx = match state.mcp_sessions.take_notification_rx(&sid) {
+        Some(rx) => rx,
+        None => {
+            // Reconnect: create new channel, update session's tx
+            let (tx, rx) = tokio::sync::mpsc::channel(32);
+            state.mcp_sessions.set_notification_tx(&sid, tx);
+            rx
+        }
+    };
+
+    // Convert mpsc::Receiver into an SSE-compatible stream
+    let stream =
+        tokio_stream::wrappers::ReceiverStream::new(rx).map(|notification| {
+            Ok::<_, Infallible>(
+                Event::default()
+                    .event("message")
+                    .data(notification.to_string()),
+            )
+        });
 
     Sse::new(stream)
         .keep_alive(
@@ -296,7 +336,7 @@ fn handle_initialize(state: &AppState, user_id: &str, request: &JsonRpcRequest) 
     let result = serde_json::json!({
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "capabilities": {
-            "tools": { "listChanged": false },
+            "tools": { "listChanged": true },
         },
         "serverInfo": {
             "name": "NyxID",
@@ -322,6 +362,7 @@ fn handle_initialize(state: &AppState, user_id: &str, request: &JsonRpcRequest) 
 async fn handle_tools_list(
     state: &AppState,
     user_id: &str,
+    session_id: &str,
     request: &JsonRpcRequest,
 ) -> Response {
     let services = match mcp_service::load_user_tools(&state.db, user_id).await {
@@ -332,7 +373,11 @@ async fn handle_tools_list(
         }
     };
 
-    let tool_defs = mcp_service::generate_tool_definitions(&services);
+    // Get activated service IDs for this session
+    let activated = state.mcp_sessions.get_activated_service_ids(session_id);
+
+    // Generate only meta-tools + activated service tools
+    let tool_defs = mcp_service::generate_tool_definitions(&services, Some(&activated));
 
     let tools_json: Vec<serde_json::Value> = tool_defs
         .iter()
@@ -354,6 +399,7 @@ async fn handle_tools_list(
 async fn handle_tools_call(
     state: &AppState,
     user_id: &str,
+    session_id: &str,
     request: &JsonRpcRequest,
 ) -> Response {
     let params = match &request.params {
@@ -374,18 +420,22 @@ async fn handle_tools_call(
     // -- Meta-tools --
     match tool_name {
         "nyx__search_tools" => {
-            return handle_meta_search(state, user_id, &arguments, request.id.clone()).await;
+            return handle_meta_search(state, user_id, session_id, &arguments, request.id.clone())
+                .await;
         }
         "nyx__discover_services" => {
             return handle_meta_discover(state, user_id, &arguments, request.id.clone()).await;
         }
         "nyx__connect_service" => {
-            return handle_meta_connect(state, user_id, &arguments, request.id.clone()).await;
+            return handle_meta_connect(state, user_id, session_id, &arguments, request.id.clone())
+                .await;
         }
         _ => {}
     }
 
-    // -- Service tool: load, resolve, execute --
+    // -- Service tool: verify activation, load, resolve, execute --
+    let activated = state.mcp_sessions.get_activated_service_ids(session_id);
+
     let services = match mcp_service::load_user_tools(&state.db, user_id).await {
         Ok(s) => s,
         Err(e) => {
@@ -399,11 +449,26 @@ async fn handle_tools_call(
         None => {
             return tool_result(
                 request.id.clone(),
-                &format!("Unknown tool: {tool_name}"),
+                &format!(
+                    "Unknown tool: {tool_name}. Use nyx__search_tools to find and activate tools."
+                ),
                 true,
             );
         }
     };
+
+    // Guard: only allow execution if the service is activated
+    if !activated.contains(&service.service_id) {
+        return tool_result(
+            request.id.clone(),
+            &format!(
+                "Tool '{}' belongs to service '{}' which is not activated. \
+                 Use nyx__search_tools to activate it first.",
+                tool_name, service.service_name,
+            ),
+            true,
+        );
+    }
 
     let encryption_key = match aes::parse_hex_key(&state.config.encryption_key) {
         Ok(k) => k,
@@ -468,6 +533,7 @@ async fn handle_tools_call(
 async fn handle_meta_search(
     state: &AppState,
     user_id: &str,
+    session_id: &str,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Response {
@@ -480,6 +546,11 @@ async fn handle_meta_search(
         return tool_result(request_id, "Search query is required", true);
     }
 
+    if query.len() > 200 {
+        return tool_result(request_id, "Search query too long (max 200 chars)", true);
+    }
+
+    // Load ALL user tools (not just activated)
     let services = match mcp_service::load_user_tools(&state.db, user_id).await {
         Ok(s) => s,
         Err(e) => {
@@ -488,10 +559,23 @@ async fn handle_meta_search(
         }
     };
 
-    let tool_defs = mcp_service::generate_tool_definitions(&services);
-    let matches = mcp_service::search_tools(&tool_defs, query);
+    // Search across ALL tools
+    let search_result = mcp_service::search_all_tools(&services, query);
 
-    let results: Vec<serde_json::Value> = matches
+    // Activate the services that had matches
+    let changed = state.mcp_sessions.activate_services(
+        session_id,
+        &search_result.matched_service_ids,
+    );
+
+    // If tools changed, send notification so client refreshes
+    if changed {
+        send_tools_list_changed(state, session_id);
+    }
+
+    // Return search results
+    let results: Vec<serde_json::Value> = search_result
+        .matches
         .iter()
         .map(|t| {
             serde_json::json!({
@@ -501,11 +585,34 @@ async fn handle_meta_search(
         })
         .collect();
 
-    let text = serde_json::to_string_pretty(&serde_json::json!({
+    let activated_count = state
+        .mcp_sessions
+        .get_activated_service_ids(session_id)
+        .len();
+
+    let mut response_json = serde_json::json!({
         "matches": results,
         "count": results.len(),
-    }))
-    .unwrap_or_default();
+        "services_activated": search_result.matched_service_ids.len(),
+        "total_activated_services": activated_count,
+        "note": if changed {
+            "Matching service tools have been activated. Your tool list has been updated."
+        } else {
+            "Tools were already activated."
+        },
+    });
+
+    if activated_count >= mcp_session::MAX_ACTIVATED_SERVICES {
+        response_json.as_object_mut().unwrap().insert(
+            "max_activated_services_warning".to_string(),
+            serde_json::Value::String(
+                "Maximum activated services reached. Some tools may not have been activated."
+                    .to_string(),
+            ),
+        );
+    }
+
+    let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
 
     tool_result(request_id, &text, false)
 }
@@ -534,11 +641,13 @@ async fn handle_meta_discover(
 async fn handle_meta_connect(
     state: &AppState,
     user_id: &str,
+    session_id: &str,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Response {
     let service_id = match arguments.get("service_id").and_then(|s| s.as_str()) {
-        Some(id) => id,
+        Some(id) if uuid::Uuid::try_parse(id).is_ok() => id,
+        Some(_) => return tool_result(request_id, "Invalid service_id format", true),
         None => return tool_result(request_id, "service_id is required", true),
     };
     let credential = arguments.get("credential").and_then(|c| c.as_str());
@@ -565,6 +674,16 @@ async fn handle_meta_connect(
     .await
     {
         Ok(result) => {
+            // Activate the newly connected service
+            let changed = state.mcp_sessions.activate_services(
+                session_id,
+                &[service_id.to_string()],
+            );
+
+            if changed {
+                send_tools_list_changed(state, session_id);
+            }
+
             audit_service::log_async(
                 state.db.clone(),
                 Some(user_id.to_string()),
@@ -574,9 +693,25 @@ async fn handle_meta_connect(
                 None,
             );
 
-            let text = serde_json::to_string_pretty(&result).unwrap_or_default();
+            // Construct response directly with activation note (no mutation)
+            let response_json = serde_json::json!({
+                "status": result.get("status").and_then(|v| v.as_str()).unwrap_or("connected"),
+                "service_name": result.get("service_name").and_then(|v| v.as_str()).unwrap_or(""),
+                "connected_at": result.get("connected_at").and_then(|v| v.as_str()).unwrap_or(""),
+                "note": "Service tools are now available. Your tool list has been updated.",
+            });
+            let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
             tool_result(request_id, &text, false)
         }
-        Err(e) => tool_result(request_id, &e.to_string(), true),
+        Err(e) => {
+            tracing::warn!("connect_service failed: {e}");
+            let msg = match &e {
+                crate::errors::AppError::Internal(_) | crate::errors::AppError::DatabaseError(_) => {
+                    "Failed to connect to service".to_string()
+                }
+                other => other.to_string(),
+            };
+            tool_result(request_id, &msg, true)
+        }
     }
 }
