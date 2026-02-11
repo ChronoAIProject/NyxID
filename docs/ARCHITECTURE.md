@@ -1053,6 +1053,69 @@ All other headers (including `Authorization`, `Cookie`, and custom headers) are 
 
 ---
 
+## MCP Integration
+
+NyxID implements lazy/dynamic tool loading for the Model Context Protocol (MCP) server to optimize performance and reduce memory usage.
+
+### Session-Based Tool Activation
+
+Instead of loading all 80+ tools at session startup, NyxID uses a three-phase approach:
+
+```
+Initialize Session
+    |
+    v
+Load 3 Meta-Tools
+    |-- nyx__search_tools
+    |-- nyx__discover_services
+    |-- nyx__connect_service
+    |
+    v
+LLM Calls Search/Connect
+    |
+    v
+Activate Matching Service Tools
+    |
+    v
+Send notifications/tools/list_changed
+    |
+    v
+Client Auto-Refreshes Tool List
+```
+
+### Tool Activation State
+
+The MCP proxy maintains session-based activation state in `McpSessionStore`:
+
+- **Initial state**: Only 3 meta-tools loaded
+- **On `nyx__search_tools` call**: Matching service tools are activated and added to the session
+- **On `nyx__connect_service` call**: That service's tools are activated
+- **On `nyx__discover_services` call**: Browse services only (does NOT activate tools)
+- **Maximum activated services**: 20 per session (bounded to prevent memory issues)
+
+### Dynamic Tool Loading Flow
+
+1. **Session initialization** -- MCP server creates a new session and loads only the 3 meta-tools
+2. **Search phase** -- LLM calls `nyx__search_tools` with a query (e.g., "payment processing")
+3. **Activation** -- Server finds matching services, activates their tools, adds to session state
+4. **Notification** -- Server sends `notifications/tools/list_changed` to the client
+5. **Client refresh** -- Client (Cursor, Claude Code) re-fetches the full tool list via `tools/list`
+6. **Tool invocation** -- LLM can now call the newly activated service tools
+
+### Meta-Tools
+
+| Tool Name | Purpose | Tool Activation |
+|-----------|---------|-----------------|
+| `nyx__search_tools` | Search and activate service tools by keyword | YES - activates matching services |
+| `nyx__discover_services` | Browse all available services | NO - browse-only |
+| `nyx__connect_service` | Connect to a specific service and activate its tools | YES - activates the service |
+
+### REST API Compatibility
+
+The REST endpoint `/api/v1/mcp/config` still returns the full list of all tools for backward compatibility with non-MCP clients.
+
+---
+
 ## Deployment Architecture
 
 ### Development

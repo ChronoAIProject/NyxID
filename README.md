@@ -475,11 +475,12 @@ Returns HTTP 429 when limits are exceeded.
 NyxID is designed to be accessible to AI agents via the Model Context Protocol (MCP). A dedicated MCP proxy (`mcp-proxy/`) exposes connected downstream services as MCP tools.
 
 **How it works:**
-- Each downstream service endpoint is mapped to an MCP tool named `{service_slug}__{endpoint_name}`
-- The proxy authenticates via NyxID's OAuth endpoints and fetches the user's MCP config
+- MCP sessions start with 3 meta-tools: `nyx__search_tools`, `nyx__discover_services`, and `nyx__connect_service`
+- Service tools are loaded on-demand when the LLM calls `nyx__search_tools` or `nyx__connect_service`
+- The server sends `notifications/tools/list_changed` so clients automatically refresh their tool lists
+- Each service endpoint is mapped to an MCP tool named `{service_slug}__{endpoint_name}`
 - Tool calls are forwarded through NyxID's authenticated proxy with per-user credential injection
-- When a user has more than 20 connected tools, a built-in `nyxid__search_tools` meta-tool is added for discovery
-- Only services with valid connections and satisfied credentials appear as available tools
+- Maximum 20 activated services per session to bound memory usage
 
 **Agent capabilities:**
 - Authenticate users and manage sessions

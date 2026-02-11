@@ -1040,9 +1040,28 @@ GET http://localhost:3002/.well-known/oauth-protected-resource
 
 MCP clients that support OAuth (e.g., Claude Desktop) will automatically discover NyxID as the authorization server and prompt the user to authenticate via the browser.
 
+### Lazy Tool Loading
+
+To optimize performance, NyxID implements dynamic tool loading:
+
+**Session Initialization:**
+- MCP sessions start with only 3 meta-tools:
+  - `nyx__search_tools` -- Search and activate service tools by keyword
+  - `nyx__discover_services` -- Browse available services (does not activate)
+  - `nyx__connect_service` -- Connect to a specific service and activate its tools
+
+**On-Demand Activation:**
+- When the LLM calls `nyx__search_tools`, the server activates matching service tools and sends a `notifications/tools/list_changed` notification
+- When the LLM calls `nyx__connect_service`, that service's tools are activated
+- Clients (Cursor, Claude Code) automatically refresh their tool list when they receive the notification
+
+**Constraints:**
+- Maximum 20 activated services per session (bounded memory usage)
+- `nyx__discover_services` is browse-only and does NOT activate tools
+
 ### How Tools Are Generated
 
-For each active downstream service with registered endpoints, the proxy creates MCP tools following this pattern:
+For each active downstream service with registered endpoints, the proxy dynamically creates MCP tools following this pattern:
 
 - **Tool name**: `{service_slug}__{endpoint_name}` (e.g., `stripe__list_customers`)
 - **Description**: `[{service_name}] {endpoint_description}`
@@ -1053,7 +1072,9 @@ Only services with valid connections and satisfied credentials are included:
 - `internal` services only require an active connection record
 - `provider` services are excluded (not proxyable)
 
-When a user has more than 20 tools, a built-in `nyxid__search_tools` meta-tool is automatically added. This tool accepts a `query` string and an optional `service` slug filter, returning up to 25 matching tools by name or description.
+### Backward Compatibility
+
+The REST endpoint `/api/v1/mcp/config` still returns the full list of all tools for clients that don't support the MCP protocol.
 
 When a tool is called, the proxy:
 1. Resolves the service and endpoint from the tool name.
