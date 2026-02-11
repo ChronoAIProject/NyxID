@@ -1,6 +1,7 @@
 pub mod api_key;
 pub mod audit_log;
 pub mod authorization_code;
+pub mod bson_bytes;
 pub mod bson_datetime;
 pub mod downstream_service;
 pub mod mcp_session;

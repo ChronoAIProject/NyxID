@@ -17,6 +17,7 @@ pub struct DownstreamService {
     /// Header name or query param name for the credential
     pub auth_key_name: String,
     /// Encrypted master credential for this service
+    #[serde(with = "crate::models::bson_bytes::required")]
     pub credential_encrypted: Vec<u8>,
     /// Original auth type as selected by the admin (e.g., "api_key", "oauth2", "oidc", "basic", "bearer").
     /// Preserves the user's intent, while `auth_method` is the resolved injection method.

@@ -12,6 +12,7 @@ pub struct UserServiceConnection {
     /// Per-user encrypted credential for this service.
     /// For "connection" services: required, contains the user's own key/token/password.
     /// For "internal" services: None (master credential used).
+    #[serde(with = "crate::models::bson_bytes::optional")]
     pub credential_encrypted: Option<Vec<u8>>,
     /// What kind of credential is stored (e.g., "api_key", "bearer", "basic").
     #[serde(default, skip_serializing_if = "Option::is_none")]
