@@ -172,7 +172,16 @@ async fn authorize_inner(
                     issue_authorization_code(state, &auth_user, params, &validated_scope)
                         .await?;
                 let redirect_url = build_callback_url(params, &code);
-                Ok(redirect_302(&redirect_url))
+
+                // For loopback redirects (MCP/CLI clients), show a friendly
+                // "authenticated" page instead of a bare 302.  The MCP client's
+                // local callback server often renders a blank page, so this
+                // gives the user a clear success message.
+                if is_loopback_redirect(&params.redirect_uri) {
+                    Ok(oauth_success_page(&redirect_url))
+                } else {
+                    Ok(redirect_302(&redirect_url))
+                }
             }
         }
     } else {
@@ -197,6 +206,71 @@ fn redirect_302(uri: &str) -> Response {
         .header(header::LOCATION, uri)
         .header(header::REFERRER_POLICY, "no-referrer")
         .body(axum::body::Body::empty())
+        .unwrap()
+}
+
+/// Check whether a redirect URI targets a loopback address (MCP/CLI clients).
+fn is_loopback_redirect(uri: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(uri) else {
+        return false;
+    };
+    parsed.scheme() == "http"
+        && matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+}
+
+/// Render an HTML page that confirms authentication succeeded and
+/// auto-redirects to the callback URI.  The MCP client's local callback
+/// server receives the code via the redirect while the user sees a clear
+/// success message instead of a blank white page.
+fn oauth_success_page(redirect_url: &str) -> Response {
+    let escaped = redirect_url
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let js_escaped = redirect_url.replace('\\', "\\\\").replace('\'', "\\'");
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="1;url={escaped}">
+<meta name="referrer" content="no-referrer">
+<title>NyxID - Authenticated</title>
+<style>
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; margin: 0;
+    background: #0a0a0b; color: #e4e4e7;
+  }}
+  .card {{
+    text-align: center; padding: 2.5rem;
+    border: 1px solid #27272a; border-radius: 0.75rem;
+    background: #18181b; max-width: 28rem;
+  }}
+  .check {{ font-size: 2.5rem; margin-bottom: 1rem; }}
+  h1 {{ font-size: 1.25rem; font-weight: 600; margin: 0 0 0.5rem; }}
+  p {{ font-size: 0.875rem; color: #a1a1aa; margin: 0; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="check">&#10003;</div>
+  <h1>Authentication Successful</h1>
+  <p>You can close this tab and return to your application.</p>
+</div>
+<script>setTimeout(function(){{ window.location.replace('{js_escaped}'); }}, 800);</script>
+</body>
+</html>"#
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/html; charset=utf-8")
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .body(axum::body::Body::from(html))
         .unwrap()
 }
 

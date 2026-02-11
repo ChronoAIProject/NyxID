@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use crate::crypto::{aes, jwt};
+use crate::errors::AppError;
 use crate::models::mcp_session;
 use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::services::{audit_service, mcp_service};
@@ -119,24 +120,54 @@ fn mcp_401(base_url: &str) -> Response {
 
 /// Extract and validate the Bearer token, returning the user_id string.
 ///
+/// When `session_fallback` is true (all methods except `initialize`), an
+/// expired JWT is tolerated as long as a valid MCP session exists.  This
+/// allows long-lived MCP sessions (30 days) to survive past the short-lived
+/// access-token TTL without forcing re-authentication.
+///
 /// On failure returns an MCP-formatted 401 response with `WWW-Authenticate`.
-async fn authenticate_mcp(state: &AppState, headers: &HeaderMap) -> Result<String, Response> {
+async fn authenticate_mcp(
+    state: &AppState,
+    headers: &HeaderMap,
+    session_fallback: bool,
+) -> Result<String, Response> {
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or_else(|| mcp_401(&state.config.base_url))?;
+        .and_then(|s| s.strip_prefix("Bearer "));
 
-    let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)
-        .map_err(|_| mcp_401(&state.config.base_url))?;
-
-    if claims.token_type != "access" {
+    // --- Try JWT-based auth first ---
+    if let Some(token) = token {
+        match jwt::verify_token(&state.jwt_keys, &state.config, token) {
+            Ok(claims) if claims.token_type == "access" => {
+                return verify_user_active(state, claims.sub).await;
+            }
+            Err(AppError::TokenExpired) if session_fallback => {
+                // Token expired -- fall through to session-based auth
+            }
+            _ => return Err(mcp_401(&state.config.base_url)),
+        }
+    } else if !session_fallback {
+        // No token at all and session fallback not allowed (initialize)
         return Err(mcp_401(&state.config.base_url));
     }
 
-    let user_id = claims.sub;
+    // --- Session-based auth fallback ---
+    let session_id = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok());
 
-    // Verify user is still active
+    if let Some(sid) = session_id {
+        if let Some(user_id) = state.mcp_sessions.get_user_id(sid) {
+            return verify_user_active(state, user_id).await;
+        }
+    }
+
+    Err(mcp_401(&state.config.base_url))
+}
+
+/// Check that a user account exists and is active.
+async fn verify_user_active(state: &AppState, user_id: String) -> Result<String, Response> {
     let user = state
         .db
         .collection::<User>(USERS)
@@ -210,7 +241,10 @@ pub async fn mcp_post(
         Err(_) => return rpc_error(None, -32700, "Parse error"),
     };
 
-    let user_id = match authenticate_mcp(&state, &headers).await {
+    // `initialize` requires a valid JWT (no session exists yet).
+    // All other methods allow session-based auth fallback.
+    let is_initialize = request.method == "initialize";
+    let user_id = match authenticate_mcp(&state, &headers, !is_initialize).await {
         Ok(uid) => uid,
         Err(resp) => return resp,
     };
@@ -258,7 +292,7 @@ pub async fn mcp_post(
 // ---------------------------------------------------------------------------
 
 pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let user_id = match authenticate_mcp(&state, &headers).await {
+    let user_id = match authenticate_mcp(&state, &headers, true).await {
         Ok(uid) => uid,
         Err(resp) => return resp,
     };
@@ -308,7 +342,7 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
 // ---------------------------------------------------------------------------
 
 pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let user_id = match authenticate_mcp(&state, &headers).await {
+    let user_id = match authenticate_mcp(&state, &headers, true).await {
         Ok(uid) => uid,
         Err(resp) => return resp,
     };

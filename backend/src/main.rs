@@ -139,13 +139,17 @@ async fn main() {
         }
     });
 
-    // Spawn background cleanup task for MCP session reaper (every 5 min, 1 hour idle max)
+    // Spawn background cleanup task for MCP session reaper.
+    // Sessions live up to 30 days (extended on every request via touch()).
+    // Reaper runs hourly to clean up sessions idle longer than 30 days.
     let mcp_sessions_for_reaper = mcp_sessions.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
             interval.tick().await;
-            mcp_sessions_for_reaper.reap_expired(std::time::Duration::from_secs(3600));
+            mcp_sessions_for_reaper.reap_expired(std::time::Duration::from_secs(
+                models::mcp_session::MCP_SESSION_MAX_IDLE_SECS,
+            ));
         }
     });
 

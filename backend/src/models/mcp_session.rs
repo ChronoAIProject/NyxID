@@ -9,6 +9,11 @@ use tokio::sync::mpsc;
 /// Prevents unbounded memory growth.
 pub const MAX_ACTIVATED_SERVICES: usize = 20;
 
+/// Maximum idle time for MCP sessions (30 days).
+/// Sessions are extended on every request via `touch()`, so active users
+/// never need to re-authenticate.
+pub const MCP_SESSION_MAX_IDLE_SECS: u64 = 30 * 24 * 3600;
+
 /// An ephemeral MCP session (in-memory only, not persisted to MongoDB).
 pub struct McpSession {
     pub user_id: String,
@@ -76,6 +81,16 @@ impl McpSessionStore {
             .expect("session store lock poisoned")
             .get(session_id)
             .is_some_and(|s| s.user_id == user_id)
+    }
+
+    /// Get the user_id for an existing session, or `None` if it doesn't exist.
+    /// Used for session-based auth fallback when JWT has expired.
+    pub fn get_user_id(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .read()
+            .expect("session store lock poisoned")
+            .get(session_id)
+            .map(|s| s.user_id.clone())
     }
 
     /// Update the `last_active` timestamp to prevent expiry.
@@ -276,6 +291,19 @@ mod tests {
     fn remove_nonexistent_is_noop() {
         let store = McpSessionStore::new();
         store.remove("nonexistent-id"); // should not panic
+    }
+
+    #[test]
+    fn get_user_id_returns_user() {
+        let store = McpSessionStore::new();
+        let sid = store.create("user-1");
+        assert_eq!(store.get_user_id(&sid), Some("user-1".to_string()));
+    }
+
+    #[test]
+    fn get_user_id_nonexistent_returns_none() {
+        let store = McpSessionStore::new();
+        assert_eq!(store.get_user_id("no-such-session"), None);
     }
 
     #[test]
