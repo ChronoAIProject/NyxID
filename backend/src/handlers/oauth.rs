@@ -157,11 +157,25 @@ pub async fn authorize(
     Query(params): Query<AuthorizeQuery>,
 ) -> Result<Response, AppError> {
     let is_browser_mode = !accepts_json(&headers);
+    let is_authenticated = opt_auth.0.is_some();
+    tracing::info!(
+        client_id = %params.client_id,
+        is_browser_mode,
+        is_authenticated,
+        redirect_uri = %params.redirect_uri,
+        "OAuth authorize endpoint hit"
+    );
+
     let result = authorize_inner(&state, opt_auth, &params, is_browser_mode).await;
 
     match result {
         Ok(response) => Ok(response),
-        Err(err) if is_browser_mode => {
+        Err(ref err) if is_browser_mode => {
+            tracing::warn!(
+                client_id = %params.client_id,
+                error = %err,
+                "OAuth authorize failed, redirecting to error page"
+            );
             // In browser mode, redirect to frontend error page for better UX.
             // Per RFC 6749 s4.1.2.1, we must NOT redirect to the client's URI
             // when client_id/redirect_uri validation fails, but redirecting to
@@ -226,12 +240,23 @@ async fn authorize_inner(
     if is_browser_mode {
         match opt_auth.0 {
             None => {
-                // Redirect to frontend login with return_to pointing back here
-                let return_to = build_authorize_url(&state.config.base_url, params);
+                // Redirect to frontend login with return_to pointing back here.
+                //
+                // Use frontend_url (not base_url) for the return_to so the
+                // authorize endpoint is reached through the frontend's nginx
+                // proxy. This is critical because the session cookie is set on
+                // the frontend domain -- if return_to pointed to the API domain
+                // the browser would not send the cookie and auth would fail.
+                let return_to =
+                    build_authorize_url(&state.config.frontend_url, params);
                 let login_url = format!(
                     "{}/login?return_to={}",
                     state.config.frontend_url,
                     urlencoding::encode(&return_to),
+                );
+                tracing::info!(
+                    client_id = %params.client_id,
+                    "Unauthenticated OAuth request, redirecting to login"
                 );
                 Ok(redirect_302(&login_url))
             }
@@ -264,11 +289,11 @@ async fn authorize_inner(
                         .await?;
                 let redirect_url = build_callback_url(params, &code);
 
-                // For loopback redirects (MCP/CLI clients), show a friendly
-                // "authenticated" page instead of a bare 302.  The MCP client's
-                // local callback server often renders a blank page, so this
-                // gives the user a clear success message.
-                if is_loopback_redirect(&params.redirect_uri) {
+                // For native app redirects (loopback or custom URI scheme),
+                // show a success page that auto-redirects after a brief delay.
+                // Without this, the browser tab is left in a broken state
+                // (blank page or stuck on login).
+                if needs_success_page(&params.redirect_uri) {
                     Ok(oauth_success_page(&redirect_url))
                 } else {
                     Ok(redirect_302(&redirect_url))
@@ -322,10 +347,21 @@ fn redirect_302(uri: &str) -> Response {
 }
 
 /// Check whether a redirect URI targets a loopback address (MCP/CLI clients).
-fn is_loopback_redirect(uri: &str) -> bool {
+/// Returns true for redirect URIs where the browser should show a friendly
+/// success page instead of a bare 302. This covers:
+/// - Loopback redirects (http://127.0.0.1/...) where the local callback server
+///   typically renders a blank page
+/// - Custom URI schemes (cursor://, vscode://) where the browser can't render
+///   anything after the OS handles the protocol
+fn needs_success_page(uri: &str) -> bool {
     let Ok(parsed) = url::Url::parse(uri) else {
         return false;
     };
+    // Custom URI scheme (cursor://, vscode://, claude-code://, etc.)
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return true;
+    }
+    // Loopback redirect
     parsed.scheme() == "http"
         && matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
 }

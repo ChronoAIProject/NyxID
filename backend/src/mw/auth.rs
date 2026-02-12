@@ -31,11 +31,7 @@ pub struct AuthUser {
     pub scope: String,
     /// If this is a delegated request, the OAuth client_id of the acting service.
     pub acting_client_id: Option<String>,
-    /// True if authenticated as a service account (not a regular user).
-    pub is_service_account: bool,
 }
-
-impl AuthUser {}
 
 /// Name of the session cookie.
 pub const SESSION_COOKIE_NAME: &str = "nyx_session";
@@ -120,7 +116,6 @@ impl FromRequestParts<AppState> for AuthUser {
                             session_id: None,
                             scope: claims.scope.clone(),
                             acting_client_id: None,
-                            is_service_account: true,
                         });
                     }
 
@@ -154,7 +149,6 @@ impl FromRequestParts<AppState> for AuthUser {
                         session_id: None,
                         scope: claims.scope.clone(),
                         acting_client_id: claims.act.map(|a| a.sub),
-                        is_service_account: false,
                     });
                 }
             }
@@ -209,7 +203,6 @@ impl FromRequestParts<AppState> for AuthUser {
                                     session_id: Some(session_id),
                                     scope: String::new(),
                                     acting_client_id: None,
-                                    is_service_account: false,
                                 });
                             }
                             _ => {
@@ -265,7 +258,6 @@ impl FromRequestParts<AppState> for AuthUser {
                     session_id: None,
                     scope: claims.scope.clone(),
                     acting_client_id: claims.act.map(|a| a.sub),
-                    is_service_account: false,
                 });
             }
 
@@ -306,7 +298,6 @@ impl FromRequestParts<AppState> for AuthUser {
                     session_id: None,
                     scope: String::new(),
                     acting_client_id: None,
-                    is_service_account: false,
                 });
             }
 

@@ -477,10 +477,10 @@ pub async fn force_password_reset(
 ) -> AppResult<Json<AdminActionResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    let token = admin_user_service::force_password_reset(&state.db, &user_id).await?;
+    let _token = admin_user_service::force_password_reset(&state.db, &user_id).await?;
 
     #[cfg(debug_assertions)]
-    if let Some(ref t) = token {
+    if let Some(ref t) = _token {
         tracing::debug!(token = %t, user_id = %user_id, "Admin-initiated password reset token (dev only)");
     }
 

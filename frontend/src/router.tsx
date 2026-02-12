@@ -53,6 +53,16 @@ const authLayout = createRoute({
   beforeLoad: () => {
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
+      // If return_to is present (OAuth browser flow), honor it instead of
+      // redirecting to the dashboard. The authorize endpoint redirects here
+      // after the user logs in so it can issue an authorization code.
+      const returnTo = new URLSearchParams(window.location.search).get(
+        "return_to",
+      );
+      if (returnTo && returnTo.startsWith(window.location.origin + "/")) {
+        window.location.assign(returnTo);
+        return;
+      }
       throw redirect({ to: "/" });
     }
   },
