@@ -35,8 +35,16 @@ pub async fn validate_client(
         return Ok(client);
     }
 
-    // For public clients, also accept loopback redirect URIs (RFC 8252 s7.3)
-    if client.client_type == "public" && is_loopback_redirect_uri(redirect_uri) {
+    // For public clients, also accept:
+    // - Loopback redirect URIs per RFC 8252 s7.3 (http://127.0.0.1:PORT/...)
+    // - Private-use URI scheme redirects per RFC 8252 s7.1 (cursor://, vscode://, etc.)
+    //
+    // Both are safe because our authorize endpoint requires PKCE (S256), which
+    // prevents authorization code interception attacks.
+    if client.client_type == "public"
+        && (is_loopback_redirect_uri(redirect_uri)
+            || is_private_use_uri_scheme(redirect_uri))
+    {
         return Ok(client);
     }
 
@@ -370,6 +378,23 @@ fn is_loopback_redirect_uri(uri: &str) -> bool {
         return false;
     };
     parsed.scheme() == "http"
-        && matches!(parsed.host_str(), Some("127.0.0.1" | "[::1]"))
+        && matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
         && parsed.port().is_some()
+}
+
+/// Check whether a redirect URI uses a private-use URI scheme per RFC 8252
+/// section 7.1.
+///
+/// Native/desktop OAuth clients (Cursor, Claude Code, VS Code, etc.) register
+/// custom URI schemes like `cursor://...` or `vscode://...` with the OS to
+/// receive authorization callbacks. These are safe for public clients because
+/// PKCE prevents authorization code interception attacks.
+///
+/// Only non-standard schemes are accepted (`http` and `https` require explicit
+/// registration to prevent open-redirector vulnerabilities).
+fn is_private_use_uri_scheme(uri: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(uri) else {
+        return false;
+    };
+    !matches!(parsed.scheme(), "http" | "https")
 }
