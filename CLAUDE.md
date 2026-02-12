@@ -97,7 +97,7 @@ All API routes under `/api/v1`:
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
 - `/delegation/refresh` -- refresh delegated access tokens
 
-- `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation
+- `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation, provider management (connect via API key/OAuth redirect/device-code, list, disconnect providers on behalf of SAs)
 
 - `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts) and `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access)
 

@@ -189,6 +189,8 @@ pub async fn initiate_oauth_connect(
         &state.config.base_url,
         &user_id_str,
         &provider_id,
+        None,
+        None,
     )
     .await?;
 
@@ -332,6 +334,7 @@ pub async fn generic_oauth_callback(
     }
 
     let provider_id = &oauth_state.provider_config_id;
+    let redirect_path = oauth_state.redirect_path.clone();
 
     match user_token_service::handle_oauth_callback(
         &state.db,
@@ -351,11 +354,16 @@ pub async fn generic_oauth_callback(
                 Some(serde_json::json!({
                     "provider_id": provider_id,
                     "token_type": "oauth2",
+                    "on_behalf_of": &oauth_state.target_user_id,
                 })),
                 None,
                 None,
             );
-            redirect_callback(frontend_url, "success", None)
+            if let Some(ref path) = redirect_path {
+                redirect_to_path(frontend_url, path, "success", None)
+            } else {
+                redirect_callback(frontend_url, "success", None)
+            }
         }
         Err(e) => {
             audit_service::log_async(
@@ -365,11 +373,18 @@ pub async fn generic_oauth_callback(
                 Some(serde_json::json!({
                     "provider_id": provider_id,
                     "error": e.to_string(),
+                    "on_behalf_of": &oauth_state.target_user_id,
                 })),
                 None,
                 None,
             );
-            redirect_callback(frontend_url, "error", Some(&e.to_string()))
+            // Sanitize error for user-facing redirect -- never leak internal details
+            let user_msg = safe_error_message(&e);
+            if let Some(ref path) = redirect_path {
+                redirect_to_path(frontend_url, path, "error", Some(&user_msg))
+            } else {
+                redirect_callback(frontend_url, "error", Some(&user_msg))
+            }
         }
     }
 }
@@ -383,6 +398,24 @@ fn redirect_callback(
     let mut url = url::Url::parse(&format!("{frontend_url}/providers/callback"))
         .expect("frontend_url should be a valid URL");
     url.query_pairs_mut().append_pair("status", status);
+    if let Some(msg) = message {
+        url.query_pairs_mut().append_pair("message", msg);
+    }
+    axum::response::Redirect::to(url.as_str())
+}
+
+/// Build a redirect URL to a custom frontend path with provider_status params.
+/// Used for admin-on-behalf flows that redirect back to the SA detail page.
+fn redirect_to_path(
+    frontend_url: &str,
+    path: &str,
+    status: &str,
+    message: Option<&str>,
+) -> axum::response::Redirect {
+    let mut url = url::Url::parse(&format!("{frontend_url}{path}"))
+        .expect("frontend_url + path should be a valid URL");
+    url.query_pairs_mut()
+        .append_pair("provider_status", status);
     if let Some(msg) = message {
         url.query_pairs_mut().append_pair("message", msg);
     }
@@ -464,6 +497,7 @@ pub async fn request_device_code(
         &encryption_key,
         &user_id_str,
         &provider_id,
+        None,
     )
     .await?;
 
@@ -525,4 +559,17 @@ pub async fn poll_device_code(
         status: result.status,
         interval: result.interval,
     }))
+}
+
+/// Return a user-safe error message for redirects, matching the sanitization
+/// applied by `AppError::into_response` for JSON errors. Internal/database
+/// errors are replaced with a generic message so implementation details never
+/// leak through URL query parameters.
+fn safe_error_message(e: &AppError) -> String {
+    match e {
+        AppError::Internal(_) | AppError::DatabaseError(_) => {
+            "An internal error occurred".to_string()
+        }
+        other => other.to_string(),
+    }
 }

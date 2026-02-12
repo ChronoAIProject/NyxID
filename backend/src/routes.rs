@@ -139,7 +139,19 @@ pub fn build_router() -> Router<AppState> {
         .route("/{sa_id}/rotate-secret",
             post(handlers::admin_service_accounts::rotate_secret))
         .route("/{sa_id}/revoke-tokens",
-            post(handlers::admin_service_accounts::revoke_tokens));
+            post(handlers::admin_service_accounts::revoke_tokens))
+        .route("/{sa_id}/providers",
+            get(handlers::admin_sa_providers::list_sa_providers))
+        .route("/{sa_id}/providers/{provider_id}/connect/api-key",
+            post(handlers::admin_sa_providers::connect_api_key_for_sa))
+        .route("/{sa_id}/providers/{provider_id}/connect/oauth",
+            get(handlers::admin_sa_providers::initiate_oauth_for_sa))
+        .route("/{sa_id}/providers/{provider_id}/connect/device-code/initiate",
+            post(handlers::admin_sa_providers::initiate_device_code_for_sa))
+        .route("/{sa_id}/providers/{provider_id}/connect/device-code/poll",
+            post(handlers::admin_sa_providers::poll_device_code_for_sa))
+        .route("/{sa_id}/providers/{provider_id}/disconnect",
+            delete(handlers::admin_sa_providers::disconnect_sa_provider));
 
     let admin_routes = Router::new()
         .route("/users", get(handlers::admin::list_users)

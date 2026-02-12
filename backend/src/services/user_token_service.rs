@@ -135,12 +135,18 @@ pub async fn store_api_key(
 }
 
 /// Initiate an OAuth2 connection flow. Returns the authorization URL.
+///
+/// When `on_behalf_of` is `Some(sa_id)`, the flow stores tokens under the SA's
+/// ID instead of the initiating user. `redirect_path` overrides the default
+/// frontend callback path for the post-OAuth redirect.
 pub async fn initiate_oauth_connect(
     db: &mongodb::Database,
     encryption_key: &[u8],
     base_url: &str,
     user_id: &str,
     provider_id: &str,
+    on_behalf_of: Option<&str>,
+    redirect_path: Option<&str>,
 ) -> AppResult<String> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -195,6 +201,8 @@ pub async fn initiate_oauth_connect(
         device_code_encrypted: None,
         user_code_encrypted: None,
         poll_interval: None,
+        target_user_id: on_behalf_of.map(String::from),
+        redirect_path: redirect_path.map(String::from),
         expires_at,
         created_at: now,
     };
@@ -233,6 +241,7 @@ pub async fn initiate_oauth_connect(
     tracing::info!(
         user_id = %user_id,
         provider_id = %provider_id,
+        on_behalf_of = ?on_behalf_of,
         "OAuth connect flow initiated"
     );
 
@@ -259,11 +268,15 @@ pub struct DeviceCodePollResult {
 /// Calls the provider's device_code_url to get a device_auth_id + user_code,
 /// stores the encrypted identifiers in an oauth_state, and returns the
 /// user_code and verification_uri for the frontend to display.
+///
+/// When `on_behalf_of` is `Some(sa_id)`, the resulting tokens will be stored
+/// under the SA's ID instead of the initiating user.
 pub async fn request_device_code(
     db: &mongodb::Database,
     encryption_key: &[u8],
     user_id: &str,
     provider_id: &str,
+    on_behalf_of: Option<&str>,
 ) -> AppResult<DeviceCodeInitiateResult> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -382,6 +395,8 @@ pub async fn request_device_code(
         device_code_encrypted: Some(device_code_encrypted),
         user_code_encrypted: Some(user_code_encrypted),
         poll_interval: Some(interval),
+        target_user_id: on_behalf_of.map(String::from),
+        redirect_path: None,
         expires_at,
         created_at: now,
     };
@@ -393,6 +408,7 @@ pub async fn request_device_code(
     tracing::info!(
         user_id = %user_id,
         provider_id = %provider_id,
+        on_behalf_of = ?on_behalf_of,
         "Device code flow initiated"
     );
 
@@ -447,6 +463,12 @@ pub async fn poll_device_code(
             "Device code state user mismatch".to_string(),
         ));
     }
+
+    // When admin-on-behalf flow, store tokens under the target SA's ID
+    let effective_user_id = oauth_state
+        .target_user_id
+        .as_deref()
+        .unwrap_or(user_id);
 
     // Decrypt device_auth_id
     let device_code_hex = oauth_state.device_code_encrypted.as_ref().ok_or_else(|| {
@@ -621,7 +643,7 @@ pub async fn poll_device_code(
         return store_device_code_tokens(
             db,
             encryption_key,
-            user_id,
+            effective_user_id,
             provider_id,
             state,
             &token_data,
@@ -634,7 +656,7 @@ pub async fn poll_device_code(
     store_device_code_tokens(
         db,
         encryption_key,
-        user_id,
+        effective_user_id,
         provider_id,
         state,
         &resp_data,
@@ -770,7 +792,12 @@ pub async fn handle_oauth_callback(
         ));
     }
 
-    let user_id = &oauth_state.user_id;
+    // When admin-on-behalf flow, store tokens under the target SA's ID
+    let effective_user_id = oauth_state
+        .target_user_id
+        .as_deref()
+        .unwrap_or(&oauth_state.user_id);
+    let user_id = effective_user_id;
 
     // Load provider config
     let provider = db

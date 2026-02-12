@@ -9,6 +9,13 @@ import type {
   RotateSecretResponse,
   RevokeTokensResponse,
   AdminActionResponse,
+  SaProviderToken,
+  SaProviderListResponse,
+  SaProviderActionResponse,
+  SaOAuthInitiateResponse,
+  SaDeviceCodeInitiateResponse,
+  SaDeviceCodePollRequest,
+  SaDeviceCodePollResponse,
 } from "@/types/service-accounts";
 
 export function useServiceAccounts(page: number, perPage: number, search?: string) {
@@ -134,6 +141,130 @@ export function useRevokeTokens() {
       void queryClient.invalidateQueries({
         queryKey: ["admin", "service-accounts", saId],
       });
+    },
+  });
+}
+
+export function useSaProviders(saId: string) {
+  return useQuery({
+    queryKey: ["admin", "service-accounts", saId, "providers"],
+    queryFn: async (): Promise<readonly SaProviderToken[]> => {
+      const res = await api.get<SaProviderListResponse>(
+        `/admin/service-accounts/${saId}/providers`,
+      );
+      return res.tokens;
+    },
+    enabled: saId.length > 0,
+  });
+}
+
+export function useConnectApiKeyForSa() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      saId,
+      providerId,
+      apiKey,
+      label,
+    }: {
+      readonly saId: string;
+      readonly providerId: string;
+      readonly apiKey: string;
+      readonly label?: string;
+    }): Promise<SaProviderActionResponse> => {
+      return api.post<SaProviderActionResponse>(
+        `/admin/service-accounts/${saId}/providers/${providerId}/connect/api-key`,
+        { api_key: apiKey, label },
+      );
+    },
+    onSuccess: (_, { saId }) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["admin", "service-accounts", saId, "providers"],
+      });
+    },
+  });
+}
+
+export function useDisconnectSaProvider() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      saId,
+      providerId,
+    }: {
+      readonly saId: string;
+      readonly providerId: string;
+    }): Promise<SaProviderActionResponse> => {
+      return api.delete<SaProviderActionResponse>(
+        `/admin/service-accounts/${saId}/providers/${providerId}/disconnect`,
+      );
+    },
+    onSuccess: (_, { saId }) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["admin", "service-accounts", saId, "providers"],
+      });
+    },
+  });
+}
+
+export function useInitiateOAuthForSa() {
+  return useMutation({
+    mutationFn: async ({
+      saId,
+      providerId,
+    }: {
+      readonly saId: string;
+      readonly providerId: string;
+    }): Promise<SaOAuthInitiateResponse> => {
+      return api.get<SaOAuthInitiateResponse>(
+        `/admin/service-accounts/${saId}/providers/${providerId}/connect/oauth`,
+      );
+    },
+  });
+}
+
+export function useInitiateDeviceCodeForSa() {
+  return useMutation({
+    mutationFn: async ({
+      saId,
+      providerId,
+    }: {
+      readonly saId: string;
+      readonly providerId: string;
+    }): Promise<SaDeviceCodeInitiateResponse> => {
+      return api.post<SaDeviceCodeInitiateResponse>(
+        `/admin/service-accounts/${saId}/providers/${providerId}/connect/device-code/initiate`,
+      );
+    },
+  });
+}
+
+export function usePollDeviceCodeForSa() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      saId,
+      providerId,
+      state,
+    }: {
+      readonly saId: string;
+      readonly providerId: string;
+      readonly state: string;
+    }): Promise<SaDeviceCodePollResponse> => {
+      return api.post<SaDeviceCodePollResponse>(
+        `/admin/service-accounts/${saId}/providers/${providerId}/connect/device-code/poll`,
+        { state } satisfies SaDeviceCodePollRequest,
+      );
+    },
+    onSuccess: (data, { saId }) => {
+      if (data.status === "complete") {
+        void queryClient.invalidateQueries({
+          queryKey: ["admin", "service-accounts", saId, "providers"],
+        });
+      }
     },
   });
 }

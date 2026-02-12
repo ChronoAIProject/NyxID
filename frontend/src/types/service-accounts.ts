@@ -65,3 +65,45 @@ export interface RevokeTokensResponse {
 export interface AdminActionResponse {
   readonly message: string;
 }
+
+export interface SaProviderToken {
+  readonly provider_id: string;
+  readonly provider_name: string;
+  readonly provider_slug: string;
+  readonly provider_type: string;
+  readonly status: string;
+  readonly label: string | null;
+  readonly expires_at: string | null;
+  readonly last_used_at: string | null;
+  readonly connected_at: string;
+}
+
+export interface SaProviderListResponse {
+  readonly tokens: readonly SaProviderToken[];
+}
+
+export interface SaProviderActionResponse {
+  readonly status: string;
+  readonly message: string;
+}
+
+export interface SaOAuthInitiateResponse {
+  readonly authorization_url: string;
+}
+
+export interface SaDeviceCodeInitiateResponse {
+  readonly user_code: string;
+  readonly verification_uri: string;
+  readonly state: string;
+  readonly expires_in: number;
+  readonly interval: number;
+}
+
+export interface SaDeviceCodePollRequest {
+  readonly state: string;
+}
+
+export interface SaDeviceCodePollResponse {
+  readonly status: string;
+  readonly interval?: number;
+}

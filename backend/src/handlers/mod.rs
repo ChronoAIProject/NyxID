@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod admin_groups;
 pub mod admin_helpers;
+pub mod admin_sa_providers;
 pub mod admin_service_accounts;
 pub mod admin_roles;
 pub mod api_keys;
