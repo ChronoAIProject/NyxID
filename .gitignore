@@ -34,4 +34,7 @@ logs/
 # ─── Docker ───
 docker-compose.override.yml
 
+# ─── Deployment ───
+k8s/
+
 .claude
