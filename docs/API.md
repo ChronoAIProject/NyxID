@@ -34,6 +34,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Admin](#admin)
   - [Admin Roles](#admin-roles)
   - [Admin Groups](#admin-groups)
+  - [Admin Service Accounts](#admin-service-accounts)
 
 ---
 
@@ -50,6 +51,8 @@ Endpoints marked **Auth: None** do not require authentication.
 Endpoints marked **Auth: Required** require any of the above.
 Endpoints marked **Auth: Admin** require an authenticated user with `is_admin = true`.
 Endpoints marked **Auth: Cookie** use a specific cookie (e.g., the refresh token cookie).
+
+**Service accounts** authenticate via OAuth2 Client Credentials Grant at `POST /oauth/token` and receive a Bearer token. Service account tokens include an `sa: true` claim and are restricted to proxy, LLM gateway, connections, providers, and delegation endpoints.
 
 ---
 
@@ -99,6 +102,8 @@ Internal errors never leak implementation details. The `message` for error codes
 | 3000 | `pkce_verification_failed` | 400         | PKCE code_verifier mismatch              |
 | 3001 | `invalid_redirect_uri`     | 400         | Redirect URI not registered for client   |
 | 3002 | `invalid_scope`            | 400         | Requested scope not allowed              |
+| 5000 | `service_account_not_found`| 404         | Service account does not exist           |
+| 5001 | `service_account_inactive` | 403         | Service account is deactivated           |
 
 ---
 
@@ -4631,6 +4636,337 @@ curl http://localhost:3001/api/v1/admin/users/user-uuid-here/groups \
 
 ---
 
+### Admin Service Accounts
+
+Service accounts are non-human (machine-to-machine) identities that authenticate via OAuth2 Client Credentials Grant. All admin endpoints require `is_admin = true`.
+
+#### POST /api/v1/admin/service-accounts
+
+Create a new service account. The `client_secret` is returned once in the response and cannot be retrieved later.
+
+**Auth:** Admin
+
+**Request Body:**
+
+| Field                 | Type     | Required | Description                                  |
+|-----------------------|----------|----------|----------------------------------------------|
+| `name`                | string   | Yes      | Human-readable name (1-100 chars)            |
+| `description`         | string   | No       | Description (max 500 chars)                  |
+| `allowed_scopes`      | string   | Yes      | Space-separated allowed scopes               |
+| `role_ids`            | string[] | No       | Role IDs to assign                           |
+| `rate_limit_override` | number   | No       | Per-account rate limit (requests/second)     |
+
+```json
+{
+  "name": "CI/CD Pipeline",
+  "description": "Automated deployment service",
+  "allowed_scopes": "proxy:* llm:proxy",
+  "role_ids": ["role-uuid-here"],
+  "rate_limit_override": 50
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "name": "CI/CD Pipeline",
+  "client_id": "sa_a1b2c3d4e5f6a1b2c3d4e5f6",
+  "client_secret": "sas_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "allowed_scopes": "proxy:* llm:proxy",
+  "role_ids": ["role-uuid-here"],
+  "is_active": true,
+  "created_at": "2025-06-01T10:00:00+00:00",
+  "message": "Service account created. Save the client_secret now -- it cannot be retrieved later."
+}
+```
+
+**Errors:**
+- `1008 validation_error` -- Name is empty or too long
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/admin/service-accounts \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "CI/CD Pipeline",
+    "allowed_scopes": "proxy:* llm:proxy"
+  }'
+```
+
+---
+
+#### GET /api/v1/admin/service-accounts
+
+List all service accounts with pagination and optional search.
+
+**Auth:** Admin
+
+**Query Parameters:**
+
+| Parameter  | Type   | Default | Description                       |
+|------------|--------|---------|-----------------------------------|
+| `page`     | number | `1`     | Page number                       |
+| `per_page` | number | `20`    | Items per page                    |
+| `search`   | string | --      | Filter by name (case-insensitive) |
+
+**Response (200):**
+
+```json
+{
+  "service_accounts": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "name": "CI/CD Pipeline",
+      "description": "Automated deployment service",
+      "client_id": "sa_a1b2c3d4e5f6a1b2c3d4e5f6",
+      "secret_prefix": "sas_xxxx",
+      "allowed_scopes": "proxy:* llm:proxy",
+      "role_ids": ["role-uuid-here"],
+      "is_active": true,
+      "rate_limit_override": 50,
+      "created_by": "admin-uuid-here",
+      "created_at": "2025-06-01T10:00:00+00:00",
+      "updated_at": "2025-06-01T10:00:00+00:00",
+      "last_authenticated_at": "2025-06-15T08:30:00+00:00"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "per_page": 20
+}
+```
+
+**Example:**
+
+```bash
+curl "http://localhost:3001/api/v1/admin/service-accounts?page=1&per_page=10&search=pipeline" \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### GET /api/v1/admin/service-accounts/{sa_id}
+
+Get a single service account by ID.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description            |
+|-----------|--------|------------------------|
+| `sa_id`   | string | Service account UUID   |
+
+**Response (200):** Same shape as a single item in the list response.
+
+**Errors:**
+- `5000 service_account_not_found` -- Service account does not exist
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/admin/service-accounts/sa-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### PUT /api/v1/admin/service-accounts/{sa_id}
+
+Update a service account's mutable fields. All fields are optional; only provided fields are updated.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description            |
+|-----------|--------|------------------------|
+| `sa_id`   | string | Service account UUID   |
+
+**Request Body:**
+
+| Field                 | Type      | Required | Description                                |
+|-----------------------|-----------|----------|--------------------------------------------|
+| `name`                | string    | No       | New name (1-100 chars)                     |
+| `description`         | string    | No       | New description (max 500 chars)            |
+| `allowed_scopes`      | string    | No       | New allowed scopes                         |
+| `role_ids`            | string[]  | No       | New role assignments                       |
+| `rate_limit_override` | number?   | No       | New rate limit (null to remove override)   |
+| `is_active`           | boolean   | No       | Enable or disable the account              |
+
+**Response (200):** Returns the updated service account (same shape as list item).
+
+**Errors:**
+- `5000 service_account_not_found` -- Service account does not exist
+
+**Example:**
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/admin/service-accounts/sa-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Updated Name", "is_active": false}'
+```
+
+---
+
+#### DELETE /api/v1/admin/service-accounts/{sa_id}
+
+Soft-delete (deactivate) a service account and revoke all its tokens.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description            |
+|-----------|--------|------------------------|
+| `sa_id`   | string | Service account UUID   |
+
+**Response (200):**
+
+```json
+{
+  "message": "Service account deleted"
+}
+```
+
+**Errors:**
+- `5000 service_account_not_found` -- Service account does not exist
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/admin/service-accounts/sa-uuid-here \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/admin/service-accounts/{sa_id}/rotate-secret
+
+Generate a new client secret and revoke all existing tokens. The new secret is returned once.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description            |
+|-----------|--------|------------------------|
+| `sa_id`   | string | Service account UUID   |
+
+**Response (200):**
+
+```json
+{
+  "client_id": "sa_a1b2c3d4e5f6a1b2c3d4e5f6",
+  "client_secret": "sas_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+  "secret_prefix": "sas_yyyy",
+  "message": "Secret rotated. All existing tokens have been revoked. Save the new secret now."
+}
+```
+
+**Errors:**
+- `5000 service_account_not_found` -- Service account does not exist
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/admin/service-accounts/sa-uuid-here/rotate-secret \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### POST /api/v1/admin/service-accounts/{sa_id}/revoke-tokens
+
+Revoke all active tokens for a service account without rotating the secret.
+
+**Auth:** Admin
+
+**Path Parameters:**
+
+| Parameter | Type   | Description            |
+|-----------|--------|------------------------|
+| `sa_id`   | string | Service account UUID   |
+
+**Response (200):**
+
+```json
+{
+  "revoked_count": 5,
+  "message": "All tokens revoked"
+}
+```
+
+**Errors:**
+- `5000 service_account_not_found` -- Service account does not exist
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/api/v1/admin/service-accounts/sa-uuid-here/revoke-tokens \
+  -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+#### Service Account Authentication (Client Credentials)
+
+Service accounts authenticate at the existing `POST /oauth/token` endpoint using the `client_credentials` grant type.
+
+**Request:**
+
+```
+POST /oauth/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials&client_id=sa_a1b2c3d4e5f6...&client_secret=sas_xxxxxxxx...&scope=proxy:* llm:proxy
+```
+
+Or with HTTP Basic Authentication:
+
+```
+POST /oauth/token
+Content-Type: application/x-www-form-urlencoded
+Authorization: Basic base64(client_id:client_secret)
+
+grant_type=client_credentials&scope=proxy:* llm:proxy
+```
+
+**Response (200):**
+
+```json
+{
+  "access_token": "eyJhbGci...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "scope": "proxy:* llm:proxy"
+}
+```
+
+The `scope` parameter is optional. If omitted, all of the service account's `allowed_scopes` are granted. If provided, the requested scopes must be a subset of `allowed_scopes`.
+
+No refresh token is issued. When the access token expires, the service account must re-authenticate with client credentials.
+
+**Errors:**
+- `1001 unauthorized` -- Invalid client_id or client_secret
+- `5001 service_account_inactive` -- Service account is deactivated
+- `3002 invalid_scope` -- Requested scope not allowed
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/oauth/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d 'grant_type=client_credentials&client_id=sa_a1b2c3d4e5f6...&client_secret=sas_xxxxxxxx...&scope=proxy:*'
+```
+
+---
+
 ## JWT Token Format
 
 All JWTs are signed with RS256 (RSA SHA-256) using a 4096-bit key pair.
@@ -4666,6 +5002,24 @@ Same structure as access tokens, but:
 - `scope` is empty
 - `exp` uses `JWT_REFRESH_TTL_SECS` (default: 7 days)
 - RBAC claims (`roles`, `groups`, `permissions`) are not included
+
+### Service Account Token Claims
+
+Service account access tokens include:
+
+| Claim        | Type   | Description                                        |
+|--------------|--------|----------------------------------------------------|
+| `sub`        | string | Service account ID (UUID)                          |
+| `iss`        | string | Issuer (matches `JWT_ISSUER`)                      |
+| `aud`        | string | Audience (matches `BASE_URL`)                      |
+| `exp`        | number | Expiration (Unix timestamp)                        |
+| `iat`        | number | Issued at (Unix timestamp)                         |
+| `jti`        | string | Unique token ID (UUID, used for revocation)        |
+| `scope`      | string | Space-separated granted scopes                     |
+| `token_type` | string | `"access"`                                         |
+| `sa`         | boolean| Always `true` for service account tokens           |
+
+Service account tokens do **not** include `sid`, `roles`, `groups`, `permissions`, `act`, or `delegated` claims. No refresh tokens are issued for service accounts.
 
 ---
 

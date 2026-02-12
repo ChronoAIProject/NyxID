@@ -16,6 +16,8 @@ pub mod role;
 pub mod service_endpoint;
 pub mod service_provider_requirement;
 pub mod session;
+pub mod service_account;
+pub mod service_account_token;
 pub mod user;
 pub mod user_provider_token;
 pub mod user_service_connection;

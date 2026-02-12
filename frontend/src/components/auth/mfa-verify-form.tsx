@@ -18,10 +18,13 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ShieldCheck } from "lucide-react";
 
-/** Backend base URL used to validate return_to redirects (open-redirect prevention). */
+/** Trusted origins for return_to redirect validation (open-redirect prevention). */
 const BACKEND_URL = (
   import.meta.env.VITE_BACKEND_URL ?? "http://localhost:3001"
 ).replace(/\/+$/, "");
+
+/** Same-origin OAuth redirects go through the frontend nginx proxy. */
+const FRONTEND_ORIGIN = window.location.origin;
 
 interface MfaVerifyFormProps {
   readonly returnTo?: string;
@@ -52,7 +55,11 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
         code: data.code,
         mfa_token: mfaToken,
       });
-      if (returnTo && returnTo.startsWith(BACKEND_URL + "/")) {
+      if (
+        returnTo &&
+        (returnTo.startsWith(FRONTEND_ORIGIN + "/") ||
+          returnTo.startsWith(BACKEND_URL + "/"))
+      ) {
         window.location.assign(returnTo);
         return;
       }

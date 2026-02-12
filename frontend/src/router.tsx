@@ -34,6 +34,8 @@ import { AdminRolesPage } from "@/pages/admin-roles";
 import { AdminRoleDetailPage } from "@/pages/admin-role-detail";
 import { AdminGroupsPage } from "@/pages/admin-groups";
 import { AdminGroupDetailPage } from "@/pages/admin-group-detail";
+import { AdminServiceAccountsPage } from "@/pages/admin-service-accounts";
+import { AdminServiceAccountDetailPage } from "@/pages/admin-service-account-detail";
 import { ConsentsPage } from "@/pages/consents";
 
 const rootRoute = createRootRoute({
@@ -51,6 +53,16 @@ const authLayout = createRoute({
   beforeLoad: () => {
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
+      // If return_to is present (OAuth browser flow), honor it instead of
+      // redirecting to the dashboard. The authorize endpoint redirects here
+      // after the user logs in so it can issue an authorization code.
+      const returnTo = new URLSearchParams(window.location.search).get(
+        "return_to",
+      );
+      if (returnTo && returnTo.startsWith(window.location.origin + "/")) {
+        window.location.assign(returnTo);
+        return;
+      }
       throw redirect({ to: "/" });
     }
   },
@@ -228,6 +240,18 @@ const adminGroupDetailRoute = createRoute({
   component: AdminGroupDetailPage,
 });
 
+const adminServiceAccountsRoute = createRoute({
+  path: "service-accounts",
+  getParentRoute: () => adminLayout,
+  component: AdminServiceAccountsPage,
+});
+
+const adminServiceAccountDetailRoute = createRoute({
+  path: "service-accounts/$saId",
+  getParentRoute: () => adminLayout,
+  component: AdminServiceAccountDetailPage,
+});
+
 const routeTree = rootRoute.addChildren([
   authLayout.addChildren([loginRoute, registerRoute]),
   dashboardLayout.addChildren([
@@ -256,6 +280,8 @@ const routeTree = rootRoute.addChildren([
       adminRoleDetailRoute,
       adminGroupsRoute,
       adminGroupDetailRoute,
+      adminServiceAccountsRoute,
+      adminServiceAccountDetailRoute,
     ]),
   ]),
 ]);

@@ -13,6 +13,8 @@ const MAX_PASSWORD_LENGTH: usize = 128;
 /// Result of a successful registration.
 pub struct RegisterResult {
     pub user_id: String,
+    /// Used in debug builds to log the verification token.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     pub email_verification_token: String,
 }
 

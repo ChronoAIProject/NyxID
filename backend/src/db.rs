@@ -400,5 +400,54 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── service_accounts ──
+    let sa = db.collection::<mongodb::bson::Document>("service_accounts");
+    sa.create_index(
+        IndexModel::builder()
+            .keys(doc! { "client_id": 1 })
+            .options(IndexOptions::builder().unique(true).build())
+            .build(),
+    )
+    .await?;
+    sa.create_index(
+        IndexModel::builder()
+            .keys(doc! { "is_active": 1 })
+            .build(),
+    )
+    .await?;
+    sa.create_index(
+        IndexModel::builder()
+            .keys(doc! { "created_by": 1 })
+            .build(),
+    )
+    .await?;
+
+    // ── service_account_tokens ──
+    let sat = db.collection::<mongodb::bson::Document>("service_account_tokens");
+    sat.create_index(
+        IndexModel::builder()
+            .keys(doc! { "jti": 1 })
+            .options(IndexOptions::builder().unique(true).build())
+            .build(),
+    )
+    .await?;
+    sat.create_index(
+        IndexModel::builder()
+            .keys(doc! { "service_account_id": 1 })
+            .build(),
+    )
+    .await?;
+    sat.create_index(
+        IndexModel::builder()
+            .keys(doc! { "expires_at": 1 })
+            .options(
+                IndexOptions::builder()
+                    .expire_after(Duration::from_secs(0))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+
     Ok(())
 }

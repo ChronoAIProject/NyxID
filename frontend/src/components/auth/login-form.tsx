@@ -21,10 +21,13 @@ interface LoginFormProps {
   readonly returnTo?: string;
 }
 
-/** Backend base URL used to validate return_to redirects (open-redirect prevention). */
+/** Trusted origins for return_to redirect validation (open-redirect prevention). */
 const BACKEND_URL = (
   import.meta.env.VITE_BACKEND_URL ?? "http://localhost:3001"
 ).replace(/\/+$/, "");
+
+/** Same-origin OAuth redirects go through the frontend nginx proxy. */
+const FRONTEND_ORIGIN = window.location.origin;
 
 export function LoginForm({ returnTo }: LoginFormProps) {
   const navigate = useNavigate();
@@ -43,11 +46,13 @@ export function LoginForm({ returnTo }: LoginFormProps) {
       const result = await loginMutation.mutateAsync(data);
       if (!result.mfaRequired) {
         // If return_to was provided (OAuth browser flow), redirect back to the
-        // backend authorize endpoint so it can issue the authorization code.
-        // Validate the URL first to prevent open-redirect attacks.
+        // authorize endpoint so it can issue the authorization code.
+        // Accept same-origin URLs (proxied through frontend nginx) or the
+        // explicit backend URL. Reject anything else to prevent open-redirect.
         if (
           returnTo &&
-          returnTo.startsWith(BACKEND_URL + "/")
+          (returnTo.startsWith(FRONTEND_ORIGIN + "/") ||
+            returnTo.startsWith(BACKEND_URL + "/"))
         ) {
           window.location.assign(returnTo);
           return;

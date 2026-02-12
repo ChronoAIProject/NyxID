@@ -51,6 +51,9 @@ pub struct AppConfig {
     pub rate_limit_per_second: u64,
     /// Max burst size for rate limiter
     pub rate_limit_burst: u32,
+
+    /// Service account token TTL in seconds (default: 3600 = 1 hour)
+    pub sa_token_ttl_secs: i64,
 }
 
 impl AppConfig {
@@ -115,6 +118,11 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+
+            sa_token_ttl_secs: env::var("SA_TOKEN_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3600),
         }
     }
 
@@ -192,6 +200,7 @@ mod tests {
             encryption_key: encryption_key.to_string(),
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            sa_token_ttl_secs: 3600,
         }
     }
 
