@@ -307,7 +307,7 @@ pub async fn logout(
     headers: HeaderMap,
 ) -> AppResult<(HeaderMap, Json<LogoutResponse>)> {
     if let Some(session_id) = auth_user.session_id {
-        token_service::revoke_session(&state.db, &session_id.to_string()).await?;
+        token_service::revoke_session(&state.db, &session_id.to_string(), Some(&state.mcp_sessions)).await?;
     }
 
     audit_service::log_async(
@@ -381,6 +381,7 @@ pub async fn refresh(
         &state.config,
         &state.jwt_keys,
         refresh_token,
+        Some(&state.mcp_sessions),
     )
     .await?;
 

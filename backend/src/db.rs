@@ -463,5 +463,27 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     )
     .await?;
 
+    // ── mcp_sessions ──
+    let mcp_sessions = db.collection::<mongodb::bson::Document>("mcp_sessions");
+    mcp_sessions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    mcp_sessions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1 })
+                .build(),
+        )
+        .await?;
+
     Ok(())
 }

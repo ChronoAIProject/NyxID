@@ -16,6 +16,8 @@ pub struct RefreshToken {
     pub expires_at: DateTime<Utc>,
     pub revoked: bool,
     pub replaced_by: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub revoked_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -40,6 +42,7 @@ mod tests {
             expires_at: Utc::now(),
             revoked: false,
             replaced_by: None,
+            revoked_at: None,
             created_at: Utc::now(),
         };
         let doc = bson::to_document(&token).expect("serialize");

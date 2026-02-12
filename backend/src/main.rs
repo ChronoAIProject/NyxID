@@ -32,7 +32,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Pre-computed JWK for the JWKS endpoint
     pub jwk_json: serde_json::Value,
-    /// In-memory MCP session store (ephemeral, not persisted)
+    /// Hybrid in-memory + MongoDB MCP session store
     pub mcp_sessions: Arc<McpSessionStore>,
 }
 
@@ -117,8 +117,15 @@ async fn main() {
         .build()
         .expect("Failed to create HTTP client");
 
-    // Create MCP session store
-    let mcp_sessions = Arc::new(McpSessionStore::new());
+    // Create MCP session store with MongoDB persistence
+    let mcp_sessions = Arc::new(McpSessionStore::with_db(db.clone()));
+
+    // Recover MCP sessions from MongoDB (survives server restarts)
+    match mcp_sessions.load_from_db().await {
+        Ok(0) => tracing::info!("No MCP sessions to recover"),
+        Ok(count) => tracing::info!(count, "Recovered MCP sessions from database"),
+        Err(e) => tracing::warn!("Failed to load MCP sessions from database: {e}"),
+    }
 
     // Create shared state
     let state = AppState {
@@ -152,10 +159,10 @@ async fn main() {
 
     // Spawn background cleanup task for MCP session reaper.
     // Sessions live up to 30 days (extended on every request via touch()).
-    // Reaper runs hourly to clean up sessions idle longer than 30 days.
+    // Reaper runs every 5 minutes to clean up sessions idle longer than 30 days.
     let mcp_sessions_for_reaper = mcp_sessions.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
             interval.tick().await;
             mcp_sessions_for_reaper.reap_expired(std::time::Duration::from_secs(

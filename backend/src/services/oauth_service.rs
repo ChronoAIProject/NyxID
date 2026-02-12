@@ -322,6 +322,7 @@ pub async fn exchange_authorization_code(
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
+        revoked_at: None,
         created_at: now,
     };
 

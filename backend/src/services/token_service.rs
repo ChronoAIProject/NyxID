@@ -6,8 +6,26 @@ use crate::config::AppConfig;
 use crate::crypto::jwt::{self, JwtKeys};
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
+use crate::models::mcp_session::McpSessionStore;
 use crate::models::refresh_token::{RefreshToken, COLLECTION_NAME as REFRESH_TOKENS};
 use crate::models::session::{Session, COLLECTION_NAME as SESSIONS};
+
+/// Grace period (in seconds) after refresh token rotation during which
+/// reuse of the old token is treated as a legitimate retry rather than theft.
+///
+/// **Security trade-off**: A longer window gives clients more time to recover
+/// from network failures during rotation (e.g., the response with the new
+/// token was lost), but also gives an attacker who stole the old token a
+/// window to use it before it is flagged as theft.
+///
+/// 120 seconds was chosen because:
+/// - Network retries typically happen within seconds, not minutes.
+/// - It covers slow mobile connections and client-side retry back-off.
+/// - It is short enough that a stolen token has minimal usable window
+///   (the attacker must also have the JWT, which has its own short TTL).
+/// - If the replacement token is already consumed (revoked), the grace
+///   period is irrelevant -- we still treat it as theft.
+const REUSE_GRACE_PERIOD_SECS: i64 = 120;
 
 /// Tokens issued after successful authentication.
 pub struct IssuedTokens {
@@ -78,6 +96,7 @@ pub async fn create_session_and_issue_tokens(
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
+        revoked_at: None,
         created_at: now,
     };
 
@@ -133,11 +152,15 @@ pub async fn create_mfa_pending_session(
 /// Implements refresh token rotation: the old token is revoked and
 /// a new refresh token is issued alongside the new access token.
 /// Does NOT generate a new session token (reuses the existing session).
+///
+/// When `mcp_sessions` is provided, session revocations also cascade
+/// to MCP sessions for the affected user.
 pub async fn refresh_tokens(
     db: &mongodb::Database,
     config: &AppConfig,
     jwt_keys: &JwtKeys,
     refresh_token_str: &str,
+    mcp_sessions: Option<&McpSessionStore>,
 ) -> AppResult<IssuedTokens> {
     // Verify the refresh JWT
     let claims = jwt::verify_token(jwt_keys, config, refresh_token_str)?;
@@ -153,29 +176,78 @@ pub async fn refresh_tokens(
         .await?
         .ok_or_else(|| AppError::Unauthorized("Refresh token not found".to_string()))?;
 
-    if stored.revoked {
-        // Token reuse detected -- possible token theft.
-        // Revoke the entire session as a security measure.
-        tracing::warn!(
-            user_id = %stored.user_id,
-            jti = %claims.jti,
-            "Refresh token reuse detected, revoking session"
-        );
+    // If the token is revoked, check if this is a post-rotation retry
+    // (client retried with old token after restart) vs actual token reuse.
+    // A grace period of 120 seconds allows legitimate retries while catching theft.
+    let active_token = if stored.revoked {
+        // Check if revocation happened within the grace period
+        let within_grace = stored
+            .revoked_at
+            .map(|ra| (Utc::now() - ra).num_seconds() <= REUSE_GRACE_PERIOD_SECS)
+            .unwrap_or(false);
 
-        if let Some(ref session_id) = stored.session_id {
-            revoke_session(db, session_id).await?;
+        match (&stored.replaced_by, within_grace) {
+            (Some(replacement_id), true) => {
+                // Within grace period with a replacement -- check if it's still valid
+                let replacement = db
+                    .collection::<RefreshToken>(REFRESH_TOKENS)
+                    .find_one(doc! { "_id": replacement_id })
+                    .await?;
+
+                match replacement {
+                    Some(r) if !r.revoked && r.expires_at > Utc::now() => {
+                        // The replacement is still valid -- this is a legitimate
+                        // post-restart retry. The client just has the old token.
+                        // Proceed with rotation using the replacement as the base.
+                        tracing::info!(
+                            user_id = %stored.user_id,
+                            jti = %claims.jti,
+                            replacement_id = %replacement_id,
+                            "Post-rotation retry detected, using replacement token"
+                        );
+                        r
+                    }
+                    _ => {
+                        // Replacement is also revoked, expired, or missing.
+                        // This is actual token reuse -- revoke the session.
+                        tracing::warn!(
+                            user_id = %stored.user_id,
+                            jti = %claims.jti,
+                            "Refresh token reuse detected, revoking session"
+                        );
+                        if let Some(ref session_id) = stored.session_id {
+                            revoke_session(db, session_id, mcp_sessions).await?;
+                        }
+                        return Err(AppError::Unauthorized(
+                            "Refresh token has been revoked".to_string(),
+                        ));
+                    }
+                }
+            }
+            _ => {
+                // Outside grace period or no replacement -- genuine reuse/theft.
+                tracing::warn!(
+                    user_id = %stored.user_id,
+                    jti = %claims.jti,
+                    "Refresh token reuse detected (outside grace period), revoking session"
+                );
+                if let Some(ref session_id) = stored.session_id {
+                    revoke_session(db, session_id, mcp_sessions).await?;
+                }
+                return Err(AppError::Unauthorized(
+                    "Refresh token has been revoked".to_string(),
+                ));
+            }
         }
+    } else {
+        stored
+    };
 
-        return Err(AppError::Unauthorized(
-            "Refresh token has been revoked".to_string(),
-        ));
-    }
-
-    let user_id_str = stored.user_id.clone();
+    let user_id_str = active_token.user_id.clone();
     let user_id = Uuid::parse_str(&user_id_str).map_err(|e| {
         AppError::Internal(format!("Invalid user_id in refresh token: {e}"))
     })?;
-    let session_id = stored.session_id.clone();
+    let session_id = active_token.session_id.clone();
     let now = Utc::now();
 
     // Resolve RBAC data and inject into the refreshed access token
@@ -190,16 +262,28 @@ pub async fn refresh_tokens(
     let new_refresh_id = Uuid::new_v4().to_string();
     let refresh_expires = now + Duration::seconds(config.jwt_refresh_ttl_secs);
 
-    // Revoke the old refresh token and set replaced_by
-    db.collection::<RefreshToken>(REFRESH_TOKENS)
-        .update_one(
-            doc! { "_id": &stored.id },
+    // Atomically revoke the active refresh token using find_one_and_update
+    // with a "revoked: false" guard. This prevents two concurrent rotation
+    // requests from both succeeding (only the first CAS wins).
+    let revoked = db
+        .collection::<RefreshToken>(REFRESH_TOKENS)
+        .find_one_and_update(
+            doc! { "_id": &active_token.id, "revoked": false },
             doc! { "$set": {
                 "revoked": true,
+                "revoked_at": bson::DateTime::from_chrono(now),
                 "replaced_by": &new_refresh_id,
             }},
         )
         .await?;
+
+    if revoked.is_none() {
+        // Another concurrent request already rotated this token.
+        // Ask the client to retry with the (now-current) refresh token.
+        return Err(AppError::Conflict(
+            "Refresh token was concurrently rotated, please retry".to_string(),
+        ));
+    }
 
     // Persist new refresh token
     let new_refresh = RefreshToken {
@@ -211,6 +295,7 @@ pub async fn refresh_tokens(
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
+        revoked_at: None,
         created_at: now,
     };
 
@@ -245,7 +330,18 @@ pub async fn refresh_tokens(
 /// Revoke a session and all its associated refresh tokens.
 ///
 /// Uses batch update where possible to avoid N+1 queries.
-pub async fn revoke_session(db: &mongodb::Database, session_id: &str) -> AppResult<()> {
+/// When `mcp_sessions` is provided, also cascades to MCP sessions for the user.
+pub async fn revoke_session(
+    db: &mongodb::Database,
+    session_id: &str,
+    mcp_sessions: Option<&McpSessionStore>,
+) -> AppResult<()> {
+    // Look up the session to get the user_id for MCP cascade
+    let session_doc = db
+        .collection::<Session>(SESSIONS)
+        .find_one(doc! { "_id": session_id })
+        .await?;
+
     // Revoke the session
     db.collection::<Session>(SESSIONS)
         .update_one(
@@ -261,6 +357,11 @@ pub async fn revoke_session(db: &mongodb::Database, session_id: &str) -> AppResu
             doc! { "$set": { "revoked": true } },
         )
         .await?;
+
+    // Cascade: remove MCP sessions for the affected user
+    if let (Some(mcp), Some(session)) = (mcp_sessions, &session_doc) {
+        mcp.remove_by_user_id(&session.user_id);
+    }
 
     tracing::info!(session_id = %session_id, "Session revoked");
 

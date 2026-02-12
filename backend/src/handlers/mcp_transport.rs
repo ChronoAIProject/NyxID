@@ -357,6 +357,17 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
     }
 
     state.mcp_sessions.remove(&sid);
+
+    // Audit log for session deletion
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id.to_string()),
+        "mcp_session_deleted".to_string(),
+        Some(serde_json::json!({ "session_id": &sid })),
+        None,
+        None,
+    );
+
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -365,7 +376,20 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
 // ---------------------------------------------------------------------------
 
 fn handle_initialize(state: &AppState, user_id: &str, request: &JsonRpcRequest) -> Response {
-    let session_id = state.mcp_sessions.create(user_id);
+    let session_id = match state.mcp_sessions.create(user_id) {
+        Some(id) => id,
+        None => return rpc_error(request.id.clone(), -32000, "Too many active MCP sessions"),
+    };
+
+    // Audit log for session creation
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id.to_string()),
+        "mcp_session_created".to_string(),
+        Some(serde_json::json!({ "session_id": &session_id })),
+        None,
+        None,
+    );
 
     let result = serde_json::json!({
         "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -385,10 +409,15 @@ fn handle_initialize(state: &AppState, user_id: &str, request: &JsonRpcRequest) 
         error: None,
     };
 
+    let header_value = match axum::http::HeaderValue::from_str(&session_id) {
+        Ok(v) => v,
+        Err(_) => return rpc_error(request.id.clone(), -32603, "Failed to create session header"),
+    };
+
     let mut response = axum::Json(body).into_response();
     response.headers_mut().insert(
         axum::http::HeaderName::from_static("mcp-session-id"),
-        axum::http::HeaderValue::from_str(&session_id).unwrap(),
+        header_value,
     );
     response
 }

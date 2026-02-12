@@ -573,6 +573,7 @@ pub async fn token(
                 &state.config,
                 &state.jwt_keys,
                 refresh,
+                Some(&state.mcp_sessions),
             )
             .await?;
 
