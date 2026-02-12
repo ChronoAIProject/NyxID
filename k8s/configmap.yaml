@@ -17,6 +17,8 @@ data:
   JWT_PUBLIC_KEY_PATH: "/etc/nyxid/keys/public.pem"
   JWT_ACCESS_TTL_SECS: "900"
   JWT_REFRESH_TTL_SECS: "604800"
+  # Database
+  DATABASE_MAX_CONNECTIONS: "10"
   # Rate limiting
   RATE_LIMIT_PER_SECOND: "10"
   RATE_LIMIT_BURST: "30"

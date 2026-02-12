@@ -1,5 +1,5 @@
 # ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.93-bookworm AS builder
 
 WORKDIR /build
 
@@ -12,7 +12,7 @@ RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs
 RUN cargo build --release --manifest-path backend/Cargo.toml
 
 # Remove the dummy build artifacts (forces recompilation of our code only)
-RUN rm -rf backend/src
+RUN rm -rf backend/src target/release/deps/nyxid-* target/release/nyxid
 
 # Copy the real source code
 COPY backend/src backend/src
@@ -36,7 +36,7 @@ RUN groupadd -r nyxid && useradd -r -g nyxid -d /app -s /sbin/nologin nyxid
 WORKDIR /app
 
 # Copy the compiled binary
-COPY --from=builder /build/backend/target/release/nyxid /usr/local/bin/nyxid
+COPY --from=builder /build/target/release/nyxid /usr/local/bin/nyxid
 
 # Create directory for JWT keys (mounted at runtime)
 RUN mkdir -p /app/keys && chown nyxid:nyxid /app/keys
