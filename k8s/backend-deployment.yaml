@@ -2,13 +2,13 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: nyxid-backend
-  namespace: nyxid
+  namespace: chronoai-platform
   labels:
     app.kubernetes.io/name: nyxid-backend
     app.kubernetes.io/component: backend
     app.kubernetes.io/part-of: nyxid
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: nyxid-backend
@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: nyxid-backend:latest
+          image: us-central1-docker.pkg.dev/aelf-shared-k8s-prod/aelf-prod-registry/nyxid-backend:0.0.3
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3001
@@ -72,7 +72,7 @@ spec:
         - name: jwt-keys
           secret:
             secretName: nyxid-jwt-keys
-            defaultMode: 0400
+            defaultMode: 0444
         - name: tmp
           emptyDir: {}
 ---
@@ -80,7 +80,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: nyxid-backend
-  namespace: nyxid
+  namespace: chronoai-platform
   labels:
     app.kubernetes.io/name: nyxid-backend
     app.kubernetes.io/component: backend

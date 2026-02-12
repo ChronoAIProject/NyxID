@@ -10,7 +10,7 @@ COPY . .
 RUN npm run build
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
-FROM nginx:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.27-alpine
 
 # Copy the built SPA
 COPY --from=builder /build/dist /usr/share/nginx/html
@@ -20,4 +20,4 @@ COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 
 ENV BACKEND_URL=http://backend:3001
 
-EXPOSE 80
+EXPOSE 8080

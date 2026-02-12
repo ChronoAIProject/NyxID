@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use axum::{extract::DefaultBodyLimit, extract::Extension, middleware as axum_mw};
 use clap::Parser;
 use tokio::net::TcpListener;
@@ -208,7 +209,7 @@ async fn main() {
 
     tracing::info!("Listening on {addr}");
 
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .expect("Server error");
 }

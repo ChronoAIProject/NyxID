@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: nyxid-mongodb
-  namespace: nyxid
+  namespace: chronoai-platform
   labels:
     app.kubernetes.io/name: nyxid-mongodb
     app.kubernetes.io/component: database
@@ -75,7 +75,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: nyxid-mongodb
-  namespace: nyxid
+  namespace: chronoai-platform
   labels:
     app.kubernetes.io/name: nyxid-mongodb
     app.kubernetes.io/component: database
