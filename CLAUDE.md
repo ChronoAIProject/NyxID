@@ -63,9 +63,9 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (18 models)
-|-- services/            # Business logic (19 services)
-|-- handlers/            # HTTP handlers (20 handler modules)
+|-- models/              # MongoDB document structs (19 models, 18 collections)
+|-- services/            # Business logic (24 services, incl. token_exchange_service)
+|-- handlers/            # HTTP handlers (25 handler modules, incl. delegation)
 |-- crypto/              # JWT, AES, password hashing, token generation
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
@@ -94,6 +94,10 @@ All API routes under `/api/v1`:
 - `/providers` -- CRUD + OAuth/device-code/API-key flows + token management
 - `/admin` -- user management, audit log, OAuth clients
 - `/proxy/{service_id}/{path}` -- authenticated proxy
+- `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
+- `/delegation/refresh` -- refresh delegated access tokens
+
+- `/oauth/token` -- also supports `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access)
 
 Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`
 

@@ -37,6 +37,7 @@ export interface OAuthClient {
   readonly client_type: "public" | "confidential";
   readonly redirect_uris: readonly string[];
   readonly allowed_scopes: string;
+  readonly delegation_scopes: string;
   readonly is_active: boolean;
   readonly client_secret: string | null;
   readonly created_at: string;
@@ -64,6 +65,8 @@ export interface DownstreamService {
   readonly identity_include_email?: boolean;
   readonly identity_include_name?: boolean;
   readonly identity_jwt_audience?: string | null;
+  readonly inject_delegation_token?: boolean;
+  readonly delegation_token_scope?: string;
 }
 
 export interface ServiceEndpoint {
@@ -91,6 +94,7 @@ export interface OidcCredentials {
   readonly client_secret: string;
   readonly redirect_uris: readonly string[];
   readonly allowed_scopes: string;
+  readonly delegation_scopes: string;
   readonly issuer: string;
   readonly authorization_endpoint: string;
   readonly token_endpoint: string;

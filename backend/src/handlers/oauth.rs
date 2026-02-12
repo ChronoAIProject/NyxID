@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
-use crate::services::{audit_service, consent_service, oauth_client_service, oauth_service};
+use crate::services::{audit_service, consent_service, oauth_client_service, oauth_service, token_exchange_service};
 use crate::AppState;
 
 // --- Request / Response types ---
@@ -41,6 +41,12 @@ pub struct TokenRequest {
     pub client_secret: Option<String>,
     pub code_verifier: Option<String>,
     pub refresh_token: Option<String>,
+    /// RFC 8693 Token Exchange: the user's access token
+    pub subject_token: Option<String>,
+    /// RFC 8693 Token Exchange: must be "urn:ietf:params:oauth:token-type:access_token"
+    pub subject_token_type: Option<String>,
+    /// Requested scope (used by token exchange)
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +57,9 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
     pub scope: Option<String>,
+    /// RFC 8693: Indicates the type of the issued token (only for token exchange grant).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issued_token_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -509,6 +518,7 @@ pub async fn token(
                 refresh_token: Some(refresh_token),
                 id_token,
                 scope: Some(granted_scope),
+                issued_token_type: None,
             }))
         }
         "refresh_token" => {
@@ -532,8 +542,55 @@ pub async fn token(
                 refresh_token: Some(tokens.refresh_token),
                 id_token: None,
                 scope: None,
+                issued_token_type: None,
             }))
         }
+        // RFC 8693 Token Exchange
+        "urn:ietf:params:oauth:grant-type:token-exchange" => {
+            let client_id = body.client_id.as_deref()
+                .ok_or_else(|| AppError::BadRequest("Missing client_id".to_string()))?;
+            let client_secret = body.client_secret.as_deref()
+                .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
+            let subject_token = body.subject_token.as_deref()
+                .ok_or_else(|| AppError::BadRequest("Missing subject_token".to_string()))?;
+            let subject_token_type = body.subject_token_type.as_deref()
+                .ok_or_else(|| AppError::BadRequest("Missing subject_token_type".to_string()))?;
+
+            let result = token_exchange_service::exchange_token(
+                &state.db,
+                &state.config,
+                &state.jwt_keys,
+                client_id,
+                client_secret,
+                subject_token,
+                subject_token_type,
+                body.scope.as_deref(),
+            )
+            .await?;
+
+            audit_service::log_async(
+                state.db.clone(),
+                Some(result.user_id.clone()),
+                "token_exchange".to_string(),
+                Some(serde_json::json!({
+                    "client_id": client_id,
+                    "scope": &result.scope,
+                })),
+                None,
+                None,
+            );
+
+            Ok(Json(TokenResponse {
+                access_token: result.access_token,
+                token_type: result.token_type,
+                expires_in: result.expires_in,
+                refresh_token: None,
+                id_token: None,
+                scope: Some(result.scope),
+                issued_token_type: Some(result.issued_token_type),
+            }))
+        }
+
         other => Err(AppError::BadRequest(format!(
             "Unsupported grant_type: {other}"
         ))),
@@ -796,12 +853,17 @@ pub async fn register_client(
         ));
     }
 
+    // Dynamic registration only creates public clients (PKCE-based, no secret).
+    // Public clients cannot authenticate with client_secret, which is required
+    // for the RFC 8693 token exchange grant. Therefore delegation_scopes is
+    // intentionally empty to prevent token exchange for dynamically registered clients.
     let (client, _secret) = oauth_client_service::create_client(
         &state.db,
         &client_name,
         &redirect_uris,
         "public",
         "dynamic_registration",
+        "",
     )
     .await?;
 

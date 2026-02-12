@@ -401,6 +401,8 @@ Currently available migrations:
 | Script | Description | When to run |
 |--------|-------------|-------------|
 | `001-service-categories.js` | Adds `service_category` and `requires_user_credential` to services, `credential_type` and `credential_label` to connections | Before deploying the service proxy overhaul |
+| `002-delegation-scopes.js` | Adds `delegation_scopes` (empty string default) to `oauth_clients` | Before deploying delegated access feature |
+| `003-delegation-token-injection.js` | Adds `inject_delegation_token` (false) and `delegation_token_scope` (`"llm:proxy"`) to `downstream_services` | Before deploying delegated access feature |
 
 ### Collections Created
 

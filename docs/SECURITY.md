@@ -15,6 +15,7 @@ This document details NyxID's security architecture, threat mitigations, and ope
 - [Admin Access Control](#admin-access-control)
 - [RBAC Security](#rbac-security)
 - [Token Introspection and Revocation Security](#token-introspection-and-revocation-security)
+- [Delegated Access Security](#delegated-access-security)
 - [Consent Flow Security](#consent-flow-security)
 - [Authentication Security](#authentication-security)
 - [HTTP Security Headers](#http-security-headers)
@@ -349,6 +350,52 @@ Both the introspection (`POST /oauth/introspect`) and revocation (`POST /oauth/r
 
 ---
 
+## Delegated Access Security
+
+### Security Properties
+
+| Property | Mechanism |
+|----------|-----------|
+| **Service authentication** | Client credentials (`client_id` + hashed `client_secret`) required for token exchange |
+| **User authentication** | Subject token must be a valid, non-expired NyxID access token |
+| **Consent verification** | Consent record must exist for `(user_id, client_id)` before token exchange is allowed |
+| **Scope limitation** | Delegated token scope is constrained to the client's configured `delegation_scopes` |
+| **Time limitation** | Token exchange: 5-minute TTL; MCP injection: 5-minute TTL |
+| **Renewable tokens** | Delegation tokens can be refreshed via `POST /api/v1/delegation/refresh`; each refresh issues a new token with fresh 5-minute TTL, same scope and acting client |
+| **Consent-on-refresh** | Every refresh validates that the user still has active consent for the acting client; revoking consent immediately blocks future refreshes |
+| **Endpoint restriction** | Delegated tokens are blocked from non-proxy/non-LLM endpoints via `reject_delegated_tokens` middleware |
+| **No credential exposure** | Services never see user's provider credentials -- only NyxID resolves and injects them |
+| **Chained exchange prevention** | Delegated tokens cannot be exchanged for new delegated tokens, preventing indefinite TTL extension |
+| **Audit trail** | Token exchange and subsequent proxy requests are audit-logged with both `user_id` and `acting_client_id` |
+
+### MCP Injection Security
+
+When NyxID proxies MCP tool calls, delegation tokens are only injected for services with `inject_delegation_token: true` (default: `false`). Additional security controls:
+
+| Property | Mechanism |
+|----------|-----------|
+| **Opt-in per service** | `inject_delegation_token` defaults to `false`; must be explicitly enabled by admin |
+| **User intent** | User explicitly invoked the tool call; tokens are not pre-generated |
+| **Scope control** | Token scope is fixed by admin config (`delegation_token_scope`); service cannot request broader access |
+| **Single use window** | 5-minute TTL; token is generated per tool call; refreshable for long-running workflows |
+| **Service identity** | `act.sub` claim identifies the downstream service for audit purposes |
+
+### Threat Mitigations
+
+| Threat | Mitigation |
+|--------|------------|
+| **Stolen service credentials** | Client secret is hashed (SHA-256) in storage. Constant-time comparison prevents timing attacks. |
+| **Stolen subject token** | Subject tokens are short-lived (15 min). Attacker also needs client_secret for token exchange. |
+| **Service acting without consent** | Consent check is mandatory at token exchange and on every refresh. Can be revoked by user at any time via consent management; revocation immediately blocks future refreshes. |
+| **Scope escalation** | Delegated scope strictly limited by `delegation_scopes` on the client configuration. |
+| **Chained token exchange** | Explicitly rejected: delegated tokens have `delegated: true` and are blocked from exchange. |
+| **Token replay** | Delegated tokens have unique JTI and short TTL (5 min). Each refresh issues a new JTI. |
+| **Downstream service replays MCP token** | 5-minute TTL. Refreshable via `/api/v1/delegation/refresh` for legitimate long-running workflows; user must remain active and consent must not be revoked for refresh to succeed. |
+| **Delegated token used on restricted endpoints** | `reject_delegated_tokens` middleware blocks access to all non-proxy/non-LLM routes. |
+| **User deactivation** | `AuthUser` extractor checks `is_active` for every request, including delegated tokens. |
+
+---
+
 ## Consent Flow Security
 
 ### IDOR Prevention
@@ -481,6 +528,9 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 | Unauthorized RBAC modification  | All RBAC endpoints require `is_admin = true` (database check, not JWT claim) |
 | Token introspection info leak   | Returns `{"active": false}` for unauthenticated callers |
 | Consent IDOR                    | User ID taken from auth context, not request parameters |
+| Delegated token scope escalation | Scope constrained to client's `delegation_scopes`; `reject_delegated_tokens` middleware blocks non-proxy endpoints |
+| Chained token exchange          | Delegated tokens explicitly rejected as subject tokens for exchange |
+| MCP token replay                | 5-minute TTL on MCP-injected tokens; per-call generation with unique JTI |
 
 ---
 
@@ -534,3 +584,7 @@ Summary of security controls by identifier (from the architecture plan):
 | SEC-M5 | Error body truncation                      | 200-char limit on provider error messages   |
 | CR-4/5/6 | N+1 query prevention                    | Batch `$in` queries for provider lookups    |
 | CR-15  | Required provider enforcement              | 400 error for missing required provider tokens |
+| DA-1   | Delegated token endpoint restriction       | `reject_delegated_tokens` middleware on non-proxy routes |
+| DA-2   | Chained exchange prevention                | `delegated == Some(true)` check in `exchange_token()` |
+| DA-3   | Consent-gated delegation                   | `consent_service::check_consent()` before token issuance |
+| DA-4   | MCP injection opt-in                       | `inject_delegation_token` defaults to `false` per service |

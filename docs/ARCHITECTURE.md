@@ -17,6 +17,7 @@ This document describes the system architecture, component design, data flows, a
 - [Credential Broker](#credential-broker)
 - [LLM Gateway](#llm-gateway)
 - [Identity Propagation](#identity-propagation)
+- [Delegated Access](#delegated-access)
 - [Deployment Architecture](#deployment-architecture)
 
 ---
@@ -113,7 +114,7 @@ Responsibilities:
 
 | Module              | Responsibility                                        |
 |---------------------|-------------------------------------------------------|
-| `auth.rs`           | Extract `AuthUser` from Bearer token, session cookie, access token cookie, or API key header. Verify user is active. |
+| `auth.rs`           | Extract `AuthUser` from Bearer token, session cookie, access token cookie, or API key header. Verify user is active. Populate `acting_client_id` from delegated token `act.sub` claim. `reject_delegated_tokens` middleware blocks delegated tokens from non-proxy endpoints. |
 | `rate_limit.rs`     | Per-IP sliding window rate limiter with global token-bucket fallback. Background cleanup prevents memory growth. |
 | `security_headers.rs` | Inject HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, X-XSS-Protection into every response. |
 
@@ -192,6 +193,7 @@ The service layer contains all business logic. Services receive database connect
 | `delegation_service.rs` | Resolves delegated provider credentials for proxy injection, batch provider queries (N+1 fix), required vs. optional enforcement |
 | `identity_service.rs` | Builds identity propagation headers (CRLF-sanitized), generates short-lived RS256 identity assertion JWTs (60s TTL) |
 | `llm_gateway_service.rs` | LLM gateway: provider slug resolution, model-to-provider routing, translator trait with Anthropic/Google AI/passthrough implementations |
+| `token_exchange_service.rs` | RFC 8693 Token Exchange: client authentication, subject token validation, consent verification, delegation scope validation, delegated token issuance |
 | `oauth_flow.rs`     | OAuth2 utilities: PKCE code verifier/challenge generation, token exchange with no-redirect HTTP client, token refresh |
 
 #### 5. Crypto Layer (`crypto/`)
@@ -1161,6 +1163,115 @@ Downstream services verify the JWT using NyxID's JWKS endpoint (`/.well-known/jw
 - **CRLF injection prevention:** All identity header values pass through `sanitize_header_value()` which strips CR (`\r`), LF (`\n`), and NUL (`\0`) characters
 - **Short token lifetime:** Identity JWTs expire in 60 seconds to minimize replay window
 - **Per-service audience:** The `aud` claim is scoped to the target service, preventing token reuse across services
+
+---
+
+## Delegated Access
+
+Delegated access allows downstream services to make NyxID API calls (LLM gateway, proxy) on behalf of authenticated users. This is essential for MCP-proxied services that need to call back to NyxID's LLM gateway.
+
+### Two Paths to Delegated Access
+
+| Path | When to Use | How It Works | Token TTL |
+|------|-------------|--------------|-----------|
+| **MCP Injection** | Downstream services called via NyxID's MCP proxy or REST proxy. Service does NOT need to be an OIDC client. | NyxID generates a delegation token and injects it as `X-NyxID-Delegation-Token` when proxying the request. | 5 minutes |
+| **Token Exchange (RFC 8693)** | OIDC-linked services that need server-to-server calls outside of MCP context. | Service exchanges the user's access token for a delegation token via `POST /oauth/token`. | 5 minutes |
+
+Both paths produce the same artifact: a standard NyxID JWT with `sub=user_id`, `act.sub=service_id`, `delegated=true`, and constrained scopes.
+
+### Token Refresh for Long-Running Workflows
+
+Delegation tokens can be refreshed via `POST /api/v1/delegation/refresh` before they expire. This is critical for agentic/long-running LLM workflows where a downstream service needs to make multiple API calls over an extended period.
+
+- The refresh endpoint only accepts delegated tokens (rejects regular user tokens)
+- Issues a new token with fresh 5-minute TTL, same `act.sub` and scope
+- Validates the user is still active before issuing the new token
+- Validates the user still has active consent for the acting client (consent-on-refresh); revoking consent immediately blocks future refreshes
+- Audit-logged as `delegation_token_refreshed`
+
+### Delegated Token Flow (Token Exchange)
+
+```
+Downstream Service                    NyxID                          LLM Provider
+       |                               |                                |
+       |  1. POST /oauth/token         |                                |
+       |     grant_type=token_exchange  |                                |
+       |     client_id + client_secret  |                                |
+       |     subject_token=<user's AT>  |                                |
+       |----------------------------->>|                                |
+       |                               |  2. Validate client creds      |
+       |                               |  3. Validate subject_token     |
+       |                               |  4. Check consent              |
+       |                               |  5. Issue delegated token      |
+       |  <<----------------------------|                                |
+       |  delegated_access_token        |                                |
+       |                               |                                |
+       |  6. POST /api/v1/llm/gateway/v1/chat/completions              |
+       |     Authorization: Bearer <delegated_access_token>             |
+       |----------------------------->>|                                |
+       |                               |  7. Extract user from token    |
+       |                               |  8. Resolve user's provider    |
+       |                               |     credentials                |
+       |                               |  9. Forward with credentials   |
+       |                               |----------------------------->>|
+       |                               |  <<----------------------------|
+       |  <<----------------------------|                                |
+       |  LLM response                 |                                |
+```
+
+### MCP Delegation Token Injection Flow
+
+```
+User (MCP Client)    NyxID                    Downstream Service      NyxID LLM Gateway
+       |              |                              |                       |
+       | tools/call   |                              |                       |
+       |------------->|                              |                       |
+       |              | Generate delegation token    |                       |
+       |              | (sub=user, act=svc, 5m TTL)  |                       |
+       |              |                              |                       |
+       |              | Proxy tool call + headers:   |                       |
+       |              |  X-NyxID-User-Id             |                       |
+       |              |  X-NyxID-Identity-Token      |                       |
+       |              |  X-NyxID-Delegation-Token    |                       |
+       |              |----------------------------->|                       |
+       |              |                              |                       |
+       |              |                              | Call LLM gateway      |
+       |              |                              | Bearer: <deleg_token> |
+       |              |                              |---------------------->|
+       |              |                              |                       |
+       |              |                              | <--- LLM response ----|
+       |              | <--- Tool result ------------|                       |
+       | <-- Result --|                              |                       |
+```
+
+### Scope Enforcement
+
+Delegated tokens are restricted to proxy and LLM gateway endpoints. All other endpoints reject delegated tokens via the `reject_delegated_tokens` middleware layer applied to the protected route group in `routes.rs`.
+
+| Route Group                      | Delegated Token | Direct Token |
+|----------------------------------|-----------------|--------------|
+| `/api/v1/llm/*`                 | Allowed         | Allowed      |
+| `/api/v1/proxy/{id}/{*path}`    | Allowed         | Allowed      |
+| `/api/v1/delegation/refresh`    | Allowed         | Blocked (403)|
+| `/api/v1/auth/*`                | Blocked         | Allowed      |
+| `/api/v1/users/*`               | Blocked         | Allowed      |
+| `/api/v1/admin/*`               | Blocked         | Allowed      |
+| `/api/v1/services/*`            | Blocked         | Allowed      |
+| All other `/api/v1/*`           | Blocked         | Allowed      |
+
+### Key Implementation Files
+
+| File | Responsibility |
+|------|---------------|
+| `services/token_exchange_service.rs` | RFC 8693 token exchange: client auth, subject token validation, consent check, scope validation, delegated token issuance; `refresh_delegation_token()` for renewable tokens |
+| `crypto/jwt.rs` | `generate_delegated_access_token()` -- creates JWTs with `act` and `delegated` claims; `ActorClaim` struct |
+| `mw/auth.rs` | `AuthUser.acting_client_id` field; `require_direct_auth()` method; `reject_delegated_tokens` middleware |
+| `handlers/oauth.rs` | Token exchange grant type handler in `token()` |
+| `handlers/delegation.rs` | `POST /api/v1/delegation/refresh` -- delegation token refresh endpoint |
+| `services/mcp_service.rs` | Delegation token injection during MCP tool execution |
+| `handlers/proxy.rs` | Delegation token injection during REST proxy requests |
+| `models/oauth_client.rs` | `delegation_scopes` field on `OauthClient` |
+| `models/downstream_service.rs` | `inject_delegation_token` and `delegation_token_scope` fields |
 
 ---
 

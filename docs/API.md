@@ -26,6 +26,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [LLM Gateway](#llm-gateway)
   - [MFA](#mfa-multi-factor-authentication)
   - [OAuth / OpenID Connect](#oauth--openid-connect)
+  - [Token Exchange (Delegated Access)](#token-exchange-delegated-access)
   - [Token Introspection](#token-introspection)
   - [Token Revocation](#token-revocation)
   - [User Consents](#user-consents)
@@ -2361,6 +2362,8 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Credential Delegation:** If the service has provider requirements configured, NyxID resolves the user's provider tokens and injects them into the outbound request. Required provider tokens cause the request to fail if missing; optional tokens are silently skipped.
 
+**Delegation Token Injection:** If the service has `inject_delegation_token: true`, NyxID generates a short-lived delegated access token (5-minute TTL) and injects it as the `X-NyxID-Delegation-Token` header. This allows the downstream service to call NyxID APIs (LLM gateway, proxy) on behalf of the user. The token can be refreshed via `POST /api/v1/delegation/refresh` for long-running workflows. See [Token Exchange (Delegated Access)](#token-exchange-delegated-access) for details.
+
 **Response:** The downstream service's response status code, allowed headers, and body are returned directly. Only a safe allowlist of response headers is forwarded.
 
 **Limits:** Request body is limited to 10 MB for proxy requests.
@@ -2692,7 +2695,7 @@ curl -G http://localhost:3001/oauth/authorize \
 
 #### POST /oauth/token
 
-Token endpoint. Exchanges an authorization code for access, refresh, and ID tokens. Also supports the `refresh_token` grant type.
+Token endpoint. Exchanges an authorization code for access, refresh, and ID tokens. Also supports the `refresh_token` grant type and `urn:ietf:params:oauth:grant-type:token-exchange` for delegated access (see [Token Exchange](#token-exchange-delegated-access)).
 
 **Auth:** None (client authenticates via `client_id` and optionally `client_secret`)
 
@@ -2879,6 +2882,207 @@ curl -X POST http://localhost:3001/oauth/revoke \
   -d "token=eyJhbGciOiJSUzI1NiIs..." \
   -d "client_id=client-uuid-here" \
   -d "client_secret=client-secret-here"
+```
+
+---
+
+### Token Exchange (Delegated Access)
+
+NyxID supports [RFC 8693 OAuth 2.0 Token Exchange](https://tools.ietf.org/html/rfc8693) to enable downstream services to make API calls on behalf of users. This is used when a downstream service (registered as an OIDC client) needs to call NyxID's LLM gateway or proxy endpoints using the user's credentials.
+
+#### POST /oauth/token (token-exchange grant)
+
+Exchange a user's access token for a short-lived delegated access token. The delegated token can be used as a Bearer token at NyxID's proxy and LLM gateway endpoints.
+
+**Auth:** None (client authenticates via `client_id` and `client_secret` in the request body)
+
+**Preconditions:**
+1. The downstream service must be registered as a **confidential** OAuth client with `delegation_scopes` configured
+2. The user must have an existing consent record for the client (auto-created during OIDC login)
+3. The subject token must be a valid, non-expired, non-delegated NyxID access token
+
+**Request Body (form-encoded):**
+
+| Field                | Type   | Required | Description                                                |
+|----------------------|--------|----------|------------------------------------------------------------|
+| `grant_type`         | string | Yes      | `urn:ietf:params:oauth:grant-type:token-exchange`          |
+| `client_id`          | string | Yes      | The downstream service's OAuth client ID                   |
+| `client_secret`      | string | Yes      | The downstream service's OAuth client secret               |
+| `subject_token`      | string | Yes      | The user's NyxID access token                              |
+| `subject_token_type` | string | Yes      | Must be `urn:ietf:params:oauth:token-type:access_token`    |
+| `scope`              | string | No       | Requested delegation scopes (default: `llm:proxy`)         |
+
+**Available Delegation Scopes:**
+
+| Scope              | Access                                                          |
+|--------------------|-----------------------------------------------------------------|
+| `llm:proxy`        | LLM gateway and provider-specific proxy endpoints               |
+| `proxy:*`          | All proxy endpoints (`/api/v1/proxy/{service_id}/{*path}`)      |
+| `proxy:{service_id}` | A specific service's proxy endpoint                           |
+| `llm:status`       | Read-only access to LLM status endpoint                        |
+
+**Response (200):**
+
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "Bearer",
+  "expires_in": 300,
+  "scope": "llm:proxy"
+}
+```
+
+**Delegated Token JWT Claims:**
+
+| Claim       | Type    | Description                                        |
+|-------------|---------|----------------------------------------------------|
+| `sub`       | string  | User ID (the user being acted on behalf of)        |
+| `iss`       | string  | NyxID issuer                                       |
+| `aud`       | string  | NyxID base URL                                     |
+| `exp`       | integer | Expiration (5 minutes from issuance)               |
+| `iat`       | integer | Issued at                                          |
+| `jti`       | string  | Unique token ID                                    |
+| `scope`     | string  | Constrained delegation scopes                      |
+| `token_type`| string  | `"access"`                                         |
+| `act.sub`   | string  | OAuth client ID of the acting service (RFC 8693)   |
+| `delegated` | boolean | `true` (distinguishes from direct user tokens)     |
+
+**Errors:**
+- `1000 bad_request` -- Missing required parameters, invalid `subject_token_type`, subject token is not an access token, or subject token is itself a delegated token (chained exchange rejected)
+- `1001 unauthorized` -- Invalid client credentials or invalid/expired subject token
+- `1002 forbidden` -- User has not consented to delegation for this client, or token exchange is not enabled for this client (empty `delegation_scopes`)
+- `3002 invalid_scope` -- Requested scope is not in the client's `delegation_scopes`
+
+**Example:**
+
+```bash
+curl -X POST http://localhost:3001/oauth/token \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  -d "client_id=downstream-client-id" \
+  -d "client_secret=downstream-client-secret" \
+  -d "subject_token=eyJhbGciOiJSUzI1NiIs..." \
+  -d "subject_token_type=urn:ietf:params:oauth:token-type:access_token" \
+  -d "scope=llm:proxy"
+```
+
+**Using the Delegated Token:**
+
+```bash
+# Use the delegated token to call NyxID's LLM gateway on behalf of the user
+curl -X POST http://localhost:3001/api/v1/llm/gateway/v1/chat/completions \
+  -H "Authorization: Bearer <delegated_access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+**Endpoint Access Restrictions:**
+
+Delegated tokens are restricted to proxy and LLM gateway endpoints only. All other endpoints (auth, users, API keys, services, admin, MFA, etc.) reject delegated tokens with `403 Forbidden`.
+
+| Endpoint Group                   | Delegated Token Access |
+|----------------------------------|------------------------|
+| `/api/v1/llm/*`                  | Allowed                |
+| `/api/v1/proxy/{id}/{*path}`     | Allowed                |
+| `/api/v1/delegation/refresh`     | Allowed (required)     |
+| All other `/api/v1/*`            | Blocked                |
+
+---
+
+#### POST /api/v1/delegation/refresh
+
+Refresh a delegated access token. Issues a new delegation token with the same `act.sub` and scope but a fresh 5-minute TTL. Only accepts delegated tokens -- regular user tokens are rejected with 403.
+
+This endpoint is critical for agentic/long-running workflows where a downstream service needs to make API calls over an extended period.
+
+**Auth:** Required (delegated Bearer token only)
+
+**Request:** No request body. The current delegation token is provided via the `Authorization: Bearer` header.
+
+**Response (200):**
+
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "Bearer",
+  "expires_in": 300,
+  "scope": "llm:proxy"
+}
+```
+
+**Security:**
+- Validates the user still exists and is active
+- Validates the user still has active consent for the acting client (prevents indefinite refresh after consent revocation)
+
+**Errors:**
+- `1001 unauthorized` -- Invalid/expired token, or user account is inactive or not found
+- `1002 forbidden` -- Token is not a delegated token (missing `act.sub`), or user consent has been revoked for the acting client
+
+**Example:**
+
+```bash
+# Refresh a delegation token before it expires
+curl -X POST http://localhost:3001/api/v1/delegation/refresh \
+  -H "Authorization: Bearer <current_delegation_token>"
+```
+
+---
+
+#### MCP Delegation Token Injection
+
+When NyxID proxies an MCP tool call or REST proxy request to a downstream service that has `inject_delegation_token: true`, it automatically generates and injects a delegation token as the `X-NyxID-Delegation-Token` header.
+
+This allows the downstream service to use the token as a Bearer token when calling back to NyxID's API endpoints (e.g., LLM gateway) on behalf of the user.
+
+**Injected Header:**
+
+| Header                          | Value                                    |
+|---------------------------------|------------------------------------------|
+| `X-NyxID-Delegation-Token`     | Short-lived delegated NyxID access JWT   |
+
+**MCP-Injected Token Properties:**
+
+| Property   | Value                                                         |
+|------------|---------------------------------------------------------------|
+| TTL        | 5 minutes (refreshable via `POST /api/v1/delegation/refresh`) |
+| Scope      | Configurable per-service via `delegation_token_scope` (default: `llm:proxy`) |
+| `act.sub`  | Service slug of the downstream service                        |
+| `delegated`| `true`                                                        |
+
+**Configuration (on the downstream service):**
+
+| Field                      | Type    | Default      | Description                                  |
+|----------------------------|---------|--------------|----------------------------------------------|
+| `inject_delegation_token`  | boolean | `false`      | Whether to inject delegation tokens          |
+| `delegation_token_scope`   | string  | `"llm:proxy"`| Space-separated scopes for the injected token|
+
+**Downstream Service Usage Example (Python):**
+
+```python
+from flask import request
+import requests
+
+@app.route("/api/analyze", methods=["POST"])
+def analyze():
+    delegation_token = request.headers.get("X-NyxID-Delegation-Token")
+    if not delegation_token:
+        return {"error": "No delegation token"}, 400
+
+    # Call NyxID's LLM gateway on behalf of the user
+    response = requests.post(
+        "https://nyx.example.com/api/v1/llm/gateway/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {delegation_token}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Analyze this data..."}],
+        },
+    )
+    return response.json()
 ```
 
 ---
@@ -3673,15 +3877,17 @@ Create a new OAuth client. Returns the client secret only at creation time -- it
 
 | Field           | Type     | Required | Description                                               |
 |-----------------|----------|----------|-----------------------------------------------------------|
-| `name`          | string   | Yes      | Client display name                                       |
-| `redirect_uris` | string[] | Yes     | At least one redirect URI                                 |
-| `client_type`   | string   | No       | `"confidential"` (default) or `"public"`                  |
+| `name`              | string   | Yes      | Client display name                                       |
+| `redirect_uris`     | string[] | Yes     | At least one redirect URI                                 |
+| `client_type`       | string   | No       | `"confidential"` (default) or `"public"`                  |
+| `delegation_scopes` | string   | No       | Space-separated scopes for token exchange (empty = disabled). Values: `llm:proxy`, `proxy:*`, `proxy:{service_id}`, `llm:status` |
 
 ```json
 {
   "name": "My Web App",
   "redirect_uris": ["https://app.example.com/callback"],
-  "client_type": "confidential"
+  "client_type": "confidential",
+  "delegation_scopes": "llm:proxy"
 }
 ```
 
@@ -3736,6 +3942,7 @@ List all registered OAuth clients. Client secrets are never included in the list
       "client_type": "confidential",
       "redirect_uris": ["https://app.example.com/callback"],
       "allowed_scopes": "openid profile email",
+      "delegation_scopes": "",
       "is_active": true,
       "client_secret": null,
       "created_at": "2025-06-01T10:00:00+00:00"

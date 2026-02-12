@@ -197,6 +197,25 @@ export function ServiceDetailPage() {
           </>
         )}
 
+      {service.inject_delegation_token && (
+        <>
+          <Separator />
+          <DetailSection title="Delegation Token Injection">
+            <DetailRow
+              label="Status"
+              value="Enabled"
+              badge
+              badgeVariant="success"
+            />
+            <DetailRow
+              label="Token Scope"
+              value={service.delegation_token_scope || "llm:proxy"}
+              mono
+            />
+          </DetailSection>
+        </>
+      )}
+
       <Separator />
       <DetailSection title="Provider Requirements">
         <ServiceRequirementsView

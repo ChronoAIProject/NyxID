@@ -618,6 +618,49 @@ pub async fn execute_tool(
         }
     }
 
+    // Generate delegation token if configured on the service
+    if target.service.inject_delegation_token {
+        let user_uuid = uuid::Uuid::parse_str(user_id)
+            .map_err(|_| crate::errors::AppError::Internal("Invalid user_id".to_string()))?;
+
+        match crate::crypto::jwt::generate_delegated_access_token(
+            jwt_keys,
+            config,
+            &user_uuid,
+            &target.service.delegation_token_scope,
+            &service.service_slug,
+            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+        ) {
+            Ok(delegation_token) => {
+                identity_headers.push((
+                    "X-NyxID-Delegation-Token".to_string(),
+                    delegation_token,
+                ));
+
+                // M1: Audit log for MCP delegation token generation
+                crate::services::audit_service::log_async(
+                    db.clone(),
+                    Some(user_id.to_string()),
+                    "mcp_delegation_token_generated".to_string(),
+                    Some(serde_json::json!({
+                        "service_id": &service.service_id,
+                        "service_slug": &service.service_slug,
+                        "scope": &target.service.delegation_token_scope,
+                    })),
+                    None,
+                    None,
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    service_id = %service.service_id,
+                    error = %e,
+                    "Failed to generate delegation token for MCP tool"
+                );
+            }
+        }
+    }
+
     // Resolve delegated credentials (CR-8)
     let delegated = delegation_service::resolve_delegated_credentials(
         db,

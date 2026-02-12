@@ -1,7 +1,10 @@
 use axum::{
     extract::FromRequestParts,
     http::request::Parts,
+    middleware::Next,
+    response::IntoResponse,
 };
+use base64::Engine as _;
 use mongodb::bson::doc;
 use uuid::Uuid;
 
@@ -22,7 +25,11 @@ pub struct AuthUser {
     pub session_id: Option<Uuid>,
     /// Space-separated scopes from the access token (empty for session/API key auth).
     pub scope: String,
+    /// If this is a delegated request, the OAuth client_id of the acting service.
+    pub acting_client_id: Option<String>,
 }
+
+impl AuthUser {}
 
 /// Name of the session cookie.
 pub const SESSION_COOKIE_NAME: &str = "nyx_session";
@@ -87,7 +94,8 @@ impl FromRequestParts<AppState> for AuthUser {
                     return Ok(AuthUser {
                         user_id,
                         session_id: None,
-                        scope: claims.scope,
+                        scope: claims.scope.clone(),
+                        acting_client_id: claims.act.map(|a| a.sub),
                     });
                 }
             }
@@ -141,6 +149,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                     user_id,
                                     session_id: Some(session_id),
                                     scope: String::new(),
+                                    acting_client_id: None,
                                 });
                             }
                             _ => {
@@ -194,7 +203,8 @@ impl FromRequestParts<AppState> for AuthUser {
                 return Ok(AuthUser {
                     user_id,
                     session_id: None,
-                    scope: claims.scope,
+                    scope: claims.scope.clone(),
+                    acting_client_id: claims.act.map(|a| a.sub),
                 });
             }
 
@@ -234,6 +244,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     user_id,
                     session_id: None,
                     scope: String::new(),
+                    acting_client_id: None,
                 });
             }
 
@@ -242,6 +253,82 @@ impl FromRequestParts<AppState> for AuthUser {
             ))
         }
     }
+}
+
+/// Middleware that rejects delegated tokens from accessing protected endpoints.
+///
+/// Delegated tokens (with `delegated: true` in JWT claims) are constrained to
+/// proxy and LLM gateway routes only. This middleware should be applied to all
+/// other route groups under `/api/v1`.
+pub async fn reject_delegated_tokens(
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<impl IntoResponse, AppError> {
+    if is_delegated_request(&request) {
+        return Err(AppError::Forbidden(
+            "Delegated tokens cannot access this endpoint".to_string(),
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
+/// Check if the request bears a delegated token (Bearer header or access token cookie).
+fn is_delegated_request(request: &axum::http::Request<axum::body::Body>) -> bool {
+    // Check Authorization header
+    if let Some(auth_header) = request.headers().get("authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                if is_jwt_delegated(token) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Check access token cookie
+    if let Some(cookie_header) = request.headers().get("cookie") {
+        if let Ok(cookie_str) = cookie_header.to_str() {
+            if let Some(token) = parse_cookie(cookie_str, ACCESS_TOKEN_COOKIE_NAME) {
+                if is_jwt_delegated(token) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Peek at the JWT payload (without verifying signature) to check the `delegated` field.
+///
+/// This is a lightweight check that avoids full JWT verification (which happens
+/// later in the `AuthUser` extractor). We only inspect the unverified claims to
+/// decide whether to reject early. If the token is forged, the extractor will
+/// reject it during signature verification.
+fn is_jwt_delegated(token: &str) -> bool {
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() < 2 {
+        return false;
+    }
+
+    // Decode the payload (2nd part) from base64url (without padding)
+    let payload = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            // Retry with standard padding
+            match base64::engine::general_purpose::URL_SAFE.decode(parts[1]) {
+                Ok(bytes) => bytes,
+                Err(_) => return false,
+            }
+        }
+    };
+
+    // Parse as JSON and check for delegated field
+    if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload) {
+        return claims.get("delegated") == Some(&serde_json::Value::Bool(true));
+    }
+
+    false
 }
 
 /// Non-rejecting version of `AuthUser`.
@@ -339,4 +426,53 @@ mod tests {
     fn access_token_cookie_name_constant() {
         assert_eq!(ACCESS_TOKEN_COOKIE_NAME, "nyx_access_token");
     }
+
+    // L1: Tests for delegated token detection (C1 fix)
+
+    #[test]
+    fn is_jwt_delegated_detects_delegated_token() {
+        // Build a fake JWT payload with delegated: true
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "delegated": true,
+            "act": { "sub": "client-1" }
+        });
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
+        assert!(is_jwt_delegated(&fake_jwt));
+    }
+
+    #[test]
+    fn is_jwt_delegated_passes_normal_token() {
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "scope": "openid profile"
+        });
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
+        assert!(!is_jwt_delegated(&fake_jwt));
+    }
+
+    #[test]
+    fn is_jwt_delegated_handles_invalid_jwt() {
+        assert!(!is_jwt_delegated("not-a-jwt"));
+        assert!(!is_jwt_delegated(""));
+        assert!(!is_jwt_delegated("a.b"));
+        assert!(!is_jwt_delegated("a.!!!invalid_base64!!!.c"));
+    }
+
+    #[test]
+    fn is_jwt_delegated_false_when_delegated_is_false() {
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "delegated": false
+        });
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
+        assert!(!is_jwt_delegated(&fake_jwt));
+    }
+
 }

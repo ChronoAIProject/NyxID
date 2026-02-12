@@ -72,6 +72,12 @@ export const updateServiceSchema = z.object({
   identity_include_email: z.boolean().optional(),
   identity_include_name: z.boolean().optional(),
   identity_jwt_audience: z.string().max(500).optional().or(z.literal("")),
+  inject_delegation_token: z.boolean().optional(),
+  delegation_token_scope: z
+    .string()
+    .max(200, "Scope must be at most 200 characters")
+    .optional()
+    .or(z.literal("")),
 });
 
 export type UpdateServiceFormData = z.infer<typeof updateServiceSchema>;

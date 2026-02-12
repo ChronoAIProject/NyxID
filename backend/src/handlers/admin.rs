@@ -704,6 +704,8 @@ pub struct CreateOAuthClientRequest {
     pub name: String,
     pub redirect_uris: Vec<String>,
     pub client_type: Option<String>,
+    /// Space-separated delegation scopes (empty = token exchange disabled).
+    pub delegation_scopes: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -713,6 +715,7 @@ pub struct OAuthClientResponse {
     pub client_type: String,
     pub redirect_uris: Vec<String>,
     pub allowed_scopes: String,
+    pub delegation_scopes: String,
     pub is_active: bool,
     /// Raw client secret -- only returned at creation time.
     pub client_secret: Option<String>,
@@ -754,12 +757,29 @@ pub async fn create_oauth_client(
     }
 
     let user_id = auth_user.user_id.to_string();
+    let delegation_scopes = body.delegation_scopes.as_deref().unwrap_or("");
+
+    // M3: Validate delegation_scopes against known scopes
+    if !delegation_scopes.is_empty() {
+        let valid_scopes = ["llm:proxy", "proxy:*", "llm:status"];
+        for s in delegation_scopes.split_whitespace() {
+            if !valid_scopes.contains(&s) {
+                return Err(AppError::ValidationError(format!(
+                    "Invalid delegation scope '{}'. Must be one of: {}",
+                    s,
+                    valid_scopes.join(", ")
+                )));
+            }
+        }
+    }
+
     let (client, raw_secret) = oauth_client_service::create_client(
         &state.db,
         &body.name,
         &body.redirect_uris,
         client_type,
         &user_id,
+        delegation_scopes,
     )
     .await?;
 
@@ -776,6 +796,7 @@ pub async fn create_oauth_client(
         client_type: client.client_type,
         redirect_uris: client.redirect_uris,
         allowed_scopes: client.allowed_scopes,
+        delegation_scopes: client.delegation_scopes,
         is_active: client.is_active,
         client_secret: raw_secret,
         created_at: client.created_at.to_rfc3339(),
@@ -802,6 +823,7 @@ pub async fn list_oauth_clients(
                 client_type: c.client_type,
                 redirect_uris: c.redirect_uris,
                 allowed_scopes: c.allowed_scopes,
+                delegation_scopes: c.delegation_scopes,
                 is_active: c.is_active,
                 client_secret: None, // never expose secret in list
                 created_at: c.created_at.to_rfc3339(),

@@ -430,6 +430,8 @@ pub async fn seed_default_llm_services(
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
             provider_config_id: Some(provider.id.clone()),
             created_at: now,
             updated_at: now,

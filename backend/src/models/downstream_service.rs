@@ -59,6 +59,15 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_jwt_audience: Option<String>,
 
+    /// Whether to inject a delegation token (X-NyxID-Delegation-Token)
+    /// when proxying requests to this service via MCP or REST proxy.
+    /// The token allows the service to call NyxID APIs on behalf of the user.
+    #[serde(default)]
+    pub inject_delegation_token: bool,
+    /// Space-separated scopes for the injected delegation token.
+    #[serde(default = "default_delegation_scope")]
+    pub delegation_token_scope: String,
+
     /// Optional link to a ProviderConfig for auto-seeded LLM services.
     /// When set, this service was auto-created for the provider's API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,6 +89,10 @@ fn default_identity_propagation_mode() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_delegation_scope() -> String {
+    "llm:proxy".to_string()
 }
 
 #[cfg(test)]
@@ -121,6 +134,8 @@ mod tests {
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
             provider_config_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -157,6 +172,8 @@ mod tests {
             identity_include_email: false,
             identity_include_name: false,
             identity_jwt_audience: None,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
             provider_config_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -166,9 +183,13 @@ mod tests {
         doc.remove("service_category");
         doc.remove("requires_user_credential");
         doc.remove("identity_propagation_mode");
+        doc.remove("inject_delegation_token");
+        doc.remove("delegation_token_scope");
         let restored: DownstreamService = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.service_category, "connection");
         assert_eq!(restored.identity_propagation_mode, "none");
         assert!(restored.requires_user_credential);
+        assert!(!restored.inject_delegation_token);
+        assert_eq!(restored.delegation_token_scope, "llm:proxy");
     }
 }

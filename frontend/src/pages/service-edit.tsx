@@ -22,6 +22,8 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -47,6 +49,8 @@ export function ServiceEditPage() {
       identity_include_email: false,
       identity_include_name: false,
       identity_jwt_audience: "",
+      inject_delegation_token: false,
+      delegation_token_scope: "",
     },
   });
 
@@ -64,6 +68,8 @@ export function ServiceEditPage() {
         identity_include_email: service.identity_include_email ?? false,
         identity_include_name: service.identity_include_name ?? false,
         identity_jwt_audience: service.identity_jwt_audience ?? "",
+        inject_delegation_token: service.inject_delegation_token ?? false,
+        delegation_token_scope: service.delegation_token_scope || "llm:proxy",
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -264,6 +270,64 @@ export function ServiceEditPage() {
                       form.setValue("identity_jwt_audience", v)
                     }
                   />
+                </div>
+
+                <Separator className="my-2" />
+                <div className="space-y-4">
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-semibold">
+                      Delegation Token Injection
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      When enabled, NyxID injects a short-lived delegation
+                      token (X-NyxID-Delegation-Token) when proxying requests
+                      to this service. The downstream service can use this
+                      token to call NyxID APIs (e.g., LLM gateway) on behalf
+                      of the user.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between rounded-md border p-3">
+                    <Label
+                      htmlFor="inject-delegation-token"
+                      className="text-sm font-normal"
+                    >
+                      Inject delegation token
+                    </Label>
+                    <Switch
+                      id="inject-delegation-token"
+                      checked={
+                        form.watch("inject_delegation_token") ?? false
+                      }
+                      onCheckedChange={(v) =>
+                        form.setValue("inject_delegation_token", v)
+                      }
+                    />
+                  </div>
+
+                  {form.watch("inject_delegation_token") && (
+                    <FormField
+                      control={form.control}
+                      name="delegation_token_scope"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Delegation Token Scope</FormLabel>
+                          <FormControl>
+                            <Input
+                              placeholder="llm:proxy"
+                              {...field}
+                            />
+                          </FormControl>
+                          <p className="text-xs text-muted-foreground">
+                            Space-separated scopes for the delegation token.
+                            Defaults to &quot;llm:proxy&quot; if left empty.
+                            Available scopes: llm:proxy, proxy:*, llm:status
+                          </p>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  )}
                 </div>
               </>
             )}

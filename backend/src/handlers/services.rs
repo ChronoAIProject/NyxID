@@ -74,6 +74,8 @@ pub struct ServiceResponse {
     pub identity_include_email: bool,
     pub identity_include_name: bool,
     pub identity_jwt_audience: Option<String>,
+    pub inject_delegation_token: bool,
+    pub delegation_token_scope: String,
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -96,6 +98,8 @@ pub struct UpdateServiceRequest {
     pub identity_include_email: Option<bool>,
     pub identity_include_name: Option<bool>,
     pub identity_jwt_audience: Option<String>,
+    pub inject_delegation_token: Option<bool>,
+    pub delegation_token_scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +108,7 @@ pub struct OidcCredentialsResponse {
     pub client_secret: String,
     pub redirect_uris: Vec<String>,
     pub allowed_scopes: String,
+    pub delegation_scopes: String,
     pub issuer: String,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
@@ -285,6 +290,7 @@ pub async fn create_service(
             &[callback_url],
             "confidential",
             &user_id_str,
+            "",
         )
         .await?;
 
@@ -349,6 +355,8 @@ pub async fn create_service(
         identity_include_email: false,
         identity_include_name: false,
         identity_jwt_audience: None,
+        inject_delegation_token: false,
+        delegation_token_scope: "llm:proxy".to_string(),
         provider_config_id: None,
         created_at: now,
         updated_at: now,
@@ -532,6 +540,27 @@ pub async fn update_service(
         }
         set_doc.insert("identity_jwt_audience", audience.as_str());
     }
+    if let Some(inject) = body.inject_delegation_token {
+        set_doc.insert("inject_delegation_token", inject);
+    }
+    if let Some(ref scope) = body.delegation_token_scope {
+        // H3: Default empty scope to "llm:proxy" so tokens always have permissions
+        let scope = if scope.is_empty() { "llm:proxy" } else { scope.as_str() };
+
+        // H2: Validate against known delegation scopes
+        let valid_scopes = ["llm:proxy", "proxy:*", "llm:status"];
+        for s in scope.split_whitespace() {
+            if !valid_scopes.contains(&s) {
+                return Err(AppError::ValidationError(format!(
+                    "Invalid delegation_token_scope '{}'. Must be one of: {}",
+                    s,
+                    valid_scopes.join(", ")
+                )));
+            }
+        }
+
+        set_doc.insert("delegation_token_scope", scope);
+    }
 
     if set_doc.is_empty() {
         return Err(AppError::ValidationError(
@@ -638,6 +667,7 @@ pub async fn get_oidc_credentials(
         client_secret,
         redirect_uris,
         allowed_scopes: oauth_client.allowed_scopes,
+        delegation_scopes: oauth_client.delegation_scopes,
         issuer: base.to_string(),
         authorization_endpoint: format!("{base}/oauth/authorize"),
         token_endpoint: format!("{base}/oauth/token"),

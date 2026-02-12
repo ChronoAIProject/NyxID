@@ -165,6 +165,24 @@ export function OidcCredentialsSection({
             />
           </div>
 
+          {credentials.delegation_scopes && (
+            <>
+              <Separator />
+              <div>
+                <p className="mb-1 text-xs font-medium text-muted-foreground">
+                  Delegation Scopes
+                </p>
+                <p className="text-sm">
+                  {credentials.delegation_scopes}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Scopes this client can request via token exchange
+                  (RFC 8693). Empty means token exchange is disabled.
+                </p>
+              </div>
+            </>
+          )}
+
           <Separator />
 
           <DiscoveryEndpoints

@@ -53,6 +53,19 @@ pub struct Claims {
     /// Session ID (stable across token refreshes)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sid: Option<String>,
+    /// RFC 8693 actor claim -- identifies the service acting on behalf of the user.
+    /// Present only in delegated tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub act: Option<ActorClaim>,
+    /// Flag indicating this is a delegated access token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegated: Option<bool>,
+}
+
+/// Actor claim per RFC 8693 Section 4.1.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ActorClaim {
+    pub sub: String,
 }
 
 /// ID token claims following OpenID Connect Core.
@@ -210,6 +223,8 @@ pub fn generate_access_token(
         groups: rbac.and_then(|r| r.groups.clone()),
         permissions: rbac.and_then(|r| r.permissions.clone()),
         sid: rbac.and_then(|r| r.sid.clone()),
+        act: None,
+        delegated: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -241,6 +256,8 @@ pub fn generate_refresh_token(
         groups: None,
         permissions: None,
         sid: None,
+        act: None,
+        delegated: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -250,6 +267,57 @@ pub fn generate_refresh_token(
         .map_err(|e| AppError::Internal(format!("Failed to encode refresh token: {e}")))?;
 
     Ok((token, jti))
+}
+
+/// TTL for delegation tokens issued via Token Exchange (5 minutes).
+pub const DELEGATED_TOKEN_TTL_SECS: i64 = 300;
+
+/// TTL for delegation tokens injected via MCP proxy (5 minutes).
+/// Downstream services can refresh these tokens via `POST /api/v1/delegation/refresh`
+/// for long-running/agentic workflows.
+pub const MCP_DELEGATION_TOKEN_TTL_SECS: i64 = 300;
+
+/// Generate a delegated access token (RFC 8693).
+///
+/// Like a regular access token, but with:
+/// - `act.sub` claim identifying the acting service
+/// - `delegated: true` flag
+/// - Constrained scope (only delegation-specific scopes)
+/// - Configurable short TTL
+pub fn generate_delegated_access_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    acting_client_id: &str,
+    ttl_secs: i64,
+) -> Result<String, AppError> {
+    let now = Utc::now().timestamp();
+
+    let claims = Claims {
+        sub: user_id.to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.base_url.clone(),
+        exp: now + ttl_secs,
+        iat: now,
+        jti: Uuid::new_v4().to_string(),
+        scope: scope.to_string(),
+        token_type: "access".to_string(),
+        roles: None,
+        groups: None,
+        permissions: None,
+        sid: None,
+        act: Some(ActorClaim {
+            sub: acting_client_id.to_string(),
+        }),
+        delegated: Some(true),
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
+
+    encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode delegated token: {e}")))
 }
 
 /// Optional auth context data to embed in ID token claims.
@@ -468,6 +536,8 @@ mod tests {
             groups: None,
             permissions: None,
             sid: None,
+            act: None,
+            delegated: None,
         };
 
         let mut header = Header::new(Algorithm::RS256);
@@ -562,11 +632,58 @@ mod tests {
             groups: None,
             permissions: None,
             sid: None,
+            act: None,
+            delegated: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
         let restored: Claims = serde_json::from_str(&json).unwrap();
         assert_eq!(claims.sub, restored.sub);
         assert_eq!(claims.token_type, restored.token_type);
+    }
+
+    #[test]
+    fn generate_and_verify_delegated_token() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_delegated_access_token(
+            &keys, &config, &user_id, "llm:proxy", "test-client-id", 300,
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.token_type, "access");
+        assert_eq!(claims.scope, "llm:proxy");
+        assert_eq!(claims.delegated, Some(true));
+        let act = claims.act.expect("act claim should be present");
+        assert_eq!(act.sub, "test-client-id");
+    }
+
+    #[test]
+    fn delegated_token_respects_ttl() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_delegated_access_token(
+            &keys, &config, &user_id, "llm:proxy", "svc", 60,
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        // TTL should be ~60 seconds (allow 2s tolerance for test execution time)
+        let ttl = claims.exp - claims.iat;
+        assert_eq!(ttl, 60);
+    }
+
+    #[test]
+    fn claims_without_act_deserialize_fine() {
+        // Verify that tokens without act/delegated fields still deserialize
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert!(claims.act.is_none());
+        assert!(claims.delegated.is_none());
     }
 
     #[test]

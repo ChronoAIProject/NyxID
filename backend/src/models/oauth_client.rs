@@ -19,6 +19,10 @@ pub struct OauthClient {
     /// "confidential" or "public"
     pub client_type: String,
     pub is_active: bool,
+    /// Space-separated scopes the client can request via token exchange.
+    /// Empty string means token exchange is not allowed.
+    #[serde(default)]
+    pub delegation_scopes: String,
     pub created_by: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -46,6 +50,7 @@ mod tests {
             grant_types: "authorization_code".to_string(),
             client_type: "confidential".to_string(),
             is_active: true,
+            delegation_scopes: String::new(),
             created_by: Some("admin".to_string()),
             created_at: Utc::now(),
             updated_at: Utc::now(),

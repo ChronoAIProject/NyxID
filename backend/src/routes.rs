@@ -1,9 +1,11 @@
 use axum::{
+    middleware,
     routing::{delete, get, patch, post, put},
     Router,
 };
 
 use crate::handlers;
+use crate::mw::auth::reject_delegated_tokens;
 use crate::AppState;
 
 /// Build the complete application router with all route groups.
@@ -173,7 +175,17 @@ pub fn build_router() -> Router<AppState> {
         .route("/introspect", post(handlers::oauth::introspect))
         .route("/revoke", post(handlers::oauth::revoke));
 
-    let api_v1 = Router::new()
+    let delegation_routes = Router::new()
+        .route("/refresh", post(handlers::delegation::refresh_delegation_token));
+
+    // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
+    let api_v1_delegated = Router::new()
+        .nest("/llm", llm_routes)
+        .nest("/delegation", delegation_routes)
+        .route("/proxy/{service_id}/{*path}", axum::routing::any(handlers::proxy::proxy_request));
+
+    // Routes that BLOCK delegated tokens (everything else)
+    let api_v1_protected = Router::new()
         .nest("/auth", auth_routes)
         .nest("/users", user_routes)
         .nest("/api-keys", api_key_routes)
@@ -182,10 +194,11 @@ pub fn build_router() -> Router<AppState> {
         .nest("/connections", connection_routes)
         .nest("/providers", provider_routes)
         .nest("/mcp", mcp_routes)
-        .nest("/llm", llm_routes)
         .nest("/admin", admin_routes)
         .route("/public/config", get(handlers::health::public_config))
-        .route("/proxy/{service_id}/{*path}", axum::routing::any(handlers::proxy::proxy_request));
+        .layer(middleware::from_fn(reject_delegated_tokens));
+
+    let api_v1 = api_v1_delegated.merge(api_v1_protected);
 
     let well_known_routes = Router::new()
         .route("/openid-configuration", get(handlers::oidc_discovery::openid_configuration))

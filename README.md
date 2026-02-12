@@ -132,6 +132,19 @@ It provides a complete identity layer: user registration, session management, Op
 - Per-service configuration of which claims to include
 - CRLF injection prevention on all header values
 
+### Delegated Access
+- Downstream services can make NyxID API calls (LLM gateway, proxy) on behalf of users
+- Two complementary paths:
+  - **MCP Injection:** NyxID automatically injects a short-lived delegation token (`X-NyxID-Delegation-Token`, 5-min TTL) when proxying MCP tool calls to services with `inject_delegation_token` enabled
+  - **OAuth 2.0 Token Exchange (RFC 8693):** OIDC-linked services exchange a user's access token for a delegated token (5-minute TTL) via `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`
+  - **Token Refresh:** Downstream services can renew delegation tokens during long-running/agentic workflows via `POST /api/v1/delegation/refresh`
+- Delegated tokens are standard NyxID JWTs with `act.sub` (acting service) and `delegated: true` claims
+- Scope enforcement: delegated tokens are restricted to proxy, LLM gateway, and delegation refresh endpoints; all other endpoints reject them via middleware
+- Consent-gated: token exchange and every refresh validate that the user has active consent for the client; revoking consent immediately blocks further delegation
+- Chained exchange prevention: delegated tokens cannot be exchanged for new delegated tokens
+- Per-client `delegation_scopes` configuration controls which scopes can be requested
+- Per-service `inject_delegation_token` and `delegation_token_scope` control MCP/proxy injection
+
 ### Security Hardening
 - Rate limiting: per-IP sliding window with global token-bucket fallback
 - Security headers: HSTS, CSP, X-Frame-Options (DENY), X-Content-Type-Options, Referrer-Policy, Permissions-Policy
@@ -319,7 +332,7 @@ For the full API reference with request/response schemas and example curl comman
 | DELETE | `/api/v1/connections/{service_id}`   | Required | Disconnect from a service            |
 | ANY    | `/api/v1/proxy/{service_id}/{*path}` | Required | Proxy request (requires connection)  |
 | GET    | `/oauth/authorize`                   | Required | OIDC authorization endpoint          |
-| POST   | `/oauth/token`                       | None     | OIDC token endpoint                  |
+| POST   | `/oauth/token`                       | None     | OIDC token endpoint (+ RFC 8693 token exchange) |
 | GET    | `/oauth/userinfo`                    | Required | OIDC userinfo endpoint               |
 | GET    | `/api/v1/admin/users`                | Admin    | List users (paginated, searchable)   |
 | POST   | `/api/v1/admin/users`                | Admin    | Create a new user                    |
@@ -373,6 +386,7 @@ For the full API reference with request/response schemas and example curl comman
 | GET    | `/api/v1/llm/status`                 | Required | LLM provider readiness per user      |
 | ANY    | `/api/v1/llm/{provider_slug}/v1/{*path}` | Required | Proxy to LLM provider           |
 | ANY    | `/api/v1/llm/gateway/v1/{*path}`     | Required | OpenAI-compatible LLM gateway        |
+| POST   | `/api/v1/delegation/refresh`         | Delegated| Refresh a delegated access token     |
 
 ---
 
@@ -464,11 +478,11 @@ NyxID uses 17 MongoDB collections:
 |----------------------------|------------------------------------------------------|
 | `users`                    | User accounts (email, password hash, MFA status)     |
 | `sessions`                 | Server-side sessions with hashed tokens              |
-| `oauth_clients`            | Registered OIDC/OAuth clients                        |
+| `oauth_clients`            | Registered OIDC/OAuth clients (includes `delegation_scopes` for token exchange) |
 | `authorization_codes`      | Short-lived OIDC authorization codes                 |
 | `refresh_tokens`           | Issued refresh tokens with rotation chain tracking   |
 | `api_keys`                 | User-scoped API keys (hashed, with prefix)           |
-| `downstream_services`      | Registered downstream services for proxying (includes auto-seeded LLM services via `provider_config_id`) |
+| `downstream_services`      | Registered downstream services for proxying (includes auto-seeded LLM services via `provider_config_id`, `inject_delegation_token` and `delegation_token_scope` for delegated access) |
 | `user_service_connections` | Per-user connections and encrypted credentials for downstream services |
 | `mfa_factors`              | TOTP factors and encrypted recovery codes            |
 | `service_endpoints`        | Registered API endpoints per service (MCP tools)     |
@@ -634,7 +648,7 @@ NyxID/
 |       |   |-- jwt.rs          RS256 JWT signing, verification, key management
 |       |   |-- aes.rs          AES-256-GCM encryption and decryption
 |       |   `-- token.rs        Random token generation, SHA-256 hashing
-|       |-- models/             MongoDB document definitions (13 modules, incl. role, group, consent)
+|       |-- models/             MongoDB document definitions (20 modules, incl. role, group, consent, delegation fields)
 |       |-- handlers/           HTTP handler functions by domain
 |       |   |-- auth.rs         Register, login, logout, refresh, verify-email, forgot/reset-password
 |       |   |-- users.rs        Get/update user profile
@@ -647,12 +661,17 @@ NyxID/
 |       |   |-- proxy.rs        Reverse proxy handler (+ identity + delegation)
 |       |   |-- llm_gateway.rs  LLM gateway handlers (proxy, gateway, status)
 |       |   |-- mcp.rs          MCP config endpoint
+|       |   |-- mcp_transport.rs MCP SSE/Streamable HTTP transport
+|       |   |-- endpoints.rs    Service endpoint CRUD (MCP tools)
+|       |   |-- sessions.rs     Session listing
+|       |   |-- oidc_discovery.rs OpenID Connect discovery
 |       |   |-- oauth.rs        OIDC authorize, token, userinfo
 |       |   |-- admin.rs        Admin user management, audit log, OAuth client endpoints
 |       |   |-- admin_roles.rs  Admin role CRUD + user role assignment
 |       |   |-- admin_groups.rs Admin group CRUD + membership management
 |       |   |-- admin_helpers.rs Shared admin handler helpers (require_admin, IP/UA extraction)
 |       |   |-- consent.rs      User consent listing and revocation
+|       |   |-- delegation.rs   Delegation token refresh endpoint
 |       |   |-- mfa.rs          MFA setup and verification
 |       |   `-- health.rs       Health check
 |       |-- services/           Business logic layer
@@ -665,6 +684,7 @@ NyxID/
 |       |   |-- provider_service.rs Provider registry CRUD, encrypted credential storage
 |       |   |-- user_token_service.rs User provider token lifecycle (API key + OAuth)
 |       |   |-- delegation_service.rs Credential delegation resolution for proxy
+|       |   |-- token_exchange_service.rs RFC 8693 Token Exchange for delegated access
 |       |   |-- llm_gateway_service.rs LLM gateway: model routing, format translation
 |       |   |-- identity_service.rs Identity propagation headers + JWT assertions
 |       |   |-- oauth_flow.rs       OAuth2 utilities (PKCE, token exchange, refresh)
@@ -674,6 +694,9 @@ NyxID/
 |       |   |-- group_service.rs    Group CRUD, membership management
 |       |   |-- consent_service.rs  Consent creation, listing, revocation
 |       |   |-- rbac_helpers.rs     Resolve effective roles/groups/permissions for a user
+|       |   |-- mcp_service.rs      MCP tool execution, delegation token injection
+|       |   |-- oauth_client_service.rs OAuth client management (admin)
+|       |   |-- service_endpoint_service.rs Service endpoint CRUD
 |       |   `-- audit_service.rs    Async audit log insertion
 |       `-- mw/                 Middleware
 |           |-- auth.rs         AuthUser extractor (Bearer / cookie / API key)

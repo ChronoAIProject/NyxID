@@ -36,6 +36,7 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         grant_types: "authorization_code".to_string(),
         client_type: "public".to_string(),
         is_active: true,
+        delegation_scopes: String::new(),
         created_by: Some("system".to_string()),
         created_at: now,
         updated_at: now,
@@ -57,6 +58,7 @@ pub async fn create_client(
     redirect_uris: &[String],
     client_type: &str,
     created_by: &str,
+    delegation_scopes: &str,
 ) -> AppResult<(OauthClient, Option<String>)> {
     let client_id = Uuid::new_v4().to_string();
     let now = Utc::now();
@@ -78,6 +80,7 @@ pub async fn create_client(
         grant_types: "authorization_code".to_string(),
         client_type: client_type.to_string(),
         is_active: true,
+        delegation_scopes: delegation_scopes.to_string(),
         created_by: Some(created_by.to_string()),
         created_at: now,
         updated_at: now,

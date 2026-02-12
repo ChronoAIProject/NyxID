@@ -121,6 +121,34 @@ pub async fn proxy_request(
         }
     }
 
+    // Generate delegation token if configured on the service
+    if target.service.inject_delegation_token {
+        let user_uuid = auth_user.user_id;
+
+        match crate::crypto::jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_uuid,
+            &target.service.delegation_token_scope,
+            &target.service.slug,
+            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+        ) {
+            Ok(delegation_token) => {
+                identity_headers.push((
+                    "X-NyxID-Delegation-Token".to_string(),
+                    delegation_token,
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    service_id = %service_id,
+                    error = %e,
+                    "Failed to generate delegation token for proxy"
+                );
+            }
+        }
+    }
+
     // Resolve delegated credentials (non-fatal: proceed without on error)
     let delegated = delegation_service::resolve_delegated_credentials(
         &state.db,
@@ -218,6 +246,7 @@ pub async fn proxy_request(
             "method": method.as_str(),
             "path": &path,
             "response_status": status.as_u16(),
+            "acting_client_id": auth_user.acting_client_id,
         })),
         None,
         None,
