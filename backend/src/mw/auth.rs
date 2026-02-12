@@ -11,6 +11,10 @@ use uuid::Uuid;
 use crate::crypto::jwt;
 use crate::crypto::token::hash_token;
 use crate::errors::AppError;
+use crate::models::service_account::{ServiceAccount, COLLECTION_NAME as SERVICE_ACCOUNTS};
+use crate::models::service_account_token::{
+    ServiceAccountToken, COLLECTION_NAME as SA_TOKENS,
+};
 use crate::models::session::{Session, COLLECTION_NAME as SESSIONS};
 use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::AppState;
@@ -27,6 +31,8 @@ pub struct AuthUser {
     pub scope: String,
     /// If this is a delegated request, the OAuth client_id of the acting service.
     pub acting_client_id: Option<String>,
+    /// True if authenticated as a service account (not a regular user).
+    pub is_service_account: bool,
 }
 
 impl AuthUser {}
@@ -66,6 +72,58 @@ impl FromRequestParts<AppState> for AuthUser {
                         ));
                     }
 
+                    // Check if this is a service account token
+                    if claims.sa == Some(true) {
+                        let sa_id = claims.sub.clone();
+
+                        // Verify the service account exists and is active
+                        let _sa = state
+                            .db
+                            .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+                            .find_one(doc! { "_id": &sa_id, "is_active": true })
+                            .await
+                            .map_err(|e| {
+                                AppError::Internal(format!("SA lookup failed: {e}"))
+                            })?
+                            .ok_or_else(|| {
+                                AppError::Unauthorized(
+                                    "Service account is inactive or not found".to_string(),
+                                )
+                            })?;
+
+                        // Check token revocation
+                        let token_record = state
+                            .db
+                            .collection::<ServiceAccountToken>(SA_TOKENS)
+                            .find_one(doc! { "jti": &claims.jti })
+                            .await
+                            .map_err(|e| {
+                                AppError::Internal(format!("SA token lookup failed: {e}"))
+                            })?;
+
+                        if let Some(record) = token_record {
+                            if record.revoked {
+                                return Err(AppError::Unauthorized(
+                                    "Token has been revoked".to_string(),
+                                ));
+                            }
+                        }
+
+                        let sa_uuid = Uuid::parse_str(&sa_id).map_err(|_| {
+                            AppError::Unauthorized(
+                                "Invalid service account ID".to_string(),
+                            )
+                        })?;
+
+                        return Ok(AuthUser {
+                            user_id: sa_uuid,
+                            session_id: None,
+                            scope: claims.scope.clone(),
+                            acting_client_id: None,
+                            is_service_account: true,
+                        });
+                    }
+
                     let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
                         AppError::Unauthorized("Invalid token subject".to_string())
                     })?;
@@ -96,6 +154,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         session_id: None,
                         scope: claims.scope.clone(),
                         acting_client_id: claims.act.map(|a| a.sub),
+                        is_service_account: false,
                     });
                 }
             }
@@ -150,6 +209,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                     session_id: Some(session_id),
                                     scope: String::new(),
                                     acting_client_id: None,
+                                    is_service_account: false,
                                 });
                             }
                             _ => {
@@ -205,6 +265,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     session_id: None,
                     scope: claims.scope.clone(),
                     acting_client_id: claims.act.map(|a| a.sub),
+                    is_service_account: false,
                 });
             }
 
@@ -245,6 +306,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     session_id: None,
                     scope: String::new(),
                     acting_client_id: None,
+                    is_service_account: false,
                 });
             }
 
@@ -326,6 +388,70 @@ fn is_jwt_delegated(token: &str) -> bool {
     // Parse as JSON and check for delegated field
     if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload) {
         return claims.get("delegated") == Some(&serde_json::Value::Bool(true));
+    }
+
+    false
+}
+
+/// Middleware that rejects service account tokens from human-only endpoints.
+pub async fn reject_service_account_tokens(
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Result<impl IntoResponse, AppError> {
+    if is_service_account_request(&request) {
+        return Err(AppError::Forbidden(
+            "Service accounts cannot access this endpoint".to_string(),
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
+/// Check if the request bears a service account token (Bearer header or access token cookie).
+fn is_service_account_request(request: &axum::http::Request<axum::body::Body>) -> bool {
+    // Check Authorization header
+    if let Some(auth_header) = request.headers().get("authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                if is_jwt_service_account(token) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Check access token cookie
+    if let Some(cookie_header) = request.headers().get("cookie") {
+        if let Ok(cookie_str) = cookie_header.to_str() {
+            if let Some(token) = parse_cookie(cookie_str, ACCESS_TOKEN_COOKIE_NAME) {
+                if is_jwt_service_account(token) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Peek at the JWT payload (without verifying signature) to check the `sa` field.
+fn is_jwt_service_account(token: &str) -> bool {
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() < 2 {
+        return false;
+    }
+
+    let payload = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            match base64::engine::general_purpose::URL_SAFE.decode(parts[1]) {
+                Ok(bytes) => bytes,
+                Err(_) => return false,
+            }
+        }
+    };
+
+    if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload) {
+        return claims.get("sa") == Some(&serde_json::Value::Bool(true));
     }
 
     false
@@ -461,6 +587,51 @@ mod tests {
         assert!(!is_jwt_delegated(""));
         assert!(!is_jwt_delegated("a.b"));
         assert!(!is_jwt_delegated("a.!!!invalid_base64!!!.c"));
+    }
+
+    // Tests for service account token detection
+
+    #[test]
+    fn is_jwt_service_account_detects_sa_token() {
+        let payload = serde_json::json!({
+            "sub": "sa-id-123",
+            "sa": true
+        });
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
+        assert!(is_jwt_service_account(&fake_jwt));
+    }
+
+    #[test]
+    fn is_jwt_service_account_passes_normal_token() {
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "scope": "openid profile"
+        });
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
+        assert!(!is_jwt_service_account(&fake_jwt));
+    }
+
+    #[test]
+    fn is_jwt_service_account_false_when_sa_is_false() {
+        let payload = serde_json::json!({
+            "sub": "sa-id-123",
+            "sa": false
+        });
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
+        assert!(!is_jwt_service_account(&fake_jwt));
+    }
+
+    #[test]
+    fn is_jwt_service_account_handles_invalid_jwt() {
+        assert!(!is_jwt_service_account("not-a-jwt"));
+        assert!(!is_jwt_service_account(""));
+        assert!(!is_jwt_service_account("a.b"));
     }
 
     #[test]

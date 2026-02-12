@@ -88,6 +88,12 @@ pub enum AppError {
 
     #[error("Circular group hierarchy detected")]
     CircularGroupHierarchy,
+
+    #[error("Service account not found: {0}")]
+    ServiceAccountNotFound(String),
+
+    #[error("Service account is inactive")]
+    ServiceAccountInactive,
 }
 
 impl AppError {
@@ -112,6 +118,8 @@ impl AppError {
             Self::SystemRoleProtected(_) => StatusCode::FORBIDDEN,
             Self::DuplicateSlug(_) => StatusCode::CONFLICT,
             Self::CircularGroupHierarchy => StatusCode::BAD_REQUEST,
+            Self::ServiceAccountNotFound(_) => StatusCode::NOT_FOUND,
+            Self::ServiceAccountInactive => StatusCode::FORBIDDEN,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -141,6 +149,8 @@ impl AppError {
             Self::SystemRoleProtected(_) => 4005,
             Self::DuplicateSlug(_) => 4006,
             Self::CircularGroupHierarchy => 4007,
+            Self::ServiceAccountNotFound(_) => 5000,
+            Self::ServiceAccountInactive => 5001,
         }
     }
 
@@ -169,6 +179,8 @@ impl AppError {
             Self::SystemRoleProtected(_) => "system_role_protected",
             Self::DuplicateSlug(_) => "duplicate_slug",
             Self::CircularGroupHierarchy => "circular_group_hierarchy",
+            Self::ServiceAccountNotFound(_) => "service_account_not_found",
+            Self::ServiceAccountInactive => "service_account_inactive",
         }
     }
 }
@@ -244,6 +256,8 @@ mod tests {
         assert_eq!(AppError::SystemRoleProtected("x".into()).status_code(), StatusCode::FORBIDDEN);
         assert_eq!(AppError::DuplicateSlug("x".into()).status_code(), StatusCode::CONFLICT);
         assert_eq!(AppError::CircularGroupHierarchy.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(AppError::ServiceAccountNotFound("x".into()).status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(AppError::ServiceAccountInactive.status_code(), StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -271,6 +285,8 @@ mod tests {
             AppError::SystemRoleProtected("".into()).error_code(),
             AppError::DuplicateSlug("".into()).error_code(),
             AppError::CircularGroupHierarchy.error_code(),
+            AppError::ServiceAccountNotFound("".into()).error_code(),
+            AppError::ServiceAccountInactive.error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(codes.len(), unique.len(), "All error codes should be unique");
@@ -303,6 +319,8 @@ mod tests {
         assert_eq!(AppError::SystemRoleProtected("".into()).error_key(), "system_role_protected");
         assert_eq!(AppError::DuplicateSlug("".into()).error_key(), "duplicate_slug");
         assert_eq!(AppError::CircularGroupHierarchy.error_key(), "circular_group_hierarchy");
+        assert_eq!(AppError::ServiceAccountNotFound("".into()).error_key(), "service_account_not_found");
+        assert_eq!(AppError::ServiceAccountInactive.error_key(), "service_account_inactive");
     }
 
     #[test]

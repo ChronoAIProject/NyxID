@@ -18,6 +18,7 @@ This document describes the system architecture, component design, data flows, a
 - [LLM Gateway](#llm-gateway)
 - [Identity Propagation](#identity-propagation)
 - [Delegated Access](#delegated-access)
+- [Service Accounts](#service-accounts)
 - [Deployment Architecture](#deployment-architecture)
 
 ---
@@ -85,7 +86,7 @@ This document describes the system architecture, component design, data flows, a
              |
     +--------v---------+
     |  MongoDB 8.0     |
-    |  (17 collections)|
+    |  (19 collections)|
     +------------------+
 ```
 
@@ -114,7 +115,7 @@ Responsibilities:
 
 | Module              | Responsibility                                        |
 |---------------------|-------------------------------------------------------|
-| `auth.rs`           | Extract `AuthUser` from Bearer token, session cookie, access token cookie, or API key header. Verify user is active. Populate `acting_client_id` from delegated token `act.sub` claim. `reject_delegated_tokens` middleware blocks delegated tokens from non-proxy endpoints. |
+| `auth.rs`           | Extract `AuthUser` from Bearer token, session cookie, access token cookie, or API key header. Verify user/service account is active. Populate `acting_client_id` from delegated token `act.sub` claim. Service account tokens (`sa: true`) follow a dedicated verification path (active check + token revocation check). `reject_delegated_tokens` and `reject_service_account_tokens` middlewares enforce endpoint access control. |
 | `rate_limit.rs`     | Per-IP sliding window rate limiter with global token-bucket fallback. Background cleanup prevents memory growth. |
 | `security_headers.rs` | Inject HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, X-XSS-Protection into every response. |
 
@@ -161,6 +162,7 @@ Handlers are thin HTTP boundary functions. They:
 | `admin.rs`    | list_users, get_user, update_user, set_user_role, set_user_status, force_password_reset, delete_user, verify_user_email, list_user_sessions, revoke_user_sessions, list_audit_log, oauth client CRUD |
 | `admin_roles.rs` | list_roles, create_role, get_role, update_role, delete_role, get_user_roles, assign_role, revoke_role |
 | `admin_groups.rs` | list_groups, create_group, get_group, update_group, delete_group, get_members, add_member, remove_member, get_user_groups |
+| `admin_service_accounts.rs` | create, list, get, update, delete service accounts, rotate_secret, revoke_tokens |
 | `admin_helpers.rs` | require_admin, extract_ip, extract_user_agent (shared admin utilities) |
 | `consent.rs`  | list_my_consents, revoke_my_consent                             |
 | `health.rs`   | health_check                                                    |
@@ -186,6 +188,7 @@ The service layer contains all business logic. Services receive database connect
 | `role_service.rs`   | Role CRUD (slug uniqueness, system role protection), user role assignment/revocation, system role seeding at startup |
 | `group_service.rs`  | Group CRUD (slug uniqueness), membership management (add/remove members via `group_ids` on User), user group queries |
 | `consent_service.rs`| Consent creation (upsert by user+client), user consent listing, consent revocation |
+| `service_account_service.rs` | Service account CRUD, client credentials authentication (SHA-256 secret verification, JWT issuance), secret rotation, bulk token revocation |
 | `rbac_helpers.rs`   | Resolves effective RBAC for a user: direct roles + group-inherited roles, deduplication, permission aggregation |
 | `audit_service.rs`  | Asynchronous audit log insertion (fire-and-forget via `tokio::spawn`), captures user, action, resource, IP, user-agent |
 | `provider_service.rs` | Provider registry CRUD, slug uniqueness, encrypted OAuth credential storage |
@@ -930,6 +933,45 @@ OAuth consent records tracking which scopes a user has granted to each client ap
 
 **Indexes:** `(user_id, client_id)` (unique)
 
+#### service_accounts
+
+Non-human (machine-to-machine) identities that authenticate via OAuth2 Client Credentials Grant. Managed by admins.
+
+| Field                    | Type          | Constraints       | Description                         |
+|--------------------------|---------------|-------------------|-------------------------------------|
+| `_id`                    | UUID (string) | PK                | Service account identifier (= `sub` in JWT) |
+| `name`                   | string        | NOT NULL          | Human-readable name                 |
+| `description`            | string        | NULLABLE          | What this service account does      |
+| `client_id`              | string        | NOT NULL, UNIQUE  | OAuth2 client ID (`sa_` + 24 hex)   |
+| `client_secret_hash`     | string        | NOT NULL          | SHA-256 hash of client secret       |
+| `secret_prefix`          | string        | NOT NULL          | First 8 chars of secret for UI display |
+| `role_ids`               | array         | NOT NULL          | Directly assigned role IDs          |
+| `allowed_scopes`         | string        | NOT NULL          | Space-separated allowed scopes      |
+| `is_active`              | boolean       | NOT NULL          | Whether the account can authenticate |
+| `rate_limit_override`    | number        | NULLABLE          | Optional per-account rate limit     |
+| `created_by`             | UUID (string) | NOT NULL          | Admin who created this account      |
+| `created_at`             | ISO 8601 date | NOT NULL          | Creation timestamp                  |
+| `updated_at`             | ISO 8601 date | NOT NULL          | Last update                         |
+| `last_authenticated_at`  | ISO 8601 date | NULLABLE          | Last successful authentication      |
+
+**Indexes:** `client_id` (unique), `is_active`, `created_by`
+
+#### service_account_tokens
+
+Tracks JWT access tokens issued to service accounts for revocation support. Token records are auto-deleted via TTL index after expiry.
+
+| Field                | Type          | Constraints       | Description                         |
+|----------------------|---------------|-------------------|-------------------------------------|
+| `_id`                | UUID (string) | PK                | Token record identifier             |
+| `jti`                | string        | NOT NULL, UNIQUE  | JWT ID for revocation lookups       |
+| `service_account_id` | UUID (string) | NOT NULL          | Owning service account              |
+| `scope`              | string        | NOT NULL          | Space-separated granted scopes      |
+| `expires_at`         | ISO 8601 date | NOT NULL          | Token expiration (TTL index target) |
+| `revoked`            | boolean       | NOT NULL          | Whether the token has been revoked  |
+| `created_at`         | ISO 8601 date | NOT NULL          | Token issuance timestamp            |
+
+**Indexes:** `jti` (unique), `service_account_id`, `expires_at` (TTL: auto-delete expired records)
+
 ---
 
 ## RBAC Model
@@ -1272,6 +1314,89 @@ Delegated tokens are restricted to proxy and LLM gateway endpoints. All other en
 | `handlers/proxy.rs` | Delegation token injection during REST proxy requests |
 | `models/oauth_client.rs` | `delegation_scopes` field on `OauthClient` |
 | `models/downstream_service.rs` | `inject_delegation_token` and `delegation_token_scope` fields |
+
+---
+
+## Service Accounts
+
+Service accounts are non-human (machine-to-machine) identities that authenticate programmatically via OAuth2 Client Credentials Grant. They are stored in a dedicated `service_accounts` collection (separate from `users`) and managed by admins.
+
+### Authentication Flow
+
+```
+Service Account                    NyxID
+     |                               |
+     | POST /oauth/token             |
+     | grant_type=client_credentials |
+     | client_id=sa_...              |
+     | client_secret=sas_...         |
+     |------------------------------>|
+     |                               | Lookup by client_id
+     |                               | Verify SHA-256(secret) matches hash
+     |                               | Check is_active = true
+     |                               | Validate requested scopes
+     |                               | Issue JWT with sa: true claim
+     |                               | Record token in service_account_tokens
+     |                               |
+     | <-- { access_token, ... } ----|
+     |                               |
+     | ANY /api/v1/proxy/...         |
+     | Authorization: Bearer <token> |
+     |------------------------------>|
+     |                               | Verify JWT
+     |                               | Check sa: true -> SA auth path
+     |                               | Verify SA is_active
+     |                               | Check token not revoked (by JTI)
+     |                               | Build AuthUser (is_service_account=true)
+     |                               |
+     | <-- Proxied response ---------|
+```
+
+### JWT Claims
+
+Service account JWTs differ from user JWTs:
+
+| Claim        | User Token       | Service Account Token       |
+|--------------|------------------|-----------------------------|
+| `sub`        | User UUID        | Service account UUID        |
+| `sa`         | absent           | `true`                      |
+| `sid`        | Session ID       | absent (no sessions)        |
+| `roles`      | Role slugs       | absent (checked at request time) |
+| `groups`     | Group slugs      | absent (no group membership)|
+| `act`        | Present if delegated | absent (acts on own behalf) |
+| `token_type` | `"access"`       | `"access"`                  |
+
+### Endpoint Access Control
+
+The `reject_service_account_tokens` middleware restricts which endpoints service accounts can access:
+
+| Route Group                      | Service Account | Direct User Token |
+|----------------------------------|-----------------|-------------------|
+| `/api/v1/proxy/{id}/{*path}`    | Allowed         | Allowed           |
+| `/api/v1/llm/*`                 | Allowed         | Allowed           |
+| `/api/v1/connections/*`         | Allowed         | Allowed           |
+| `/api/v1/providers/*`           | Allowed         | Allowed           |
+| `/api/v1/delegation/*`          | Allowed         | Allowed           |
+| `/api/v1/auth/*`                | Blocked (403)   | Allowed           |
+| `/api/v1/users/*`               | Blocked (403)   | Allowed           |
+| `/api/v1/sessions/*`            | Blocked (403)   | Allowed           |
+| `/api/v1/api-keys/*`            | Blocked (403)   | Allowed           |
+| `/api/v1/admin/*`               | Blocked (403)   | Allowed           |
+| `/api/v1/services/*`            | Blocked (403)   | Allowed           |
+| `/api/v1/mcp/*`                 | Blocked (403)   | Allowed           |
+
+### Key Implementation Files
+
+| File | Responsibility |
+|------|---------------|
+| `models/service_account.rs` | `ServiceAccount` document model, `COLLECTION_NAME` constant |
+| `models/service_account_token.rs` | `ServiceAccountToken` document model for revocation tracking |
+| `services/service_account_service.rs` | CRUD, client credentials authentication, secret rotation, token revocation |
+| `handlers/admin_service_accounts.rs` | Admin API handlers for service account management |
+| `handlers/oauth.rs` | `client_credentials` grant type handling in `token()` |
+| `crypto/jwt.rs` | `generate_service_account_token()`, `sa` claim on `Claims` struct |
+| `mw/auth.rs` | `is_service_account` field on `AuthUser`, SA verification branch, `reject_service_account_tokens` middleware |
+| `config.rs` | `sa_token_ttl_secs` configuration (default: 3600s) |
 
 ---
 

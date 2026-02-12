@@ -8,9 +8,13 @@ use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{AppError, AppResult};
+use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
+use crate::models::service_account_token::{
+    ServiceAccountToken, COLLECTION_NAME as SA_TOKENS,
+};
 use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
-use crate::services::{audit_service, consent_service, oauth_client_service, oauth_service, token_exchange_service};
+use crate::services::{audit_service, consent_service, oauth_client_service, oauth_service, service_account_service, token_exchange_service};
 use crate::AppState;
 
 // --- Request / Response types ---
@@ -479,6 +483,7 @@ async fn issue_authorization_code(
 /// Validates client_secret for confidential clients.
 pub async fn token(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(body): Form<TokenRequest>,
 ) -> AppResult<Json<TokenResponse>> {
     match body.grant_type.as_str() {
@@ -589,6 +594,60 @@ pub async fn token(
                 scope: Some(result.scope),
                 issued_token_type: Some(result.issued_token_type),
             }))
+        }
+
+        // OAuth2 Client Credentials Grant (service accounts)
+        "client_credentials" => {
+            let client_id = body.client_id.as_deref()
+                .ok_or_else(|| AppError::BadRequest("Missing client_id".to_string()))?;
+            let client_secret = body.client_secret.as_deref()
+                .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
+
+            let result = service_account_service::authenticate_client_credentials(
+                &state.db,
+                &state.config,
+                &state.jwt_keys,
+                client_id,
+                client_secret,
+                body.scope.as_deref(),
+            ).await;
+
+            match result {
+                Ok(response) => {
+                    audit_service::log_async(
+                        state.db.clone(),
+                        None,
+                        "sa.token_issued".to_string(),
+                        Some(serde_json::json!({
+                            "client_id": client_id,
+                            "scope": &response.scope,
+                        })),
+                        extract_ip(&headers),
+                        extract_user_agent(&headers),
+                    );
+
+                    Ok(Json(TokenResponse {
+                        access_token: response.access_token,
+                        token_type: response.token_type,
+                        expires_in: response.expires_in,
+                        refresh_token: None,
+                        id_token: None,
+                        scope: Some(response.scope),
+                        issued_token_type: None,
+                    }))
+                }
+                Err(e) => {
+                    audit_service::log_async(
+                        state.db.clone(),
+                        None,
+                        "sa.auth_failed".to_string(),
+                        Some(serde_json::json!({ "client_id": client_id })),
+                        extract_ip(&headers),
+                        extract_user_agent(&headers),
+                    );
+                    Err(e)
+                }
+            }
         }
 
         other => Err(AppError::BadRequest(format!(
@@ -720,6 +779,20 @@ pub async fn introspect(
         }
     }
 
+    // For service account tokens, check if revoked in the SA tokens collection
+    if claims.sa == Some(true) {
+        let sa_token = state
+            .db
+            .collection::<ServiceAccountToken>(SA_TOKENS)
+            .find_one(doc! { "jti": &claims.jti })
+            .await;
+        match sa_token {
+            Ok(Some(t)) if t.revoked => return Json(inactive),
+            Err(_) => return Json(inactive),
+            _ => {}
+        }
+    }
+
     // Fetch user email for username field
     let username = state
         .db
@@ -793,6 +866,20 @@ pub async fn revoke(
                 doc! { "$set": { "revoked": true } },
             )
             .await;
+        return StatusCode::OK;
+    }
+
+    // For service account tokens, revoke via the SA tokens collection
+    if claims.sa == Some(true) {
+        let _ = state
+            .db
+            .collection::<ServiceAccountToken>(SA_TOKENS)
+            .update_one(
+                doc! { "jti": &claims.jti, "revoked": false },
+                doc! { "$set": { "revoked": true } },
+            )
+            .await;
+        return StatusCode::OK;
     }
 
     // Access tokens are JWTs -- they cannot be directly revoked without a blacklist.

@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   UsersRound,
   KeyRound,
+  Bot,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
@@ -30,6 +31,7 @@ const NAV_ITEMS = [
 
 const ADMIN_NAV_ITEMS = [
   { to: "/admin/users", icon: Users, label: "Users" },
+  { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },
   { to: "/admin/groups", icon: UsersRound, label: "Groups" },
 ] as const;

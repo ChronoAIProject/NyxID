@@ -34,6 +34,8 @@ import { AdminRolesPage } from "@/pages/admin-roles";
 import { AdminRoleDetailPage } from "@/pages/admin-role-detail";
 import { AdminGroupsPage } from "@/pages/admin-groups";
 import { AdminGroupDetailPage } from "@/pages/admin-group-detail";
+import { AdminServiceAccountsPage } from "@/pages/admin-service-accounts";
+import { AdminServiceAccountDetailPage } from "@/pages/admin-service-account-detail";
 import { ConsentsPage } from "@/pages/consents";
 
 const rootRoute = createRootRoute({
@@ -228,6 +230,18 @@ const adminGroupDetailRoute = createRoute({
   component: AdminGroupDetailPage,
 });
 
+const adminServiceAccountsRoute = createRoute({
+  path: "service-accounts",
+  getParentRoute: () => adminLayout,
+  component: AdminServiceAccountsPage,
+});
+
+const adminServiceAccountDetailRoute = createRoute({
+  path: "service-accounts/$saId",
+  getParentRoute: () => adminLayout,
+  component: AdminServiceAccountDetailPage,
+});
+
 const routeTree = rootRoute.addChildren([
   authLayout.addChildren([loginRoute, registerRoute]),
   dashboardLayout.addChildren([
@@ -256,6 +270,8 @@ const routeTree = rootRoute.addChildren([
       adminRoleDetailRoute,
       adminGroupsRoute,
       adminGroupDetailRoute,
+      adminServiceAccountsRoute,
+      adminServiceAccountDetailRoute,
     ]),
   ]),
 ]);

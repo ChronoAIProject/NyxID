@@ -5,7 +5,7 @@ use axum::{
 };
 
 use crate::handlers;
-use crate::mw::auth::reject_delegated_tokens;
+use crate::mw::auth::{reject_delegated_tokens, reject_service_account_tokens};
 use crate::AppState;
 
 /// Build the complete application router with all route groups.
@@ -130,6 +130,17 @@ pub fn build_router() -> Router<AppState> {
             axum::routing::any(handlers::llm_gateway::llm_proxy_request),
         );
 
+    let sa_admin_routes = Router::new()
+        .route("/", get(handlers::admin_service_accounts::list_service_accounts)
+            .post(handlers::admin_service_accounts::create_service_account))
+        .route("/{sa_id}", get(handlers::admin_service_accounts::get_service_account)
+            .put(handlers::admin_service_accounts::update_service_account)
+            .delete(handlers::admin_service_accounts::delete_service_account))
+        .route("/{sa_id}/rotate-secret",
+            post(handlers::admin_service_accounts::rotate_secret))
+        .route("/{sa_id}/revoke-tokens",
+            post(handlers::admin_service_accounts::revoke_tokens));
+
     let admin_routes = Router::new()
         .route("/users", get(handlers::admin::list_users)
             .post(handlers::admin::create_user))
@@ -165,7 +176,8 @@ pub fn build_router() -> Router<AppState> {
         .route("/oauth-clients", get(handlers::admin::list_oauth_clients)
             .post(handlers::admin::create_oauth_client))
         .route("/oauth-clients/{client_id}", delete(handlers::admin::delete_oauth_client))
-        .route("/oauth-clients/{client_id}/consents", get(handlers::admin::list_client_consents));
+        .route("/oauth-clients/{client_id}/consents", get(handlers::admin::list_client_consents))
+        .nest("/service-accounts", sa_admin_routes);
 
     let oauth_routes = Router::new()
         .route("/authorize", get(handlers::oauth::authorize))
@@ -179,26 +191,34 @@ pub fn build_router() -> Router<AppState> {
         .route("/refresh", post(handlers::delegation::refresh_delegation_token));
 
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
+    // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
         .nest("/llm", llm_routes)
         .nest("/delegation", delegation_routes)
         .route("/proxy/{service_id}/{*path}", axum::routing::any(handlers::proxy::proxy_request));
 
-    // Routes that BLOCK delegated tokens (everything else)
-    let api_v1_protected = Router::new()
+    // Routes accessible by both users and service accounts (block delegated tokens)
+    let api_v1_shared = Router::new()
+        .nest("/connections", connection_routes)
+        .nest("/providers", provider_routes)
+        .layer(middleware::from_fn(reject_delegated_tokens));
+
+    // Routes that BLOCK service account tokens (human-only endpoints)
+    let api_v1_human_only = Router::new()
         .nest("/auth", auth_routes)
         .nest("/users", user_routes)
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)
         .nest("/sessions", session_routes)
-        .nest("/connections", connection_routes)
-        .nest("/providers", provider_routes)
         .nest("/mcp", mcp_routes)
         .nest("/admin", admin_routes)
         .route("/public/config", get(handlers::health::public_config))
-        .layer(middleware::from_fn(reject_delegated_tokens));
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens));
 
-    let api_v1 = api_v1_delegated.merge(api_v1_protected);
+    let api_v1 = api_v1_delegated
+        .merge(api_v1_shared)
+        .merge(api_v1_human_only);
 
     let well_known_routes = Router::new()
         .route("/openid-configuration", get(handlers::oidc_discovery::openid_configuration))

@@ -63,18 +63,18 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (19 models, 18 collections)
-|-- services/            # Business logic (24 services, incl. token_exchange_service)
-|-- handlers/            # HTTP handlers (25 handler modules, incl. delegation)
+|-- models/              # MongoDB document structs (21 models, 19 collections)
+|-- services/            # Business logic (25 services, incl. service_account_service)
+|-- handlers/            # HTTP handlers (26 handler modules, incl. admin_service_accounts)
 |-- crypto/              # JWT, AES, password hashing, token generation
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
 frontend/src/
-|-- pages/               # Route pages (18 pages)
+|-- pages/               # Route pages (20 pages)
 |-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/)
-|-- hooks/               # TanStack Query hooks (7 hooks)
-|-- schemas/             # Zod validation schemas (6 schema files + tests)
+|-- hooks/               # TanStack Query hooks (8 hooks)
+|-- schemas/             # Zod validation schemas (7 schema files + tests)
 |-- stores/              # Zustand stores (auth-store)
 |-- lib/                 # API client, constants, utils
 |-- types/               # TypeScript type definitions
@@ -92,12 +92,14 @@ All API routes under `/api/v1`:
 - `/sessions` -- list sessions
 - `/connections` -- connect/disconnect services
 - `/providers` -- CRUD + OAuth/device-code/API-key flows + token management
-- `/admin` -- user management, audit log, OAuth clients
+- `/admin` -- user management, audit log, OAuth clients, service accounts
 - `/proxy/{service_id}/{path}` -- authenticated proxy
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
 - `/delegation/refresh` -- refresh delegated access tokens
 
-- `/oauth/token` -- also supports `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access)
+- `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation
+
+- `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts) and `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access)
 
 Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`
 
@@ -117,6 +119,7 @@ JWT_PUBLIC_KEY_PATH=keys/public.pem
 JWT_ISSUER=nyxid
 JWT_ACCESS_TTL_SECS=900             # 15 minutes
 JWT_REFRESH_TTL_SECS=604800         # 7 days
+SA_TOKEN_TTL_SECS=3600              # 1 hour (service account tokens)
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
 RATE_LIMIT_BURST=30

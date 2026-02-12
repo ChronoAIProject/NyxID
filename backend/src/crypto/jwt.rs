@@ -60,6 +60,9 @@ pub struct Claims {
     /// Flag indicating this is a delegated access token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delegated: Option<bool>,
+    /// True if this token was issued to a service account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sa: Option<bool>,
 }
 
 /// Actor claim per RFC 8693 Section 4.1.
@@ -225,6 +228,7 @@ pub fn generate_access_token(
         sid: rbac.and_then(|r| r.sid.clone()),
         act: None,
         delegated: None,
+        sa: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -258,6 +262,7 @@ pub fn generate_refresh_token(
         sid: None,
         act: None,
         delegated: None,
+        sa: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -311,6 +316,7 @@ pub fn generate_delegated_access_token(
             sub: acting_client_id.to_string(),
         }),
         delegated: Some(true),
+        sa: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
@@ -411,6 +417,47 @@ pub fn public_key_jwk(public_pem: &str) -> Result<serde_json::Value, AppError> {
     }))
 }
 
+/// Generate an access token for a service account.
+///
+/// Like a regular access token, but with `sa: true` and no RBAC claims
+/// embedded (RBAC is resolved at request time for service accounts).
+pub fn generate_service_account_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    service_account_id: &str,
+    scope: &str,
+    ttl_secs: i64,
+) -> Result<(String, String), AppError> {
+    let now = Utc::now().timestamp();
+    let jti = Uuid::new_v4().to_string();
+
+    let claims = Claims {
+        sub: service_account_id.to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.base_url.clone(),
+        exp: now + ttl_secs,
+        iat: now,
+        jti: jti.clone(),
+        scope: scope.to_string(),
+        token_type: "access".to_string(),
+        roles: None,
+        groups: None,
+        permissions: None,
+        sid: None,
+        act: None,
+        delegated: None,
+        sa: Some(true),
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
+
+    let token = encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode SA token: {e}")))?;
+
+    Ok((token, jti))
+}
+
 /// Verify and decode an access or refresh token.
 pub fn verify_token(keys: &JwtKeys, config: &AppConfig, token: &str) -> Result<Claims, AppError> {
     let mut validation = Validation::new(Algorithm::RS256);
@@ -479,6 +526,7 @@ mod tests {
             encryption_key: "ab".repeat(32),
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            sa_token_ttl_secs: 3600,
         };
 
         (keys, config)
@@ -538,6 +586,7 @@ mod tests {
             sid: None,
             act: None,
             delegated: None,
+            sa: None,
         };
 
         let mut header = Header::new(Algorithm::RS256);
@@ -634,6 +683,7 @@ mod tests {
             sid: None,
             act: None,
             delegated: None,
+            sa: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
         let restored: Claims = serde_json::from_str(&json).unwrap();
@@ -717,5 +767,55 @@ mod tests {
         assert!(json.get("amr").is_none());
         assert!(json.get("auth_time").is_none());
         assert!(json.get("sid").is_none());
+    }
+
+    #[test]
+    fn generate_and_verify_service_account_token() {
+        let (keys, config) = test_keys_and_config();
+        let sa_id = Uuid::new_v4().to_string();
+        let (token, jti) = generate_service_account_token(
+            &keys, &config, &sa_id, "proxy:* llm:proxy", 3600,
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.sub, sa_id);
+        assert_eq!(claims.token_type, "access");
+        assert_eq!(claims.scope, "proxy:* llm:proxy");
+        assert_eq!(claims.sa, Some(true));
+        assert_eq!(claims.jti, jti);
+        assert!(claims.act.is_none());
+        assert!(claims.delegated.is_none());
+        assert!(claims.roles.is_none());
+        assert!(claims.groups.is_none());
+        assert!(claims.sid.is_none());
+    }
+
+    #[test]
+    fn service_account_token_respects_ttl() {
+        let (keys, config) = test_keys_and_config();
+        let sa_id = Uuid::new_v4().to_string();
+        let (token, _) = generate_service_account_token(
+            &keys, &config, &sa_id, "proxy:*", 120,
+        )
+        .unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        let ttl = claims.exp - claims.iat;
+        assert_eq!(ttl, 120);
+    }
+
+    #[test]
+    fn sa_claim_skipped_when_none() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let token = generate_access_token(&keys, &config, &user_id, "openid", None).unwrap();
+
+        let claims = verify_token(&keys, &config, &token).unwrap();
+        assert!(claims.sa.is_none());
+
+        // Verify the JSON doesn't include "sa" when None
+        let json = serde_json::to_string(&claims).unwrap();
+        assert!(!json.contains("\"sa\""));
     }
 }

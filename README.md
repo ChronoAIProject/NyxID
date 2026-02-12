@@ -105,6 +105,20 @@ It provides a complete identity layer: user registration, session management, Op
 - Per-client consent revocation without disconnecting from the application
 - Consent records track granted scopes, grant time, and optional expiration
 
+### Service Accounts
+- Non-human (machine-to-machine) identities for programmatic access
+- OAuth2 Client Credentials Grant authentication (`POST /oauth/token` with `grant_type=client_credentials`)
+- Admin CRUD for service accounts with paginated listing and search
+- Client secret generation with SHA-256 hashed storage (plaintext shown once at creation)
+- Client secret rotation with automatic token revocation
+- Scope-based access control (requested scopes must be a subset of allowed scopes)
+- Token revocation support with per-token tracking via JTI
+- Service accounts can access proxy, LLM gateway, connections, and provider endpoints
+- RBAC role assignment for service accounts (direct roles, no group membership)
+- Blocked from human-only endpoints (auth, users, sessions, admin, MFA)
+- Configurable token TTL (default: 1 hour)
+- Full audit logging for all service account operations
+
 ### Credential Broker
 - Admin-managed provider registry (OpenAI, Anthropic, Google AI, Mistral, Cohere, etc.)
 - Users connect by entering API keys or completing OAuth2 flows
@@ -203,7 +217,7 @@ It provides a complete identity layer: user registration, session management, Op
                                   |
                          +--------v---------+
                          |  MongoDB 8.0     |
-                         |  (17 collections)|
+                         |  (19 collections)|
                          +------------------+
 ```
 
@@ -387,6 +401,15 @@ For the full API reference with request/response schemas and example curl comman
 | ANY    | `/api/v1/llm/{provider_slug}/v1/{*path}` | Required | Proxy to LLM provider           |
 | ANY    | `/api/v1/llm/gateway/v1/{*path}`     | Required | OpenAI-compatible LLM gateway        |
 | POST   | `/api/v1/delegation/refresh`         | Delegated| Refresh a delegated access token     |
+| POST   | `/api/v1/admin/service-accounts`     | Admin    | Create a service account             |
+| GET    | `/api/v1/admin/service-accounts`     | Admin    | List service accounts (paginated, searchable) |
+| GET    | `/api/v1/admin/service-accounts/{sa_id}` | Admin | Get service account details          |
+| PUT    | `/api/v1/admin/service-accounts/{sa_id}` | Admin | Update a service account             |
+| DELETE | `/api/v1/admin/service-accounts/{sa_id}` | Admin | Delete (deactivate) a service account |
+| POST   | `/api/v1/admin/service-accounts/{sa_id}/rotate-secret` | Admin | Rotate client secret |
+| POST   | `/api/v1/admin/service-accounts/{sa_id}/revoke-tokens` | Admin | Revoke all tokens    |
+
+`POST /oauth/token` also supports `grant_type=client_credentials` for service account authentication.
 
 ---
 
@@ -425,6 +448,7 @@ All configuration is loaded from environment variables. A `.env` file is support
 | `JWT_ISSUER`           | `nyxid`              | JWT `iss` claim value                    |
 | `JWT_ACCESS_TTL_SECS`  | `900` (15 min)       | Access token lifetime in seconds         |
 | `JWT_REFRESH_TTL_SECS` | `604800` (7 days)    | Refresh token lifetime in seconds        |
+| `SA_TOKEN_TTL_SECS`   | `3600` (1 hour)      | Service account token lifetime in seconds |
 
 In development mode, RSA keys are auto-generated if the files do not exist. In production, you must provide pre-generated keys:
 
@@ -472,7 +496,7 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 
 ## Database Schema
 
-NyxID uses 17 MongoDB collections:
+NyxID uses 19 MongoDB collections:
 
 | Collection                 | Description                                          |
 |----------------------------|------------------------------------------------------|
@@ -493,6 +517,8 @@ NyxID uses 17 MongoDB collections:
 | `roles`                    | Role definitions with permissions and scoping        |
 | `groups`                   | Group definitions with role inheritance               |
 | `consents`                 | User OAuth consent records per client                 |
+| `service_accounts`         | Non-human (machine) identity definitions             |
+| `service_account_tokens`   | Issued service account JWT records for revocation    |
 | `audit_log`                | Immutable audit trail of security events             |
 
 All documents use UUID identifiers, ISO 8601 timestamps, and appropriate indexes for query patterns.
@@ -648,7 +674,7 @@ NyxID/
 |       |   |-- jwt.rs          RS256 JWT signing, verification, key management
 |       |   |-- aes.rs          AES-256-GCM encryption and decryption
 |       |   `-- token.rs        Random token generation, SHA-256 hashing
-|       |-- models/             MongoDB document definitions (20 modules, incl. role, group, consent, delegation fields)
+|       |-- models/             MongoDB document definitions (22 modules, incl. role, group, consent, service_account)
 |       |-- handlers/           HTTP handler functions by domain
 |       |   |-- auth.rs         Register, login, logout, refresh, verify-email, forgot/reset-password
 |       |   |-- users.rs        Get/update user profile
@@ -669,6 +695,7 @@ NyxID/
 |       |   |-- admin.rs        Admin user management, audit log, OAuth client endpoints
 |       |   |-- admin_roles.rs  Admin role CRUD + user role assignment
 |       |   |-- admin_groups.rs Admin group CRUD + membership management
+|       |   |-- admin_service_accounts.rs Admin service account CRUD + secret rotation + token revocation
 |       |   |-- admin_helpers.rs Shared admin handler helpers (require_admin, IP/UA extraction)
 |       |   |-- consent.rs      User consent listing and revocation
 |       |   |-- delegation.rs   Delegation token refresh endpoint
@@ -693,6 +720,7 @@ NyxID/
 |       |   |-- role_service.rs     Role CRUD, assignment, system role seeding
 |       |   |-- group_service.rs    Group CRUD, membership management
 |       |   |-- consent_service.rs  Consent creation, listing, revocation
+|       |   |-- service_account_service.rs Service account CRUD, client credentials auth, token revocation
 |       |   |-- rbac_helpers.rs     Resolve effective roles/groups/permissions for a user
 |       |   |-- mcp_service.rs      MCP tool execution, delegation token injection
 |       |   |-- oauth_client_service.rs OAuth client management (admin)
@@ -714,14 +742,17 @@ NyxID/
         |-- types/              TypeScript API type definitions
         |   |-- api.ts
         |   |-- admin.ts       Admin-specific types
-        |   `-- rbac.ts        RBAC types (roles, groups, consents)
+        |   |-- rbac.ts        RBAC types (roles, groups, consents)
+        |   `-- service-accounts.ts Service account types
         |-- schemas/            Zod validation schemas
         |   |-- admin.ts       Admin form schemas
-        |   `-- rbac.ts        RBAC form schemas (role, group)
+        |   |-- rbac.ts        RBAC form schemas (role, group)
+        |   `-- service-accounts.ts Service account form schemas
         |-- hooks/              React Query hooks
         |   |-- use-admin.ts   Admin user management hooks
         |   |-- use-rbac.ts    Role and group management hooks
         |   |-- use-consents.ts Consent management hooks
+        |   |-- use-service-accounts.ts Service account management hooks
         |   `-- use-llm-gateway.ts LLM gateway status hook
         |-- components/
         |   |-- ui/             16 shadcn/ui primitives
@@ -733,6 +764,8 @@ NyxID/
             |-- admin-role-detail.tsx  Admin role detail
             |-- admin-groups.tsx   Admin group list
             |-- admin-group-detail.tsx Admin group detail with member management
+            |-- admin-service-accounts.tsx Admin service account list
+            |-- admin-service-account-detail.tsx Admin service account detail
             |-- consents.tsx       User consent management
             `-- (login, register, dashboard, admin-users, admin-user-detail, etc.)
 ```
