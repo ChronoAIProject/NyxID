@@ -71,6 +71,20 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Social login lookup: find user by (provider, provider_id)
+    users
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "social_provider": 1, "social_provider_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .sparse(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── sessions ──
     let sessions = db.collection::<mongodb::bson::Document>("sessions");

@@ -38,9 +38,9 @@ It provides a complete identity layer: user registration, session management, Op
 - Support for both confidential and public clients
 
 ### Social Login
-- Google, GitHub, and Apple OAuth 2.0 integration
-- Automatic account linking by email
-- Encrypted storage of provider tokens (AES-256-GCM)
+- Google and GitHub OAuth 2.0 integration
+- Automatic account linking by verified email
+- Session creation on successful social login (same cookies as email/password login)
 
 ### Multi-Factor Authentication (MFA)
 - TOTP-based second factor (compatible with Google Authenticator, Authy, 1Password)
@@ -331,6 +331,8 @@ For the full API reference with request/response schemas and example curl comman
 | POST   | `/api/v1/auth/verify-email`          | None     | Verify email address with token      |
 | POST   | `/api/v1/auth/forgot-password`       | None     | Request a password reset email       |
 | POST   | `/api/v1/auth/reset-password`        | None     | Reset password with token            |
+| GET    | `/api/v1/auth/social/{provider}`     | None     | Initiate social login (redirects to provider) |
+| GET    | `/api/v1/auth/social/{provider}/callback` | None | Social login callback (exchanges code, creates session) |
 | GET    | `/api/v1/users/me`                   | Required | Get current user profile             |
 | PUT    | `/api/v1/users/me`                   | Required | Update current user profile          |
 | GET    | `/api/v1/api-keys`                   | Required | List API keys                        |
@@ -677,6 +679,7 @@ NyxID/
 |       |-- models/             MongoDB document definitions (22 modules, incl. role, group, consent, service_account)
 |       |-- handlers/           HTTP handler functions by domain
 |       |   |-- auth.rs         Register, login, logout, refresh, verify-email, forgot/reset-password
+|       |   |-- social_auth.rs  Social login: authorize redirect + OAuth callback
 |       |   |-- users.rs        Get/update user profile
 |       |   |-- api_keys.rs     CRUD + rotate API keys
 |       |   |-- services.rs     CRUD downstream services (+ identity propagation config)
@@ -703,6 +706,7 @@ NyxID/
 |       |   `-- health.rs       Health check
 |       |-- services/           Business logic layer
 |       |   |-- auth_service.rs     User registration, password verification
+|       |   |-- social_auth_service.rs Social login OAuth flow (GitHub + Google)
 |       |   |-- token_service.rs    Session/token issuance, refresh rotation
 |       |   |-- oauth_service.rs    Client validation, code exchange
 |       |   |-- key_service.rs      API key lifecycle

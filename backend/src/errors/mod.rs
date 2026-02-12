@@ -94,6 +94,18 @@ pub enum AppError {
 
     #[error("Service account is inactive")]
     ServiceAccountInactive,
+
+    #[error("Social authentication failed: {0}")]
+    SocialAuthFailed(String),
+
+    #[error("Social auth conflict: email already linked to another provider")]
+    SocialAuthConflict,
+
+    #[error("Social auth: no verified email from provider")]
+    SocialAuthNoEmail,
+
+    #[error("Social auth: account is deactivated")]
+    SocialAuthDeactivated,
 }
 
 impl AppError {
@@ -120,6 +132,9 @@ impl AppError {
             Self::CircularGroupHierarchy => StatusCode::BAD_REQUEST,
             Self::ServiceAccountNotFound(_) => StatusCode::NOT_FOUND,
             Self::ServiceAccountInactive => StatusCode::FORBIDDEN,
+            Self::SocialAuthFailed(_) | Self::SocialAuthNoEmail => StatusCode::BAD_REQUEST,
+            Self::SocialAuthConflict => StatusCode::CONFLICT,
+            Self::SocialAuthDeactivated => StatusCode::FORBIDDEN,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -151,6 +166,10 @@ impl AppError {
             Self::CircularGroupHierarchy => 4007,
             Self::ServiceAccountNotFound(_) => 5000,
             Self::ServiceAccountInactive => 5001,
+            Self::SocialAuthFailed(_) => 6000,
+            Self::SocialAuthConflict => 6001,
+            Self::SocialAuthNoEmail => 6002,
+            Self::SocialAuthDeactivated => 6003,
         }
     }
 
@@ -181,6 +200,10 @@ impl AppError {
             Self::CircularGroupHierarchy => "circular_group_hierarchy",
             Self::ServiceAccountNotFound(_) => "service_account_not_found",
             Self::ServiceAccountInactive => "service_account_inactive",
+            Self::SocialAuthFailed(_) => "social_auth_failed",
+            Self::SocialAuthConflict => "social_auth_conflict",
+            Self::SocialAuthNoEmail => "social_auth_no_email",
+            Self::SocialAuthDeactivated => "social_auth_deactivated",
         }
     }
 }
@@ -258,6 +281,10 @@ mod tests {
         assert_eq!(AppError::CircularGroupHierarchy.status_code(), StatusCode::BAD_REQUEST);
         assert_eq!(AppError::ServiceAccountNotFound("x".into()).status_code(), StatusCode::NOT_FOUND);
         assert_eq!(AppError::ServiceAccountInactive.status_code(), StatusCode::FORBIDDEN);
+        assert_eq!(AppError::SocialAuthFailed("x".into()).status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(AppError::SocialAuthConflict.status_code(), StatusCode::CONFLICT);
+        assert_eq!(AppError::SocialAuthNoEmail.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(AppError::SocialAuthDeactivated.status_code(), StatusCode::FORBIDDEN);
     }
 
     #[test]
@@ -287,6 +314,10 @@ mod tests {
             AppError::CircularGroupHierarchy.error_code(),
             AppError::ServiceAccountNotFound("".into()).error_code(),
             AppError::ServiceAccountInactive.error_code(),
+            AppError::SocialAuthFailed("".into()).error_code(),
+            AppError::SocialAuthConflict.error_code(),
+            AppError::SocialAuthNoEmail.error_code(),
+            AppError::SocialAuthDeactivated.error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(codes.len(), unique.len(), "All error codes should be unique");
@@ -321,6 +352,10 @@ mod tests {
         assert_eq!(AppError::CircularGroupHierarchy.error_key(), "circular_group_hierarchy");
         assert_eq!(AppError::ServiceAccountNotFound("".into()).error_key(), "service_account_not_found");
         assert_eq!(AppError::ServiceAccountInactive.error_key(), "service_account_inactive");
+        assert_eq!(AppError::SocialAuthFailed("".into()).error_key(), "social_auth_failed");
+        assert_eq!(AppError::SocialAuthConflict.error_key(), "social_auth_conflict");
+        assert_eq!(AppError::SocialAuthNoEmail.error_key(), "social_auth_no_email");
+        assert_eq!(AppError::SocialAuthDeactivated.error_key(), "social_auth_deactivated");
     }
 
     #[test]

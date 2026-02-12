@@ -25,6 +25,10 @@ pub struct User {
     #[serde(default)]
     pub group_ids: Vec<String>,
     pub mfa_enabled: bool,
+    #[serde(default)]
+    pub social_provider: Option<String>,
+    #[serde(default)]
+    pub social_provider_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -58,6 +62,8 @@ mod tests {
             role_ids: vec![],
             group_ids: vec![],
             mfa_enabled: false,
+            social_provider: None,
+            social_provider_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_login_at: None,

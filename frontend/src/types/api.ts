@@ -191,6 +191,7 @@ export interface MfaVerifyRequest {
 export interface PublicConfig {
   readonly mcp_url: string;
   readonly version: string;
+  readonly social_providers: readonly string[];
 }
 
 export interface ProviderConfig {

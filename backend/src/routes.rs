@@ -25,6 +25,8 @@ pub fn build_router() -> Router<AppState> {
         .route("/forgot-password", post(handlers::auth::forgot_password))
         .route("/reset-password", post(handlers::auth::reset_password))
         .route("/setup", post(handlers::auth::setup))
+        .route("/social/{provider}", get(handlers::social_auth::authorize))
+        .route("/social/{provider}/callback", get(handlers::social_auth::callback))
         .nest("/mfa", mfa_routes);
 
     let user_routes = Router::new()

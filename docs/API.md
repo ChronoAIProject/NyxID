@@ -12,6 +12,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 - [Endpoints](#endpoints)
   - [Health](#health)
   - [Auth](#auth)
+  - [Social Auth](#social-auth)
   - [Users](#users)
   - [API Keys](#api-keys)
   - [Downstream Services](#downstream-services)
@@ -104,6 +105,10 @@ Internal errors never leak implementation details. The `message` for error codes
 | 3002 | `invalid_scope`            | 400         | Requested scope not allowed              |
 | 5000 | `service_account_not_found`| 404         | Service account does not exist           |
 | 5001 | `service_account_inactive` | 403         | Service account is deactivated           |
+| 6000 | `social_auth_failed`       | 400         | Social authentication failed             |
+| 6001 | `social_auth_conflict`     | 409         | Email already linked to another provider |
+| 6002 | `social_auth_no_email`     | 400         | No verified email from provider          |
+| 6003 | `social_auth_deactivated`  | 403         | Social login account is deactivated      |
 
 ---
 
@@ -489,6 +494,93 @@ curl -X POST http://localhost:3001/api/v1/auth/setup \
     "display_name": "Admin"
   }'
 ```
+
+---
+
+### Social Auth
+
+Social login allows users to authenticate via GitHub or Google OAuth 2.0. The flow is entirely browser-based: the frontend navigates to the authorize endpoint, the user authenticates with the provider, and the callback endpoint creates a session and redirects to the frontend dashboard.
+
+**Flow:**
+
+1. Frontend navigates to `GET /api/v1/auth/social/{provider}` (e.g., via a "Sign in with GitHub" button)
+2. Backend generates a CSRF state token, stores it as a cookie, and redirects (302) to the provider's authorization page
+3. User authorizes the application on the provider's site
+4. Provider redirects back to `GET /api/v1/auth/social/{provider}/callback` with `code` and `state` query parameters
+5. Backend validates the state token, exchanges the code for an access token, fetches the user's profile
+6. Backend finds or creates a user (matching by email), creates a session, sets auth cookies, and redirects to the frontend dashboard
+
+#### GET /api/v1/auth/social/{provider}
+
+Initiate an OAuth 2.0 authorization flow with a social provider.
+
+**Auth:** None
+
+**Path Parameters:**
+
+| Parameter  | Type   | Description                            |
+|------------|--------|----------------------------------------|
+| `provider` | string | Social provider: `"github"` or `"google"` |
+
+**Response (302):** Redirects to the provider's authorization page. Sets a `social_auth_state` HttpOnly cookie containing the CSRF state token.
+
+**Errors:**
+- `6000 social_auth_failed` -- Provider not configured (missing client ID/secret) or unsupported provider
+
+**Example:**
+
+Navigate in browser:
+```
+http://localhost:3001/api/v1/auth/social/github
+http://localhost:3001/api/v1/auth/social/google
+```
+
+---
+
+#### GET /api/v1/auth/social/{provider}/callback
+
+OAuth callback handler. Called by the provider after user authorization.
+
+**Auth:** None (called by the OAuth provider redirect)
+
+**Path Parameters:**
+
+| Parameter  | Type   | Description                            |
+|------------|--------|----------------------------------------|
+| `provider` | string | Social provider: `"github"` or `"google"` |
+
+**Query Parameters:**
+
+| Parameter | Type   | Description                                         |
+|-----------|--------|-----------------------------------------------------|
+| `code`    | string | Authorization code from the provider                |
+| `state`   | string | CSRF state token (must match the `social_auth_state` cookie) |
+| `error`   | string | Error code from the provider (if authorization was denied) |
+
+**Response (302 on success):** Redirects to the frontend dashboard (`{FRONTEND_URL}/dashboard`). Sets the same auth cookies as a regular login: `nyx_session`, `nyx_access_token`, `nyx_refresh_token`.
+
+**Response (302 on error):** Redirects to `{FRONTEND_URL}/login?error={error_key}`.
+
+Possible error keys in the redirect:
+
+| Scenario                          | Error key in redirect         |
+|-----------------------------------|-------------------------------|
+| Provider returned an error        | `social_auth_denied`          |
+| Missing code or state parameter   | `social_auth_invalid`         |
+| State/CSRF token mismatch         | `social_auth_csrf`            |
+| Code exchange failed              | `social_auth_exchange`        |
+| Profile fetch failed              | `social_auth_profile`         |
+| Email linked to another provider  | `social_auth_conflict`        |
+| No verified email from provider   | `social_auth_no_email`        |
+| Provider not configured           | `social_auth_unavailable`     |
+| Unsupported provider name         | `social_auth_unsupported`     |
+| Account is deactivated            | `social_auth_deactivated`     |
+
+**Notes:**
+- If a user with the same email already exists and has no social provider set, the account is linked to this provider
+- If a user with the same email is already linked to a *different* social provider, the login fails with `social_auth_conflict`
+- New users created via social login have `email_verified = true` (provider verified the email) and no password set
+- Social login users cannot use the password reset or password login flows
 
 ---
 

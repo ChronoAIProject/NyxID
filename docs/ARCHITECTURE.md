@@ -608,6 +608,8 @@ The core user identity collection. Password hash is nullable to support social-o
 | `role_ids`                | array                  | NOT NULL, DEFAULT []    | Directly-assigned role IDs |
 | `group_ids`               | array                  | NOT NULL, DEFAULT []    | Group membership IDs     |
 | `mfa_enabled`             | boolean                | NOT NULL, DEFAULT false | MFA enabled flag         |
+| `social_provider`         | string                 | NULLABLE        | Social login provider (`"github"` or `"google"`) |
+| `social_provider_id`      | string                 | NULLABLE        | Provider-specific user ID       |
 | `created_at`              | ISO 8601 date          | NOT NULL        | Account creation time           |
 | `updated_at`              | ISO 8601 date          | NOT NULL        | Last profile update             |
 | `last_login_at`           | ISO 8601 date          | NULLABLE        | Last successful login           |
@@ -1461,7 +1463,7 @@ The following data is encrypted with AES-256-GCM before database storage:
 
 - Downstream service credentials (`downstream_services.credential_encrypted`)
 - Per-user service credentials (`user_service_connections.credential_encrypted`)
-- Social login provider tokens (`user_social_connections.access_token_encrypted`, `refresh_token_encrypted`)
+- Social login: provider identity stored on the `users` document (`social_provider`, `social_provider_id`); no tokens are persisted
 - MFA TOTP secrets (`mfa_factors.secret_encrypted`)
 - Provider OAuth client credentials (`provider_configs.client_id_encrypted`, `client_secret_encrypted`)
 - User provider tokens (`user_provider_tokens.access_token_encrypted`, `refresh_token_encrypted`, `api_key_encrypted`)

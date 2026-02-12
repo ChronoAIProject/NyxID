@@ -113,6 +113,8 @@ pub async fn create_user(
         role_ids: vec![],
         group_ids: vec![],
         mfa_enabled: false,
+        social_provider: None,
+        social_provider_id: None,
         created_at: now,
         updated_at: now,
         last_login_at: None,

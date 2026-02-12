@@ -109,7 +109,7 @@ pub(crate) fn build_cookie(name: &str, value: &str, max_age_secs: i64, path: &st
 }
 
 /// Build a cookie-clearing header value.
-fn clear_cookie(name: &str, path: &str, secure: bool) -> String {
+pub(crate) fn clear_cookie(name: &str, path: &str, secure: bool) -> String {
     let secure_flag = if secure { "; Secure" } else { "" };
     format!(
         "{}=; HttpOnly; SameSite=Lax; Path={}; Max-Age=0{}",
