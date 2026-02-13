@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use crate::crypto::{aes, jwt};
-use crate::errors::AppError;
 use crate::models::mcp_session;
 use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::services::{audit_service, mcp_service};
@@ -142,8 +141,11 @@ async fn authenticate_mcp(
             Ok(claims) if claims.token_type == "access" => {
                 return verify_user_active(state, claims.sub).await;
             }
-            Err(AppError::TokenExpired) if session_fallback => {
-                // Token expired -- fall through to session-based auth
+            Err(_) if session_fallback => {
+                // Any JWT error (expired, invalid issuer, etc.) -- fall through
+                // to session-based auth. The MCP session ID is the real auth
+                // mechanism for long-lived connections; the JWT is only needed
+                // for the initial `initialize` call.
             }
             _ => return Err(mcp_401(&state.config.base_url)),
         }
