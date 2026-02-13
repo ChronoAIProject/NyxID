@@ -42,6 +42,13 @@ const PROVIDER_BRANDS: Readonly<Record<string, ProviderBrand>> = {
     textClass: "text-[#39594d]",
     initial: "Co",
   },
+  deepseek: {
+    label: "DeepSeek",
+    color: "#4D6BFE",
+    bgClass: "bg-[#4D6BFE]/15",
+    textClass: "text-[#4D6BFE]",
+    initial: "DS",
+  },
   "openai-codex": {
     label: "Codex",
     color: "#10a37f",

@@ -303,6 +303,41 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 7. DeepSeek (API Key)
+    if !slug_exists!("deepseek") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "deepseek".to_string(),
+            name: "DeepSeek".to_string(),
+            description: Some("DeepSeek AI API access".to_string()),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Get your API key from https://platform.deepseek.com/api_keys".to_string(),
+            ),
+            api_key_url: Some("https://platform.deepseek.com/api_keys".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://api-docs.deepseek.com".to_string()),
+            is_active: true,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "deepseek", "Seeded default provider: DeepSeek");
+        seeded_count += 1;
+    }
+
     if seeded_count > 0 {
         tracing::info!(count = seeded_count, "Default provider seeding complete");
     }
@@ -365,6 +400,14 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         service_slug: "llm-cohere",
         service_name: "Cohere API",
         base_url: "https://api.cohere.com/v2",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    LlmServiceSeed {
+        provider_slug: "deepseek",
+        service_slug: "llm-deepseek",
+        service_name: "DeepSeek API",
+        base_url: "https://api.deepseek.com/v1",
         injection_method: "bearer",
         injection_key: "Authorization",
     },
