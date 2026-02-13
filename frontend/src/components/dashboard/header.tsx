@@ -21,7 +21,6 @@ function getPageTitle(pathname: string): string {
     "/connections": "Connections",
     "/settings": "Settings",
   };
-  // Match on first path segment to handle nested routes (e.g. /services/abc)
   const segment = "/" + (pathname.split("/")[1] ?? "");
   return titles[segment] ?? "Dashboard";
 }
@@ -39,6 +38,7 @@ function getInitials(name: string | null, email: string): string {
   return email.slice(0, 2).toUpperCase();
 }
 
+/* ── VoidPortal Header ── */
 export function Header() {
   const routerState = useRouterState();
   const navigate = useNavigate();
@@ -54,8 +54,8 @@ export function Header() {
   }
 
   return (
-    <header className="flex h-16 items-center justify-between border-b px-6">
-      <h1 className="text-xl font-semibold">{title}</h1>
+    <header className="flex h-16 items-center justify-between border-b border-border bg-background px-14">
+      <h1 className="font-display text-[22px] font-normal">{title}</h1>
 
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -64,15 +64,16 @@ export function Header() {
             className="flex items-center gap-3 rounded-lg p-1.5 transition-colors hover:bg-accent"
             aria-label="User menu"
           >
-            <div className="text-right">
-              <p className="text-sm font-medium">
+            {/* Name + email right-aligned */}
+            <div className="flex flex-col items-end gap-0.5">
+              <span className="text-[13px] font-medium text-foreground">
                 {user?.name ?? user?.email ?? "User"}
-              </p>
+              </span>
               {user?.name && (
-                <p className="text-xs text-muted-foreground">{user.email}</p>
+                <span className="text-[11px] text-text-tertiary">{user.email}</span>
               )}
             </div>
-            <Avatar className="h-8 w-8">
+            <Avatar className="h-10 w-10">
               {safeAvatarUrl && <AvatarImage src={safeAvatarUrl} alt="" />}
               <AvatarFallback className="text-xs">
                 {getInitials(user?.name ?? null, user?.email ?? "")}
@@ -86,13 +87,13 @@ export function Header() {
           <DropdownMenuItem
             onClick={() => void navigate({ to: "/settings" as string })}
           >
-            <User className="mr-2 h-4 w-4" aria-hidden="true" />
+            <User className="h-4 w-4" aria-hidden="true" />
             Profile
           </DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => void navigate({ to: "/settings" as string })}
           >
-            <Settings className="mr-2 h-4 w-4" aria-hidden="true" />
+            <Settings className="h-4 w-4" aria-hidden="true" />
             Settings
           </DropdownMenuItem>
           <DropdownMenuSeparator />
@@ -100,7 +101,7 @@ export function Header() {
             onClick={() => void handleLogout()}
             className="text-destructive focus:text-destructive"
           >
-            <LogOut className="mr-2 h-4 w-4" aria-hidden="true" />
+            <LogOut className="h-4 w-4" aria-hidden="true" />
             Log out
           </DropdownMenuItem>
         </DropdownMenuContent>

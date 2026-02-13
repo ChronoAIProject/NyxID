@@ -6,7 +6,7 @@ export function ApiKeysPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-3xl font-bold tracking-tight">API Keys</h2>
+          <h2 className="font-display text-5xl font-normal tracking-tight">API Keys</h2>
           <p className="text-muted-foreground">
             Manage your API keys for programmatic access.
           </p>
@@ -14,7 +14,9 @@ export function ApiKeysPage() {
         <ApiKeyCreateDialog />
       </div>
 
-      <ApiKeyTable />
+      <div className="rounded-xl border border-border">
+        <ApiKeyTable />
+      </div>
     </div>
   );
 }

@@ -49,6 +49,13 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -259,7 +266,7 @@ export function AdminUserDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 text-lg font-semibold">User not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">User not found</h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The user you are looking for does not exist or has been deleted.
         </p>
@@ -415,7 +422,7 @@ export function AdminUserDetailPage() {
         {sessions.length === 0 ? (
           <p className="text-sm text-muted-foreground">No sessions found.</p>
         ) : (
-          <div className="rounded-md border">
+          <div className="rounded-xl border border-border">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -766,18 +773,18 @@ function UserRolesSection({ userId }: { readonly userId: string }) {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <select
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              value={selectedRoleId}
-              onChange={(e) => setSelectedRoleId(e.target.value)}
-            >
-              <option value="">Select a role...</option>
-              {availableRoles.map((role) => (
-                <option key={role.id} value={role.id}>
-                  {role.name} ({role.slug})
-                </option>
-              ))}
-            </select>
+            <Select value={selectedRoleId} onValueChange={setSelectedRoleId}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select a role..." />
+              </SelectTrigger>
+              <SelectContent>
+                {availableRoles.map((role) => (
+                  <SelectItem key={role.id} value={role.id}>
+                    {role.name} ({role.slug})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setAssignOpen(false)}>

@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/table";
 import { ShieldCheck, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { Checkbox } from "@/components/ui/checkbox";
 
 export function AdminRolesPage() {
   const navigate = useNavigate();
@@ -146,7 +147,7 @@ export function AdminRolesPage() {
           <p className="text-sm text-muted-foreground">No roles found.</p>
         </div>
       ) : (
-        <div className="rounded-md border">
+        <div className="rounded-xl border border-border">
           <Table>
             <TableHeader>
               <TableRow>
@@ -313,11 +314,9 @@ export function AdminRolesPage() {
                 render={({ field }) => (
                   <FormItem className="flex items-center gap-2">
                     <FormControl>
-                      <input
-                        type="checkbox"
+                      <Checkbox
                         checked={field.value}
-                        onChange={field.onChange}
-                        className="h-4 w-4 rounded border-input"
+                        onCheckedChange={field.onChange}
                       />
                     </FormControl>
                     <FormLabel className="!mt-0">

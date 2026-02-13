@@ -62,7 +62,7 @@ export function ProviderDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 text-lg font-semibold">Provider not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">Provider not found</h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The provider you are looking for does not exist or has been deleted.
         </p>

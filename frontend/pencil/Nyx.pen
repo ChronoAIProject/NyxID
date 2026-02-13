@@ -658,7 +658,8 @@
           "fill": "#333333",
           "content": "Geometric Minimal",
           "fontFamily": "Manrope",
-          "fontSize": 12
+          "fontSize": 12,
+          "fontWeight": "normal"
         }
       ]
     },
@@ -692,6 +693,7 @@
           "content": "02",
           "fontFamily": "JetBrains Mono",
           "fontSize": 10,
+          "fontWeight": "normal",
           "letterSpacing": 4
         },
         {
@@ -919,6 +921,7 @@
               "content": "OAUTH 2.0 · OIDC · VERIFIED",
               "fontFamily": "JetBrains Mono",
               "fontSize": 9,
+              "fontWeight": "normal",
               "letterSpacing": 3
             }
           ]
@@ -966,7 +969,8 @@
           "fill": "#14F0FF15",
           "content": "Identity Chain",
           "fontFamily": "JetBrains Mono",
-          "fontSize": 10
+          "fontSize": 10,
+          "fontWeight": "normal"
         },
         {
           "type": "frame",
@@ -1082,7 +1086,8 @@
                   "fill": "#14F0FF30",
                   "content": "Dark",
                   "fontFamily": "JetBrains Mono",
-                  "fontSize": 9
+                  "fontSize": 9,
+                  "fontWeight": "normal"
                 }
               ]
             },
@@ -1191,7 +1196,8 @@
                   "fill": "#0A7A8A50",
                   "content": "Light",
                   "fontFamily": "JetBrains Mono",
-                  "fontSize": 9
+                  "fontSize": 9,
+                  "fontWeight": "normal"
                 }
               ]
             }
@@ -1202,8 +1208,8 @@
     {
       "type": "frame",
       "id": "vpNOc",
-      "x": 1404,
-      "y": 1020,
+      "x": 1225,
+      "y": 85,
       "name": "03 — Void Portal",
       "width": 600,
       "height": 760,
@@ -1229,6 +1235,7 @@
           "content": "03",
           "fontFamily": "JetBrains Mono",
           "fontSize": 10,
+          "fontWeight": "normal",
           "letterSpacing": 4
         },
         {
@@ -1448,7 +1455,8 @@
               "fill": "#C4B5FD",
               "content": "N",
               "fontFamily": "Playfair Display",
-              "fontSize": 52
+              "fontSize": 52,
+              "fontWeight": "normal"
             },
             {
               "type": "text",
@@ -1457,7 +1465,8 @@
               "fill": "#A78BFA60",
               "content": "yx",
               "fontFamily": "Playfair Display",
-              "fontSize": 52
+              "fontSize": 52,
+              "fontWeight": "normal"
             },
             {
               "type": "text",
@@ -1480,6 +1489,7 @@
           "content": "from the void, identity emerges",
           "fontFamily": "Playfair Display",
           "fontSize": 12,
+          "fontWeight": "normal",
           "letterSpacing": 2,
           "fontStyle": "italic"
         },
@@ -1562,7 +1572,8 @@
           "fill": "#8B5CF615",
           "content": "Void Portal",
           "fontFamily": "JetBrains Mono",
-          "fontSize": 10
+          "fontSize": 10,
+          "fontWeight": "normal"
         },
         {
           "type": "frame",
@@ -1682,7 +1693,8 @@
                   "fill": "#C4B5FD",
                   "content": "NyxID",
                   "fontFamily": "Playfair Display",
-                  "fontSize": 14
+                  "fontSize": 14,
+                  "fontWeight": "normal"
                 },
                 {
                   "type": "text",
@@ -1691,7 +1703,8 @@
                   "fill": "#8B5CF630",
                   "content": "Dark",
                   "fontFamily": "JetBrains Mono",
-                  "fontSize": 9
+                  "fontSize": 9,
+                  "fontWeight": "normal"
                 }
               ]
             },
@@ -1786,7 +1799,8 @@
                   "fill": "#6D28D9",
                   "content": "NyxID",
                   "fontFamily": "Playfair Display",
-                  "fontSize": 14
+                  "fontSize": 14,
+                  "fontWeight": "normal"
                 },
                 {
                   "type": "text",
@@ -1795,7 +1809,8 @@
                   "fill": "#6D28D950",
                   "content": "Light",
                   "fontFamily": "JetBrains Mono",
-                  "fontSize": 9
+                  "fontSize": 9,
+                  "fontWeight": "normal"
                 }
               ]
             }

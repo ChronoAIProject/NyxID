@@ -15,7 +15,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { SocialLoginButtons } from "@/components/auth/social-login-buttons";
-import { Separator } from "@/components/ui/separator";
 
 interface LoginFormProps {
   readonly returnTo?: string;
@@ -71,29 +70,16 @@ export function LoginForm({ returnTo }: LoginFormProps) {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="space-y-2 text-center">
-        <h1 className="text-2xl font-semibold tracking-tight">Welcome back</h1>
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-2 text-center">
+        <h1 className="font-display text-[28px] font-normal tracking-tight">Welcome back</h1>
         <p className="text-sm text-muted-foreground">
           Sign in to your NyxID account
         </p>
       </div>
 
-      <SocialLoginButtons />
-
-      <div className="relative">
-        <div className="absolute inset-0 flex items-center">
-          <Separator className="w-full" />
-        </div>
-        <div className="relative flex justify-center text-xs uppercase">
-          <span className="bg-card px-2 text-muted-foreground">
-            Or continue with
-          </span>
-        </div>
-      </div>
-
       <Form {...form}>
-        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+        <form onSubmit={form.handleSubmit(onSubmit)} className="flex flex-col gap-4">
           {form.formState.errors.root && (
             <div
               role="alert"
@@ -131,7 +117,7 @@ export function LoginForm({ returnTo }: LoginFormProps) {
                   <FormLabel>Password</FormLabel>
                   <Link
                     to={"/forgot-password" as string}
-                    className="text-xs text-muted-foreground hover:text-primary"
+                    className="text-xs font-medium text-void-400 hover:text-primary"
                   >
                     Forgot password?
                   </Link>
@@ -154,17 +140,26 @@ export function LoginForm({ returnTo }: LoginFormProps) {
             className="w-full"
             isLoading={loginMutation.isPending}
           >
-            Sign in
+            Sign In
           </Button>
         </form>
       </Form>
 
-      <p className="text-center text-sm text-muted-foreground">
-        {"Don't have an account? "}
-        <Link to="/register" className="text-primary hover:underline">
-          Sign up
+      {/* Divider */}
+      <div className="flex items-center gap-4">
+        <div className="h-px flex-1 bg-border" />
+        <span className="text-xs text-text-tertiary">or</span>
+        <div className="h-px flex-1 bg-border" />
+      </div>
+
+      <SocialLoginButtons />
+
+      <div className="flex items-center justify-center gap-1.5">
+        <span className="text-xs text-text-tertiary">Don&apos;t have an account?</span>
+        <Link to="/register" className="text-xs font-medium text-void-400 hover:text-primary">
+          Create account
         </Link>
-      </p>
+      </div>
     </div>
   );
 }

@@ -66,8 +66,8 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
         width: 200,
         margin: 2,
         color: {
-          dark: "#fafafa",
-          light: "#09090b",
+          dark: "#f0eeff",
+          light: "#0d0b14",
         },
       });
       setQrDataUrl(dataUrl);
@@ -242,7 +242,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                   <span>{code}</span>
                   {copiedIndex === index ? (
                     <Check
-                      className="h-3 w-3 text-emerald-400"
+                      className="h-3 w-3 text-success"
                       aria-hidden="true"
                     />
                   ) : (

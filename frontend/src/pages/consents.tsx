@@ -79,7 +79,7 @@ export function ConsentsPage() {
           </p>
         </div>
       ) : (
-        <div className="rounded-md border">
+        <div className="rounded-xl border border-border">
           <Table>
             <TableHeader>
               <TableRow>

@@ -183,7 +183,7 @@ export function AdminGroupDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 text-lg font-semibold">Group not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">Group not found</h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The group you are looking for does not exist or has been deleted.
         </p>
@@ -280,7 +280,7 @@ export function AdminGroupDetailPage() {
             No members in this group.
           </p>
         ) : (
-          <div className="rounded-md border">
+          <div className="rounded-xl border border-border">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -384,7 +384,7 @@ export function AdminGroupDetailPage() {
                     <FormLabel>Roles</FormLabel>
                     <FormControl>
                       <select
-                        className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        className="flex w-full rounded-[10px] border border-input bg-popover px-3 py-2 text-[13px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value

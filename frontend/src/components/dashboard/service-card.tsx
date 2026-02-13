@@ -3,19 +3,10 @@ import type { DownstreamService } from "@/types/api";
 import {
   getAuthTypeLabel,
   isOidcService,
-  SERVICE_CATEGORY_LABELS,
 } from "@/lib/constants";
-import { formatDate } from "@/lib/utils";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Server, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 
 interface ServiceCardProps {
   readonly service: DownstreamService;
@@ -23,6 +14,7 @@ interface ServiceCardProps {
   readonly isDeleting: boolean;
 }
 
+/* ── Service Card (VoidPortal) ── */
 export function ServiceCard({
   service,
   onDelete,
@@ -31,8 +23,8 @@ export function ServiceCard({
   const navigate = useNavigate();
 
   return (
-    <Card
-      className="cursor-pointer transition-colors hover:border-border/80"
+    <div
+      className="group relative flex cursor-pointer flex-col gap-4 rounded-[10px] border border-border bg-transparent p-6 transition-colors hover:border-border/80"
       onClick={() =>
         void navigate({
           to: "/services/$serviceId",
@@ -40,49 +32,45 @@ export function ServiceCard({
         })
       }
     >
-      <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-3">
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-            <Server className="h-5 w-5 text-primary" />
-          </div>
-          <div>
-            <CardTitle className="text-base">{service.name}</CardTitle>
-            <CardDescription className="text-xs">
-              {service.base_url}
-            </CardDescription>
-          </div>
+      {/* Delete button (show on hover) */}
+      <Button
+        variant="ghost"
+        size="icon"
+        className="absolute right-2 top-2 h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete(service.id);
+        }}
+        disabled={isDeleting}
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+        <span className="sr-only">Delete service</span>
+      </Button>
+
+      {/* Title + Badges row */}
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="font-display text-lg font-normal text-foreground">
+          {service.name}
+        </h3>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {isOidcService(service) && (
+            <Badge variant="accent">OIDC</Badge>
+          )}
+          <Badge variant="info">{getAuthTypeLabel(service)}</Badge>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete(service.id);
-          }}
-          disabled={isDeleting}
-        >
-          <Trash2 className="h-4 w-4" />
-          <span className="sr-only">Delete service</span>
-        </Button>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary">{getAuthTypeLabel(service)}</Badge>
-            {isOidcService(service) && (
-              <Badge variant="outline">OIDC</Badge>
-            )}
-            <Badge variant="outline">
-              {SERVICE_CATEGORY_LABELS[service.service_category] ??
-                service.service_category}
-            </Badge>
-          </div>
-          <span className="text-xs text-muted-foreground">
-            Created {formatDate(service.created_at)}
-          </span>
-        </div>
-      </CardContent>
-    </Card>
+      </div>
+
+      {/* Description (if exists) */}
+      {service.description && (
+        <p className="text-[13px] text-muted-foreground line-clamp-2">
+          {service.description}
+        </p>
+      )}
+
+      {/* Base URL */}
+      <span className="text-xs text-text-tertiary">
+        {service.base_url}
+      </span>
+    </div>
   );
 }

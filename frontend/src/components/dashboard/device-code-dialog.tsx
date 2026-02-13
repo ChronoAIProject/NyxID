@@ -316,7 +316,7 @@ export function DeviceCodeDialog({
         {step === "success" && (
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
-              <CheckCircle2 className="h-10 w-10 text-emerald-500" />
+              <CheckCircle2 className="h-10 w-10 text-success" />
               <p className="text-sm text-muted-foreground text-center">
                 Your {provider.name} account has been connected successfully.
                 Tokens are encrypted and stored securely.

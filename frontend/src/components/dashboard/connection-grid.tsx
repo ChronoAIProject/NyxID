@@ -162,9 +162,9 @@ export function ConnectionGrid() {
             >
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
+                  <div className="flex min-w-0 flex-1 items-center gap-3">
                     <div
-                      className={`flex h-10 w-10 items-center justify-center rounded-lg ${
+                      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
                         isConnected ? "bg-primary/20" : "bg-muted"
                       }`}
                     >
@@ -176,16 +176,16 @@ export function ConnectionGrid() {
                         }`}
                       />
                     </div>
-                    <div>
+                    <div className="min-w-0 flex-1">
                       <CardTitle className="text-base">
                         {service.name}
                       </CardTitle>
-                      <CardDescription className="text-xs">
+                      <CardDescription className="truncate text-xs">
                         {service.base_url}
                       </CardDescription>
                     </div>
                   </div>
-                  <div className="flex flex-col items-end gap-1">
+                  <div className="flex shrink-0 flex-col items-end gap-1">
                     <Badge variant={isConnected ? "success" : "secondary"}>
                       {isConnected ? "Connected" : "Available"}
                     </Badge>

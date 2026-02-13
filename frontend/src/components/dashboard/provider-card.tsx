@@ -62,21 +62,21 @@ export function ProviderCard({
         isConnected && !needsAttention
           ? "border-primary/30 bg-primary/5"
           : needsAttention
-            ? "border-amber-500/30 bg-amber-500/5"
+            ? "border-warning/30 bg-warning/5"
             : "transition-colors hover:border-border/80"
       }
     >
       <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center justify-between">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             <div
-              className={`flex h-10 w-10 items-center justify-center rounded-lg ${
+              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
                 hasBrand
                   ? brand.bgClass
                   : isConnected && !needsAttention
                     ? "bg-primary/20"
                     : needsAttention
-                      ? "bg-amber-500/20"
+                      ? "bg-warning/20"
                       : "bg-muted"
               }`}
             >
@@ -98,22 +98,22 @@ export function ProviderCard({
                     isConnected && !needsAttention
                       ? "text-primary"
                       : needsAttention
-                        ? "text-amber-500"
+                        ? "text-warning"
                         : "text-muted-foreground"
                   }`}
                 />
               )}
             </div>
-            <div>
-              <CardTitle className="text-base">{provider.name}</CardTitle>
+            <div className="min-w-0 flex-1">
+              <CardTitle className="truncate text-base">{provider.name}</CardTitle>
               {provider.description && (
-                <CardDescription className="text-xs line-clamp-1">
+                <CardDescription className="truncate text-xs">
                   {provider.description}
                 </CardDescription>
               )}
             </div>
           </div>
-          <div className="flex flex-col items-end gap-1">
+          <div className="flex shrink-0 flex-col items-end gap-1">
             {isConnected ? (
               <ProviderStatusBadge status={token.status} />
             ) : (
