@@ -72,6 +72,10 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
     // Social login lookup: find user by (provider, provider_id)
+    // Drop old sparse index if it exists (sparse doesn't work with null values from serde)
+    let _ = users
+        .drop_index("social_provider_1_social_provider_id_1")
+        .await;
     users
         .create_index(
             IndexModel::builder()
@@ -79,7 +83,10 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .options(
                     IndexOptions::builder()
                         .unique(true)
-                        .sparse(true)
+                        .partial_filter_expression(doc! {
+                            "social_provider": { "$type": "string" },
+                            "social_provider_id": { "$type": "string" },
+                        })
                         .build(),
                 )
                 .build(),
