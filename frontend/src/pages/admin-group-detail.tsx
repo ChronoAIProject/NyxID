@@ -198,7 +198,7 @@ export function AdminGroupDetailPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <PageHeader
         breadcrumbs={[
           { label: "Group Management", to: "/admin/groups" },

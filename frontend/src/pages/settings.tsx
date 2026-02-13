@@ -67,7 +67,7 @@ import { toast } from "sonner";
 
 export function SettingsPage() {
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div>
         <h2 className="font-display text-5xl font-normal tracking-tight">Settings</h2>
         <p className="text-muted-foreground">

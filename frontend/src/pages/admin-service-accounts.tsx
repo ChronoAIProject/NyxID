@@ -140,7 +140,7 @@ export function AdminServiceAccountsPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <PageHeader
         title="Service Accounts"
         description="Manage machine-to-machine service accounts for programmatic access."

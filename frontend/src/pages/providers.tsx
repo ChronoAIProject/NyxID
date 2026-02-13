@@ -10,7 +10,7 @@ export function ProvidersPage() {
   const { data: llmStatus } = useLlmStatus();
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="font-display text-5xl font-normal tracking-tight">Providers</h2>

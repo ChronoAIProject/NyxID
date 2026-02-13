@@ -91,7 +91,7 @@ export function ServiceListPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="font-display text-5xl font-normal tracking-tight">Services</h2>
@@ -266,7 +266,7 @@ export function ServiceListPage() {
       </div>
 
       {isLoading ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }).map((_, i) => (
             <Skeleton key={`svc-skel-${String(i)}`} className="h-36 w-full" />
           ))}
@@ -279,7 +279,7 @@ export function ServiceListPage() {
           </p>
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {services.map((service) => (
             <ServiceCard
               key={service.id}

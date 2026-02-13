@@ -355,7 +355,7 @@ export function AdminServiceAccountDetailPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <PageHeader
         breadcrumbs={[
           { label: "Service Accounts", to: "/admin/service-accounts" },

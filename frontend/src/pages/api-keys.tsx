@@ -3,7 +3,7 @@ import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog
 
 export function ApiKeysPage() {
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="font-display text-5xl font-normal tracking-tight">API Keys</h2>

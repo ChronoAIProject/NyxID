@@ -80,7 +80,7 @@ export function ProviderDetailPage() {
   const isDeviceCode = provider.provider_type === "device_code";
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <PageHeader
         breadcrumbs={[
           { label: "Manage Providers", to: "/providers/manage" },
