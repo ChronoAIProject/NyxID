@@ -10,7 +10,8 @@ import {
   changePasswordSchema,
   type ChangePasswordFormData,
 } from "@/schemas/auth";
-import { formatDate } from "@/lib/utils";
+import { copyToClipboard, formatDate } from "@/lib/utils";
+import { usePublicConfig } from "@/hooks/use-public-config";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -57,6 +58,10 @@ import {
   Monitor,
   Smartphone,
   Globe,
+  Terminal,
+  ExternalLink,
+  Copy,
+  Check,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -75,6 +80,7 @@ export function SettingsPage() {
           <TabsTrigger value="profile">Profile</TabsTrigger>
           <TabsTrigger value="security">Security</TabsTrigger>
           <TabsTrigger value="sessions">Sessions</TabsTrigger>
+          <TabsTrigger value="mcp">MCP</TabsTrigger>
         </TabsList>
 
         <TabsContent value="profile">
@@ -85,6 +91,9 @@ export function SettingsPage() {
         </TabsContent>
         <TabsContent value="sessions">
           <SessionsTab />
+        </TabsContent>
+        <TabsContent value="mcp">
+          <McpTab />
         </TabsContent>
       </Tabs>
     </div>
@@ -442,6 +451,184 @@ function getDeviceIcon(userAgent: string) {
   }
   return <Globe className="h-4 w-4" aria-hidden="true" />;
 }
+
+// ---------------------------------------------------------------------------
+// MCP Install Tab
+// ---------------------------------------------------------------------------
+
+function buildCursorDeeplink(mcpUrl: string): string {
+  const config = JSON.stringify({ url: mcpUrl });
+  const encoded = encodeURIComponent(btoa(config));
+  return `cursor://anysphere.cursor-deeplink/mcp/install?name=nyxid&config=${encoded}`;
+}
+
+function buildClaudeCodeCommand(mcpUrl: string): string {
+  return `claude mcp add --transport http nyxid ${mcpUrl}`;
+}
+
+function buildCursorConfig(mcpUrl: string): string {
+  return JSON.stringify(
+    { mcpServers: { nyxid: { url: mcpUrl } } },
+    null,
+    2,
+  );
+}
+
+function buildClaudeCodeConfig(mcpUrl: string): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        nyxid: {
+          command: "npx",
+          args: ["-y", "@anthropic-ai/mcp-proxy", mcpUrl],
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+function CopyInlineButton({ text, label }: { readonly text: string; readonly label: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function handleCopy() {
+    try {
+      await copyToClipboard(text);
+      setCopied(true);
+      toast.success(`${label} copied to clipboard`);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error("Failed to copy to clipboard");
+    }
+  }
+
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      className="absolute right-2 top-2 h-6 w-6"
+      onClick={() => void handleCopy()}
+    >
+      {copied ? (
+        <Check className="h-3 w-3 text-green-400" aria-hidden="true" />
+      ) : (
+        <Copy className="h-3 w-3" aria-hidden="true" />
+      )}
+      <span className="sr-only">Copy {label}</span>
+    </Button>
+  );
+}
+
+function McpTab() {
+  const { data: config, isLoading } = usePublicConfig();
+
+  if (isLoading) {
+    return <Skeleton className="h-64 w-full" />;
+  }
+
+  const mcpUrl = config?.mcp_url ?? `${window.location.origin}/mcp`;
+  const cursorDeeplink = buildCursorDeeplink(mcpUrl);
+  const claudeCommand = buildClaudeCodeCommand(mcpUrl);
+  const cursorConfig = buildCursorConfig(mcpUrl);
+  const claudeConfig = buildClaudeCodeConfig(mcpUrl);
+
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <ExternalLink className="h-5 w-5" aria-hidden="true" />
+            Install to Cursor
+          </CardTitle>
+          <CardDescription>
+            One-click install via Cursor's deeplink protocol. Cursor will open
+            and prompt you to confirm the MCP server installation.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Button
+            onClick={() => window.open(cursorDeeplink, "_blank")}
+            className="w-full"
+          >
+            <ExternalLink className="mr-2 h-4 w-4" aria-hidden="true" />
+            Install to Cursor
+          </Button>
+          <Separator />
+          <div>
+            <div className="mb-1 flex items-center gap-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                Or copy manually
+              </p>
+              <Badge variant="outline" className="text-[10px]">
+                .cursor/mcp.json
+              </Badge>
+            </div>
+            <div className="relative">
+              <pre className="rounded bg-muted px-3 py-2 pr-10 text-xs overflow-x-auto">
+                {cursorConfig}
+              </pre>
+              <CopyInlineButton text={cursorConfig} label="Cursor config" />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Terminal className="h-5 w-5" aria-hidden="true" />
+            Install to Claude Code
+          </CardTitle>
+          <CardDescription>
+            Run this command in your terminal to add NyxID as an MCP server in
+            Claude Code.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="relative">
+            <code className="block rounded bg-muted px-3 py-2 pr-10 text-xs break-all font-mono">
+              {claudeCommand}
+            </code>
+            <CopyInlineButton text={claudeCommand} label="CLI command" />
+          </div>
+          <Separator />
+          <div>
+            <div className="mb-1 flex items-center gap-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                Or add manually
+              </p>
+              <Badge variant="outline" className="text-[10px]">
+                .claude/settings.json
+              </Badge>
+            </div>
+            <div className="relative">
+              <pre className="rounded bg-muted px-3 py-2 pr-10 text-xs overflow-x-auto">
+                {claudeConfig}
+              </pre>
+              <CopyInlineButton text={claudeConfig} label="Claude Code config" />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="rounded-md border border-border/50 bg-muted/30 p-4">
+        <p className="text-sm font-medium mb-1">How it works</p>
+        <p className="text-xs text-muted-foreground">
+          When your MCP client connects for the first time, NyxID will open an
+          OAuth flow in your browser to authenticate. Once authenticated, the
+          proxy exposes tools from all your connected services. Tool calls are
+          forwarded to each service's API with your credentials injected
+          automatically.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sessions Tab
+// ---------------------------------------------------------------------------
 
 function SessionsTab() {
   const { data: sessions, isLoading } = useQuery({
