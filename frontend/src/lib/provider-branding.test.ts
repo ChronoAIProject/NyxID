@@ -33,6 +33,12 @@ describe("getProviderBrand", () => {
     expect(brand.initial).toBe("Co");
   });
 
+  it("returns DeepSeek brand for 'deepseek' slug", () => {
+    const brand = getProviderBrand("deepseek");
+    expect(brand.label).toBe("DeepSeek");
+    expect(brand.initial).toBe("DS");
+  });
+
   it("returns Codex brand for 'openai-codex' slug", () => {
     const brand = getProviderBrand("openai-codex");
     expect(brand.label).toBe("Codex");
@@ -56,11 +62,11 @@ describe("hasKnownBrand", () => {
     expect(hasKnownBrand("mistral")).toBe(true);
     expect(hasKnownBrand("cohere")).toBe(true);
     expect(hasKnownBrand("openai-codex")).toBe(true);
+    expect(hasKnownBrand("deepseek")).toBe(true);
   });
 
   it("returns false for unknown slugs", () => {
     expect(hasKnownBrand("unknown")).toBe(false);
     expect(hasKnownBrand("")).toBe(false);
-    expect(hasKnownBrand("deepseek")).toBe(false);
   });
 });

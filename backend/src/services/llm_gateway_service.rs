@@ -147,9 +147,12 @@ pub async fn get_llm_status(
             "pixtral-*".to_string(),
             "ministral-*".to_string(),
             "open-mistral-*".to_string(),
+            "devstral-*".to_string(),
+            "magistral-*".to_string(),
             "command-*".to_string(),
             "embed-*".to_string(),
             "rerank-*".to_string(),
+            "deepseek-*".to_string(),
         ],
     })
 }
@@ -182,6 +185,8 @@ pub fn resolve_provider_for_model(model: &str) -> Option<&'static str> {
         || model_lower.starts_with("pixtral-")
         || model_lower.starts_with("ministral-")
         || model_lower.starts_with("open-mistral-")
+        || model_lower.starts_with("devstral-")
+        || model_lower.starts_with("magistral-")
     {
         Some("mistral")
     } else if model_lower.starts_with("command-")
@@ -189,6 +194,8 @@ pub fn resolve_provider_for_model(model: &str) -> Option<&'static str> {
         || model_lower.starts_with("rerank-")
     {
         Some("cohere")
+    } else if model_lower.starts_with("deepseek-") {
+        Some("deepseek")
     } else {
         None
     }
@@ -235,7 +242,7 @@ pub fn get_translator(provider_slug: &str) -> Box<dyn LlmTranslator> {
 }
 
 // ---------------------------------------------------------------------------
-// PassthroughTranslator (OpenAI, OpenAI Codex, Mistral, Cohere)
+// PassthroughTranslator (OpenAI, OpenAI Codex, Mistral, Cohere, DeepSeek)
 // ---------------------------------------------------------------------------
 
 pub struct PassthroughTranslator;
@@ -522,6 +529,8 @@ mod tests {
         assert_eq!(resolve_provider_for_model("pixtral-large"), Some("mistral"));
         assert_eq!(resolve_provider_for_model("ministral-8b"), Some("mistral"));
         assert_eq!(resolve_provider_for_model("open-mistral-nemo"), Some("mistral"));
+        assert_eq!(resolve_provider_for_model("devstral-2-25-12"), Some("mistral"));
+        assert_eq!(resolve_provider_for_model("magistral-medium-1-2-25-09"), Some("mistral"));
     }
 
     #[test]
@@ -529,6 +538,13 @@ mod tests {
         assert_eq!(resolve_provider_for_model("command-r-plus"), Some("cohere"));
         assert_eq!(resolve_provider_for_model("embed-english-v3.0"), Some("cohere"));
         assert_eq!(resolve_provider_for_model("rerank-english-v3.0"), Some("cohere"));
+    }
+
+    #[test]
+    fn resolve_deepseek_models() {
+        assert_eq!(resolve_provider_for_model("deepseek-chat"), Some("deepseek"));
+        assert_eq!(resolve_provider_for_model("deepseek-reasoner"), Some("deepseek"));
+        assert_eq!(resolve_provider_for_model("DEEPSEEK-chat"), Some("deepseek"));
     }
 
     #[test]
