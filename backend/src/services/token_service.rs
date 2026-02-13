@@ -178,17 +178,22 @@ pub async fn refresh_tokens(
 
     // If the token is revoked, check if this is a post-rotation retry
     // (client retried with old token after restart) vs actual token reuse.
-    // A grace period of 120 seconds allows legitimate retries while catching theft.
+    //
+    // The primary indicator of rotation is `replaced_by` being set -- batch
+    // revocations (revoke_session, explicit revoke) never set `replaced_by`.
+    // The time-based grace period is a secondary constraint: if `revoked_at`
+    // is present, we only allow retries within REUSE_GRACE_PERIOD_SECS.
+    // If `revoked_at` is `None` (tokens rotated before this field was added),
+    // we still check the replacement chain for a valid unused token.
     let active_token = if stored.revoked {
-        // Check if revocation happened within the grace period
         let within_grace = stored
             .revoked_at
             .map(|ra| (Utc::now() - ra).num_seconds() <= REUSE_GRACE_PERIOD_SECS)
-            .unwrap_or(false);
+            .unwrap_or(true); // None means pre-migration token; allow chain check
 
         match (&stored.replaced_by, within_grace) {
             (Some(replacement_id), true) => {
-                // Within grace period with a replacement -- check if it's still valid
+                // Rotation-revoked token with a replacement -- check if it's still valid
                 let replacement = db
                     .collection::<RefreshToken>(REFRESH_TOKENS)
                     .find_one(doc! { "_id": replacement_id })
@@ -224,8 +229,22 @@ pub async fn refresh_tokens(
                     }
                 }
             }
-            _ => {
-                // Outside grace period or no replacement -- genuine reuse/theft.
+            (None, _) => {
+                // No replacement -- this was a batch/explicit revocation, not rotation.
+                tracing::warn!(
+                    user_id = %stored.user_id,
+                    jti = %claims.jti,
+                    "Refresh token reuse detected (explicitly revoked), revoking session"
+                );
+                if let Some(ref session_id) = stored.session_id {
+                    revoke_session(db, session_id, mcp_sessions).await?;
+                }
+                return Err(AppError::Unauthorized(
+                    "Refresh token has been revoked".to_string(),
+                ));
+            }
+            (Some(_), false) => {
+                // Outside grace period -- too old to be a legitimate retry.
                 tracing::warn!(
                     user_id = %stored.user_id,
                     jti = %claims.jti,
