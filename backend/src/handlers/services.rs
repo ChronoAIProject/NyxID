@@ -668,7 +668,7 @@ pub async fn get_oidc_credentials(
         redirect_uris,
         allowed_scopes: oauth_client.allowed_scopes,
         delegation_scopes: oauth_client.delegation_scopes,
-        issuer: base.to_string(),
+        issuer: state.config.jwt_issuer.clone(),
         authorization_endpoint: format!("{base}/oauth/authorize"),
         token_endpoint: format!("{base}/oauth/token"),
         userinfo_endpoint: format!("{base}/oauth/userinfo"),

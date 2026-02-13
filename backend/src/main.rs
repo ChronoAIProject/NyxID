@@ -96,7 +96,8 @@ async fn main() {
 
     // --- Server startup ---
     tracing::info!("Starting NyxID authentication server");
-    tracing::info!(port = config.port, "Configuration loaded");
+    tracing::info!(port = config.port, issuer = %config.jwt_issuer, "Configuration loaded");
+    config.warn_if_non_url_issuer();
 
     // Validate encryption key at startup
     config.validate_encryption_key();

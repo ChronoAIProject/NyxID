@@ -522,7 +522,7 @@ mod tests {
             environment: "development".to_string(),
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
-            jwt_issuer: "nyxid".to_string(),
+            jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: google_id.map(String::from),

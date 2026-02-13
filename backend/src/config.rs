@@ -63,13 +63,14 @@ impl AppConfig {
         let environment = env::var("ENVIRONMENT")
             .unwrap_or_else(|_| "development".to_string());
 
+        let base_url = env::var("BASE_URL")
+            .unwrap_or_else(|_| "http://localhost:3001".to_string());
+
         Self {
             port: env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3001),
-            base_url: env::var("BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:3001".to_string()),
             frontend_url: env::var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
             database_url: env::var("DATABASE_URL")
@@ -86,7 +87,9 @@ impl AppConfig {
             jwt_public_key_path: env::var("JWT_PUBLIC_KEY_PATH")
                 .unwrap_or_else(|_| "keys/public.pem".to_string()),
             jwt_issuer: env::var("JWT_ISSUER")
-                .unwrap_or_else(|_| "nyxid".to_string()),
+                .unwrap_or_else(|_| base_url.clone()),
+
+            base_url,
             jwt_access_ttl_secs: env::var("JWT_ACCESS_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -162,6 +165,20 @@ impl AppConfig {
         }
     }
 
+    /// Log a warning if the OIDC issuer is not a URL.
+    /// The OIDC spec requires the issuer to be an https:// URL
+    /// (http:// is acceptable for localhost development).
+    pub fn warn_if_non_url_issuer(&self) {
+        if !self.jwt_issuer.starts_with("http://") && !self.jwt_issuer.starts_with("https://") {
+            tracing::warn!(
+                issuer = %self.jwt_issuer,
+                "JWT_ISSUER is not a URL. OIDC spec requires the issuer to be an https:// URL \
+                 (http:// is acceptable for localhost development). Consider removing JWT_ISSUER \
+                 to use BASE_URL as the default, or set it to your public URL."
+            );
+        }
+    }
+
     /// Returns true if the Secure cookie flag should be set.
     /// Disabled for localhost HTTP development.
     pub fn use_secure_cookies(&self) -> bool {
@@ -185,7 +202,7 @@ mod tests {
             environment: environment.to_string(),
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
-            jwt_issuer: "nyxid".to_string(),
+            jwt_issuer: base_url.to_string(),
             jwt_access_ttl_secs: 900,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,

@@ -40,7 +40,7 @@ pub async fn oauth_authorization_server_metadata(
     let base = &state.config.base_url;
 
     Json(serde_json::json!({
-        "issuer": base,
+        "issuer": state.config.jwt_issuer,
         "authorization_endpoint": format!("{base}/oauth/authorize"),
         "token_endpoint": format!("{base}/oauth/token"),
         "registration_endpoint": format!("{base}/oauth/register"),

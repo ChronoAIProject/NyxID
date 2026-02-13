@@ -511,7 +511,7 @@ mod tests {
             environment: "development".to_string(),
             jwt_private_key_path: "keys/private.pem".to_string(),
             jwt_public_key_path: "keys/public.pem".to_string(),
-            jwt_issuer: "nyxid".to_string(),
+            jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,
@@ -542,7 +542,7 @@ mod tests {
         assert_eq!(claims.sub, user_id.to_string());
         assert_eq!(claims.token_type, "access");
         assert_eq!(claims.scope, "openid profile");
-        assert_eq!(claims.iss, "nyxid");
+        assert_eq!(claims.iss, "http://localhost:3001");
     }
 
     #[test]

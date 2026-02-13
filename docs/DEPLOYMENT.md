@@ -251,7 +251,7 @@ kubectl create secret generic nyxid-mongo-secret \
 Edit `k8s/configmap.yaml` and replace the placeholder URLs:
 - `BASE_URL`: Your backend's public URL (e.g., `https://auth.yourdomain.com`)
 - `FRONTEND_URL`: Your frontend's public URL (e.g., `https://app.yourdomain.com`)
-- `JWT_ISSUER`: Should match `BASE_URL` hostname
+- `JWT_ISSUER`: Defaults to `BASE_URL`; leave unset unless you need a custom issuer
 
 Edit `k8s/ingress.yaml` and replace `auth.example.com` / `app.example.com` with your domains.
 
@@ -330,7 +330,7 @@ If using cert-manager for automatic TLS certificates:
 |------------------------|--------------------|-----------------------------------|
 | `JWT_PRIVATE_KEY_PATH` | `keys/private.pem` | `/etc/nyxid/keys/private.pem`     |
 | `JWT_PUBLIC_KEY_PATH`  | `keys/public.pem`  | `/etc/nyxid/keys/public.pem`      |
-| `JWT_ISSUER`           | `nyxid`            | `auth.example.com`                |
+| `JWT_ISSUER`           | Same as `BASE_URL` | Leave unset (uses `BASE_URL`)     |
 | `JWT_ACCESS_TTL_SECS`  | `900` (15 min)     | `900` or lower                    |
 | `JWT_REFRESH_TTL_SECS` | `604800` (7 days)  | `604800` or lower                 |
 
