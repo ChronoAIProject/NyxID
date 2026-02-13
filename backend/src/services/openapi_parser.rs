@@ -157,13 +157,21 @@ fn sanitize_name(raw: &str) -> String {
     }
 }
 
-/// Extract description from summary or description fields.
+/// Extract description by combining summary and description fields.
+///
+/// When both `summary` and `description` are present, they are joined with
+/// a newline so the MCP tool receives the full context. Falls back to
+/// whichever field exists.
 fn extract_description(operation: &serde_json::Value) -> Option<String> {
-    operation
-        .get("summary")
-        .and_then(|v| v.as_str())
-        .or_else(|| operation.get("description").and_then(|v| v.as_str()))
-        .map(|s| s.to_string())
+    let summary = operation.get("summary").and_then(|v| v.as_str());
+    let description = operation.get("description").and_then(|v| v.as_str());
+
+    match (summary, description) {
+        (Some(s), Some(d)) => Some(format!("{s}\n\n{d}")),
+        (Some(s), None) => Some(s.to_string()),
+        (None, Some(d)) => Some(d.to_string()),
+        (None, None) => None,
+    }
 }
 
 /// Extract parameters from both operation-level and path-level.
@@ -309,9 +317,12 @@ mod tests {
     }
 
     #[test]
-    fn extract_description_prefers_summary() {
+    fn extract_description_combines_summary_and_description() {
         let op = serde_json::json!({"summary": "Short", "description": "Long"});
-        assert_eq!(extract_description(&op), Some("Short".to_string()));
+        assert_eq!(
+            extract_description(&op),
+            Some("Short\n\nLong".to_string())
+        );
     }
 
     #[test]
