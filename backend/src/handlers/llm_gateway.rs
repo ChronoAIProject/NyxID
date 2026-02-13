@@ -5,13 +5,16 @@ use axum::{
     response::Response,
     Json,
 };
+use futures::StreamExt;
 use mongodb::bson::doc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, delegation_service, llm_gateway_service, proxy_service,
+    audit_service, delegation_service, llm_gateway_service,
+    llm_gateway_service::LlmTranslator, proxy_service,
 };
 use crate::AppState;
 
@@ -108,18 +111,6 @@ pub async fn llm_proxy_request(
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
 
-    // H-1: Reject streaming requests (SSE not yet supported)
-    if !body_bytes.is_empty() {
-        if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-            if body_json.get("stream").and_then(|v| v.as_bool()) == Some(true) {
-                return Err(AppError::BadRequest(
-                    "Streaming is not yet supported via the LLM proxy. Set stream: false."
-                        .to_string(),
-                ));
-            }
-        }
-    }
-
     let body = if body_bytes.is_empty() {
         None
     } else {
@@ -194,12 +185,10 @@ pub async fn gateway_request(
         })?
     };
 
-    // H-1: Reject streaming requests (SSE not yet supported)
-    if body_json.get("stream").and_then(|v| v.as_bool()) == Some(true) {
-        return Err(AppError::BadRequest(
-            "Streaming is not yet supported via the gateway. Set stream: false.".to_string(),
-        ));
-    }
+    let is_streaming = body_json
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        == Some(true);
 
     let model = body_json
         .get("model")
@@ -322,99 +311,12 @@ pub async fn gateway_request(
 
     // If translator needs translation, parse and translate the response
     let response = if translator.needs_translation() {
-        let status = downstream_response.status();
-        let resp_headers = downstream_response.headers().clone();
-
-        // H-3: Read response with size limit
-        let resp_bytes = read_response_with_limit(downstream_response).await?;
-
-        if status.is_success() {
-            let resp_json: serde_json::Value =
-                serde_json::from_slice(&resp_bytes).map_err(|e| {
-                    AppError::Internal(format!(
-                        "Failed to parse provider response as JSON: {e}"
-                    ))
-                })?;
-
-            let translated = translator.translate_response(resp_json)?;
-            let translated_bytes = serde_json::to_vec(&translated).map_err(|e| {
-                AppError::Internal(format!(
-                    "Failed to serialize translated response: {e}"
-                ))
-            })?;
-
-            let axum_status = StatusCode::from_u16(status.as_u16())
-                .unwrap_or(StatusCode::BAD_GATEWAY);
-
-            let mut response_builder = Response::builder()
-                .status(axum_status)
-                .header("content-type", "application/json");
-
-            // Forward allowlisted headers from original response.
-            // M-3: Skip content-type (already set) and content-length (body
-            // size changed after translation; axum will calculate it).
-            for (name, value) in resp_headers.iter() {
-                let name_lower = name.as_str().to_lowercase();
-                if name_lower != "content-type"
-                    && name_lower != "content-length"
-                    && ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
-                {
-                    if let Ok(header_name) =
-                        axum::http::header::HeaderName::from_bytes(
-                            name.as_str().as_bytes(),
-                        )
-                    {
-                        if let Ok(header_value) =
-                            axum::http::header::HeaderValue::from_bytes(
-                                value.as_bytes(),
-                            )
-                        {
-                            response_builder =
-                                response_builder.header(header_name, header_value);
-                        }
-                    }
-                }
-            }
-
-            response_builder
-                .body(Body::from(translated_bytes))
-                .map_err(|e| {
-                    AppError::Internal(format!("Failed to build response: {e}"))
-                })?
+        if is_streaming {
+            // Streaming: translate SSE events on the fly
+            build_translated_sse_response(downstream_response, translator).await?
         } else {
-            // M-6: Translate error responses to OpenAI error format
-            let axum_status = StatusCode::from_u16(status.as_u16())
-                .unwrap_or(StatusCode::BAD_GATEWAY);
-
-            let error_message = serde_json::from_slice::<serde_json::Value>(&resp_bytes)
-                .ok()
-                .and_then(|v| {
-                    // Try Anthropic error format: {"type":"error","error":{"message":"..."}}
-                    v.pointer("/error/message")
-                        .and_then(|m| m.as_str())
-                        .map(String::from)
-                })
-                .unwrap_or_else(|| format!("Upstream provider error (HTTP {})", status.as_u16()));
-
-            let error_body = serde_json::json!({
-                "error": {
-                    "message": error_message,
-                    "type": "gateway_error",
-                    "code": status.as_u16(),
-                }
-            });
-
-            let error_bytes = serde_json::to_vec(&error_body).map_err(|e| {
-                AppError::Internal(format!("Failed to serialize error response: {e}"))
-            })?;
-
-            Response::builder()
-                .status(axum_status)
-                .header("content-type", "application/json")
-                .body(Body::from(error_bytes))
-                .map_err(|e| {
-                    AppError::Internal(format!("Failed to build response: {e}"))
-                })?
+            // Non-streaming: buffer and translate the full response
+            build_translated_json_response(downstream_response).await?
         }
     } else {
         build_filtered_response(downstream_response).await?
@@ -556,10 +458,20 @@ async fn build_filtered_response(
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
 
+    let is_sse = downstream_response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream"));
+
     let mut response_builder = Response::builder().status(status);
 
     for (name, value) in downstream_response.headers().iter() {
         let name_lower = name.as_str().to_lowercase();
+        // Skip content-length for SSE -- the body is streamed, length unknown
+        if is_sse && name_lower == "content-length" {
+            continue;
+        }
         if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str()) {
             if let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
@@ -574,10 +486,215 @@ async fn build_filtered_response(
         }
     }
 
-    // H-3: Read response with size limit
-    let response_body = read_response_with_limit(downstream_response).await?;
+    if is_sse {
+        // Stream SSE responses directly without buffering
+        let body = Body::from_stream(downstream_response.bytes_stream());
+        response_builder
+            .body(body)
+            .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))
+    } else {
+        // H-3: Buffer non-streaming responses with size limit
+        let response_body = read_response_with_limit(downstream_response).await?;
+        response_builder
+            .body(Body::from(response_body))
+            .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))
+    }
+}
 
-    response_builder
-        .body(Body::from(response_body))
-        .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))
+/// Build a non-streaming translated response (buffer, translate, return).
+/// Used by `gateway_request` when `needs_translation() && !is_streaming`.
+async fn build_translated_json_response(
+    downstream_response: reqwest::Response,
+) -> AppResult<Response> {
+    let status = downstream_response.status();
+    let resp_headers = downstream_response.headers().clone();
+    let resp_bytes = read_response_with_limit(downstream_response).await?;
+
+    if status.is_success() {
+        let resp_json: serde_json::Value =
+            serde_json::from_slice(&resp_bytes).map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to parse provider response as JSON: {e}"
+                ))
+            })?;
+
+        // Use AnthropicTranslator directly (only translator with needs_translation=true)
+        let translator = llm_gateway_service::AnthropicTranslator;
+        let translated = translator.translate_response(resp_json)?;
+        let translated_bytes = serde_json::to_vec(&translated).map_err(|e| {
+            AppError::Internal(format!(
+                "Failed to serialize translated response: {e}"
+            ))
+        })?;
+
+        let axum_status = StatusCode::from_u16(status.as_u16())
+            .unwrap_or(StatusCode::BAD_GATEWAY);
+
+        let mut response_builder = Response::builder()
+            .status(axum_status)
+            .header("content-type", "application/json");
+
+        for (name, value) in resp_headers.iter() {
+            let name_lower = name.as_str().to_lowercase();
+            if name_lower != "content-type"
+                && name_lower != "content-length"
+                && ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
+            {
+                if let Ok(header_name) =
+                    axum::http::header::HeaderName::from_bytes(
+                        name.as_str().as_bytes(),
+                    )
+                {
+                    if let Ok(header_value) =
+                        axum::http::header::HeaderValue::from_bytes(
+                            value.as_bytes(),
+                        )
+                    {
+                        response_builder =
+                            response_builder.header(header_name, header_value);
+                    }
+                }
+            }
+        }
+
+        response_builder
+            .body(Body::from(translated_bytes))
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to build response: {e}"))
+            })
+    } else {
+        // M-6: Translate error responses to OpenAI error format
+        let axum_status = StatusCode::from_u16(status.as_u16())
+            .unwrap_or(StatusCode::BAD_GATEWAY);
+
+        let error_message = serde_json::from_slice::<serde_json::Value>(&resp_bytes)
+            .ok()
+            .and_then(|v| {
+                v.pointer("/error/message")
+                    .and_then(|m| m.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_else(|| {
+                format!("Upstream provider error (HTTP {})", status.as_u16())
+            });
+
+        let error_body = serde_json::json!({
+            "error": {
+                "message": error_message,
+                "type": "gateway_error",
+                "code": status.as_u16(),
+            }
+        });
+
+        let error_bytes = serde_json::to_vec(&error_body).map_err(|e| {
+            AppError::Internal(format!("Failed to serialize error response: {e}"))
+        })?;
+
+        Response::builder()
+            .status(axum_status)
+            .header("content-type", "application/json")
+            .body(Body::from(error_bytes))
+            .map_err(|e| {
+                AppError::Internal(format!("Failed to build response: {e}"))
+            })
+    }
+}
+
+/// Build a streaming SSE response with on-the-fly event translation.
+/// Parses provider SSE events, translates each to OpenAI chunk format, and
+/// re-emits as SSE text without buffering the full response.
+async fn build_translated_sse_response(
+    downstream_response: reqwest::Response,
+    translator: Box<dyn llm_gateway_service::LlmTranslator>,
+) -> AppResult<Response> {
+    let status = downstream_response.status();
+
+    // If the upstream returned an error, buffer and return as translated JSON error
+    if !status.is_success() {
+        return build_translated_json_response(downstream_response).await;
+    }
+
+    let axum_status =
+        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK);
+
+    let (tx, rx) =
+        tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+
+    tokio::spawn(async move {
+        let mut buffer = String::new();
+        let mut state = llm_gateway_service::StreamTranslationState::default();
+        let mut stream = downstream_response.bytes_stream();
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                    while let Some(event) = parse_next_sse_event(&mut buffer) {
+                        if let Some(translated) =
+                            translator.translate_stream_event(&event, &mut state)
+                        {
+                            if tx
+                                .send(Ok(bytes::Bytes::from(translated)))
+                                .await
+                                .is_err()
+                            {
+                                return; // client disconnected
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            e,
+                        )))
+                        .await;
+                    return;
+                }
+            }
+        }
+    });
+
+    let body = Body::from_stream(ReceiverStream::new(rx));
+
+    Response::builder()
+        .status(axum_status)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(body)
+        .map_err(|e| AppError::Internal(format!("Failed to build SSE response: {e}")))
+}
+
+/// Parse the next complete SSE event from a buffer.
+/// Returns `None` if no complete event is available yet.
+/// Consumes the parsed event text (including the `\n\n` delimiter) from the buffer.
+fn parse_next_sse_event(
+    buffer: &mut String,
+) -> Option<llm_gateway_service::SseEvent> {
+    let end = buffer.find("\n\n")?;
+    let event_text = buffer[..end].to_string();
+    buffer.drain(..end + 2);
+
+    let mut event_type = None;
+    let mut data_parts = Vec::new();
+
+    for line in event_text.lines() {
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_type = Some(rest.trim_start().to_string());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_parts.push(rest.trim_start().to_string());
+        }
+        // Ignore id:, retry:, and comment lines (starting with :)
+    }
+
+    if data_parts.is_empty() {
+        return None;
+    }
+
+    Some(llm_gateway_service::SseEvent {
+        event_type,
+        data: data_parts.join("\n"),
+    })
 }

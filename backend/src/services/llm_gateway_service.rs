@@ -212,6 +212,36 @@ pub struct TranslatedRequest {
     pub extra_headers: Vec<(String, String)>,
 }
 
+/// A parsed SSE event from an upstream provider stream.
+pub struct SseEvent {
+    pub event_type: Option<String>,
+    pub data: String,
+}
+
+/// Mutable state carried across SSE events during stream translation.
+pub struct StreamTranslationState {
+    pub id: String,
+    pub model: String,
+    pub created: i64,
+    pub input_tokens: u64,
+    /// Maps content_block index to tool_call index.
+    pub tool_call_indices: Vec<(usize, usize)>,
+    pub next_tool_index: usize,
+}
+
+impl Default for StreamTranslationState {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            model: String::new(),
+            created: chrono::Utc::now().timestamp(),
+            input_tokens: 0,
+            tool_call_indices: Vec::new(),
+            next_tool_index: 0,
+        }
+    }
+}
+
 /// Trait for translating between OpenAI format and provider-native format.
 pub trait LlmTranslator: Send + Sync {
     fn translate_request(
@@ -228,6 +258,16 @@ pub trait LlmTranslator: Send + Sync {
     fn needs_translation(&self) -> bool;
 
     fn gateway_base_url(&self) -> Option<&str> {
+        None
+    }
+
+    /// Translate a single SSE event from provider format to OpenAI chunk format.
+    /// Returns the SSE text to emit (e.g. `"data: {...}\n\n"`), or `None` to skip.
+    fn translate_stream_event(
+        &self,
+        _event: &SseEvent,
+        _state: &mut StreamTranslationState,
+    ) -> Option<String> {
         None
     }
 }
@@ -441,6 +481,203 @@ impl LlmTranslator for AnthropicTranslator {
                 "total_tokens": input_tokens + output_tokens,
             },
         }))
+    }
+
+    fn translate_stream_event(
+        &self,
+        event: &SseEvent,
+        state: &mut StreamTranslationState,
+    ) -> Option<String> {
+        let data: serde_json::Value = serde_json::from_str(&event.data).ok()?;
+
+        match event.event_type.as_deref() {
+            Some("message_start") => {
+                state.id = data
+                    .pointer("/message/id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                state.model = data
+                    .pointer("/message/model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                state.input_tokens = data
+                    .pointer("/message/usage/input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                let chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", state.id),
+                    "object": "chat.completion.chunk",
+                    "created": state.created,
+                    "model": &state.model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "role": "assistant", "content": "" },
+                        "finish_reason": serde_json::Value::Null,
+                    }]
+                });
+                Some(format!("data: {}\n\n", chunk))
+            }
+
+            Some("content_block_start") => {
+                let block_type = data
+                    .pointer("/content_block/type")
+                    .and_then(|v| v.as_str());
+
+                if block_type == Some("tool_use") {
+                    let tool_index = state.next_tool_index;
+                    state.next_tool_index += 1;
+
+                    let block_index = data
+                        .get("index")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    state
+                        .tool_call_indices
+                        .push((block_index, tool_index));
+
+                    let tool_id = data
+                        .pointer("/content_block/id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let tool_name = data
+                        .pointer("/content_block/name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+
+                    let chunk = serde_json::json!({
+                        "id": format!("chatcmpl-{}", state.id),
+                        "object": "chat.completion.chunk",
+                        "created": state.created,
+                        "model": &state.model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": tool_index,
+                                    "id": tool_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": "",
+                                    }
+                                }]
+                            },
+                            "finish_reason": serde_json::Value::Null,
+                        }]
+                    });
+                    Some(format!("data: {}\n\n", chunk))
+                } else {
+                    None
+                }
+            }
+
+            Some("content_block_delta") => {
+                let delta_type = data.pointer("/delta/type").and_then(|v| v.as_str());
+
+                match delta_type {
+                    Some("text_delta") => {
+                        let text = data
+                            .pointer("/delta/text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        let chunk = serde_json::json!({
+                            "id": format!("chatcmpl-{}", state.id),
+                            "object": "chat.completion.chunk",
+                            "created": state.created,
+                            "model": &state.model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "content": text },
+                                "finish_reason": serde_json::Value::Null,
+                            }]
+                        });
+                        Some(format!("data: {}\n\n", chunk))
+                    }
+                    Some("input_json_delta") => {
+                        let partial_json = data
+                            .pointer("/delta/partial_json")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        let block_index = data
+                            .get("index")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize;
+
+                        let tool_index = state
+                            .tool_call_indices
+                            .iter()
+                            .find(|(bi, _)| *bi == block_index)
+                            .map(|(_, ti)| *ti)
+                            .unwrap_or(0);
+
+                        let chunk = serde_json::json!({
+                            "id": format!("chatcmpl-{}", state.id),
+                            "object": "chat.completion.chunk",
+                            "created": state.created,
+                            "model": &state.model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [{
+                                        "index": tool_index,
+                                        "function": {
+                                            "arguments": partial_json,
+                                        }
+                                    }]
+                                },
+                                "finish_reason": serde_json::Value::Null,
+                            }]
+                        });
+                        Some(format!("data: {}\n\n", chunk))
+                    }
+                    _ => None,
+                }
+            }
+
+            Some("message_delta") => {
+                let stop_reason = data.pointer("/delta/stop_reason").and_then(|v| v.as_str());
+                let output_tokens = data
+                    .pointer("/usage/output_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                let finish_reason = match stop_reason {
+                    Some("end_turn") => "stop",
+                    Some("max_tokens") => "length",
+                    Some("stop_sequence") => "stop",
+                    Some("tool_use") => "tool_calls",
+                    _ => "stop",
+                };
+
+                let chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", state.id),
+                    "object": "chat.completion.chunk",
+                    "created": state.created,
+                    "model": &state.model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": finish_reason,
+                    }],
+                    "usage": {
+                        "prompt_tokens": state.input_tokens,
+                        "completion_tokens": output_tokens,
+                        "total_tokens": state.input_tokens + output_tokens,
+                    }
+                });
+                Some(format!("data: {}\n\n", chunk))
+            }
+
+            Some("message_stop") => Some("data: [DONE]\n\n".to_string()),
+
+            // Skip: ping, content_block_stop, etc.
+            _ => None,
+        }
     }
 }
 
@@ -783,5 +1020,216 @@ mod tests {
         assert_eq!(result.path, "chat/completions");
         assert_eq!(result.body, body);
         assert!(result.extra_headers.is_empty());
+    }
+
+    // --- AnthropicTranslator streaming tests ---
+
+    fn make_event(event_type: &str, data: &str) -> SseEvent {
+        SseEvent {
+            event_type: Some(event_type.to_string()),
+            data: data.to_string(),
+        }
+    }
+
+    fn parse_chunk_json(sse_line: &str) -> serde_json::Value {
+        let json_str = sse_line
+            .strip_prefix("data: ")
+            .unwrap()
+            .trim();
+        serde_json::from_str(json_str).unwrap()
+    }
+
+    #[test]
+    fn anthropic_stream_message_start() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_abc","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":25,"output_tokens":1}}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["id"], "chatcmpl-msg_abc");
+        assert_eq!(chunk["object"], "chat.completion.chunk");
+        assert_eq!(chunk["model"], "claude-sonnet-4-20250514");
+        assert_eq!(chunk["choices"][0]["delta"]["role"], "assistant");
+        assert!(chunk["choices"][0]["finish_reason"].is_null());
+        assert_eq!(state.id, "msg_abc");
+        assert_eq!(state.input_tokens, 25);
+    }
+
+    #[test]
+    fn anthropic_stream_text_delta() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState {
+            id: "msg_abc".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            ..Default::default()
+        };
+
+        let event = make_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello world"}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["delta"]["content"], "Hello world");
+        assert!(chunk["choices"][0]["finish_reason"].is_null());
+    }
+
+    #[test]
+    fn anthropic_stream_message_delta_stop() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState {
+            id: "msg_abc".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            input_tokens: 25,
+            ..Default::default()
+        };
+
+        let event = make_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":15}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["finish_reason"], "stop");
+        assert_eq!(chunk["usage"]["prompt_tokens"], 25);
+        assert_eq!(chunk["usage"]["completion_tokens"], 15);
+        assert_eq!(chunk["usage"]["total_tokens"], 40);
+    }
+
+    #[test]
+    fn anthropic_stream_message_stop_emits_done() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event("message_stop", r#"{"type":"message_stop"}"#);
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+
+        assert_eq!(result, "data: [DONE]\n\n");
+    }
+
+    #[test]
+    fn anthropic_stream_ping_skipped() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event("ping", r#"{"type":"ping"}"#);
+        assert!(translator
+            .translate_stream_event(&event, &mut state)
+            .is_none());
+    }
+
+    #[test]
+    fn anthropic_stream_tool_use() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState {
+            id: "msg_abc".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            ..Default::default()
+        };
+
+        // content_block_start for tool_use
+        let start_event = make_event(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_123","name":"get_weather","input":{}}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&start_event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+        assert_eq!(chunk["choices"][0]["delta"]["tool_calls"][0]["id"], "toolu_123");
+        assert_eq!(
+            chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+            "get_weather"
+        );
+        assert_eq!(state.next_tool_index, 1);
+
+        // content_block_delta for tool input
+        let delta_event = make_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"location\":"}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&delta_event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+        assert_eq!(
+            chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            "{\"location\":"
+        );
+    }
+
+    #[test]
+    fn anthropic_stream_content_block_start_text_skipped() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        );
+
+        assert!(translator
+            .translate_stream_event(&event, &mut state)
+            .is_none());
+    }
+
+    #[test]
+    fn anthropic_stream_max_tokens_finish_reason() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":100}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["finish_reason"], "length");
+    }
+
+    #[test]
+    fn anthropic_stream_tool_use_finish_reason() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":50}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["finish_reason"], "tool_calls");
     }
 }
