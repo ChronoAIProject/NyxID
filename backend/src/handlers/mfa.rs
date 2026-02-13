@@ -220,6 +220,7 @@ pub async fn verify(
 
     // Set auth cookies
     let secure = state.config.use_secure_cookies();
+    let domain = state.config.cookie_domain();
 
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -230,6 +231,7 @@ pub async fn verify(
             30 * 24 * 3600,
             "/",
             secure,
+            domain,
         )
         .parse()
         .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
@@ -242,6 +244,7 @@ pub async fn verify(
             tokens.access_expires_in,
             "/",
             secure,
+            domain,
         )
         .parse()
         .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
@@ -254,6 +257,7 @@ pub async fn verify(
             state.config.jwt_refresh_ttl_secs,
             "/api/v1/auth/refresh",
             secure,
+            domain,
         )
         .parse()
         .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,

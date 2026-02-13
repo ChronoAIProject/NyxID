@@ -54,6 +54,11 @@ pub struct AppConfig {
 
     /// Service account token TTL in seconds (default: 3600 = 1 hour)
     pub sa_token_ttl_secs: i64,
+
+    /// Optional cookie domain for cross-subdomain auth (e.g. ".chrono-ai.fun").
+    /// When set, cookies include `Domain=<value>` so they are shared across
+    /// subdomains. Leave unset for single-domain / localhost development.
+    pub cookie_domain: Option<String>,
 }
 
 impl AppConfig {
@@ -126,6 +131,8 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
+
+            cookie_domain: env::var("COOKIE_DOMAIN").ok().filter(|s| !s.is_empty()),
         }
     }
 
@@ -185,6 +192,11 @@ impl AppConfig {
         !self.base_url.starts_with("http://localhost")
             && !self.base_url.starts_with("http://127.0.0.1")
     }
+
+    /// Returns the configured cookie domain, if any.
+    pub fn cookie_domain(&self) -> Option<&str> {
+        self.cookie_domain.as_deref()
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +230,7 @@ mod tests {
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
+            cookie_domain: None,
         }
     }
 

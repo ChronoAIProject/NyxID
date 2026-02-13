@@ -100,20 +100,25 @@ pub(crate) fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
 
 /// Build a Set-Cookie header value for an HttpOnly, SameSite=Lax cookie.
 /// The Secure flag is set based on the deployment environment.
-pub(crate) fn build_cookie(name: &str, value: &str, max_age_secs: i64, path: &str, secure: bool) -> String {
+/// When `domain` is provided, includes `Domain=<value>` for cross-subdomain sharing.
+pub(crate) fn build_cookie(name: &str, value: &str, max_age_secs: i64, path: &str, secure: bool, domain: Option<&str>) -> String {
     let secure_flag = if secure { "; Secure" } else { "" };
+    let domain_attr = domain.map(|d| format!("; Domain={d}")).unwrap_or_default();
     format!(
-        "{}={}; HttpOnly; SameSite=Lax; Path={}; Max-Age={}{}",
-        name, value, path, max_age_secs, secure_flag
+        "{}={}; HttpOnly; SameSite=Lax; Path={}; Max-Age={}{}{}",
+        name, value, path, max_age_secs, secure_flag, domain_attr
     )
 }
 
 /// Build a cookie-clearing header value.
-pub(crate) fn clear_cookie(name: &str, path: &str, secure: bool) -> String {
+/// When `domain` is provided, includes `Domain=<value>` so the browser clears
+/// the correct cross-subdomain cookie.
+pub(crate) fn clear_cookie(name: &str, path: &str, secure: bool, domain: Option<&str>) -> String {
     let secure_flag = if secure { "; Secure" } else { "" };
+    let domain_attr = domain.map(|d| format!("; Domain={d}")).unwrap_or_default();
     format!(
-        "{}=; HttpOnly; SameSite=Lax; Path={}; Max-Age=0{}",
-        name, path, secure_flag
+        "{}=; HttpOnly; SameSite=Lax; Path={}; Max-Age=0{}{}",
+        name, path, secure_flag, domain_attr
     )
 }
 
@@ -248,6 +253,7 @@ pub async fn login(
     );
 
     let secure = state.config.use_secure_cookies();
+    let domain = state.config.cookie_domain();
 
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -258,6 +264,7 @@ pub async fn login(
             30 * 24 * 3600, // 30 days
             "/",
             secure,
+            domain,
         )
         .parse()
         .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
@@ -270,6 +277,7 @@ pub async fn login(
             tokens.access_expires_in,
             "/",
             secure,
+            domain,
         )
         .parse()
         .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
@@ -282,6 +290,7 @@ pub async fn login(
             state.config.jwt_refresh_ttl_secs,
             "/api/v1/auth/refresh",
             secure,
+            domain,
         )
         .parse()
         .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
@@ -320,23 +329,24 @@ pub async fn logout(
     );
 
     let secure = state.config.use_secure_cookies();
+    let domain = state.config.cookie_domain();
 
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::SET_COOKIE,
-        clear_cookie(SESSION_COOKIE_NAME, "/", secure)
+        clear_cookie(SESSION_COOKIE_NAME, "/", secure, domain)
             .parse()
             .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
     );
     response_headers.append(
         header::SET_COOKIE,
-        clear_cookie(ACCESS_TOKEN_COOKIE_NAME, "/", secure)
+        clear_cookie(ACCESS_TOKEN_COOKIE_NAME, "/", secure, domain)
             .parse()
             .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
     );
     response_headers.append(
         header::SET_COOKIE,
-        clear_cookie("nyx_refresh_token", "/api/v1/auth/refresh", secure)
+        clear_cookie("nyx_refresh_token", "/api/v1/auth/refresh", secure, domain)
             .parse()
             .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
     );
@@ -386,6 +396,7 @@ pub async fn refresh(
     .await?;
 
     let secure = state.config.use_secure_cookies();
+    let domain = state.config.cookie_domain();
 
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -396,6 +407,7 @@ pub async fn refresh(
             tokens.access_expires_in,
             "/",
             secure,
+            domain,
         )
         .parse()
         .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
@@ -408,6 +420,7 @@ pub async fn refresh(
             state.config.jwt_refresh_ttl_secs,
             "/api/v1/auth/refresh",
             secure,
+            domain,
         )
         .parse()
         .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,

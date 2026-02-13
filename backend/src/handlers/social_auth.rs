@@ -35,6 +35,7 @@ pub async fn authorize(
         social_auth_service::build_authorization_url(provider, &state_token, &state.config)?;
 
     let secure = state.config.use_secure_cookies();
+    let domain = state.config.cookie_domain();
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -45,6 +46,7 @@ pub async fn authorize(
             SOCIAL_STATE_MAX_AGE,
             "/api/v1/auth/social",
             secure,
+            domain,
         )
         .parse()
         .map_err(|_| AppError::Internal("Cookie error".to_string()))?,
@@ -80,12 +82,13 @@ pub async fn callback(
     headers: HeaderMap,
 ) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
     let secure = state.config.use_secure_cookies();
+    let domain = state.config.cookie_domain();
     let frontend_url = &state.config.frontend_url;
 
     // Parse provider
     let provider = match social_auth_service::SocialProvider::parse(&provider_name) {
         Some(p) => p,
-        None => return Err(redirect_with_error(frontend_url, "social_auth_unsupported", secure)),
+        None => return Err(redirect_with_error(frontend_url, "social_auth_unsupported", secure, domain)),
     };
 
     // Check for provider error response
@@ -95,17 +98,17 @@ pub async fn callback(
             desc = ?params.error_description,
             "Provider returned error"
         );
-        return Err(redirect_with_error(frontend_url, "social_auth_denied", secure));
+        return Err(redirect_with_error(frontend_url, "social_auth_denied", secure, domain));
     }
 
     // Extract code and state
     let code = match params.code {
         Some(ref c) if !c.is_empty() => c.as_str(),
-        _ => return Err(redirect_with_error(frontend_url, "social_auth_invalid", secure)),
+        _ => return Err(redirect_with_error(frontend_url, "social_auth_invalid", secure, domain)),
     };
     let state_param = match params.state {
         Some(ref s) if !s.is_empty() => s.as_str(),
-        _ => return Err(redirect_with_error(frontend_url, "social_auth_invalid", secure)),
+        _ => return Err(redirect_with_error(frontend_url, "social_auth_invalid", secure, domain)),
     };
 
     // Validate CSRF state (constant-time comparison to prevent timing attacks)
@@ -113,7 +116,7 @@ pub async fn callback(
     let cookie_hash = extract_cookie_value(&headers, SOCIAL_STATE_COOKIE);
     match cookie_hash {
         Some(ref h) if constant_time_eq(h.as_bytes(), computed_hash.as_bytes()) => {}
-        _ => return Err(redirect_with_error(frontend_url, "social_auth_csrf", secure)),
+        _ => return Err(redirect_with_error(frontend_url, "social_auth_csrf", secure, domain)),
     }
 
     // Exchange code for access token
@@ -126,7 +129,7 @@ pub async fn callback(
     .await
     .map_err(|e| {
         tracing::warn!(error = %e, "Social auth code exchange failed");
-        redirect_with_error(frontend_url, "social_auth_exchange", secure)
+        redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
     })?;
 
     // Fetch user profile
@@ -138,7 +141,7 @@ pub async fn callback(
     .await
     .map_err(|e| {
         tracing::warn!(error = %e, "Social auth profile fetch failed");
-        redirect_with_error(frontend_url, "social_auth_profile", secure)
+        redirect_with_error(frontend_url, "social_auth_profile", secure, domain)
     })?;
 
     // Find or create user
@@ -152,7 +155,7 @@ pub async fn callback(
                 AppError::SocialAuthDeactivated => "social_auth_deactivated",
                 _ => "social_auth_exchange",
             };
-            redirect_with_error(frontend_url, error_key, secure)
+            redirect_with_error(frontend_url, error_key, secure, domain)
         })?;
 
     // Issue session and tokens
@@ -170,7 +173,7 @@ pub async fn callback(
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "Social auth session creation failed");
-        redirect_with_error(frontend_url, "social_auth_exchange", secure)
+        redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
     })?;
 
     // Audit log
@@ -198,9 +201,10 @@ pub async fn callback(
             30 * 24 * 3600,
             "/",
             secure,
+            domain,
         )
         .parse()
-        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure))?,
+        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
     );
 
     // Access token cookie
@@ -212,9 +216,10 @@ pub async fn callback(
             tokens.access_expires_in,
             "/",
             secure,
+            domain,
         )
         .parse()
-        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure))?,
+        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
     );
 
     // Refresh token cookie
@@ -226,17 +231,18 @@ pub async fn callback(
             state.config.jwt_refresh_ttl_secs,
             "/api/v1/auth/refresh",
             secure,
+            domain,
         )
         .parse()
-        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure))?,
+        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
     );
 
     // Clear state cookie
     response_headers.append(
         header::SET_COOKIE,
-        clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure)
+        clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure, domain)
             .parse()
-            .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure))?,
+            .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
     );
 
     // Redirect to frontend root (dashboard lives at /)
@@ -245,7 +251,7 @@ pub async fn callback(
         header::LOCATION,
         redirect_url
             .parse()
-            .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure))?,
+            .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
     );
 
     Ok((StatusCode::FOUND, response_headers, ()))
@@ -256,6 +262,7 @@ fn redirect_with_error(
     frontend_url: &str,
     error: &str,
     secure: bool,
+    domain: Option<&str>,
 ) -> (StatusCode, HeaderMap, ()) {
     let mut headers = HeaderMap::new();
     let base = frontend_url.trim_end_matches('/');
@@ -263,7 +270,7 @@ fn redirect_with_error(
     if let Ok(location) = url.parse() {
         headers.insert(header::LOCATION, location);
     }
-    if let Ok(cookie) = clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure).parse() {
+    if let Ok(cookie) = clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure, domain).parse() {
         headers.append(header::SET_COOKIE, cookie);
     }
     (StatusCode::FOUND, headers, ())

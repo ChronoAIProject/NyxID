@@ -527,6 +527,7 @@ mod tests {
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
+            cookie_domain: None,
         };
 
         (keys, config)

@@ -23,9 +23,12 @@ use crate::models::session::{Session, COLLECTION_NAME as SESSIONS};
 /// - It covers slow mobile connections and client-side retry back-off.
 /// - It is short enough that a stolen token has minimal usable window
 ///   (the attacker must also have the JWT, which has its own short TTL).
-/// - If the replacement token is already consumed (revoked), the grace
-///   period is irrelevant -- we still treat it as theft.
 const REUSE_GRACE_PERIOD_SECS: i64 = 120;
+
+/// Maximum depth when following a replacement chain.
+/// Prevents infinite loops if the database has a cycle, and bounds the
+/// number of DB round-trips for concurrent-rotation scenarios.
+const MAX_REPLACEMENT_CHAIN_DEPTH: usize = 5;
 
 /// Tokens issued after successful authentication.
 pub struct IssuedTokens {
@@ -185,6 +188,12 @@ pub async fn refresh_tokens(
     // is present, we only allow retries within REUSE_GRACE_PERIOD_SECS.
     // If `revoked_at` is `None` (tokens rotated before this field was added),
     // we still check the replacement chain for a valid unused token.
+    //
+    // When multiple concurrent requests use the same old token, the first
+    // succeeds and rotates the replacement. Subsequent requests find the
+    // replacement already rotated (revoked with its own `replaced_by`).
+    // We follow the chain up to MAX_REPLACEMENT_CHAIN_DEPTH hops to find
+    // the current active token rather than wrongly treating this as theft.
     let active_token = if stored.revoked {
         let within_grace = stored
             .revoked_at
@@ -192,28 +201,55 @@ pub async fn refresh_tokens(
             .unwrap_or(true); // None means pre-migration token; allow chain check
 
         match (&stored.replaced_by, within_grace) {
-            (Some(replacement_id), true) => {
-                // Rotation-revoked token with a replacement -- check if it's still valid
-                let replacement = db
-                    .collection::<RefreshToken>(REFRESH_TOKENS)
-                    .find_one(doc! { "_id": replacement_id })
-                    .await?;
+            (Some(first_replacement_id), true) => {
+                // Rotation-revoked token with a replacement -- follow the chain
+                // to find the current active token. This handles the case where
+                // concurrent requests each rotated the token further.
+                let mut current_id = first_replacement_id.clone();
+                let mut found_active: Option<RefreshToken> = None;
 
-                match replacement {
-                    Some(r) if !r.revoked && r.expires_at > Utc::now() => {
-                        // The replacement is still valid -- this is a legitimate
-                        // post-restart retry. The client just has the old token.
-                        // Proceed with rotation using the replacement as the base.
-                        tracing::info!(
-                            user_id = %stored.user_id,
-                            jti = %claims.jti,
-                            replacement_id = %replacement_id,
-                            "Post-rotation retry detected, using replacement token"
-                        );
-                        r
+                for depth in 0..MAX_REPLACEMENT_CHAIN_DEPTH {
+                    let candidate = db
+                        .collection::<RefreshToken>(REFRESH_TOKENS)
+                        .find_one(doc! { "_id": &current_id })
+                        .await?;
+
+                    match candidate {
+                        Some(r) if !r.revoked && r.expires_at > Utc::now() => {
+                            // Found a valid active token in the chain.
+                            tracing::info!(
+                                user_id = %stored.user_id,
+                                jti = %claims.jti,
+                                replacement_id = %current_id,
+                                chain_depth = depth,
+                                "Post-rotation retry detected, using replacement token"
+                            );
+                            found_active = Some(r);
+                            break;
+                        }
+                        Some(RefreshToken { replaced_by: Some(next_id), .. }) => {
+                            // This token was itself rotated by a concurrent request.
+                            // Follow the chain to the next replacement.
+                            tracing::debug!(
+                                user_id = %stored.user_id,
+                                replacement_id = %current_id,
+                                chain_depth = depth,
+                                "Following replacement chain (concurrent rotation)"
+                            );
+                            current_id = next_id;
+                        }
+                        _ => {
+                            // Dead end: token is revoked without a replacement,
+                            // expired, or missing. Stop searching.
+                            break;
+                        }
                     }
-                    _ => {
-                        // Replacement is also revoked, expired, or missing.
+                }
+
+                match found_active {
+                    Some(token) => token,
+                    None => {
+                        // Chain exhausted without finding a valid token.
                         // This is actual token reuse -- revoke the session.
                         tracing::warn!(
                             user_id = %stored.user_id,
