@@ -89,6 +89,52 @@ fn tool_result(id: Option<serde_json::Value>, text: &str, is_error: bool) -> Res
     )
 }
 
+/// Check if the client's `Accept` header includes `text/event-stream`.
+/// Used to decide whether we can send inline SSE notifications in POST responses
+/// (Streamable HTTP transport).
+fn accepts_sse(headers: &HeaderMap) -> bool {
+    headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/event-stream"))
+}
+
+/// Return a tool result followed by JSON-RPC notifications in a single SSE
+/// stream embedded in the POST response.  This allows clients to receive
+/// `notifications/tools/list_changed` without depending on a separate GET SSE
+/// channel (which is optional in Streamable HTTP transport).
+fn tool_result_with_notifications(
+    id: Option<serde_json::Value>,
+    text: &str,
+    is_error: bool,
+    notifications: Vec<serde_json::Value>,
+) -> Response {
+    let result = JsonRpcResponse {
+        jsonrpc: JSONRPC_VERSION.into(),
+        id,
+        result: Some(serde_json::json!({
+            "content": [{ "type": "text", "text": text }],
+            "isError": is_error,
+        })),
+        error: None,
+    };
+
+    let mut events: Vec<Result<Event, Infallible>> =
+        Vec::with_capacity(1 + notifications.len());
+
+    events.push(Ok(Event::default()
+        .event("message")
+        .data(serde_json::to_string(&result).unwrap_or_default())));
+
+    for notification in notifications {
+        events.push(Ok(Event::default()
+            .event("message")
+            .data(serde_json::to_string(&notification).unwrap_or_default())));
+    }
+
+    Sse::new(tokio_stream::iter(events)).into_response()
+}
+
 /// MCP-formatted 401 with `WWW-Authenticate` pointing to the protected-resource
 /// metadata endpoint (RFC 9728).
 fn mcp_401(base_url: &str) -> Response {
@@ -280,7 +326,8 @@ pub async fn mcp_post(
             if let Err(r) = validate_session(&state, &sid, &user_id, request.id.clone()) {
                 return r;
             }
-            handle_tools_call(&state, &user_id, &sid, &request).await
+            let sse_capable = accepts_sse(&headers);
+            handle_tools_call(&state, &user_id, &sid, &request, sse_capable).await
         }
 
         "ping" => rpc_success(request.id, serde_json::json!({})),
@@ -466,6 +513,7 @@ async fn handle_tools_call(
     user_id: &str,
     session_id: &str,
     request: &JsonRpcRequest,
+    client_accepts_sse: bool,
 ) -> Response {
     let params = match &request.params {
         Some(p) => p,
@@ -485,15 +533,40 @@ async fn handle_tools_call(
     // -- Meta-tools --
     match tool_name {
         "nyx__search_tools" => {
-            return handle_meta_search(state, user_id, session_id, &arguments, request.id.clone())
-                .await;
+            return handle_meta_search(
+                state,
+                user_id,
+                session_id,
+                &arguments,
+                request.id.clone(),
+                client_accepts_sse,
+            )
+            .await;
         }
         "nyx__discover_services" => {
             return handle_meta_discover(state, user_id, &arguments, request.id.clone()).await;
         }
         "nyx__connect_service" => {
-            return handle_meta_connect(state, user_id, session_id, &arguments, request.id.clone())
-                .await;
+            return handle_meta_connect(
+                state,
+                user_id,
+                session_id,
+                &arguments,
+                request.id.clone(),
+                client_accepts_sse,
+            )
+            .await;
+        }
+        "nyx__call_tool" => {
+            return handle_meta_call_tool(
+                state,
+                user_id,
+                session_id,
+                &arguments,
+                request.id.clone(),
+                client_accepts_sse,
+            )
+            .await;
         }
         _ => {}
     }
@@ -595,12 +668,156 @@ async fn handle_tools_call(
 // Meta-tool dispatch helpers
 // ---------------------------------------------------------------------------
 
+/// `nyx__call_tool` -- universal proxy that lets clients invoke any connected
+/// tool by name, bypassing the need for a `tools/list` refresh.  The AI
+/// discovers tools via `nyx__search_tools` and then calls them through this
+/// meta-tool, which is always in the static tool list.
+async fn handle_meta_call_tool(
+    state: &AppState,
+    user_id: &str,
+    session_id: &str,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+    client_accepts_sse: bool,
+) -> Response {
+    let tool_name = match arguments.get("tool_name").and_then(|n| n.as_str()) {
+        Some(n) if !n.is_empty() => n,
+        _ => return tool_result(request_id, "tool_name is required", true),
+    };
+
+    if tool_name.len() > 200 {
+        return tool_result(request_id, "tool_name too long (max 200 chars)", true);
+    }
+
+    // Accept arguments either nested under "arguments" key or flat alongside
+    // "tool_name".  LLMs sometimes flatten the structure, so we handle both:
+    //   { "tool_name": "x", "arguments": { "foo": 1 } }   -- nested
+    //   { "tool_name": "x", "foo": 1 }                     -- flat
+    let inner_args = if let Some(nested) = arguments.get("arguments") {
+        nested.clone()
+    } else {
+        // Collect all keys except "tool_name" as the arguments
+        let mut flat = serde_json::Map::new();
+        if let Some(obj) = arguments.as_object() {
+            for (k, v) in obj {
+                if k != "tool_name" {
+                    flat.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        serde_json::Value::Object(flat)
+    };
+
+    // Load user tools
+    let services = match mcp_service::load_user_tools(&state.db, user_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to load tools for call_tool: {e}");
+            return tool_result(request_id, "Failed to load tools", true);
+        }
+    };
+
+    // Resolve tool (no activation gate -- that's the whole point)
+    let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
+        Some(pair) => pair,
+        None => {
+            return tool_result(
+                request_id,
+                &format!(
+                    "Unknown tool: {tool_name}. Use nyx__search_tools to find available tools."
+                ),
+                true,
+            );
+        }
+    };
+
+    // Auto-activate so future tools/list responses include this service
+    let changed = state
+        .mcp_sessions
+        .activate_services(session_id, &[service.service_id.clone()]);
+
+    if changed {
+        send_tools_list_changed(state, session_id);
+    }
+
+    // Execute
+    let encryption_key = match aes::parse_hex_key(&state.config.encryption_key) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::error!("Failed to parse encryption key: {e}");
+            return tool_result(request_id, "Internal server error", true);
+        }
+    };
+
+    let (status, body) = match mcp_service::execute_tool(
+        &state.http_client,
+        &state.db,
+        &encryption_key,
+        user_id,
+        service,
+        endpoint,
+        &inner_args,
+        &state.jwt_keys,
+        &state.config,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Tool execution failed for {tool_name}: {e}");
+            return tool_result(
+                request_id,
+                &format!("Tool execution failed: {e}"),
+                true,
+            );
+        }
+    };
+
+    // Audit log
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id.to_string()),
+        "mcp_tool_call".to_string(),
+        Some(serde_json::json!({
+            "tool": tool_name,
+            "service_id": service.service_id,
+            "response_status": status,
+            "via": "nyx__call_tool",
+        })),
+        None,
+        None,
+    );
+
+    let is_error = !(200..300).contains(&status);
+    let content_text = if is_error {
+        format!("Error ({status}): {body}")
+    } else {
+        body
+    };
+
+    // Embed tools/list_changed inline for SSE-capable clients
+    if changed && client_accepts_sse {
+        tool_result_with_notifications(
+            request_id,
+            &content_text,
+            is_error,
+            vec![serde_json::json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "method": "notifications/tools/list_changed",
+            })],
+        )
+    } else {
+        tool_result(request_id, &content_text, is_error)
+    }
+}
+
 async fn handle_meta_search(
     state: &AppState,
     user_id: &str,
     session_id: &str,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
+    client_accepts_sse: bool,
 ) -> Response {
     let query = arguments
         .get("query")
@@ -633,12 +850,13 @@ async fn handle_meta_search(
         &search_result.matched_service_ids,
     );
 
-    // If tools changed, send notification so client refreshes
+    // Send notification via GET SSE channel (fallback for clients that have it)
     if changed {
         send_tools_list_changed(state, session_id);
     }
 
-    // Return search results
+    // Return search results (include inputSchema so the AI knows what arguments
+    // to pass when calling tools via nyx__call_tool)
     let results: Vec<serde_json::Value> = search_result
         .matches
         .iter()
@@ -646,6 +864,7 @@ async fn handle_meta_search(
             serde_json::json!({
                 "name": t.name,
                 "description": t.description,
+                "inputSchema": t.input_schema,
             })
         })
         .collect();
@@ -660,6 +879,8 @@ async fn handle_meta_search(
         "count": results.len(),
         "services_activated": search_result.matched_service_ids.len(),
         "total_activated_services": activated_count,
+        "hint": "Use nyx__call_tool to invoke any of these tools by name. \
+            Pass the tool name and arguments as shown in the match results.",
         "note": if changed {
             "Matching service tools have been activated. Your tool list has been updated."
         } else {
@@ -679,7 +900,22 @@ async fn handle_meta_search(
 
     let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
 
-    tool_result(request_id, &text, false)
+    // When tools changed and client supports SSE, embed the notification
+    // inline in the POST response so the client picks it up without needing
+    // the separate GET SSE channel.
+    if changed && client_accepts_sse {
+        tool_result_with_notifications(
+            request_id,
+            &text,
+            false,
+            vec![serde_json::json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "method": "notifications/tools/list_changed",
+            })],
+        )
+    } else {
+        tool_result(request_id, &text, false)
+    }
 }
 
 async fn handle_meta_discover(
@@ -709,6 +945,7 @@ async fn handle_meta_connect(
     session_id: &str,
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
+    client_accepts_sse: bool,
 ) -> Response {
     let service_id = match arguments.get("service_id").and_then(|s| s.as_str()) {
         Some(id) if uuid::Uuid::try_parse(id).is_ok() => id,
@@ -745,6 +982,7 @@ async fn handle_meta_connect(
                 &[service_id.to_string()],
             );
 
+            // Send via GET SSE channel (fallback for clients that have it)
             if changed {
                 send_tools_list_changed(state, session_id);
             }
@@ -766,7 +1004,21 @@ async fn handle_meta_connect(
                 "note": "Service tools are now available. Your tool list has been updated.",
             });
             let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
-            tool_result(request_id, &text, false)
+
+            // Embed notification inline for SSE-capable clients
+            if changed && client_accepts_sse {
+                tool_result_with_notifications(
+                    request_id,
+                    &text,
+                    false,
+                    vec![serde_json::json!({
+                        "jsonrpc": JSONRPC_VERSION,
+                        "method": "notifications/tools/list_changed",
+                    })],
+                )
+            } else {
+                tool_result(request_id, &text, false)
+            }
         }
         Err(e) => {
             tracing::warn!("connect_service failed: {e}");

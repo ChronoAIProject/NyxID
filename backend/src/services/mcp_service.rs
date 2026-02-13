@@ -276,6 +276,28 @@ pub fn generate_tool_definitions(
         }),
     });
 
+    tools.push(McpToolDefinition {
+        name: "nyx__call_tool".to_string(),
+        description: "Execute any connected tool by name. Use nyx__search_tools first to \
+            discover available tools, then invoke them through this tool. Pass the exact \
+            tool name from search results and any required arguments."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "The full tool name from search results (e.g., 'sisyphus-maker__verify')"
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Arguments to pass to the tool (matching the tool's input schema from search results)"
+                }
+            },
+            "required": ["tool_name"]
+        }),
+    });
+
     // -- Per-service tools (filtered by activated set) --
     for service in services {
         let included = match activated_service_ids {
@@ -671,9 +693,16 @@ pub async fn execute_tool(
     .await
     .unwrap_or_default();
 
-    // Minimal headers for the downstream request
+    // Minimal headers for the downstream request.
+    // Always set Content-Type for methods that typically carry a body, even
+    // when the body is empty -- some APIs (e.g. ASP.NET) return 415 without it.
     let mut headers = reqwest::header::HeaderMap::new();
-    if body.is_some() {
+    if body.is_some()
+        || matches!(
+            method,
+            reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
+        )
+    {
         headers.insert(
             reqwest::header::CONTENT_TYPE,
             "application/json".parse().unwrap(),
@@ -971,8 +1000,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 3 meta-tools
-        assert_eq!(tools.len(), 3);
+        // Should only have the 4 meta-tools
+        assert_eq!(tools.len(), 4);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -997,8 +1026,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 3 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 4);
+        // 4 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 5);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -1022,8 +1051,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 3 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 5);
+        // 4 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 6);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }
