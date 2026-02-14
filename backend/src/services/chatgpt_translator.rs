@@ -4,6 +4,10 @@
 //! The `openai-codex` device code flow produces OIDC tokens that are only
 //! valid at the ChatGPT backend (not `api.openai.com`). The ChatGPT backend
 //! speaks the Responses API wire format, so this translator bridges the gap.
+//!
+//! Supports both directions:
+//! - Chat Completions request (has `messages`) → translated to Responses API
+//! - Responses API request (has `input`) → passed through with minimal enrichment
 
 use tracing;
 
@@ -12,18 +16,17 @@ use crate::services::llm_gateway_service::{
     LlmTranslator, SseEvent, StreamTranslationState, TranslatedRequest,
 };
 
+/// Returns `true` if the body is in Chat Completions format (has `messages`).
+/// Returns `false` if already in Responses API format (has `input`).
+pub fn is_chat_completions_format(body: &serde_json::Value) -> bool {
+    body.get("messages").is_some()
+}
+
 pub struct ChatgptTranslator;
 
-impl LlmTranslator for ChatgptTranslator {
-    fn needs_translation(&self) -> bool {
-        true
-    }
-
-    fn gateway_base_url(&self) -> Option<&str> {
-        Some("https://chatgpt.com/backend-api/codex")
-    }
-
-    fn translate_request(
+impl ChatgptTranslator {
+    /// Translate a Chat Completions request (has `messages`) to Responses API format.
+    fn translate_chat_completions_request(
         &self,
         path: &str,
         body: &serde_json::Value,
@@ -49,7 +52,7 @@ impl LlmTranslator for ChatgptTranslator {
             translated.insert("input".to_string(), serde_json::Value::Array(input));
         }
 
-        // Rename max_tokens -> max_output_tokens
+        // Rename max_tokens -> max_output_tokens (Responses API name)
         if let Some(max) = body
             .get("max_tokens")
             .or_else(|| body.get("max_completion_tokens"))
@@ -60,17 +63,9 @@ impl LlmTranslator for ChatgptTranslator {
         // Do not store responses in the user's ChatGPT history
         translated.insert("store".to_string(), serde_json::Value::Bool(false));
 
-        // Request usage in the response
-        translated.insert(
-            "include".to_string(),
-            serde_json::json!(["usage"]),
-        );
-
         // Path: chat/completions -> responses
         let translated_path = path.replace("chat/completions", "responses");
 
-        // No browser-impersonation headers -- match codex-rs which connects
-        // honestly as a CLI client (no Origin/Referer/browser UA).
         let extra_headers = vec![];
 
         Ok(TranslatedRequest {
@@ -78,6 +73,52 @@ impl LlmTranslator for ChatgptTranslator {
             body: serde_json::Value::Object(translated),
             extra_headers,
         })
+    }
+
+    /// Enrich a Responses API request (has `input`) with defaults, pass through as-is.
+    fn enrich_responses_api_request(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> AppResult<TranslatedRequest> {
+        let mut enriched = body
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+
+        // Ensure store=false so responses don't pollute ChatGPT history
+        enriched
+            .entry("store".to_string())
+            .or_insert(serde_json::Value::Bool(false));
+
+        Ok(TranslatedRequest {
+            path: path.to_string(),
+            body: serde_json::Value::Object(enriched),
+            extra_headers: vec![],
+        })
+    }
+}
+
+impl LlmTranslator for ChatgptTranslator {
+    fn needs_translation(&self) -> bool {
+        true
+    }
+
+    fn gateway_base_url(&self) -> Option<&str> {
+        Some("https://chatgpt.com/backend-api/codex")
+    }
+
+    fn translate_request(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> AppResult<TranslatedRequest> {
+        if is_chat_completions_format(body) {
+            self.translate_chat_completions_request(path, body)
+        } else {
+            // Already Responses API format -- pass through with enrichment
+            self.enrich_responses_api_request(path, body)
+        }
     }
 
     fn translate_response(
@@ -232,6 +273,9 @@ impl LlmTranslator for ChatgptTranslator {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string();
+                if let Some(ts) = response.get("created_at").and_then(|v| v.as_i64()) {
+                    state.created = ts;
+                }
 
                 let chunk = serde_json::json!({
                     "id": format!("chatcmpl-{}", state.id),
@@ -366,7 +410,9 @@ impl LlmTranslator for ChatgptTranslator {
                     "stop"
                 };
 
-                let chunk = serde_json::json!({
+                // OpenAI spec: finish_reason in one chunk, usage in a
+                // separate chunk with empty choices[], then [DONE].
+                let finish_chunk = serde_json::json!({
                     "id": format!("chatcmpl-{}", state.id),
                     "object": "chat.completion.chunk",
                     "created": state.created,
@@ -375,18 +421,28 @@ impl LlmTranslator for ChatgptTranslator {
                         "index": 0,
                         "delta": {},
                         "finish_reason": finish_reason,
-                    }],
+                    }]
+                });
+                let usage_chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", state.id),
+                    "object": "chat.completion.chunk",
+                    "created": state.created,
+                    "model": &state.model,
+                    "choices": [],
                     "usage": {
                         "prompt_tokens": input_tokens,
                         "completion_tokens": output_tokens,
                         "total_tokens": input_tokens + output_tokens,
                     }
                 });
-                Some(format!("data: {}\n\ndata: [DONE]\n\n", chunk))
+                Some(format!(
+                    "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                    finish_chunk, usage_chunk
+                ))
             }
 
             "response.incomplete" => {
-                let chunk = serde_json::json!({
+                let finish_chunk = serde_json::json!({
                     "id": format!("chatcmpl-{}", state.id),
                     "object": "chat.completion.chunk",
                     "created": state.created,
@@ -397,7 +453,7 @@ impl LlmTranslator for ChatgptTranslator {
                         "finish_reason": "length",
                     }]
                 });
-                Some(format!("data: {}\n\ndata: [DONE]\n\n", chunk))
+                Some(format!("data: {}\n\ndata: [DONE]\n\n", finish_chunk))
             }
 
             // Skip: response.output_item.done, response.output_text.done,
@@ -501,299 +557,259 @@ fn convert_messages_to_input(
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket transport for ChatGPT backend (matching codex-rs approach)
+// HTTP SSE transport for ChatGPT backend (matching default codex-rs approach)
 // ---------------------------------------------------------------------------
 
-/// Establish a WebSocket connection to `chatgpt.com:443` tunneled through an
-/// HTTP CONNECT proxy. This bypasses Cloudflare datacenter IP blocking.
-async fn connect_via_proxy(
-    request: tokio_tungstenite::tungstenite::http::Request<()>,
-    proxy_url: &str,
-    ws_config: tokio_tungstenite::tungstenite::protocol::WebSocketConfig,
-) -> AppResult<(
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
-)> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+/// Codex CLI version to impersonate. Should track a recent stable release.
+const CODEX_VERSION: &str = "0.101.0";
 
-    let parsed = url::Url::parse(proxy_url).map_err(|e| {
-        AppError::Internal(format!("Invalid CHATGPT_PROXY_URL: {e}"))
-    })?;
+/// Build a User-Agent string matching the codex-rs format:
+/// `codex_cli_rs/{version} ({os_type} {os_version}; {arch})`
+fn codex_user_agent() -> String {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    // Map Rust OS names to codex-rs os_info style names
+    let os_name = match os {
+        "linux" => "Linux",
+        "macos" => "Mac OS",
+        "windows" => "Windows",
+        other => other,
+    };
+    format!("codex_cli_rs/{CODEX_VERSION} ({os_name}; {arch})")
+}
 
-    let proxy_host = parsed
-        .host_str()
-        .ok_or_else(|| AppError::Internal("CHATGPT_PROXY_URL missing host".into()))?;
-    let proxy_port = parsed.port().unwrap_or(match parsed.scheme() {
-        "socks5" | "socks5h" => 1080,
-        _ => 3128,
-    });
-    let proxy_addr = format!("{proxy_host}:{proxy_port}");
+/// Build a `reqwest::Client` for ChatGPT backend requests.
+/// Configures proxy from environment if set.
+fn chatgpt_http_client() -> AppResult<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().use_rustls_tls();
 
-    tracing::debug!("WebSocket via proxy {proxy_addr} -> chatgpt.com:443");
-
-    // 1. TCP connect to proxy
-    let mut proxy_stream =
-        tokio::net::TcpStream::connect(&proxy_addr).await.map_err(|e| {
-            tracing::error!("Failed to connect to proxy {proxy_addr}: {e}");
-            AppError::Internal(format!("Failed to connect to proxy: {e}"))
+    if let Ok(proxy_url) = std::env::var("CHATGPT_PROXY_URL")
+        .or_else(|_| std::env::var("HTTPS_PROXY"))
+        .or_else(|_| std::env::var("https_proxy"))
+    {
+        tracing::debug!("ChatGPT HTTP via proxy: {proxy_url}");
+        let proxy = reqwest::Proxy::https(&proxy_url).map_err(|e| {
+            AppError::Internal(format!("Invalid proxy URL: {e}"))
         })?;
-
-    // 2. Send HTTP CONNECT to tunnel to chatgpt.com:443
-    let connect_req =
-        format!("CONNECT chatgpt.com:443 HTTP/1.1\r\nHost: chatgpt.com:443\r\n\r\n");
-    proxy_stream
-        .write_all(connect_req.as_bytes())
-        .await
-        .map_err(|e| AppError::Internal(format!("Proxy CONNECT write failed: {e}")))?;
-
-    // 3. Read proxy response -- expect "HTTP/1.1 200"
-    let mut buf = vec![0u8; 4096];
-    let n = proxy_stream.read(&mut buf).await.map_err(|e| {
-        AppError::Internal(format!("Proxy CONNECT read failed: {e}"))
-    })?;
-    let resp_str = String::from_utf8_lossy(&buf[..n]);
-    if !resp_str.starts_with("HTTP/1.1 200") && !resp_str.starts_with("HTTP/1.0 200") {
-        tracing::error!("Proxy CONNECT rejected: {resp_str}");
-        return Err(AppError::Internal(format!(
-            "Proxy CONNECT rejected: {resp_str}"
-        )));
+        builder = builder.proxy(proxy);
     }
 
-    tracing::debug!("Proxy tunnel established");
-
-    // 4. TLS handshake over the tunneled connection, then WebSocket upgrade.
-    //    We use the rustls connector from tokio-tungstenite.
-    let tls_connector = build_tls_connector()?;
-
-    let server_name = rustls_pki_types::ServerName::try_from("chatgpt.com")
-        .map_err(|e| AppError::Internal(format!("Invalid server name: {e}")))?
-        .to_owned();
-
-    let tls_stream = tls_connector
-        .connect(server_name, proxy_stream)
-        .await
-        .map_err(|e| {
-            tracing::error!("TLS handshake through proxy failed: {e}");
-            AppError::Internal(format!("TLS handshake through proxy failed: {e}"))
-        })?;
-
-    // 5. WebSocket handshake over the TLS stream
-    let (ws_stream, response) = tokio_tungstenite::client_async_with_config(
-        request,
-        tokio_tungstenite::MaybeTlsStream::Rustls(tls_stream),
-        Some(ws_config),
-    )
-    .await
-    .map_err(|e| {
-        let detail = log_ws_error_detail(&e);
-        tracing::error!("ChatGPT WebSocket handshake via proxy failed: {detail}");
-        AppError::Internal(format!(
-            "ChatGPT WebSocket handshake via proxy failed: {e}"
-        ))
-    })?;
-
-    Ok((ws_stream, response))
+    builder
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))
 }
 
-/// Extract diagnostic details from a tungstenite WebSocket error.
-fn log_ws_error_detail(e: &tokio_tungstenite::tungstenite::Error) -> String {
-    match e {
-        tokio_tungstenite::tungstenite::Error::Http(resp) => {
-            let status = resp.status();
-            let server = resp
-                .headers()
-                .get("server")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("unknown");
-            let cf_ray = resp
-                .headers()
-                .get("cf-ray")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("none");
-            let body = resp
-                .body()
-                .as_ref()
-                .and_then(|b| String::from_utf8(b.clone()).ok())
-                .unwrap_or_default();
-            let body_preview = if body.len() > 500 {
-                &body[..500]
-            } else {
-                &body
-            };
-            format!("HTTP {status}, server={server}, cf-ray={cf_ray}, body={body_preview}")
-        }
-        _ => format!("{e}"),
-    }
-}
-
-/// Build a `tokio_rustls::TlsConnector` with webpki root certificates.
-/// Explicitly selects `ring` as the crypto provider to avoid ambiguity when
-/// both `ring` and `aws-lc-rs` are enabled via Cargo feature unification.
-fn build_tls_connector() -> AppResult<tokio_rustls::TlsConnector> {
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let config = rustls::ClientConfig::builder_with_provider(
-        rustls::crypto::ring::default_provider().into(),
-    )
-    .with_safe_default_protocol_versions()
-    .map_err(|e| AppError::Internal(format!("TLS config error: {e}")))?
-    .with_root_certificates(root_store)
-    .with_no_client_auth();
-
-    Ok(tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)))
-}
-
-/// Send a Responses API request via WebSocket to `chatgpt.com/backend-api/codex`.
+/// Send a Responses API request via HTTP POST to `chatgpt.com/backend-api/codex`.
 ///
-/// Uses `tokio-tungstenite` with `rustls` matching the codex CLI (`codex-rs`).
-/// Supports optional HTTP CONNECT proxy via `CHATGPT_PROXY_URL` env var.
+/// Uses `reqwest` with SSE streaming, matching the default codex CLI behavior
+/// (codex-rs uses HTTP by default; WebSocket is an opt-in feature).
+///
+/// When `translate_response` is `true`, Responses API SSE events are
+/// translated back to Chat Completions format. When `false`,
+/// the raw Responses API SSE events are forwarded to the client.
 pub async fn send_to_chatgpt(
     translated_body: &serde_json::Value,
     bearer_token: &str,
     is_streaming: bool,
+    translate_response: bool,
 ) -> AppResult<axum::response::Response> {
     use axum::body::Body;
     use axum::http::StatusCode;
-    use futures::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite;
-    use tungstenite::client::IntoClientRequest;
+    use futures::StreamExt;
 
-    // Ensure ring is installed as the process-level default crypto provider
-    // (same as codex-rs ensure_rustls_crypto_provider). Required because
-    // tokio-tungstenite internally calls ClientConfig::builder() which needs
-    // a default provider when both ring and aws-lc-rs are in the dep graph.
-    static RUSTLS_INIT: std::sync::Once = std::sync::Once::new();
-    RUSTLS_INIT.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
+    let api_url = "https://chatgpt.com/backend-api/codex/responses";
 
-    let ws_url = "wss://chatgpt.com/backend-api/codex/responses";
-
-    // Build the WebSocket request exactly like codex-rs:
-    // 1. Use into_client_request() to let tungstenite auto-set WS headers
-    //    (Host, Connection, Upgrade, Sec-WebSocket-Version, Sec-WebSocket-Key)
-    // 2. Only add application-specific headers
-    let mut request = ws_url
-        .into_client_request()
-        .map_err(|e| AppError::Internal(format!("Failed to build WS request: {e}")))?;
-
-    let headers = request.headers_mut();
-    headers.insert(
-        "Authorization",
-        format!("Bearer {bearer_token}")
-            .parse()
-            .map_err(|e| AppError::Internal(format!("Invalid auth header: {e}")))?,
-    );
-    headers.insert(
-        "OpenAI-Beta",
-        "responses_websockets=2026-02-04"
-            .parse()
-            .unwrap(),
-    );
-    headers.insert("originator", "codex_cli_rs".parse().unwrap());
-    headers.insert(
-        "User-Agent",
-        "codex_cli_rs/1.0.5 (Linux 6.1.0; x86_64)"
-            .parse()
-            .unwrap(),
-    );
-
-    let ws_config = tungstenite::protocol::WebSocketConfig::default();
-
-    // Check for proxy configuration (CHATGPT_PROXY_URL or HTTPS_PROXY)
-    let proxy_url = std::env::var("CHATGPT_PROXY_URL")
-        .or_else(|_| std::env::var("HTTPS_PROXY"))
-        .or_else(|_| std::env::var("https_proxy"))
-        .ok();
-
-    let (mut ws_stream, response) = if let Some(ref proxy) = proxy_url {
-        connect_via_proxy(request, proxy, ws_config).await?
-    } else {
-        tracing::debug!("WebSocket {ws_url} (direct, stream={is_streaming})");
-        tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false)
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    "ChatGPT WebSocket connection failed: {}",
-                    log_ws_error_detail(&e)
-                );
-                AppError::Internal(format!("ChatGPT WebSocket connection failed: {e}"))
-            })?
-    };
-
-    tracing::debug!(
-        "ChatGPT WebSocket connected (HTTP {})",
-        response.status()
-    );
-
-    // Send the translated Responses API request as a text message, then read.
-    // Send and receive are sequential so no need to split the stream.
     let request_text = serde_json::to_string(translated_body).map_err(|e| {
         AppError::Internal(format!("Failed to serialize request: {e}"))
     })?;
 
-    ws_stream
-        .send(tungstenite::Message::Text(request_text.into()))
+    tracing::debug!(
+        translate_response,
+        is_streaming,
+        request_len = request_text.len(),
+        "ChatGPT HTTP request body: {}",
+        &request_text,
+    );
+
+    let client = chatgpt_http_client()?;
+
+    let response = client
+        .post(api_url)
+        .header("Authorization", format!("Bearer {bearer_token}"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .header("originator", "codex_cli_rs")
+        .header("User-Agent", codex_user_agent())
+        .body(request_text)
+        .send()
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to send WS message: {e}")))?;
+        .map_err(|e| {
+            tracing::error!("ChatGPT HTTP request failed: {e}");
+            AppError::Internal(format!("ChatGPT HTTP request failed: {e}"))
+        })?;
+
+    let status = response.status();
+    tracing::debug!("ChatGPT HTTP response status: {status}");
+
+    // Forward upstream errors to the client as-is so they can see what
+    // the ChatGPT backend rejected (e.g. unsupported parameter for a model).
+    if !status.is_success() {
+        let error_body = response.text().await.unwrap_or_default();
+        tracing::warn!(
+            "ChatGPT backend returned HTTP {status}: {}",
+            truncate_for_log(&error_body, 1000),
+        );
+
+        let content_type = if error_body.starts_with('{') {
+            "application/json"
+        } else {
+            "text/plain"
+        };
+
+        return axum::http::Response::builder()
+            .status(status.as_u16())
+            .header("content-type", content_type)
+            .body(Body::from(error_body))
+            .map_err(|e| AppError::Internal(format!("Failed to build error response: {e}")));
+    }
 
     if is_streaming {
-        // Stream: translate each WebSocket message to SSE and emit
-        let translator = ChatgptTranslator;
         let (tx, rx) =
             tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
 
         tokio::spawn(async move {
-            let mut state = StreamTranslationState::default();
+            let mut received_any_event = false;
 
-            while let Some(msg) = ws_stream.next().await {
-                match msg {
-                    Ok(tungstenite::Message::Text(text)) => {
-                        if let Ok(data) =
-                            serde_json::from_str::<serde_json::Value>(&text)
+            if translate_response {
+                // Chat Completions mode: translate SSE events → OpenAI chunks
+                let translator = ChatgptTranslator;
+                let mut state = StreamTranslationState::default();
+                let mut sse_buf = String::new();
+                let mut byte_stream = response.bytes_stream();
+
+                while let Some(chunk_result) = byte_stream.next().await {
+                    let chunk_bytes = match chunk_result {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!("ChatGPT SSE read error: {e}");
+                            break;
+                        }
+                    };
+
+                    sse_buf.push_str(&String::from_utf8_lossy(&chunk_bytes));
+
+                    // Process complete SSE events (delimited by double newline)
+                    while let Some(event) = extract_next_sse_event(&mut sse_buf) {
+                        received_any_event = true;
+
+                        tracing::debug!(
+                            event_type = %event.event_type.as_deref().unwrap_or(""),
+                            "ChatGPT SSE recv: {}",
+                            truncate_for_log(&event.data, 500),
+                        );
+
+                        if let Some(ref translated) =
+                            translator.translate_stream_event(&event, &mut state)
                         {
-                            let event_type = data
-                                .get("type")
-                                .and_then(|t| t.as_str())
-                                .unwrap_or("")
-                                .to_string();
-
-                            let event = SseEvent {
-                                event_type: Some(event_type.clone()),
-                                data: text.to_string(),
-                            };
-
-                            if let Some(translated) =
-                                translator.translate_stream_event(&event, &mut state)
+                            tracing::debug!(
+                                "ChatGPT SSE emit: {}",
+                                truncate_for_log(translated, 500),
+                            );
+                            if tx
+                                .send(Ok(bytes::Bytes::from(translated.clone())))
+                                .await
+                                .is_err()
                             {
-                                if tx
-                                    .send(Ok(bytes::Bytes::from(translated)))
-                                    .await
-                                    .is_err()
-                                {
-                                    return; // client disconnected
-                                }
-                            }
-
-                            if event_type == "response.completed"
-                                || event_type == "response.incomplete"
-                            {
-                                break;
+                                tracing::debug!("ChatGPT SSE client disconnected");
+                                return;
                             }
                         }
+
+                        let etype = event.event_type.as_deref().unwrap_or("");
+                        if etype == "response.completed"
+                            || etype == "response.incomplete"
+                        {
+                            return;
+                        }
                     }
-                    Ok(tungstenite::Message::Close(_)) => break,
-                    Err(_) => break,
-                    _ => {} // skip ping/pong/binary
+                }
+            } else {
+                // Responses API passthrough: forward SSE events directly
+                let mut sse_buf = String::new();
+                let mut byte_stream = response.bytes_stream();
+
+                while let Some(chunk_result) = byte_stream.next().await {
+                    let chunk_bytes = match chunk_result {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::warn!("ChatGPT SSE read error: {e}");
+                            break;
+                        }
+                    };
+
+                    sse_buf.push_str(&String::from_utf8_lossy(&chunk_bytes));
+
+                    while let Some(event) = extract_next_sse_event(&mut sse_buf) {
+                        received_any_event = true;
+
+                        let event_type = event.event_type.as_deref().unwrap_or("");
+                        tracing::debug!(
+                            event_type = %event_type,
+                            "ChatGPT SSE passthrough: {}",
+                            truncate_for_log(&event.data, 500),
+                        );
+
+                        let sse = format!(
+                            "event: {event_type}\ndata: {}\n\n",
+                            event.data,
+                        );
+                        if tx.send(Ok(bytes::Bytes::from(sse))).await.is_err() {
+                            tracing::debug!("ChatGPT SSE client disconnected (passthrough)");
+                            return;
+                        }
+
+                        if event_type == "response.completed"
+                            || event_type == "response.incomplete"
+                        {
+                            return;
+                        }
+                    }
                 }
             }
 
-            let _ = ws_stream
-                .close(None)
-                .await;
+            if !received_any_event {
+                let error_msg = "ChatGPT backend returned empty SSE stream";
+                tracing::error!("{error_msg}");
+
+                if translate_response {
+                    let error_chunk = serde_json::json!({
+                        "error": {
+                            "message": error_msg,
+                            "type": "server_error",
+                            "code": "upstream_error",
+                        }
+                    });
+                    let _ = tx
+                        .send(Ok(bytes::Bytes::from(format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            error_chunk,
+                        ))))
+                        .await;
+                } else {
+                    let error_event = serde_json::json!({
+                        "type": "error",
+                        "error": { "message": error_msg },
+                    });
+                    let _ = tx
+                        .send(Ok(bytes::Bytes::from(format!(
+                            "event: error\ndata: {}\n\n",
+                            error_event,
+                        ))))
+                        .await;
+                }
+            }
+
+            tracing::debug!("ChatGPT SSE stream ended");
         });
 
         let body = Body::from_stream(
@@ -806,43 +822,71 @@ pub async fn send_to_chatgpt(
             .body(body)
             .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))
     } else {
-        // Non-streaming: collect events until response.completed/incomplete
-        let translator = ChatgptTranslator;
+        // Non-streaming: collect SSE events until response.completed/incomplete
         let mut final_response: Option<serde_json::Value> = None;
+        let mut sse_buf = String::new();
+        let mut byte_stream = response.bytes_stream();
 
-        while let Some(msg) = ws_stream.next().await {
-            match msg {
-                Ok(tungstenite::Message::Text(text)) => {
-                    if let Ok(data) =
-                        serde_json::from_str::<serde_json::Value>(&text)
-                    {
-                        let etype = data
-                            .get("type")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
-
-                        if etype == "response.completed"
-                            || etype == "response.incomplete"
-                        {
-                            final_response = data.get("response").cloned();
-                            break;
-                        }
-                    }
+        while let Some(chunk_result) = byte_stream.next().await {
+            let chunk_bytes = match chunk_result {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("ChatGPT SSE read error: {e}");
+                    break;
                 }
-                Ok(tungstenite::Message::Close(_)) => break,
-                Err(_) => break,
-                _ => {}
+            };
+
+            sse_buf.push_str(&String::from_utf8_lossy(&chunk_bytes));
+
+            while let Some(event) = extract_next_sse_event(&mut sse_buf) {
+                let etype = event.event_type.as_deref().unwrap_or("");
+
+                tracing::debug!(
+                    event_type = %etype,
+                    "ChatGPT SSE recv (non-stream): {}",
+                    truncate_for_log(&event.data, 500),
+                );
+
+                if etype == "response.completed" || etype == "response.incomplete" {
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&event.data) {
+                        final_response = data.get("response").cloned();
+                    }
+                    break;
+                }
+            }
+
+            if final_response.is_some() {
+                break;
             }
         }
 
-        let _ = ws_stream.close(None).await;
-
         let resp_json = final_response.unwrap_or_else(|| {
+            tracing::warn!("ChatGPT SSE: no response.completed event received");
             serde_json::json!({"error": "No response received from ChatGPT"})
         });
 
-        let translated = translator.translate_response(resp_json)?;
-        let body_bytes = serde_json::to_vec(&translated).map_err(|e| {
+        let body_bytes = if translate_response {
+            let translator = ChatgptTranslator;
+            let translated = translator.translate_response(resp_json)?;
+            tracing::debug!(
+                "ChatGPT response (translated): {}",
+                truncate_for_log(
+                    &serde_json::to_string(&translated).unwrap_or_default(),
+                    2000,
+                ),
+            );
+            serde_json::to_vec(&translated)
+        } else {
+            tracing::debug!(
+                "ChatGPT response (passthrough): {}",
+                truncate_for_log(
+                    &serde_json::to_string(&resp_json).unwrap_or_default(),
+                    2000,
+                ),
+            );
+            serde_json::to_vec(&resp_json)
+        }
+        .map_err(|e| {
             AppError::Internal(format!("Failed to serialize response: {e}"))
         })?;
 
@@ -851,6 +895,68 @@ pub async fn send_to_chatgpt(
             .header("content-type", "application/json")
             .body(Body::from(body_bytes))
             .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))
+    }
+}
+
+/// Extract the next complete SSE event from a buffer.
+///
+/// SSE events are delimited by double newlines (`\n\n`). Each event may have:
+/// - `event: <type>` line
+/// - `data: <payload>` line(s)
+///
+/// Returns `None` if no complete event is available yet.
+fn extract_next_sse_event(buf: &mut String) -> Option<SseEvent> {
+    let delimiter = "\n\n";
+    let pos = buf.find(delimiter)?;
+
+    let raw = buf[..pos].to_string();
+    *buf = buf[pos + delimiter.len()..].to_string();
+
+    let mut event_type = None;
+    let mut data_parts = Vec::new();
+
+    for line in raw.lines() {
+        if let Some(val) = line.strip_prefix("event: ") {
+            event_type = Some(val.to_string());
+        } else if let Some(val) = line.strip_prefix("data: ") {
+            data_parts.push(val.to_string());
+        } else if line.starts_with("event:") {
+            event_type = Some(line["event:".len()..].trim().to_string());
+        } else if line.starts_with("data:") {
+            data_parts.push(line["data:".len()..].trim().to_string());
+        }
+    }
+
+    if data_parts.is_empty() && event_type.is_none() {
+        return None;
+    }
+
+    let data = data_parts.join("\n");
+
+    // If no explicit event: header, try to extract type from the JSON data
+    if event_type.is_none() {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
+            event_type = parsed
+                .get("type")
+                .and_then(|t| t.as_str())
+                .map(String::from);
+        }
+    }
+
+    Some(SseEvent { event_type, data })
+}
+
+/// Truncate a string for logging, appending "..." if cut.
+fn truncate_for_log(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        // Find a valid UTF-8 boundary
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
     }
 }
 
@@ -1009,7 +1115,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.body["store"], false);
-        assert_eq!(result.body["include"], serde_json::json!(["usage"]));
+        // include:["usage"] is NOT added -- usage is returned by default
+        assert!(result.body.get("include").is_none());
     }
 
     #[test]
@@ -1051,6 +1158,91 @@ mod tests {
 
         assert_eq!(result.body["tools"], tools);
         assert_eq!(result.body["tool_choice"], "auto");
+    }
+
+    // --- Format detection tests ---
+
+    #[test]
+    fn detect_chat_completions_format() {
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        assert!(is_chat_completions_format(&body));
+    }
+
+    #[test]
+    fn detect_responses_api_format() {
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "input": "Hello"
+        });
+        assert!(!is_chat_completions_format(&body));
+    }
+
+    // --- Responses API passthrough tests ---
+
+    #[test]
+    fn responses_api_passthrough_preserves_input() {
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "o3",
+            "input": [{"role": "user", "content": "Hello"}],
+            "instructions": "Be helpful",
+            "max_output_tokens": 1024,
+            "stream": true
+        });
+
+        let result = translator
+            .translate_request("responses", &body)
+            .unwrap();
+
+        assert_eq!(result.path, "responses");
+        assert_eq!(result.body["model"], "o3");
+        assert_eq!(result.body["input"][0]["role"], "user");
+        assert_eq!(result.body["instructions"], "Be helpful");
+        assert_eq!(result.body["max_output_tokens"], 1024);
+        assert_eq!(result.body["stream"], true);
+        assert_eq!(result.body["store"], false);
+        // include is NOT added by us -- usage is default in Responses API
+        assert!(result.body.get("include").is_none());
+        // Should NOT have messages
+        assert!(result.body.get("messages").is_none());
+    }
+
+    #[test]
+    fn responses_api_passthrough_preserves_custom_include() {
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "o3",
+            "input": "Hi",
+            "include": ["reasoning.encrypted_content"]
+        });
+
+        let result = translator
+            .translate_request("responses", &body)
+            .unwrap();
+
+        // Should preserve client's include as-is
+        assert_eq!(
+            result.body["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+    }
+
+    #[test]
+    fn responses_api_passthrough_string_input() {
+        let translator = ChatgptTranslator;
+        let body = serde_json::json!({
+            "model": "o3",
+            "input": "What is 2+2?"
+        });
+
+        let result = translator
+            .translate_request("responses", &body)
+            .unwrap();
+
+        assert_eq!(result.body["input"], "What is 2+2?");
     }
 
     // --- Response translation tests ---
@@ -1188,16 +1380,25 @@ mod tests {
     /// Parse the first `data: {...}` line from an SSE payload into JSON.
     /// Skips `data: [DONE]` and blank lines.
     fn parse_chunk_json(sse_payload: &str) -> serde_json::Value {
+        parse_nth_chunk_json(sse_payload, 0)
+    }
+
+    /// Parse the Nth JSON `data:` line (0-indexed) from an SSE payload.
+    fn parse_nth_chunk_json(sse_payload: &str, n: usize) -> serde_json::Value {
+        let mut found = 0;
         for line in sse_payload.lines() {
             let trimmed = line.trim();
             if let Some(json_str) = trimmed.strip_prefix("data: ") {
                 if json_str == "[DONE]" {
                     continue;
                 }
-                return serde_json::from_str(json_str).unwrap();
+                if found == n {
+                    return serde_json::from_str(json_str).unwrap();
+                }
+                found += 1;
             }
         }
-        panic!("No data line found in SSE payload: {sse_payload}");
+        panic!("No data line at index {n} found in SSE payload: {sse_payload}");
     }
 
     #[test]
@@ -1207,7 +1408,7 @@ mod tests {
 
         let event = make_event(
             "response.created",
-            r#"{"type":"response.created","response":{"id":"resp_abc","model":"gpt-5.2","status":"in_progress"}}"#,
+            r#"{"type":"response.created","response":{"id":"resp_abc","model":"gpt-5.2","created_at":1700000000,"status":"in_progress"}}"#,
         );
 
         let result = translator
@@ -1217,11 +1418,13 @@ mod tests {
 
         assert_eq!(chunk["id"], "chatcmpl-resp_abc");
         assert_eq!(chunk["object"], "chat.completion.chunk");
+        assert_eq!(chunk["created"], 1700000000);
         assert_eq!(chunk["model"], "gpt-5.2");
         assert_eq!(chunk["choices"][0]["delta"]["role"], "assistant");
         assert!(chunk["choices"][0]["finish_reason"].is_null());
         assert_eq!(state.id, "resp_abc");
         assert_eq!(state.model, "gpt-5.2");
+        assert_eq!(state.created, 1700000000);
     }
 
     #[test]
@@ -1324,14 +1527,20 @@ mod tests {
             .translate_stream_event(&event, &mut state)
             .unwrap();
 
-        // Should contain both final chunk and [DONE]
+        // Should contain finish chunk, usage chunk, and [DONE]
         assert!(result.contains("data: [DONE]"));
 
-        let chunk = parse_chunk_json(&result);
-        assert_eq!(chunk["choices"][0]["finish_reason"], "stop");
-        assert_eq!(chunk["usage"]["prompt_tokens"], 25);
-        assert_eq!(chunk["usage"]["completion_tokens"], 15);
-        assert_eq!(chunk["usage"]["total_tokens"], 40);
+        // First chunk: finish_reason, no usage
+        let finish_chunk = parse_nth_chunk_json(&result, 0);
+        assert_eq!(finish_chunk["choices"][0]["finish_reason"], "stop");
+        assert!(finish_chunk.get("usage").is_none());
+
+        // Second chunk: empty choices, usage only
+        let usage_chunk = parse_nth_chunk_json(&result, 1);
+        assert_eq!(usage_chunk["choices"].as_array().unwrap().len(), 0);
+        assert_eq!(usage_chunk["usage"]["prompt_tokens"], 25);
+        assert_eq!(usage_chunk["usage"]["completion_tokens"], 15);
+        assert_eq!(usage_chunk["usage"]["total_tokens"], 40);
     }
 
     #[test]
@@ -1352,9 +1561,13 @@ mod tests {
         let result = translator
             .translate_stream_event(&event, &mut state)
             .unwrap();
-        let chunk = parse_chunk_json(&result);
 
-        assert_eq!(chunk["choices"][0]["finish_reason"], "tool_calls");
+        let finish_chunk = parse_nth_chunk_json(&result, 0);
+        assert_eq!(finish_chunk["choices"][0]["finish_reason"], "tool_calls");
+
+        let usage_chunk = parse_nth_chunk_json(&result, 1);
+        assert_eq!(usage_chunk["choices"].as_array().unwrap().len(), 0);
+        assert_eq!(usage_chunk["usage"]["prompt_tokens"], 10);
     }
 
     #[test]
@@ -1414,5 +1627,55 @@ mod tests {
         assert!(translator
             .translate_stream_event(&event, &mut state)
             .is_none());
+    }
+
+    // --- SSE event parser tests ---
+
+    #[test]
+    fn extract_sse_event_basic() {
+        let mut buf = "event: response.created\ndata: {\"type\":\"response.created\"}\n\n".to_string();
+        let event = extract_next_sse_event(&mut buf).unwrap();
+        assert_eq!(event.event_type.as_deref(), Some("response.created"));
+        assert_eq!(event.data, "{\"type\":\"response.created\"}");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn extract_sse_event_data_only() {
+        let mut buf = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n".to_string();
+        let event = extract_next_sse_event(&mut buf).unwrap();
+        // Should extract type from JSON data when no event: header
+        assert_eq!(
+            event.event_type.as_deref(),
+            Some("response.output_text.delta"),
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn extract_sse_event_incomplete_returns_none() {
+        let mut buf = "event: response.created\ndata: {\"partial".to_string();
+        assert!(extract_next_sse_event(&mut buf).is_none());
+        // Buffer should be untouched
+        assert_eq!(buf, "event: response.created\ndata: {\"partial");
+    }
+
+    #[test]
+    fn extract_sse_event_multiple_events() {
+        let mut buf = "event: a\ndata: {\"type\":\"a\"}\n\nevent: b\ndata: {\"type\":\"b\"}\n\n".to_string();
+        let e1 = extract_next_sse_event(&mut buf).unwrap();
+        assert_eq!(e1.event_type.as_deref(), Some("a"));
+        let e2 = extract_next_sse_event(&mut buf).unwrap();
+        assert_eq!(e2.event_type.as_deref(), Some("b"));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn extract_sse_event_empty_lines_skipped() {
+        let mut buf = "\n\nevent: test\ndata: {}\n\n".to_string();
+        // First extraction gets empty block (no event/data lines)
+        let first = extract_next_sse_event(&mut buf);
+        // Empty block has no event_type and no data -- returns None
+        assert!(first.is_none() || first.unwrap().data.is_empty());
     }
 }

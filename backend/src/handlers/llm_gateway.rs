@@ -119,6 +119,10 @@ pub async fn llm_proxy_request(
                 AppError::BadRequest(format!("Invalid JSON body: {e}"))
             })?;
 
+        // Path determines response format: chat/completions → Chat Completions,
+        // responses → Responses API passthrough
+        let is_chat_completions_path = path.contains("chat/completions");
+
         let translator = llm_gateway_service::get_translator(&provider_slug);
         let translated = translator.translate_request(&path, &body_json)?;
 
@@ -132,6 +136,7 @@ pub async fn llm_proxy_request(
             &translated.body,
             &bearer_token,
             is_streaming,
+            is_chat_completions_path,
         )
         .await?
     } else {
@@ -340,10 +345,15 @@ pub async fn gateway_request(
             AppError::Internal(format!("Failed to parse translated body: {e}"))
         })?;
 
+        // Path determines response format: chat/completions → translate back
+        // to Chat Completions, responses → return Responses API as-is
+        let is_chat_completions_path = path.contains("chat/completions");
+
         chatgpt_translator::send_to_chatgpt(
             &translated_body,
             &bearer_token,
             is_streaming,
+            is_chat_completions_path,
         )
         .await?
     } else {
