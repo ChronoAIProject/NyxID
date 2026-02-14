@@ -277,6 +277,9 @@ pub fn get_translator(provider_slug: &str) -> Box<dyn LlmTranslator> {
     match provider_slug {
         "anthropic" => Box::new(AnthropicTranslator),
         "google-ai" => Box::new(GoogleAiTranslator),
+        "openai-codex" => {
+            Box::new(super::chatgpt_translator::ChatgptTranslator)
+        }
         _ => Box::new(PassthroughTranslator),
     }
 }

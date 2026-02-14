@@ -13,8 +13,8 @@ use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, delegation_service, llm_gateway_service,
-    llm_gateway_service::LlmTranslator, proxy_service,
+    audit_service, chatgpt_translator, delegation_service, llm_gateway_service,
+    proxy_service,
 };
 use crate::AppState;
 
@@ -111,29 +111,54 @@ pub async fn llm_proxy_request(
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
 
-    let body = if body_bytes.is_empty() {
-        None
+    // OpenAI Codex: use WebSocket transport with Responses API translation
+    // (Cloudflare blocks regular HTTP to chatgpt.com, but allows WebSocket)
+    let response = if provider_slug == "openai-codex" && !body_bytes.is_empty() {
+        let body_json: serde_json::Value =
+            serde_json::from_slice(&body_bytes).map_err(|e| {
+                AppError::BadRequest(format!("Invalid JSON body: {e}"))
+            })?;
+
+        let translator = llm_gateway_service::get_translator(&provider_slug);
+        let translated = translator.translate_request(&path, &body_json)?;
+
+        let bearer_token = extract_bearer_token(&delegated)?;
+        let is_streaming = body_json
+            .get("stream")
+            .and_then(|s| s.as_bool())
+            .unwrap_or(false);
+
+        chatgpt_translator::send_to_chatgpt(
+            &translated.body,
+            &bearer_token,
+            is_streaming,
+        )
+        .await?
     } else {
-        Some(body_bytes)
+        let body = if body_bytes.is_empty() {
+            None
+        } else {
+            Some(body_bytes)
+        };
+
+        let reqwest_method = convert_method(&method)?;
+        let reqwest_headers = convert_headers(&headers);
+
+        let downstream_response = proxy_service::forward_request(
+            &state.http_client,
+            &target,
+            reqwest_method,
+            &path,
+            query.as_deref(),
+            reqwest_headers,
+            body,
+            vec![], // no identity headers for LLM proxy
+            delegated,
+        )
+        .await?;
+
+        build_filtered_response(downstream_response).await?
     };
-
-    let reqwest_method = convert_method(&method)?;
-    let reqwest_headers = convert_headers(&headers);
-
-    let downstream_response = proxy_service::forward_request(
-        &state.http_client,
-        &target,
-        reqwest_method,
-        &path,
-        query.as_deref(),
-        reqwest_headers,
-        body,
-        vec![], // no identity headers for LLM proxy
-        delegated,
-    )
-    .await?;
-
-    let response = build_filtered_response(downstream_response).await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -281,7 +306,15 @@ pub async fn gateway_request(
     };
 
     let reqwest_method = convert_method(&method)?;
-    let reqwest_headers = convert_headers(&headers);
+    let mut reqwest_headers = convert_headers(&headers);
+
+    // Remove forwarded headers that the translator wants to override, so
+    // the translator's version takes precedence (reqwest appends, not replaces).
+    for (key, _) in &extra_headers {
+        if let Ok(name) = reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
+            reqwest_headers.remove(&name);
+        }
+    }
 
     // L-4: Extend delegated credentials immutably via iterator chaining
     let delegated: Vec<_> = delegated
@@ -296,30 +329,50 @@ pub async fn gateway_request(
         }))
         .collect();
 
-    let downstream_response = proxy_service::forward_request(
-        &state.http_client,
-        &target,
-        reqwest_method,
-        &final_path,
-        query.as_deref(),
-        reqwest_headers,
-        final_body_bytes,
-        vec![],
-        delegated,
-    )
-    .await?;
+    // OpenAI Codex: use WebSocket transport (Cloudflare blocks HTTP to chatgpt.com)
+    let response = if provider_slug == "openai-codex" {
+        let bearer_token = extract_bearer_token(&delegated)?;
+        // final_body_bytes is already the translated Responses API body
+        let translated_body: serde_json::Value = serde_json::from_slice(
+            final_body_bytes.as_deref().unwrap_or(&[]),
+        )
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to parse translated body: {e}"))
+        })?;
 
-    // If translator needs translation, parse and translate the response
-    let response = if translator.needs_translation() {
-        if is_streaming {
-            // Streaming: translate SSE events on the fly
-            build_translated_sse_response(downstream_response, translator).await?
-        } else {
-            // Non-streaming: buffer and translate the full response
-            build_translated_json_response(downstream_response).await?
-        }
+        chatgpt_translator::send_to_chatgpt(
+            &translated_body,
+            &bearer_token,
+            is_streaming,
+        )
+        .await?
     } else {
-        build_filtered_response(downstream_response).await?
+        let downstream_response = proxy_service::forward_request(
+            &state.http_client,
+            &target,
+            reqwest_method,
+            &final_path,
+            query.as_deref(),
+            reqwest_headers,
+            final_body_bytes,
+            vec![],
+            delegated,
+        )
+        .await?;
+
+        // If translator needs translation, parse and translate the response
+        if translator.needs_translation() {
+            if is_streaming {
+                // Streaming: translate SSE events on the fly
+                build_translated_sse_response(downstream_response, translator).await?
+            } else {
+                // Non-streaming: buffer and translate the full response
+                build_translated_json_response(downstream_response, translator.as_ref())
+                    .await?
+            }
+        } else {
+            build_filtered_response(downstream_response).await?
+        }
     };
 
     audit_service::log_async(
@@ -404,6 +457,22 @@ async fn resolve_provider_slug_with_fallback(
     Err(AppError::BadRequest(format!(
         "Provider '{primary_slug}' not connected. Connect at /providers."
     )))
+}
+
+/// Extract the bearer token from delegated credentials.
+fn extract_bearer_token(
+    delegated: &[delegation_service::DelegatedCredential],
+) -> AppResult<String> {
+    delegated
+        .iter()
+        .find(|c| c.injection_method == "bearer")
+        .map(|c| c.credential.clone())
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "No bearer token available for openai-codex. Connect the provider first."
+                    .to_string(),
+            )
+        })
 }
 
 fn convert_method(method: &Method) -> AppResult<reqwest::Method> {
@@ -505,6 +574,7 @@ async fn build_filtered_response(
 /// Used by `gateway_request` when `needs_translation() && !is_streaming`.
 async fn build_translated_json_response(
     downstream_response: reqwest::Response,
+    translator: &dyn llm_gateway_service::LlmTranslator,
 ) -> AppResult<Response> {
     let status = downstream_response.status();
     let resp_headers = downstream_response.headers().clone();
@@ -518,8 +588,6 @@ async fn build_translated_json_response(
                 ))
             })?;
 
-        // Use AnthropicTranslator directly (only translator with needs_translation=true)
-        let translator = llm_gateway_service::AnthropicTranslator;
         let translated = translator.translate_response(resp_json)?;
         let translated_bytes = serde_json::to_vec(&translated).map_err(|e| {
             AppError::Internal(format!(
@@ -611,7 +679,7 @@ async fn build_translated_sse_response(
 
     // If the upstream returned an error, buffer and return as translated JSON error
     if !status.is_success() {
-        return build_translated_json_response(downstream_response).await;
+        return build_translated_json_response(downstream_response, translator.as_ref()).await;
     }
 
     let axum_status =

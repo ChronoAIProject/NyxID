@@ -1,5 +1,6 @@
 pub mod admin_user_service;
 pub mod audit_service;
+pub mod chatgpt_translator;
 pub mod auth_service;
 pub mod connection_service;
 pub mod consent_service;

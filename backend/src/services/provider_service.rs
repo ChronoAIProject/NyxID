@@ -367,7 +367,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         provider_slug: "openai-codex",
         service_slug: "llm-openai-codex",
         service_name: "OpenAI Codex API",
-        base_url: "https://api.openai.com/v1",
+        base_url: "https://chatgpt.com/backend-api/codex",
         injection_method: "bearer",
         injection_key: "Authorization",
     },
@@ -427,6 +427,32 @@ pub async fn seed_default_llm_services(
     let req_col = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
     let now = Utc::now();
     let mut seeded_count: u32 = 0;
+
+    // Upgrade existing openai-codex downstream service base_url
+    // (was api.openai.com/v1, now chatgpt.com/backend-api/codex)
+    let old_codex_url = "https://api.openai.com/v1";
+    let new_codex_url = "https://chatgpt.com/backend-api/codex";
+    if let Ok(Some(_)) = service_col
+        .find_one(doc! {
+            "slug": "llm-openai-codex",
+            "base_url": old_codex_url,
+        })
+        .await
+    {
+        service_col
+            .update_one(
+                doc! { "slug": "llm-openai-codex", "base_url": old_codex_url },
+                doc! { "$set": {
+                    "base_url": new_codex_url,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+        tracing::info!(
+            slug = "llm-openai-codex",
+            "Updated existing downstream service base_url to chatgpt.com"
+        );
+    }
 
     for seed in LLM_SERVICE_SEEDS {
         // Find the provider by slug
