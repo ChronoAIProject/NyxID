@@ -101,6 +101,12 @@ impl McpSessionStore {
 
     /// Load non-expired sessions from MongoDB into memory.
     /// Called once at startup to recover sessions across restarts.
+    ///
+    /// Filters out MCP sessions for users whose auth sessions have all been
+    /// revoked (e.g., due to refresh token reuse detection). This handles the
+    /// edge case where the fire-and-forget MongoDB deletion in
+    /// `remove_by_user_id` didn't complete before a server restart.
+    ///
     /// Returns the number of sessions recovered.
     pub async fn load_from_db(&self) -> Result<usize, mongodb::error::Error> {
         let db = match &self.db {
@@ -115,7 +121,37 @@ impl McpSessionStore {
             .await?;
 
         let records: Vec<McpSessionRecord> = cursor.try_collect().await?;
-        let count = records.len();
+
+        if records.is_empty() {
+            return Ok(0);
+        }
+
+        // Collect unique user IDs and check which users still have at least
+        // one active (non-revoked, non-expired) session.
+        let unique_user_ids: HashSet<&str> =
+            records.iter().map(|r| r.user_id.as_str()).collect();
+
+        let bson_now = bson::DateTime::from_chrono(Utc::now());
+        let users_with_sessions_cursor = db
+            .collection::<mongodb::bson::Document>("sessions")
+            .find(doc! {
+                "user_id": { "$in": unique_user_ids.iter().copied().collect::<Vec<_>>() },
+                "revoked": false,
+                "expires_at": { "$gt": bson_now },
+            })
+            .await?;
+
+        let active_session_docs: Vec<mongodb::bson::Document> =
+            users_with_sessions_cursor.try_collect().await?;
+
+        let users_with_active_sessions: HashSet<String> = active_session_docs
+            .iter()
+            .filter_map(|d| d.get_str("user_id").ok().map(String::from))
+            .collect();
+
+        // Filter: only recover MCP sessions for users who still have a valid
+        // auth session. Orphaned records are cleaned up below.
+        let mut orphaned_ids: Vec<String> = Vec::new();
 
         let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         let mut receivers = self
@@ -123,19 +159,48 @@ impl McpSessionStore {
             .write()
             .unwrap_or_else(|e| e.into_inner());
 
-        for record in records {
+        for record in &records {
+            if !users_with_active_sessions.contains(&record.user_id) {
+                orphaned_ids.push(record.id.clone());
+                continue;
+            }
+
             let (tx, rx) = mpsc::channel(32);
-            let activated: HashSet<String> = record.activated_service_ids.into_iter().collect();
+            let activated: HashSet<String> =
+                record.activated_service_ids.iter().cloned().collect();
             sessions.insert(
                 record.id.clone(),
                 McpSession {
-                    user_id: record.user_id,
+                    user_id: record.user_id.clone(),
                     last_active: record.last_active_at,
                     activated_service_ids: activated,
                     notification_tx: Some(tx),
                 },
             );
-            receivers.insert(record.id, rx);
+            receivers.insert(record.id.clone(), rx);
+        }
+
+        let count = sessions.len();
+
+        drop(sessions);
+        drop(receivers);
+
+        // Clean up orphaned MCP session records from MongoDB
+        if !orphaned_ids.is_empty() {
+            tracing::info!(
+                orphaned = orphaned_ids.len(),
+                "Cleaning up orphaned MCP sessions (users with no active auth sessions)"
+            );
+            let db = db.clone();
+            tokio::spawn(async move {
+                if let Err(e) = db
+                    .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                    .delete_many(doc! { "_id": { "$in": &orphaned_ids } })
+                    .await
+                {
+                    tracing::warn!("Failed to delete orphaned MCP sessions: {e}");
+                }
+            });
         }
 
         Ok(count)
