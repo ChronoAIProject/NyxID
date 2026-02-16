@@ -4,8 +4,9 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::crypto::jwt::{self, JwtKeys, DELEGATED_TOKEN_TTL_SECS};
 use crate::errors::{AppError, AppResult};
+use crate::models::oauth_client::{OauthClient, COLLECTION_NAME as OAUTH_CLIENTS};
 use crate::models::user::{User, COLLECTION_NAME as USERS};
-use crate::services::{consent_service, oauth_service};
+use crate::services::{audit_service, consent_service, oauth_service};
 
 /// Result of a successful token exchange.
 pub struct TokenExchangeResponse {
@@ -56,6 +57,12 @@ pub async fn exchange_token(
     // Reject chained delegation: a delegated token cannot be exchanged for
     // another delegated token, as this would allow indefinite TTL extension.
     if subject_claims.delegated == Some(true) {
+        log_exchange_failure(
+            db,
+            Some(&subject_claims.sub),
+            client_id,
+            "chained_delegation_rejected",
+        );
         return Err(AppError::BadRequest(
             "Cannot exchange a delegated token -- subject_token must be a direct access token"
                 .to_string(),
@@ -74,6 +81,7 @@ pub async fn exchange_token(
     .await?;
 
     if consent.is_none() {
+        log_exchange_failure(db, Some(user_id_str), client_id, "consent_missing");
         return Err(AppError::Forbidden(
             "User has not consented to delegation for this client".to_string(),
         ));
@@ -120,7 +128,10 @@ pub struct DelegationRefreshResponse {
 ///
 /// Validates that:
 /// 1. The user still exists and is active
-/// 2. Issues a new delegated token with the same `act.sub` and scope
+/// 2. The acting OAuth client still exists and is active
+/// 3. The user still has active consent for this client
+/// 4. The requested scope is still allowed by the client's delegation_scopes
+/// 5. Issues a new delegated token with the same `act.sub` and validated scope
 ///    but a fresh 5-minute TTL
 pub async fn refresh_delegation_token(
     db: &mongodb::Database,
@@ -140,11 +151,37 @@ pub async fn refresh_delegation_token(
     match user {
         Some(u) if u.is_active => {}
         _ => {
+            log_exchange_failure(db, Some(user_id), acting_client_id, "user_inactive");
             return Err(AppError::Unauthorized(
                 "User account is inactive or not found".to_string(),
             ));
         }
     }
+
+    // Verify the acting OAuth client still exists and is active.
+    // Without this check, a deleted or deactivated client could continue
+    // refreshing delegation tokens indefinitely.
+    let client = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one(doc! { "_id": acting_client_id })
+        .await
+        .map_err(|e| AppError::Internal(format!("Client lookup failed: {e}")))?;
+
+    let client = match client {
+        Some(c) if c.is_active => c,
+        Some(_) => {
+            log_exchange_failure(db, Some(user_id), acting_client_id, "client_deactivated");
+            return Err(AppError::Forbidden(
+                "Acting OAuth client has been deactivated".to_string(),
+            ));
+        }
+        None => {
+            log_exchange_failure(db, Some(user_id), acting_client_id, "client_not_found");
+            return Err(AppError::Forbidden(
+                "Acting OAuth client no longer exists".to_string(),
+            ));
+        }
+    };
 
     // Verify user still has active consent for this client.
     // Without this check, a client could indefinitely refresh delegation
@@ -158,10 +195,16 @@ pub async fn refresh_delegation_token(
     .await?;
 
     if consent.is_none() {
+        log_exchange_failure(db, Some(user_id), acting_client_id, "consent_revoked");
         return Err(AppError::Forbidden(
             "User consent has been revoked for this client".to_string(),
         ));
     }
+
+    // Re-validate scope against the client's current delegation_scopes.
+    // The client's allowed scopes may have been downgraded since the
+    // original token was issued.
+    let validated_scope = validate_delegation_scope(scope, &client.delegation_scopes)?;
 
     let user_uuid = Uuid::parse_str(user_id).map_err(|e| {
         AppError::Internal(format!("Invalid user_id: {e}"))
@@ -171,7 +214,7 @@ pub async fn refresh_delegation_token(
         jwt_keys,
         config,
         &user_uuid,
-        scope,
+        &validated_scope,
         acting_client_id,
         DELEGATED_TOKEN_TTL_SECS,
     )?;
@@ -180,8 +223,28 @@ pub async fn refresh_delegation_token(
         access_token: new_token,
         token_type: "Bearer".to_string(),
         expires_in: DELEGATED_TOKEN_TTL_SECS,
-        scope: scope.to_string(),
+        scope: validated_scope,
     })
+}
+
+/// Fire-and-forget audit log for token exchange / delegation refresh failures.
+fn log_exchange_failure(
+    db: &mongodb::Database,
+    user_id: Option<&str>,
+    client_id: &str,
+    reason: &str,
+) {
+    audit_service::log_async(
+        db.clone(),
+        user_id.map(String::from),
+        "token_exchange_failed".to_string(),
+        Some(serde_json::json!({
+            "client_id": client_id,
+            "reason": reason,
+        })),
+        None,
+        None,
+    );
 }
 
 /// Validate that the requested delegation scope is allowed by the client's
