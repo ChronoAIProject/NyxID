@@ -661,7 +661,7 @@ function McpTab() {
       </Card>
 
       <div className="rounded-[10px] border border-border bg-muted/30 p-4">
-        <p className="text-[13px] font-medium mb-1">How it works</p>
+        <p className="mb-1 text-[13px] font-medium">How it works</p>
         <p className="text-xs text-muted-foreground">
           When your MCP client connects for the first time, NyxID will open an
           OAuth flow in your browser to authenticate. Once authenticated, the
