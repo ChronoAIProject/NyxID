@@ -489,6 +489,14 @@ function buildClaudeCodeConfig(mcpUrl: string): string {
   );
 }
 
+function buildCodexCommand(mcpUrl: string): string {
+  return `codex mcp add nyxid --url ${mcpUrl}`;
+}
+
+function buildCodexConfig(mcpUrl: string): string {
+  return `[mcp_servers.nyxid]\nurl = "${mcpUrl}"`;
+}
+
 function CopyInlineButton({ text, label }: { readonly text: string; readonly label: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -532,6 +540,8 @@ function McpTab() {
   const claudeCommand = buildClaudeCodeCommand(mcpUrl);
   const cursorConfig = buildCursorConfig(mcpUrl);
   const claudeConfig = buildClaudeCodeConfig(mcpUrl);
+  const codexCommand = buildCodexCommand(mcpUrl);
+  const codexConfig = buildCodexConfig(mcpUrl);
 
   return (
     <div className="space-y-6">
@@ -607,6 +617,44 @@ function McpTab() {
                 {claudeConfig}
               </pre>
               <CopyInlineButton text={claudeConfig} label="Claude Code config" />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Terminal className="h-5 w-5" aria-hidden="true" />
+            Install to Codex
+          </CardTitle>
+          <CardDescription>
+            Run this command in your terminal to add NyxID as an MCP server in
+            Codex CLI.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="relative">
+            <code className="block rounded bg-muted px-3 py-2 pr-10 text-xs break-all font-mono">
+              {codexCommand}
+            </code>
+            <CopyInlineButton text={codexCommand} label="CLI command" />
+          </div>
+          <Separator />
+          <div>
+            <div className="mb-1 flex items-center gap-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                Or add manually
+              </p>
+              <Badge variant="outline" className="text-[10px]">
+                ~/.codex/config.toml
+              </Badge>
+            </div>
+            <div className="relative">
+              <pre className="rounded bg-muted px-3 py-2 pr-10 text-xs overflow-x-auto">
+                {codexConfig}
+              </pre>
+              <CopyInlineButton text={codexConfig} label="Codex config" />
             </div>
           </div>
         </CardContent>

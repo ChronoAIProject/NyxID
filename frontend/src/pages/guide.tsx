@@ -71,6 +71,10 @@ function buildClaudeCodeExample(mcpUrl: string): string {
   );
 }
 
+function buildCodexExample(mcpUrl: string): string {
+  return `[mcp_servers.nyxid]\nurl = "${mcpUrl}"`;
+}
+
 export function GuidePage() {
   const { data: config, isLoading } = usePublicConfig();
 
@@ -87,6 +91,7 @@ export function GuidePage() {
   const mcpUrl = config?.mcp_url ?? `${window.location.origin}/mcp`;
   const cursorExample = buildCursorExample(mcpUrl);
   const claudeCodeExample = buildClaudeCodeExample(mcpUrl);
+  const codexExample = buildCodexExample(mcpUrl);
   return (
     <div className="space-y-8">
       <div>
@@ -104,7 +109,7 @@ export function GuidePage() {
           NyxID is an identity and access management platform that also acts as
           an MCP (Model Context Protocol) proxy. It lets you manage
           authentication for services and expose their API endpoints as MCP
-          tools that AI clients like Cursor and Claude Code can call directly.
+          tools that AI clients like Cursor, Claude Code, and Codex can call directly.
         </p>
         <div className="space-y-2">
           <h4 className="text-sm font-medium">Service Types</h4>
@@ -205,7 +210,7 @@ export function GuidePage() {
 
       <Section
         title="Setting Up MCP Clients"
-        description="Connect Cursor or Claude Code to services via the MCP proxy"
+        description="Connect Cursor, Claude Code, or Codex to services via the MCP proxy"
       >
         <div className="rounded-md border border-primary/20 bg-primary/5 p-4">
           <p className="text-sm text-muted-foreground leading-relaxed">
@@ -257,6 +262,25 @@ export function GuidePage() {
               <li>All tools from your connected services will be available.</li>
             </ol>
             <CodeBlock label=".claude/settings.json">{claudeCodeExample}</CodeBlock>
+          </div>
+
+          <Separator />
+
+          <div>
+            <h4 className="text-sm font-medium mb-2">Codex</h4>
+            <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground leading-relaxed mb-3">
+              <li>
+                Edit{" "}
+                <code className="rounded bg-muted px-1.5 py-0.5 text-xs">~/.codex/config.toml</code>.
+              </li>
+              <li>
+                Add the NyxID MCP server configuration below.
+              </li>
+              <li>Restart Codex.</li>
+              <li>Authenticate when prompted.</li>
+              <li>All tools from your connected services will be available.</li>
+            </ol>
+            <CodeBlock label="~/.codex/config.toml">{codexExample}</CodeBlock>
           </div>
         </div>
       </Section>

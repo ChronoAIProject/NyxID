@@ -38,6 +38,10 @@ function buildClaudeCodeConfig(mcpUrl: string): string {
   );
 }
 
+function buildCodexConfig(mcpUrl: string): string {
+  return `[mcp_servers.nyxid]\nurl = "${mcpUrl}"`;
+}
+
 function CopyButton({ text, label }: { readonly text: string; readonly label: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -79,6 +83,7 @@ export function McpConnectionInfo() {
   const mcpUrl = config?.mcp_url ?? `${window.location.origin}/mcp`;
   const cursorConfig = buildCursorConfig(mcpUrl);
   const claudeCodeConfig = buildClaudeCodeConfig(mcpUrl);
+  const codexConfig = buildCodexConfig(mcpUrl);
 
   return (
     <div className="space-y-4">
@@ -133,6 +138,23 @@ export function McpConnectionInfo() {
             {claudeCodeConfig}
           </pre>
           <CopyButton text={claudeCodeConfig} label="Claude Code config" />
+        </div>
+      </div>
+
+      <div>
+        <div className="mb-1 flex items-center gap-2">
+          <p className="text-xs font-medium text-muted-foreground">
+            Codex Configuration
+          </p>
+          <Badge variant="outline" className="text-[10px]">
+            ~/.codex/config.toml
+          </Badge>
+        </div>
+        <div className="relative">
+          <pre className="rounded bg-muted px-3 py-2 pr-10 text-xs overflow-x-auto">
+            {codexConfig}
+          </pre>
+          <CopyButton text={codexConfig} label="Codex config" />
         </div>
       </div>
 
