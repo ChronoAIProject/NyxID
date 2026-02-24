@@ -10,6 +10,7 @@ interface BreadcrumbProps {
   readonly items: readonly BreadcrumbItem[];
 }
 
+/* ── VoidPortal Breadcrumb ── */
 export function Breadcrumb({ items }: BreadcrumbProps) {
   return (
     <nav aria-label="Breadcrumb" className="flex items-center gap-1 text-sm">
@@ -19,12 +20,12 @@ export function Breadcrumb({ items }: BreadcrumbProps) {
         return (
           <div key={item.label} className="flex items-center gap-1">
             {index > 0 && (
-              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+              <ChevronRight className="h-3.5 w-3.5 text-text-tertiary" />
             )}
             {item.to && !isLast ? (
               <Link
                 to={item.to}
-                className="text-muted-foreground transition-colors hover:text-foreground"
+                className="text-text-tertiary transition-colors hover:text-foreground"
               >
                 {item.label}
               </Link>

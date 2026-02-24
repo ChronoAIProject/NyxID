@@ -33,7 +33,7 @@ export function ProvidersCallbackPage() {
         <CardContent className="flex flex-col items-center gap-4">
           {isSuccess ? (
             <>
-              <CheckCircle className="h-12 w-12 text-emerald-500" />
+              <CheckCircle className="h-12 w-12 text-success" />
               <p className="text-sm text-muted-foreground text-center">
                 Your provider has been connected successfully.
               </p>

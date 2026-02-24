@@ -64,7 +64,7 @@ function CopyButton({ text, label }: { readonly text: string; readonly label: st
       onClick={() => void handleCopy()}
     >
       {copied ? (
-        <Check className="h-3 w-3 text-green-400" />
+        <Check className="h-3 w-3 text-success" />
       ) : (
         <Copy className="h-3 w-3" />
       )}

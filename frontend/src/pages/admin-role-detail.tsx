@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/form";
 import { Pencil, Trash2, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
+import { Checkbox } from "@/components/ui/checkbox";
 
 export function AdminRoleDetailPage() {
   const { roleId } = useParams({ strict: false }) as { roleId: string };
@@ -123,7 +124,7 @@ export function AdminRoleDetailPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 text-lg font-semibold">Role not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">Role not found</h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The role you are looking for does not exist or has been deleted.
         </p>
@@ -138,7 +139,7 @@ export function AdminRoleDetailPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <PageHeader
         breadcrumbs={[
           { label: "Role Management", to: "/admin/roles" },
@@ -295,11 +296,9 @@ export function AdminRoleDetailPage() {
                 render={({ field }) => (
                   <FormItem className="flex items-center gap-2">
                     <FormControl>
-                      <input
-                        type="checkbox"
+                      <Checkbox
                         checked={field.value}
-                        onChange={field.onChange}
-                        className="h-4 w-4 rounded border-input"
+                        onCheckedChange={field.onChange}
                       />
                     </FormControl>
                     <FormLabel className="!mt-0">

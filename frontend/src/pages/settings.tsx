@@ -67,9 +67,9 @@ import { toast } from "sonner";
 
 export function SettingsPage() {
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div>
-        <h2 className="text-3xl font-bold tracking-tight">Settings</h2>
+        <h2 className="font-display text-5xl font-normal tracking-tight">Settings</h2>
         <p className="text-muted-foreground">
           Manage your account settings and preferences.
         </p>
@@ -249,7 +249,7 @@ function SecurityTab() {
           <CardTitle className="flex items-center gap-2">
             {user?.mfa_enabled ? (
               <ShieldCheck
-                className="h-5 w-5 text-emerald-400"
+                className="h-5 w-5 text-success"
                 aria-hidden="true"
               />
             ) : (
@@ -519,7 +519,7 @@ function CopyInlineButton({ text, label }: { readonly text: string; readonly lab
       onClick={() => void handleCopy()}
     >
       {copied ? (
-        <Check className="h-3 w-3 text-green-400" aria-hidden="true" />
+        <Check className="h-3 w-3 text-success" aria-hidden="true" />
       ) : (
         <Copy className="h-3 w-3" aria-hidden="true" />
       )}
@@ -575,7 +575,7 @@ function McpTab() {
               </Badge>
             </div>
             <div className="relative">
-              <pre className="rounded bg-muted px-3 py-2 pr-10 text-xs overflow-x-auto">
+              <pre className="rounded-[10px] bg-muted px-3 py-2 pr-10 font-mono text-xs overflow-x-auto">
                 {cursorConfig}
               </pre>
               <CopyInlineButton text={cursorConfig} label="Cursor config" />
@@ -597,7 +597,7 @@ function McpTab() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="relative">
-            <code className="block rounded bg-muted px-3 py-2 pr-10 text-xs break-all font-mono">
+            <code className="block rounded-[10px] bg-muted px-3 py-2 pr-10 text-xs break-all font-mono">
               {claudeCommand}
             </code>
             <CopyInlineButton text={claudeCommand} label="CLI command" />
@@ -613,7 +613,7 @@ function McpTab() {
               </Badge>
             </div>
             <div className="relative">
-              <pre className="rounded bg-muted px-3 py-2 pr-10 text-xs overflow-x-auto">
+              <pre className="rounded-[10px] bg-muted px-3 py-2 pr-10 font-mono text-xs overflow-x-auto">
                 {claudeConfig}
               </pre>
               <CopyInlineButton text={claudeConfig} label="Claude Code config" />
@@ -660,8 +660,8 @@ function McpTab() {
         </CardContent>
       </Card>
 
-      <div className="rounded-md border border-border/50 bg-muted/30 p-4">
-        <p className="text-sm font-medium mb-1">How it works</p>
+      <div className="rounded-[10px] border border-border bg-muted/30 p-4">
+        <p className="mb-1 text-[13px] font-medium">How it works</p>
         <p className="text-xs text-muted-foreground">
           When your MCP client connects for the first time, NyxID will open an
           OAuth flow in your browser to authenticate. Once authenticated, the

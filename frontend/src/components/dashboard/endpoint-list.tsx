@@ -26,11 +26,11 @@ interface EndpointListProps {
 }
 
 const METHOD_COLORS: Readonly<Record<string, string>> = {
-  GET: "bg-blue-500/15 text-blue-400 border-blue-500/30",
-  POST: "bg-green-500/15 text-green-400 border-green-500/30",
-  PUT: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+  GET: "bg-info/15 text-info border-info/30",
+  POST: "bg-success/15 text-success border-success/30",
+  PUT: "bg-warning/15 text-warning border-warning/30",
   PATCH: "bg-orange-500/15 text-orange-400 border-orange-500/30",
-  DELETE: "bg-red-500/15 text-red-400 border-red-500/30",
+  DELETE: "bg-destructive/15 text-destructive border-destructive/30",
 };
 
 function getMethodColor(method: string): string {

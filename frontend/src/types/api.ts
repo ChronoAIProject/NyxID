@@ -150,8 +150,9 @@ export interface MfaConfirmResponse {
 
 export interface ApiErrorResponse {
   readonly error: string;
-  readonly error_code: string;
+  readonly error_code: number;
   readonly message: string;
+  readonly consent_url?: string;
 }
 
 export interface LoginCredentials {
@@ -178,7 +179,7 @@ export interface RegisterResponse {
 
 export interface MfaRequiredError {
   readonly error: string;
-  readonly error_code: string;
+  readonly error_code: number;
   readonly message: string;
   readonly session_token: string;
 }

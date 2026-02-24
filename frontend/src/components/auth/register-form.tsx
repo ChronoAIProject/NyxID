@@ -15,7 +15,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { SocialLoginButtons } from "@/components/auth/social-login-buttons";
-import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 
 function getPasswordStrength(password: string): {
@@ -32,8 +31,8 @@ function getPasswordStrength(password: string): {
   if (/[^A-Za-z0-9]/.test(password)) score += 1;
 
   if (score <= 2) return { score, label: "Weak", color: "bg-destructive" };
-  if (score <= 4) return { score, label: "Fair", color: "bg-amber-500" };
-  return { score, label: "Strong", color: "bg-emerald-500" };
+  if (score <= 4) return { score, label: "Fair", color: "bg-warning" };
+  return { score, label: "Strong", color: "bg-success" };
 }
 
 export function RegisterForm() {
@@ -74,29 +73,16 @@ export function RegisterForm() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="space-y-2 text-center">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Create an account
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-2 text-center">
+        <h1 className="font-display text-[28px] font-normal tracking-tight">
+          Create your account
         </h1>
-        <p className="text-sm text-muted-foreground">Get started with NyxID</p>
-      </div>
-
-      <SocialLoginButtons />
-
-      <div className="relative">
-        <div className="absolute inset-0 flex items-center">
-          <Separator className="w-full" />
-        </div>
-        <div className="relative flex justify-center text-xs uppercase">
-          <span className="bg-card px-2 text-muted-foreground">
-            Or continue with
-          </span>
-        </div>
+        <p className="text-sm text-muted-foreground">Start securing your digital identity</p>
       </div>
 
       <Form {...form}>
-        <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+        <form onSubmit={form.handleSubmit(onSubmit)} className="flex flex-col gap-4">
           {form.formState.errors.root && (
             <div
               role="alert"
@@ -111,10 +97,10 @@ export function RegisterForm() {
             name="name"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Name</FormLabel>
+                <FormLabel>Full Name</FormLabel>
                 <FormControl>
                   <Input
-                    placeholder="Your name"
+                    placeholder="John Doe"
                     autoComplete="name"
                     {...field}
                   />
@@ -152,7 +138,7 @@ export function RegisterForm() {
                 <FormControl>
                   <Input
                     type="password"
-                    placeholder="Create a password"
+                    placeholder="Min 8 characters"
                     autoComplete="new-password"
                     {...field}
                   />
@@ -195,7 +181,7 @@ export function RegisterForm() {
                 <FormControl>
                   <Input
                     type="password"
-                    placeholder="Confirm your password"
+                    placeholder="Re-enter your password"
                     autoComplete="new-password"
                     {...field}
                   />
@@ -210,17 +196,26 @@ export function RegisterForm() {
             className="w-full"
             isLoading={registerMutation.isPending}
           >
-            Create account
+            Create Account
           </Button>
         </form>
       </Form>
 
-      <p className="text-center text-sm text-muted-foreground">
-        Already have an account?{" "}
-        <Link to="/login" className="text-primary hover:underline">
+      {/* Divider */}
+      <div className="flex items-center gap-4">
+        <div className="h-px flex-1 bg-border" />
+        <span className="text-xs text-text-tertiary">or</span>
+        <div className="h-px flex-1 bg-border" />
+      </div>
+
+      <SocialLoginButtons />
+
+      <div className="flex items-center justify-center gap-1.5">
+        <span className="text-xs text-text-tertiary">Already have an account?</span>
+        <Link to="/login" className="text-xs font-medium text-void-400 hover:text-primary">
           Sign in
         </Link>
-      </p>
+      </div>
     </div>
   );
 }

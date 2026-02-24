@@ -42,13 +42,16 @@ pub async fn security_headers_middleware(
         "DENY".parse().unwrap(),
     );
 
-    // Content Security Policy for API responses
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        "default-src 'none'; frame-ancestors 'none'"
-            .parse()
-            .unwrap(),
-    );
+    // Content Security Policy — only set if the handler hasn't already provided one
+    // (e.g. oauth_success_page sets a custom CSP allowing inline style/script).
+    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; frame-ancestors 'none'"
+                .parse()
+                .unwrap(),
+        );
+    }
 
     // Control referrer information
     headers.insert(

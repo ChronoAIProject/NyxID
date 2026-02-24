@@ -32,7 +32,7 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
   }'`;
 
   return (
-    <Card className="border-primary/20 bg-primary/5">
+    <Card className="border-primary/30 bg-primary/10">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">

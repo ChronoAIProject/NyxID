@@ -59,7 +59,7 @@ export function SocialLoginButtons() {
     if (!returnUrl.startsWith(window.location.origin)) {
       return;
     }
-    window.location.href = returnUrl;
+    window.location.assign(returnUrl);
   }
 
   if (enabledProviders.length === 0) {
@@ -74,11 +74,11 @@ export function SocialLoginButtons() {
           variant="outline"
           type="button"
           onClick={() => handleSocialLogin(provider.id)}
-          className="h-10"
+          className="h-10 gap-2"
           aria-label={`Sign in with ${provider.label}`}
         >
           {provider.icon}
-          <span className="sr-only">Sign in with {provider.label}</span>
+          <span className="text-xs font-medium text-muted-foreground">{provider.label}</span>
         </Button>
       ))}
     </div>

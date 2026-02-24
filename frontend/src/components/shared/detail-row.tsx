@@ -19,6 +19,7 @@ interface DetailRowProps {
     | "warning";
 }
 
+/* ── VoidPortal Detail Row ── */
 export function DetailRow({
   label,
   value,
@@ -28,13 +29,15 @@ export function DetailRow({
   badgeVariant = "secondary",
 }: DetailRowProps) {
   return (
-    <div className="flex items-center justify-between text-sm">
-      <span className="text-muted-foreground">{label}</span>
+    <div className="flex items-center justify-between border-b border-border py-2 text-sm last:border-b-0">
+      <span className="text-text-tertiary">{label}</span>
       <div className="flex items-center gap-1">
         {badge ? (
           <Badge variant={badgeVariant}>{value}</Badge>
         ) : (
-          <span className={mono ? "font-mono text-xs" : ""}>{value}</span>
+          <span className={mono ? "font-mono text-xs text-foreground" : "text-foreground"}>
+            {value}
+          </span>
         )}
         {copyable && (
           <Button

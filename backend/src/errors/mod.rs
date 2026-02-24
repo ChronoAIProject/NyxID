@@ -14,6 +14,9 @@ pub struct ErrorResponse {
     /// MFA session token, only present when error_code == 2002 (mfa_required)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_token: Option<String>,
+    /// Browser URL to complete consent flow (consent_required only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent_url: Option<String>,
 }
 
 /// Application-level error variants.
@@ -106,6 +109,12 @@ pub enum AppError {
 
     #[error("Social auth: account is deactivated")]
     SocialAuthDeactivated,
+
+    #[error("Consent required")]
+    ConsentRequired { consent_url: String },
+
+    #[error("Unsupported grant type: {0}")]
+    UnsupportedGrantType(String),
 }
 
 impl AppError {
@@ -135,6 +144,8 @@ impl AppError {
             Self::SocialAuthFailed(_) | Self::SocialAuthNoEmail => StatusCode::BAD_REQUEST,
             Self::SocialAuthConflict => StatusCode::CONFLICT,
             Self::SocialAuthDeactivated => StatusCode::FORBIDDEN,
+            Self::ConsentRequired { .. } => StatusCode::FORBIDDEN,
+            Self::UnsupportedGrantType(_) => StatusCode::BAD_REQUEST,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -170,6 +181,37 @@ impl AppError {
             Self::SocialAuthConflict => 6001,
             Self::SocialAuthNoEmail => 6002,
             Self::SocialAuthDeactivated => 6003,
+            Self::ConsentRequired { .. } => 3003,
+            Self::UnsupportedGrantType(_) => 3004,
+        }
+    }
+
+    /// RFC 6749 §5.2 OAuth error code for token endpoint responses.
+    /// Each variant maps to a standard OAuth error string — no string matching.
+    pub(crate) fn oauth_error_code(&self) -> &'static str {
+        match self {
+            Self::UnsupportedGrantType(_) => "unsupported_grant_type",
+            Self::PkceVerificationFailed | Self::InvalidRedirectUri => "invalid_grant",
+            Self::InvalidScope(_) => "invalid_scope",
+            Self::Unauthorized(_)
+            | Self::AuthenticationFailed(_)
+            | Self::ServiceAccountNotFound(_)
+            | Self::ServiceAccountInactive => "invalid_client",
+            Self::NotFound(_) => "invalid_grant",
+            Self::ConsentRequired { .. } => "consent_required",
+            _ => "invalid_request",
+        }
+    }
+
+    /// HTTP status to use when emitting an RFC 6749 §5.2 error response.
+    pub(crate) fn oauth_status(&self) -> StatusCode {
+        match self {
+            Self::Unauthorized(_)
+            | Self::AuthenticationFailed(_)
+            | Self::ServiceAccountNotFound(_)
+            | Self::ServiceAccountInactive => StatusCode::UNAUTHORIZED,
+            Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            _ => StatusCode::BAD_REQUEST,
         }
     }
 
@@ -204,6 +246,8 @@ impl AppError {
             Self::SocialAuthConflict => "social_auth_conflict",
             Self::SocialAuthNoEmail => "social_auth_no_email",
             Self::SocialAuthDeactivated => "social_auth_deactivated",
+            Self::ConsentRequired { .. } => "consent_required",
+            Self::UnsupportedGrantType(_) => "unsupported_grant_type",
         }
     }
 }
@@ -224,6 +268,10 @@ impl IntoResponse for AppError {
             AppError::MfaRequired { session_token } => Some(session_token.clone()),
             _ => None,
         };
+        let consent_url = match &self {
+            AppError::ConsentRequired { consent_url } => Some(consent_url.clone()),
+            _ => None,
+        };
 
         let body = ErrorResponse {
             error: self.error_key().to_string(),
@@ -236,9 +284,13 @@ impl IntoResponse for AppError {
                 AppError::MfaRequired { .. } => {
                     "MFA verification required".to_string()
                 }
+                AppError::ConsentRequired { .. } => {
+                    "Consent required. Complete authorization in browser flow.".to_string()
+                }
                 other => other.to_string(),
             },
             session_token: mfa_session_token,
+            consent_url,
         };
 
         (status, axum::Json(body)).into_response()
@@ -285,6 +337,7 @@ mod tests {
         assert_eq!(AppError::SocialAuthConflict.status_code(), StatusCode::CONFLICT);
         assert_eq!(AppError::SocialAuthNoEmail.status_code(), StatusCode::BAD_REQUEST);
         assert_eq!(AppError::SocialAuthDeactivated.status_code(), StatusCode::FORBIDDEN);
+        assert_eq!(AppError::UnsupportedGrantType("x".into()).status_code(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
@@ -318,6 +371,7 @@ mod tests {
             AppError::SocialAuthConflict.error_code(),
             AppError::SocialAuthNoEmail.error_code(),
             AppError::SocialAuthDeactivated.error_code(),
+            AppError::UnsupportedGrantType("".into()).error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(codes.len(), unique.len(), "All error codes should be unique");
@@ -356,6 +410,22 @@ mod tests {
         assert_eq!(AppError::SocialAuthConflict.error_key(), "social_auth_conflict");
         assert_eq!(AppError::SocialAuthNoEmail.error_key(), "social_auth_no_email");
         assert_eq!(AppError::SocialAuthDeactivated.error_key(), "social_auth_deactivated");
+        assert_eq!(AppError::UnsupportedGrantType("".into()).error_key(), "unsupported_grant_type");
+    }
+
+    #[test]
+    fn oauth_error_codes() {
+        assert_eq!(AppError::UnsupportedGrantType("x".into()).oauth_error_code(), "unsupported_grant_type");
+        assert_eq!(AppError::PkceVerificationFailed.oauth_error_code(), "invalid_grant");
+        assert_eq!(AppError::InvalidRedirectUri.oauth_error_code(), "invalid_grant");
+        assert_eq!(AppError::InvalidScope("x".into()).oauth_error_code(), "invalid_scope");
+        assert_eq!(AppError::Unauthorized("x".into()).oauth_error_code(), "invalid_client");
+        assert_eq!(AppError::AuthenticationFailed("x".into()).oauth_error_code(), "invalid_client");
+        assert_eq!(AppError::ServiceAccountNotFound("x".into()).oauth_error_code(), "invalid_client");
+        assert_eq!(AppError::ServiceAccountInactive.oauth_error_code(), "invalid_client");
+        assert_eq!(AppError::NotFound("x".into()).oauth_error_code(), "invalid_grant");
+        assert_eq!(AppError::BadRequest("x".into()).oauth_error_code(), "invalid_request");
+        assert_eq!(AppError::ConsentRequired { consent_url: "x".into() }.oauth_error_code(), "consent_required");
     }
 
     #[test]
@@ -375,12 +445,13 @@ mod tests {
             error_code: 1000,
             message: "Invalid input".to_string(),
             session_token: None,
+            consent_url: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["error"], "bad_request");
         assert_eq!(json["error_code"], 1000);
-        // session_token should be omitted when None (skip_serializing_if)
         assert!(json.get("session_token").is_none());
+        assert!(json.get("consent_url").is_none());
     }
 
     #[test]
@@ -390,6 +461,7 @@ mod tests {
             error_code: 2002,
             message: "MFA verification required".to_string(),
             session_token: Some("mfa-session-tok".to_string()),
+            consent_url: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["session_token"], "mfa-session-tok");

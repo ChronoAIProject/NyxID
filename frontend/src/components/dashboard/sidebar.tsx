@@ -7,7 +7,8 @@ import {
   Plug,
   Settings,
   BookOpen,
-  Shield,
+  BookMarked,
+  Code,
   Users,
   ShieldCheck,
   UsersRound,
@@ -16,8 +17,9 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
-import { Separator } from "@/components/ui/separator";
+import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
 
+/* ── Navigation Config ── */
 const NAV_ITEMS = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/api-keys", icon: Key, label: "API Keys" },
@@ -27,6 +29,11 @@ const NAV_ITEMS = [
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
   { to: "/guide", icon: BookOpen, label: "Guide" },
+] as const;
+
+const DEVELOPER_NAV_ITEMS = [
+  { to: "/developer/apps", icon: Code, label: "Developer Apps" },
+  { to: "/integration-guide", icon: BookMarked, label: "Integration Guide" },
 ] as const;
 
 const ADMIN_NAV_ITEMS = [
@@ -46,7 +53,6 @@ function isNavActive(
   const matches =
     currentPath === itemTo || currentPath.startsWith(itemTo + "/");
   if (!matches) return false;
-  // Only highlight if no more-specific sibling also matches
   return !allItems.some(
     (other) =>
       other.to !== itemTo &&
@@ -55,88 +61,116 @@ function isNavActive(
   );
 }
 
+/* ── Shared nav button renderer ── */
+function NavButton({
+  item,
+  isActive,
+  onClick,
+}: {
+  readonly item: { readonly icon: React.ComponentType<{ className?: string }>; readonly label: string };
+  readonly isActive: boolean;
+  readonly onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "relative flex w-full items-center gap-[14px] rounded-[10px] px-4 py-3.5 text-sm transition-colors",
+        isActive
+          ? "bg-primary/[0.15] font-medium text-foreground"
+          : "font-normal text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+      )}
+      style={isActive ? { boxShadow: "inset 2px 0 0 0 var(--color-primary)" } : undefined}
+    >
+      <item.icon className={cn("h-[18px] w-[18px] shrink-0", isActive ? "text-primary" : "text-text-tertiary")} />
+      {item.label}
+    </button>
+  );
+}
+
+/* ── VoidPortal Sidebar ── */
 export function Sidebar() {
   const routerState = useRouterState();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
 
+  /* Initials from user name or email */
+  const initials = user?.name
+    ? user.name.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase()
+    : user?.email?.slice(0, 2).toUpperCase() ?? "U";
+
   return (
-    <aside className="flex w-64 flex-col border-r bg-card">
-      <div className="flex h-16 items-center gap-2 px-6">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary">
-          <Shield className="h-5 w-5 text-primary-foreground" />
+    <aside className="flex w-[280px] flex-col justify-between border-r border-border bg-sidebar px-7 py-10">
+      {/* ── Top: Logo + Navigation ── */}
+      <div className="flex flex-col gap-12">
+        {/* Logo */}
+        <div className="flex items-center gap-3">
+          <PortalMarkLogo size={36} className="shrink-0" />
+          <span className="logo-wordmark text-[22px]">NyxID</span>
         </div>
-        <span className="text-lg font-bold">NyxID</span>
+
+        {/* Main Nav */}
+        <nav className="flex flex-col gap-1">
+          {NAV_ITEMS.map((item) => (
+            <NavButton
+              key={item.to}
+              item={item}
+              isActive={isNavActive(item.to, currentPath, NAV_ITEMS)}
+              onClick={() => void navigate({ to: item.to as string })}
+            />
+          ))}
+        </nav>
       </div>
 
-      <Separator />
-
-      <nav className="flex-1 space-y-1 p-4">
-        {NAV_ITEMS.map((item) => {
-          const isActive = isNavActive(item.to, currentPath, NAV_ITEMS);
-
-          return (
-            <button
+      {/* ── Bottom: Developer + Admin + Account ── */}
+      <div className="flex flex-col gap-6">
+        {/* Developer section */}
+        <div className="flex flex-col gap-1">
+          <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
+            Developer
+          </p>
+          {DEVELOPER_NAV_ITEMS.map((item) => (
+            <NavButton
               key={item.to}
-              type="button"
+              item={item}
+              isActive={isNavActive(item.to, currentPath, DEVELOPER_NAV_ITEMS)}
               onClick={() => void navigate({ to: item.to as string })}
-              className={cn(
-                "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                isActive
-                  ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-              )}
-            >
-              <item.icon className="h-4 w-4" />
-              {item.label}
-            </button>
-          );
-        })}
-      </nav>
+            />
+          ))}
+        </div>
 
-      {user?.is_admin && (
-        <>
-          <Separator />
-          <div className="px-4 pt-2">
-            <p className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        {/* Admin section */}
+        {user?.is_admin && (
+          <div className="flex flex-col gap-1">
+            <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
               Admin
             </p>
+            {ADMIN_NAV_ITEMS.map((item) => (
+              <NavButton
+                key={item.to}
+                item={item}
+                isActive={isNavActive(item.to, currentPath, ADMIN_NAV_ITEMS)}
+                onClick={() => void navigate({ to: item.to as string })}
+              />
+            ))}
           </div>
-          <nav className="space-y-1 px-4 pb-2">
-            {ADMIN_NAV_ITEMS.map((item) => {
-              const isActive = isNavActive(item.to, currentPath, ADMIN_NAV_ITEMS);
-              return (
-                <button
-                  key={item.to}
-                  type="button"
-                  onClick={() => void navigate({ to: item.to as string })}
-                  className={cn(
-                    "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
-                    isActive
-                      ? "bg-primary/10 text-primary"
-                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-                  )}
-                >
-                  <item.icon className="h-4 w-4" />
-                  {item.label}
-                </button>
-              );
-            })}
-          </nav>
-        </>
-      )}
+        )}
 
-      <Separator />
-
-      <div className="p-4">
-        <div className="rounded-lg bg-muted p-3">
-          <p className="text-xs font-medium text-muted-foreground">
-            NyxID v1.0
-          </p>
-          <p className="text-xs text-muted-foreground/70">
-            Identity & Access Management
-          </p>
+        {/* Account row */}
+        <div className="flex items-center gap-3 border-t border-border pt-4">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-primary">
+            <span className="text-xs font-semibold text-void-400">{initials}</span>
+          </div>
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="truncate text-[13px] font-medium text-foreground">
+              {user?.name ?? "User"}
+            </span>
+            <span className="truncate text-[11px] text-text-tertiary">
+              {user?.email ?? ""}
+            </span>
+          </div>
         </div>
       </div>
     </aside>

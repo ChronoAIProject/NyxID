@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Form, Query, State},
+    extract::{Form, Query, State, rejection::QueryRejection},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -29,6 +29,22 @@ pub struct AuthorizeQuery {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    /// OIDC prompt parameter: "none", "login", "consent", or space-separated combo.
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConsentDecisionForm {
+    pub response_type: String,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub scope: Option<String>,
+    pub state: Option<String>,
+    pub code_challenge: Option<String>,
+    pub code_challenge_method: Option<String>,
+    pub nonce: Option<String>,
+    pub prompt: Option<String>,
+    pub decision: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -134,6 +150,41 @@ pub struct RevokeRequest {
     pub client_secret: Option<String>,
 }
 
+// --- RFC 6749 §5.2 OAuth Error Response ---
+
+/// RFC 6749 §5.2 compliant error body for the token endpoint.
+/// Standard OAuth clients expect `error` + `error_description`, not our
+/// internal `ErrorResponse` format which carries `error_code` / `message`.
+#[derive(Debug, Serialize)]
+struct OAuthErrorBody {
+    error: &'static str,
+    error_description: String,
+}
+
+/// Map internal `AppError` to an RFC 6749 §5.2 JSON error response.
+/// Uses `AppError::oauth_error_code()` and `AppError::oauth_status()` —
+/// each variant declares its own OAuth semantics, no string matching.
+fn oauth_error_response(err: AppError) -> Response {
+    let status = err.oauth_status();
+    let oauth_error = err.oauth_error_code();
+
+    let description = match &err {
+        AppError::Internal(_) | AppError::DatabaseError(_) => {
+            "An internal error occurred".to_string()
+        }
+        other => other.to_string(),
+    };
+
+    (
+        status,
+        axum::Json(OAuthErrorBody {
+            error: oauth_error,
+            error_description: description,
+        }),
+    )
+        .into_response()
+}
+
 // --- Handlers ---
 
 /// GET /oauth/authorize
@@ -154,9 +205,25 @@ pub async fn authorize(
     State(state): State<AppState>,
     opt_auth: OptionalAuthUser,
     headers: HeaderMap,
-    Query(params): Query<AuthorizeQuery>,
+    query_result: Result<Query<AuthorizeQuery>, QueryRejection>,
 ) -> Result<Response, AppError> {
     let is_browser_mode = !accepts_json(&headers);
+
+    let params = match query_result {
+        Ok(Query(p)) => p,
+        Err(rejection) => {
+            if is_browser_mode {
+                let error_url = format!(
+                    "{}/error?code=invalid_request&message={}",
+                    state.config.frontend_url,
+                    urlencoding::encode(&rejection.body_text()),
+                );
+                return Ok(redirect_302(&error_url));
+            }
+            return Err(AppError::BadRequest(rejection.body_text()));
+        }
+    };
+
     let is_authenticated = opt_auth.0.is_some();
     tracing::info!(
         client_id = %params.client_id,
@@ -176,10 +243,6 @@ pub async fn authorize(
                 error = %err,
                 "OAuth authorize failed, redirecting to error page"
             );
-            // In browser mode, redirect to frontend error page for better UX.
-            // Per RFC 6749 s4.1.2.1, we must NOT redirect to the client's URI
-            // when client_id/redirect_uri validation fails, but redirecting to
-            // our own frontend error page is safe.
             let error_url = format!(
                 "{}/error?code={}&message={}",
                 state.config.frontend_url,
@@ -192,61 +255,116 @@ pub async fn authorize(
     }
 }
 
+/// POST /oauth/authorize/decision
+///
+/// Browser consent decision endpoint. Accepts allow/deny from the consent page
+/// and either issues an authorization code or redirects with access_denied.
+pub async fn authorize_decision(
+    State(state): State<AppState>,
+    opt_auth: OptionalAuthUser,
+    Form(form): Form<ConsentDecisionForm>,
+) -> Result<Response, AppError> {
+    let params = AuthorizeQuery {
+        response_type: form.response_type,
+        client_id: form.client_id,
+        redirect_uri: form.redirect_uri,
+        scope: form.scope,
+        state: form.state,
+        code_challenge: form.code_challenge,
+        code_challenge_method: form.code_challenge_method,
+        nonce: form.nonce,
+        prompt: form.prompt,
+    };
+
+    let auth_user = match opt_auth.0 {
+        Some(user) => user,
+        None => {
+            let return_to = build_authorize_url(&state.config.frontend_url, &params);
+            let login_url = format!(
+                "{}/login?return_to={}",
+                state.config.frontend_url,
+                urlencoding::encode(&return_to),
+            );
+            return Ok(redirect_302(&login_url));
+        }
+    };
+
+    let (_client, validated_scope) = validate_authorize_request(&state, &params).await?;
+
+    if form.decision == "deny" {
+        let redirect_url = build_callback_error_url(
+            &params,
+            "access_denied",
+            "The resource owner denied the request",
+        );
+        return Ok(redirect_302(&redirect_url));
+    }
+
+    if form.decision != "allow" {
+        return Err(AppError::BadRequest("Invalid consent decision".to_string()));
+    }
+
+    let user_id_str = auth_user.user_id.to_string();
+    consent_service::grant_consent(
+        &state.db,
+        &user_id_str,
+        &params.client_id,
+        &validated_scope,
+    )
+    .await?;
+
+    let code = issue_authorization_code(&state, &auth_user, &params, &validated_scope).await?;
+    let redirect_url = build_callback_url(&params, &code);
+
+    if needs_success_page(&params.redirect_uri) {
+        Ok(oauth_success_page(&redirect_url))
+    } else {
+        Ok(redirect_302(&redirect_url))
+    }
+}
+
+/// Parse the `prompt` parameter into a set of prompt values (OIDC Core §3.1.2.1).
+fn parse_prompt(prompt: Option<&str>) -> std::collections::HashSet<&str> {
+    prompt
+        .map(|p| p.split_whitespace().collect())
+        .unwrap_or_default()
+}
+
 async fn authorize_inner(
     state: &AppState,
     opt_auth: OptionalAuthUser,
     params: &AuthorizeQuery,
     is_browser_mode: bool,
 ) -> Result<Response, AppError> {
-    // --- Common validation (both modes) ---
+    let (client, validated_scope) = validate_authorize_request(state, params).await?;
+    let prompts = parse_prompt(params.prompt.as_deref());
 
-    if params.response_type != "code" {
+    // OIDC Core §3.1.2.1: prompt=none is incompatible with login/consent.
+    if prompts.contains("none") && (prompts.contains("login") || prompts.contains("consent")) {
         return Err(AppError::BadRequest(
-            "Only response_type=code is supported".to_string(),
+            "prompt=none cannot be combined with login or consent".to_string(),
         ));
     }
 
-    if params.code_challenge.is_none() {
-        return Err(AppError::BadRequest(
-            "code_challenge is required (PKCE)".to_string(),
-        ));
-    }
-
-    // Require explicit code_challenge_method (RFC 7636 s4.3 default is plain,
-    // but we only support S256 -- reject ambiguity by requiring the parameter).
-    match params.code_challenge_method.as_deref() {
-        Some("S256") => {}
-        Some(_) => {
-            return Err(AppError::BadRequest(
-                "Only S256 code_challenge_method is supported".to_string(),
-            ));
-        }
-        None => {
-            return Err(AppError::BadRequest(
-                "code_challenge_method is required (must be S256)".to_string(),
-            ));
-        }
-    }
-
-    // Validate client_id and redirect_uri BEFORE any redirects.
-    // If these are invalid we must NOT redirect (could be an attacker's URI).
-    let client =
-        oauth_service::validate_client(&state.db, &params.client_id, &params.redirect_uri)
-            .await?;
-
-    let scope = params.scope.as_deref().unwrap_or("openid profile email");
-    let validated_scope = oauth_service::validate_scopes(scope, &client.allowed_scopes)?;
+    let force_login = prompts.contains("login");
+    let force_consent = prompts.contains("consent");
 
     if is_browser_mode {
-        match opt_auth.0 {
+        // prompt=login: treat as unauthenticated to force re-login
+        let effective_auth = if force_login { None } else { opt_auth.0 };
+
+        match effective_auth {
             None => {
-                // Redirect to frontend login with return_to pointing back here.
-                //
-                // Use frontend_url (not base_url) for the return_to so the
-                // authorize endpoint is reached through the frontend's nginx
-                // proxy. This is critical because the session cookie is set on
-                // the frontend domain -- if return_to pointed to the API domain
-                // the browser would not send the cookie and auth would fail.
+                // prompt=none + unauthenticated → error, not redirect
+                if prompts.contains("none") {
+                    let redirect_url = build_callback_error_url(
+                        params,
+                        "login_required",
+                        "User is not authenticated",
+                    );
+                    return Ok(redirect_302(&redirect_url));
+                }
+
                 let return_to =
                     build_authorize_url(&state.config.frontend_url, params);
                 let login_url = format!(
@@ -263,25 +381,35 @@ async fn authorize_inner(
             Some(auth_user) => {
                 let user_id_str = auth_user.user_id.to_string();
 
-                // Check existing consent; auto-grant if not yet recorded.
-                // When a third-party consent UI is added, replace the
-                // auto-grant with a redirect to the consent screen.
-                if consent_service::check_consent(
+                let has_consent = consent_service::check_consent(
                     &state.db,
                     &user_id_str,
                     &params.client_id,
                     &validated_scope,
                 )
                 .await?
-                .is_none()
-                {
-                    consent_service::grant_consent(
-                        &state.db,
-                        &user_id_str,
-                        &params.client_id,
+                .is_some();
+
+                let needs_consent = !has_consent || force_consent;
+
+                if needs_consent {
+                    // prompt=none + needs consent → error, not redirect
+                    if prompts.contains("none") {
+                        let redirect_url = build_callback_error_url(
+                            params,
+                            "consent_required",
+                            "User consent is required",
+                        );
+                        return Ok(redirect_302(&redirect_url));
+                    }
+
+                    let consent_url = build_consent_url(
+                        &state.config.frontend_url,
+                        params,
+                        &client.client_name,
                         &validated_scope,
-                    )
-                    .await?;
+                    );
+                    return Ok(redirect_302(&consent_url));
                 }
 
                 let code =
@@ -289,10 +417,6 @@ async fn authorize_inner(
                         .await?;
                 let redirect_url = build_callback_url(params, &code);
 
-                // For native app redirects (loopback or custom URI scheme),
-                // show a success page that auto-redirects after a brief delay.
-                // Without this, the browser tab is left in a broken state
-                // (blank page or stuck on login).
                 if needs_success_page(&params.redirect_uri) {
                     Ok(oauth_success_page(&redirect_url))
                 } else {
@@ -301,30 +425,29 @@ async fn authorize_inner(
             }
         }
     } else {
-        // API mode: require authentication (existing behavior)
         let auth_user = opt_auth.0.ok_or_else(|| {
             AppError::Unauthorized("Authentication required".to_string())
         })?;
 
         let user_id_str = auth_user.user_id.to_string();
 
-        // Record consent (auto-grant for API mode; same logic as browser mode)
-        if consent_service::check_consent(
+        let has_consent = consent_service::check_consent(
             &state.db,
             &user_id_str,
             &params.client_id,
             &validated_scope,
         )
         .await?
-        .is_none()
-        {
-            consent_service::grant_consent(
-                &state.db,
-                &user_id_str,
-                &params.client_id,
+        .is_some();
+
+        if !has_consent || force_consent {
+            let consent_url = build_consent_url(
+                &state.config.frontend_url,
+                params,
+                &client.client_name,
                 &validated_scope,
-            )
-            .await?;
+            );
+            return Err(AppError::ConsentRequired { consent_url });
         }
 
         let code =
@@ -332,6 +455,45 @@ async fn authorize_inner(
         let redirect_url = build_callback_url(params, &code);
         Ok(Json(AuthorizeResponse { redirect_url }).into_response())
     }
+}
+
+async fn validate_authorize_request(
+    state: &AppState,
+    params: &AuthorizeQuery,
+) -> AppResult<(crate::models::oauth_client::OauthClient, String)> {
+    if params.response_type != "code" {
+        return Err(AppError::BadRequest(
+            "Only response_type=code is supported".to_string(),
+        ));
+    }
+
+    if params.code_challenge.is_none() {
+        return Err(AppError::BadRequest(
+            "code_challenge is required (PKCE)".to_string(),
+        ));
+    }
+
+    match params.code_challenge_method.as_deref() {
+        Some("S256") => {}
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Only S256 code_challenge_method is supported".to_string(),
+            ));
+        }
+        None => {
+            return Err(AppError::BadRequest(
+                "code_challenge_method is required (must be S256)".to_string(),
+            ));
+        }
+    }
+
+    let client =
+        oauth_service::validate_client(&state.db, &params.client_id, &params.redirect_uri)
+            .await?;
+    let scope = params.scope.as_deref().unwrap_or("openid profile email");
+    let validated_scope = oauth_service::validate_scopes(scope, &client.allowed_scopes)?;
+
+    Ok((client, validated_scope))
 }
 
 /// Build a 302 Found response (RFC 6749 requires 302, not 307).
@@ -366,10 +528,13 @@ fn needs_success_page(uri: &str) -> bool {
         && matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
 }
 
-/// Render an HTML page that confirms authentication succeeded and
+/// Render a branded HTML page that confirms authentication succeeded and
 /// auto-redirects to the callback URI.  The MCP client's local callback
 /// server receives the code via the redirect while the user sees a clear
 /// success message instead of a blank white page.
+///
+/// Overrides the global CSP to allow inline style/script for this one-off
+/// HTML page (the global CSP is `default-src 'none'` which blocks them).
 fn oauth_success_page(redirect_url: &str) -> Response {
     let escaped = redirect_url
         .replace('&', "&amp;")
@@ -378,46 +543,60 @@ fn oauth_success_page(redirect_url: &str) -> Response {
         .replace('>', "&gt;");
     let js_escaped = redirect_url.replace('\\', "\\\\").replace('\'', "\\'");
 
-    let html = format!(
-        r#"<!DOCTYPE html>
+    let html = format!(r##"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="1;url={escaped}">
+<meta http-equiv="refresh" content="2;url={escaped}">
 <meta name="referrer" content="no-referrer">
-<title>NyxID - Authenticated</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NyxID — Authenticated</title>
 <style>
-  body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    display: flex; align-items: center; justify-content: center;
-    min-height: 100vh; margin: 0;
-    background: #0a0a0b; color: #e4e4e7;
-  }}
-  .card {{
-    text-align: center; padding: 2.5rem;
-    border: 1px solid #27272a; border-radius: 0.75rem;
-    background: #18181b; max-width: 28rem;
-  }}
-  .check {{ font-size: 2.5rem; margin-bottom: 1rem; }}
-  h1 {{ font-size: 1.25rem; font-weight: 600; margin: 0 0 0.5rem; }}
-  p {{ font-size: 0.875rem; color: #a1a1aa; margin: 0; }}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;flex-direction:column;min-height:100vh;background:#0a0a0b;color:#e4e4e7}}
+.wrap{{display:flex;flex-direction:column;align-items:center;gap:2rem;width:100%;max-width:26rem;padding:1.5rem}}
+.logo{{display:flex;align-items:center;gap:.6rem}}
+.logo svg{{width:28px;height:28px}}
+.logo span{{font-size:1.2rem;font-weight:700;letter-spacing:-.02em;background:linear-gradient(135deg,#c084fc,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}}
+.card{{width:100%;text-align:center;padding:2.5rem 2rem;border:1px solid #27272a;border-radius:.75rem;background:#18181b}}
+.icon{{width:3rem;height:3rem;margin:0 auto 1.25rem;border-radius:50%;background:rgba(52,211,153,.12);display:flex;align-items:center;justify-content:center}}
+.icon svg{{width:1.25rem;height:1.25rem;color:#34d399}}
+h1{{font-size:1.125rem;font-weight:600;margin-bottom:.375rem}}
+.sub{{font-size:.8125rem;color:#a1a1aa;line-height:1.5}}
+.bar{{margin-top:1.5rem;height:3px;border-radius:2px;background:#27272a;overflow:hidden}}
+.bar .fill{{height:100%;width:0;border-radius:2px;background:linear-gradient(90deg,#818cf8,#c084fc);animation:progress 1.8s ease-in-out forwards}}
+@keyframes progress{{to{{width:100%}}}}
+.foot{{font-size:.6875rem;color:#52525b}}
 </style>
 </head>
 <body>
-<div class="card">
-  <div class="check">&#10003;</div>
-  <h1>Authentication Successful</h1>
-  <p>You can close this tab and return to your application.</p>
+<div class="wrap">
+  <div class="logo">
+    <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="14" stroke="url(#pg)" stroke-width="2.5"/><circle cx="16" cy="16" r="4" fill="url(#pg)"/><defs><linearGradient id="pg" x1="4" y1="4" x2="28" y2="28"><stop stop-color="#c084fc"/><stop offset="1" stop-color="#818cf8"/></linearGradient></defs></svg>
+    <span>NyxID</span>
+  </div>
+  <div class="card">
+    <div class="icon">
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    </div>
+    <h1>Authentication Successful</h1>
+    <p class="sub">Redirecting you back to the application&hellip;</p>
+    <div class="bar"><div class="fill"></div></div>
+  </div>
+  <p class="foot">You can close this tab if it doesn&rsquo;t redirect automatically.</p>
 </div>
-<script>setTimeout(function(){{ window.location.replace('{js_escaped}'); }}, 800);</script>
+<script>setTimeout(function(){{window.location.replace('{js_escaped}')}},1800)</script>
 </body>
-</html>"#
-    );
+</html>"##);
 
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/html; charset=utf-8")
         .header(header::REFERRER_POLICY, "no-referrer")
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'",
+        )
         .body(axum::body::Body::from(html))
         .unwrap()
 }
@@ -460,6 +639,9 @@ fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
     if let Some(ref nonce) = params.nonce {
         url.push_str(&format!("&nonce={}", urlencoding::encode(nonce)));
     }
+    if let Some(ref prompt) = params.prompt {
+        url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
+    }
 
     url
 }
@@ -474,6 +656,62 @@ fn build_callback_url(params: &AuthorizeQuery, code: &str) -> String {
     if let Some(ref state_param) = params.state {
         url.push_str(&format!("&state={}", urlencoding::encode(state_param)));
     }
+    url
+}
+
+fn build_callback_error_url(
+    params: &AuthorizeQuery,
+    error: &str,
+    description: &str,
+) -> String {
+    let mut url = format!(
+        "{}?error={}&error_description={}",
+        params.redirect_uri,
+        urlencoding::encode(error),
+        urlencoding::encode(description),
+    );
+    if let Some(ref state_param) = params.state {
+        url.push_str(&format!("&state={}", urlencoding::encode(state_param)));
+    }
+    url
+}
+
+fn build_consent_url(
+    frontend_url: &str,
+    params: &AuthorizeQuery,
+    client_name: &str,
+    validated_scope: &str,
+) -> String {
+    let mut url = format!(
+        "{}/oauth-consent?response_type={}&client_id={}&client_name={}&redirect_uri={}",
+        frontend_url,
+        urlencoding::encode(&params.response_type),
+        urlencoding::encode(&params.client_id),
+        urlencoding::encode(client_name),
+        urlencoding::encode(&params.redirect_uri),
+    );
+
+    url.push_str(&format!("&scope={}", urlencoding::encode(validated_scope)));
+
+    if let Some(ref state) = params.state {
+        url.push_str(&format!("&state={}", urlencoding::encode(state)));
+    }
+    if let Some(ref cc) = params.code_challenge {
+        url.push_str(&format!("&code_challenge={}", urlencoding::encode(cc)));
+    }
+    if let Some(ref ccm) = params.code_challenge_method {
+        url.push_str(&format!(
+            "&code_challenge_method={}",
+            urlencoding::encode(ccm),
+        ));
+    }
+    if let Some(ref nonce) = params.nonce {
+        url.push_str(&format!("&nonce={}", urlencoding::encode(nonce)));
+    }
+    if let Some(ref prompt) = params.prompt {
+        url.push_str(&format!("&prompt={}", urlencoding::encode(prompt)));
+    }
+
     url
 }
 
@@ -515,12 +753,26 @@ async fn issue_authorization_code(
 
 /// POST /oauth/token
 ///
-/// OAuth 2.0 Token Endpoint. Exchanges an authorization code for tokens.
-/// Validates client_secret for confidential clients.
+/// OAuth 2.0 Token Endpoint (RFC 6749 §5).
+///
+/// Error responses use RFC 6749 §5.2 format (`error` + `error_description`)
+/// instead of the application's internal `ErrorResponse` format, because
+/// standard OAuth/OIDC client libraries depend on the standard error shape.
 pub async fn token(
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(body): Form<TokenRequest>,
+) -> Response {
+    match token_inner(&state, &headers, body).await {
+        Ok(json) => json.into_response(),
+        Err(err) => oauth_error_response(err),
+    }
+}
+
+async fn token_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: TokenRequest,
 ) -> AppResult<Json<TokenResponse>> {
     match body.grant_type.as_str() {
         "authorization_code" => {
@@ -659,8 +911,8 @@ pub async fn token(
                             "client_id": client_id,
                             "scope": &response.scope,
                         })),
-                        extract_ip(&headers),
-                        extract_user_agent(&headers),
+                        extract_ip(headers),
+                        extract_user_agent(headers),
                     );
 
                     Ok(Json(TokenResponse {
@@ -679,17 +931,15 @@ pub async fn token(
                         None,
                         "sa.auth_failed".to_string(),
                         Some(serde_json::json!({ "client_id": client_id })),
-                        extract_ip(&headers),
-                        extract_user_agent(&headers),
+                        extract_ip(headers),
+                        extract_user_agent(headers),
                     );
                     Err(e)
                 }
             }
         }
 
-        other => Err(AppError::BadRequest(format!(
-            "Unsupported grant_type: {other}"
-        ))),
+        other => Err(AppError::UnsupportedGrantType(other.to_string())),
     }
 }
 

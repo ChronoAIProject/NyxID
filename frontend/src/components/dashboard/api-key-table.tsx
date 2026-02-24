@@ -253,7 +253,7 @@ export function ApiKeyTable() {
             >
               {copied ? (
                 <Check
-                  className="h-4 w-4 text-emerald-400"
+                  className="h-4 w-4 text-success"
                   aria-hidden="true"
                 />
               ) : (

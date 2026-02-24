@@ -194,10 +194,14 @@ async fn main() {
         ]))
         .allow_credentials(true);
 
-    // Build router with all middleware layers
-    let app = routes::build_router()
+    // Build router — public OAuth routes get open CORS (per RFC 9207),
+    // private API routes get restricted CORS (FRONTEND_URL only).
+    let (public_oauth, private_api) = routes::build_router();
+
+    let app = public_oauth
+        .merge(private_api.layer(cors))
         .with_state(state)
-        .layer(DefaultBodyLimit::max(1_048_576)) // 1MB global body limit
+        .layer(DefaultBodyLimit::max(1_048_576))
         .layer(axum_mw::from_fn(
             mw::security_headers::security_headers_middleware,
         ))
@@ -206,8 +210,7 @@ async fn main() {
         ))
         .layer(Extension(per_ip_rate_limiter))
         .layer(Extension(global_rate_limiter))
-        .layer(TraceLayer::new_for_http())
-        .layer(cors);
+        .layer(TraceLayer::new_for_http());
 
     // Bind and serve
     let addr = format!("0.0.0.0:{}", config.port);

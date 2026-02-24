@@ -119,7 +119,7 @@ export function AdminGroupsPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <PageHeader
         title="Group Management"
         description="Manage groups and their role assignments."
@@ -153,7 +153,7 @@ export function AdminGroupsPage() {
           <p className="text-sm text-muted-foreground">No groups found.</p>
         </div>
       ) : (
-        <div className="rounded-md border">
+        <div className="rounded-xl border border-border">
           <Table>
             <TableHeader>
               <TableRow>
@@ -307,7 +307,7 @@ export function AdminGroupsPage() {
                     <FormLabel>Roles</FormLabel>
                     <FormControl>
                       <select
-                        className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        className="flex w-full rounded-[10px] border border-input bg-popover px-3 py-2 text-[13px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value

@@ -12,6 +12,13 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -106,7 +113,7 @@ export function AdminUsersPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <PageHeader
         title="User Management"
         description="View and manage all registered users."
@@ -143,7 +150,7 @@ export function AdminUsersPage() {
         </form>
         <Button size="sm" onClick={openCreateDialog}>
           <UserPlus className="mr-1 h-4 w-4" />
-          Add User
+          Create User
         </Button>
       </div>
 
@@ -169,7 +176,7 @@ export function AdminUsersPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-md border">
+          <div className="rounded-xl border border-border">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -295,7 +302,7 @@ export function AdminUsersPage() {
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add User</DialogTitle>
+            <DialogTitle>Create User</DialogTitle>
             <DialogDescription>
               Create a new user account. The account will be active and
               email-verified immediately.
@@ -366,18 +373,17 @@ export function AdminUsersPage() {
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Role</FormLabel>
-                    <FormControl>
-                      <select
-                        className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                        value={field.value}
-                        onChange={field.onChange}
-                        onBlur={field.onBlur}
-                        name={field.name}
-                      >
-                        <option value="user">User</option>
-                        <option value="admin">Admin</option>
-                      </select>
-                    </FormControl>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select role" />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value="user">User</SelectItem>
+                        <SelectItem value="admin">Admin</SelectItem>
+                      </SelectContent>
+                    </Select>
                     <FormMessage />
                   </FormItem>
                 )}

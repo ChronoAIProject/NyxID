@@ -20,7 +20,7 @@ function CodeBlock({ children, label }: { readonly children: string; readonly la
           </Badge>
         </div>
       )}
-      <pre className="rounded bg-muted px-4 py-3 text-xs overflow-x-auto leading-relaxed">
+      <pre className="rounded-lg border border-border bg-muted px-4 py-3 font-mono text-xs overflow-x-auto leading-relaxed">
         {children}
       </pre>
     </div>
@@ -95,7 +95,7 @@ export function GuidePage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="text-3xl font-bold tracking-tight">Guide</h2>
+        <h2 className="font-display text-5xl font-normal tracking-tight">Guide</h2>
         <p className="text-muted-foreground">
           Learn how to set up and use NyxID for identity management and MCP proxy access.
         </p>
@@ -212,7 +212,7 @@ export function GuidePage() {
         title="Setting Up MCP Clients"
         description="Connect Cursor, Claude Code, or Codex to services via the MCP proxy"
       >
-        <div className="rounded-md border border-primary/20 bg-primary/5 p-4">
+        <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
           <p className="text-sm text-muted-foreground leading-relaxed">
             NyxID exposes a single MCP endpoint at{" "}
             <code className="rounded bg-muted px-1.5 py-0.5 text-xs">/mcp</code>{" "}

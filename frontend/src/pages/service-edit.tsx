@@ -109,7 +109,7 @@ export function ServiceEditPage() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 text-lg font-semibold">Service not found</h3>
+        <h3 className="mb-2 font-display text-lg font-semibold">Service not found</h3>
         <p className="mb-4 text-sm text-muted-foreground">
           The service you are trying to edit does not exist or has been deleted.
         </p>
@@ -124,7 +124,7 @@ export function ServiceEditPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <PageHeader
         breadcrumbs={[
           { label: "Services", to: "/services" },
@@ -171,7 +171,7 @@ export function ServiceEditPage() {
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -287,7 +287,7 @@ export function ServiceEditPage() {
                     </p>
                   </div>
 
-                  <div className="flex items-center justify-between rounded-md border p-3">
+                  <div className="flex items-center justify-between rounded-[10px] border border-border p-3">
                     <Label
                       htmlFor="inject-delegation-token"
                       className="text-sm font-normal"

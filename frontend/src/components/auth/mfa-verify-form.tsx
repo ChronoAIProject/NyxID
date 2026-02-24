@@ -85,7 +85,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
           <ShieldCheck className="h-6 w-6 text-primary" aria-hidden="true" />
         </div>
-        <h1 className="text-2xl font-semibold tracking-tight">
+        <h1 className="font-display text-[28px] font-normal tracking-tight">
           Two-factor authentication
         </h1>
         <p className="text-sm text-muted-foreground">

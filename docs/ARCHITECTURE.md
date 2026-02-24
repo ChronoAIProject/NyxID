@@ -294,6 +294,16 @@ frontend/src/
 - **Routing:** TanStack Router with file-based route definitions
 - **Styling:** Tailwind CSS v4 with shadcn/ui component library (Radix primitives)
 
+### SDK Packages (Top-Level)
+
+```
+sdk/oauth-core/   npm package @nyxid/oauth-core
+sdk/oauth-react/  npm package @nyxid/oauth-react
+```
+
+- `oauth-core`: protocol and PKCE logic, callback exchange, token/session helpers.
+- `oauth-react`: React provider/context/hooks built on top of `@nyxid/oauth-core`.
+
 ---
 
 ## Data Flow Diagrams

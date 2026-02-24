@@ -7,6 +7,7 @@ interface PageHeaderProps {
   readonly actions?: React.ReactNode;
 }
 
+/* ── VoidPortal Page Header ── */
 export function PageHeader({
   breadcrumbs,
   title,
@@ -14,15 +15,17 @@ export function PageHeader({
   actions,
 }: PageHeaderProps) {
   return (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-2">
       {breadcrumbs && breadcrumbs.length > 0 && (
         <Breadcrumb items={breadcrumbs} />
       )}
       <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-3xl font-bold tracking-tight">{title}</h2>
+        <div className="flex flex-col gap-2">
+          <h2 className="font-display text-5xl font-normal tracking-tight">
+            {title}
+          </h2>
           {description && (
-            <p className="text-muted-foreground">{description}</p>
+            <p className="text-sm text-muted-foreground">{description}</p>
           )}
         </div>
         {actions && <div className="flex items-center gap-2">{actions}</div>}

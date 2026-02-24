@@ -2,7 +2,7 @@ import { create } from "zustand";
 import type { User, LoginResponse } from "@/types/api";
 import { api, ApiError } from "@/lib/api-client";
 
-const MFA_REQUIRED_ERROR_CODE = "2002";
+const MFA_REQUIRED_ERROR_CODE = 2002;
 
 interface LoginResult {
   readonly mfaRequired: boolean;

@@ -117,7 +117,7 @@ describe("login", () => {
     apiMock.post.mockRejectedValueOnce(
       new ApiError(403, {
         error: "mfa_required",
-        error_code: "2002",
+        error_code: 2002,
         message: "MFA required",
         session_token: "session-tok-123",
       } as never),
@@ -134,7 +134,7 @@ describe("login", () => {
     apiMock.post.mockRejectedValueOnce(
       new ApiError(401, {
         error: "invalid_credentials",
-        error_code: "1001",
+        error_code: 1001,
         message: "Invalid credentials",
       }),
     );
@@ -202,7 +202,7 @@ describe("checkAuth", () => {
     apiMock.get.mockRejectedValueOnce(
       new ApiError(401, {
         error: "unauthorized",
-        error_code: "1001",
+        error_code: 1001,
         message: "Not authenticated",
       }),
     );
@@ -219,7 +219,7 @@ describe("checkAuth", () => {
     apiMock.get.mockRejectedValueOnce(
       new ApiError(500, {
         error: "server_error",
-        error_code: "5000",
+        error_code: 5000,
         message: "Server error",
       }),
     );

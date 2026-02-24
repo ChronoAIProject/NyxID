@@ -1,5 +1,13 @@
 import type { DownstreamService } from "@/types/api";
 
+export type OAuthScopeRisk = "low" | "medium" | "high";
+
+export interface OAuthScopeMeta {
+  readonly title: string;
+  readonly description: string;
+  readonly risk: OAuthScopeRisk;
+}
+
 export const AUTH_TYPE_LABELS: Readonly<Record<string, string>> = {
   none: "No Auth",
   api_key: "API Key",
@@ -16,6 +24,43 @@ export const SERVICE_CATEGORY_LABELS: Readonly<Record<string, string>> = {
   connection: "External Service",
   internal: "Internal Service",
 };
+
+export const OAUTH_SCOPE_META: Readonly<Record<string, OAuthScopeMeta>> = {
+  openid: {
+    title: "Authenticate your identity",
+    description: "Allows the app to verify who you are.",
+    risk: "low",
+  },
+  profile: {
+    title: "Read basic profile",
+    description: "Lets the app read your display name and profile details.",
+    risk: "low",
+  },
+  email: {
+    title: "Read your email",
+    description: "Lets the app access your email address and verification state.",
+    risk: "medium",
+  },
+  offline_access: {
+    title: "Long-lived access",
+    description:
+      "Lets the app refresh tokens without asking you to log in every time.",
+    risk: "high",
+  },
+};
+
+export function scopeRiskClass(risk: OAuthScopeRisk): string {
+  if (risk === "high") return "border-red-500/30 bg-red-500/10 text-red-200";
+  if (risk === "medium")
+    return "border-yellow-500/30 bg-yellow-500/10 text-yellow-200";
+  return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+}
+
+export function scopeRiskLabel(risk: OAuthScopeRisk): string {
+  if (risk === "high") return "High";
+  if (risk === "medium") return "Medium";
+  return "Low";
+}
 
 export function getAuthTypeLabel(service: DownstreamService): string {
   const key = service.auth_type ?? service.auth_method;

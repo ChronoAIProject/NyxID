@@ -49,7 +49,7 @@ export function ConsentsPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <PageHeader
         title="Authorized Applications"
         description="Manage applications that have access to your account."
@@ -79,7 +79,7 @@ export function ConsentsPage() {
           </p>
         </div>
       ) : (
-        <div className="rounded-md border">
+        <div className="rounded-xl border border-border">
           <Table>
             <TableHeader>
               <TableRow>

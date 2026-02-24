@@ -35,6 +35,13 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Plus, Server } from "lucide-react";
 import { toast } from "sonner";
 
@@ -84,10 +91,10 @@ export function ServiceListPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-3xl font-bold tracking-tight">Services</h2>
+          <h2 className="font-display text-5xl font-normal tracking-tight">Services</h2>
           <p className="text-muted-foreground">
             Manage downstream services and their authentication.
           </p>
@@ -96,12 +103,12 @@ export function ServiceListPage() {
           <DialogTrigger asChild>
             <Button>
               <Plus className="mr-2 h-4 w-4" />
-              Add Service
+              Create Service
             </Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Add Service</DialogTitle>
+              <DialogTitle>Create Service</DialogTitle>
               <DialogDescription>
                 Register a new downstream service to connect with NyxID.
               </DialogDescription>
@@ -140,7 +147,7 @@ export function ServiceListPage() {
                       <FormLabel>Description</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[60px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Optional description"
                           {...field}
                         />
@@ -173,34 +180,36 @@ export function ServiceListPage() {
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Auth Type</FormLabel>
-                      <FormControl>
-                        <select
-                          className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                          value={field.value}
-                          onChange={(e) => {
-                            field.onChange(e);
-                            // Auto-set category based on auth type
-                            if (e.target.value === "oidc") {
-                              form.setValue("service_category", "provider");
-                            } else if (e.target.value === "none") {
-                              form.setValue("service_category", "internal");
-                            } else if (
-                              form.getValues("service_category") === "provider" ||
-                              form.getValues("service_category") === "internal"
-                            ) {
-                              form.setValue("service_category", "connection");
-                            }
-                          }}
-                          onBlur={field.onBlur}
-                          name={field.name}
-                        >
+                      <Select
+                        value={field.value}
+                        onValueChange={(value) => {
+                          field.onChange(value);
+                          // Auto-set category based on auth type
+                          if (value === "oidc") {
+                            form.setValue("service_category", "provider");
+                          } else if (value === "none") {
+                            form.setValue("service_category", "internal");
+                          } else if (
+                            form.getValues("service_category") === "provider" ||
+                            form.getValues("service_category") === "internal"
+                          ) {
+                            form.setValue("service_category", "connection");
+                          }
+                        }}
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select auth type" />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
                           {AUTH_TYPES.map((type) => (
-                            <option key={type} value={type}>
+                            <SelectItem key={type} value={type}>
                               {AUTH_TYPE_LABELS[type] ?? type}
-                            </option>
+                            </SelectItem>
                           ))}
-                        </select>
-                      </FormControl>
+                        </SelectContent>
+                      </Select>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -213,23 +222,25 @@ export function ServiceListPage() {
                     render={({ field }) => (
                       <FormItem>
                         <FormLabel>Service Category</FormLabel>
-                        <FormControl>
-                          <select
-                            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                            value={field.value ?? "connection"}
-                            onChange={field.onChange}
-                            onBlur={field.onBlur}
-                            name={field.name}
-                          >
+                        <Select
+                          value={field.value ?? "connection"}
+                          onValueChange={field.onChange}
+                        >
+                          <FormControl>
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select category" />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
                             {SERVICE_CATEGORIES.filter(
                               (cat) => cat !== "provider",
                             ).map((cat) => (
-                              <option key={cat} value={cat}>
+                              <SelectItem key={cat} value={cat}>
                                 {SERVICE_CATEGORY_LABELS[cat] ?? cat}
-                              </option>
+                              </SelectItem>
                             ))}
-                          </select>
-                        </FormControl>
+                          </SelectContent>
+                        </Select>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -255,7 +266,7 @@ export function ServiceListPage() {
       </div>
 
       {isLoading ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }).map((_, i) => (
             <Skeleton key={`svc-skel-${String(i)}`} className="h-36 w-full" />
           ))}
@@ -268,12 +279,12 @@ export function ServiceListPage() {
           </p>
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {services.map((service) => (
             <ServiceCard
               key={service.id}
               service={service}
-              onDelete={(id) => void handleDelete(id)}
+              onDelete={handleDelete}
               isDeleting={deletingId === service.id}
             />
           ))}

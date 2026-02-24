@@ -10,6 +10,7 @@ interface CopyableFieldProps {
   readonly size?: "sm" | "md";
 }
 
+/* ── VoidPortal Copyable Field ── */
 export function CopyableField({
   label,
   value,
@@ -35,12 +36,12 @@ export function CopyableField({
 
   return (
     <div>
-      <p className={`mb-1 ${labelSize} font-medium text-muted-foreground`}>
+      <p className={`mb-1 ${labelSize} font-medium text-text-tertiary`}>
         {label}
       </p>
       <div className="flex items-center gap-1">
         <code
-          className={`flex-1 rounded bg-muted ${padding} ${textSize} break-all`}
+          className={`flex-1 rounded-md border border-border bg-muted font-mono ${padding} ${textSize} break-all text-foreground`}
         >
           {value}
         </code>
@@ -51,7 +52,7 @@ export function CopyableField({
           onClick={() => void handleCopy()}
         >
           {copied ? (
-            <Check className="h-3 w-3 text-green-400" />
+            <Check className="h-3 w-3 text-success" />
           ) : (
             <Copy className="h-3 w-3" />
           )}

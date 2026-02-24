@@ -3,13 +3,36 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use crate::handlers;
 use crate::mw::auth::{reject_delegated_tokens, reject_service_account_tokens};
 use crate::AppState;
 
-/// Build the complete application router with all route groups.
-pub fn build_router() -> Router<AppState> {
+/// Per RFC 9207 / OAuth 2.0 for Browser-Based Apps, the token endpoint,
+/// userinfo endpoint, and discovery documents MUST be accessible from any
+/// origin so that public SPA clients can call them directly.
+fn oauth_public_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods(AllowMethods::list([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::OPTIONS,
+        ]))
+        .allow_headers(AllowHeaders::list([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::ACCEPT,
+        ]))
+}
+
+/// Build two routers: (public OAuth / .well-known, private API).
+///
+/// The caller must attach separate CORS layers to each before merging.
+/// Public OAuth endpoints allow any origin (per RFC 9207) while private
+/// API endpoints restrict origin to FRONTEND_URL.
+pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
@@ -195,14 +218,35 @@ pub fn build_router() -> Router<AppState> {
 
     let oauth_routes = Router::new()
         .route("/authorize", get(handlers::oauth::authorize))
+        .route(
+            "/authorize/decision",
+            post(handlers::oauth::authorize_decision),
+        )
         .route("/token", post(handlers::oauth::token))
-        .route("/userinfo", get(handlers::oauth::userinfo))
+        .route("/userinfo", get(handlers::oauth::userinfo).post(handlers::oauth::userinfo))
         .route("/register", post(handlers::oauth::register_client))
         .route("/introspect", post(handlers::oauth::introspect))
         .route("/revoke", post(handlers::oauth::revoke));
 
     let delegation_routes = Router::new()
         .route("/refresh", post(handlers::delegation::refresh_delegation_token));
+
+    let developer_routes = Router::new()
+        .route(
+            "/oauth-clients",
+            get(handlers::developer_apps::list_my_oauth_clients)
+                .post(handlers::developer_apps::create_my_oauth_client),
+        )
+        .route(
+            "/oauth-clients/{client_id}",
+            get(handlers::developer_apps::get_my_oauth_client)
+                .patch(handlers::developer_apps::update_my_oauth_client)
+                .delete(handlers::developer_apps::delete_my_oauth_client),
+        )
+        .route(
+            "/oauth-clients/{client_id}/rotate-secret",
+            post(handlers::developer_apps::rotate_my_oauth_client_secret),
+        );
 
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
@@ -225,6 +269,7 @@ pub fn build_router() -> Router<AppState> {
         .nest("/services", service_routes)
         .nest("/sessions", session_routes)
         .nest("/mcp", mcp_routes)
+        .nest("/developer", developer_routes)
         .nest("/admin", admin_routes)
         .route("/public/config", get(handlers::health::public_config))
         .layer(middleware::from_fn(reject_delegated_tokens))
@@ -240,16 +285,20 @@ pub fn build_router() -> Router<AppState> {
         .route("/jwks.json", get(handlers::oidc_discovery::jwks))
         .route("/oauth-protected-resource", get(handlers::oidc_discovery::oauth_protected_resource));
 
-    Router::new()
-        .route("/health", get(handlers::health::health_check))
+    let public_oauth = Router::new()
         .nest("/.well-known", well_known_routes)
         .nest("/oauth", oauth_routes)
+        .layer(oauth_public_cors());
+
+    let private = Router::new()
+        .route("/health", get(handlers::health::health_check))
         .nest("/api/v1", api_v1)
-        // MCP StreamableHTTP endpoint (root level, not under /api/v1)
         .route(
             "/mcp",
             post(handlers::mcp_transport::mcp_post)
                 .get(handlers::mcp_transport::mcp_get)
                 .delete(handlers::mcp_transport::mcp_delete),
-        )
+        );
+
+    (public_oauth, private)
 }
