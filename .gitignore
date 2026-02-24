@@ -8,6 +8,7 @@ node_modules/
 .next/
 dist/
 build/
+*.tsbuildinfo
 
 # ─── Environment ───
 .env
@@ -38,3 +39,5 @@ docker-compose.override.yml
 k8s/
 
 .claude
+.playwright-mcp
+

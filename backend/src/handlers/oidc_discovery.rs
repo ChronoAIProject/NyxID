@@ -27,6 +27,7 @@ pub async fn openid_configuration(
         "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash", "roles", "groups", "permissions", "acr", "amr", "auth_time", "sid"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["client_secret_post", "none"],
+        "userinfo_signing_alg_values_supported": ["none"],
     }))
 }
 

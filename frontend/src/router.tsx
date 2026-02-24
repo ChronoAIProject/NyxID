@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import {
   createRouter,
   createRoute,
@@ -11,37 +12,48 @@ import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { useAuthStore } from "@/stores/auth-store";
 
-import { LoginPage } from "@/pages/login";
-import { RegisterPage } from "@/pages/register";
-import { DashboardPage } from "@/pages/dashboard";
-import { ApiKeysPage } from "@/pages/api-keys";
-import { ServicesPage } from "@/pages/services";
-import { ServiceListPage } from "@/pages/service-list";
-import { ServiceDetailPage } from "@/pages/service-detail";
-import { ServiceEditPage } from "@/pages/service-edit";
-import { ConnectionsPage } from "@/pages/connections";
-import { SettingsPage } from "@/pages/settings";
-import { GuidePage } from "@/pages/guide";
-import { ProvidersLayout } from "@/pages/providers-layout";
-import { ProvidersPage } from "@/pages/providers";
-import { ProvidersCallbackPage } from "@/pages/providers-callback";
-import { ProviderListPage } from "@/pages/provider-list";
-import { ProviderDetailPage } from "@/pages/provider-detail";
-import { ProviderEditPage } from "@/pages/provider-edit";
-import { AdminUsersPage } from "@/pages/admin-users";
-import { AdminUserDetailPage } from "@/pages/admin-user-detail";
-import { AdminRolesPage } from "@/pages/admin-roles";
-import { AdminRoleDetailPage } from "@/pages/admin-role-detail";
-import { AdminGroupsPage } from "@/pages/admin-groups";
-import { AdminGroupDetailPage } from "@/pages/admin-group-detail";
-import { AdminServiceAccountsPage } from "@/pages/admin-service-accounts";
-import { AdminServiceAccountDetailPage } from "@/pages/admin-service-account-detail";
-import { ConsentsPage } from "@/pages/consents";
+import {
+  LoginPage,
+  RegisterPage,
+  DashboardPage,
+  ApiKeysPage,
+  ServicesPage,
+  ServiceListPage,
+  ServiceDetailPage,
+  ServiceEditPage,
+  ConnectionsPage,
+  SettingsPage,
+  GuidePage,
+  ProvidersLayout,
+  ProvidersPage,
+  ProvidersCallbackPage,
+  ProviderListPage,
+  ProviderDetailPage,
+  ProviderEditPage,
+  AdminUsersPage,
+  AdminUserDetailPage,
+  AdminRolesPage,
+  AdminRoleDetailPage,
+  AdminGroupsPage,
+  AdminGroupDetailPage,
+  AdminServiceAccountsPage,
+  AdminServiceAccountDetailPage,
+  ConsentsPage,
+  DeveloperAppsPage,
+  DeveloperAppDetailPage,
+  IntegrationGuidePage,
+  OAuthConsentPage,
+  OAuthErrorPage,
+} from "@/pages/lazy";
+
+// ── Route tree ──
 
 const rootRoute = createRootRoute({
   component: () => (
     <TooltipProvider>
-      <Outlet />
+      <Suspense>
+        <Outlet />
+      </Suspense>
       <Toaster />
     </TooltipProvider>
   ),
@@ -53,9 +65,6 @@ const authLayout = createRoute({
   beforeLoad: () => {
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
-      // If return_to is present (OAuth browser flow), honor it instead of
-      // redirecting to the dashboard. The authorize endpoint redirects here
-      // after the user logs in so it can issue an authorization code.
       const returnTo = new URLSearchParams(window.location.search).get(
         "return_to",
       );
@@ -79,6 +88,28 @@ const registerRoute = createRoute({
   path: "/register",
   getParentRoute: () => authLayout,
   component: RegisterPage,
+});
+
+const oauthConsentRoute = createRoute({
+  path: "/oauth-consent",
+  getParentRoute: () => rootRoute,
+  beforeLoad: () => {
+    const { isAuthenticated, isLoading } = useAuthStore.getState();
+    if (!isAuthenticated && !isLoading) {
+      const returnTo = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+      window.location.assign(
+        `/login?return_to=${encodeURIComponent(returnTo)}`,
+      );
+      return;
+    }
+  },
+  component: OAuthConsentPage,
+});
+
+const oauthErrorRoute = createRoute({
+  path: "/error",
+  getParentRoute: () => rootRoute,
+  component: OAuthErrorPage,
 });
 
 const dashboardLayout = createRoute({
@@ -151,6 +182,24 @@ const consentsRoute = createRoute({
   path: "/settings/consents",
   getParentRoute: () => dashboardLayout,
   component: ConsentsPage,
+});
+
+const developerAppsRoute = createRoute({
+  path: "/developer/apps",
+  getParentRoute: () => dashboardLayout,
+  component: DeveloperAppsPage,
+});
+
+const developerAppDetailRoute = createRoute({
+  path: "/developer/apps/$clientId",
+  getParentRoute: () => dashboardLayout,
+  component: DeveloperAppDetailPage,
+});
+
+const integrationGuideRoute = createRoute({
+  path: "/integration-guide",
+  getParentRoute: () => dashboardLayout,
+  component: IntegrationGuidePage,
 });
 
 const providersLayout = createRoute({
@@ -254,6 +303,8 @@ const adminServiceAccountDetailRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   authLayout.addChildren([loginRoute, registerRoute]),
+  oauthConsentRoute,
+  oauthErrorRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
     apiKeysRoute,
@@ -273,6 +324,9 @@ const routeTree = rootRoute.addChildren([
     settingsRoute,
     consentsRoute,
     guideRoute,
+    developerAppsRoute,
+    developerAppDetailRoute,
+    integrationGuideRoute,
     adminLayout.addChildren([
       adminUsersRoute,
       adminUserDetailRoute,

@@ -4,7 +4,7 @@ const BASE_URL = "/api/v1";
 
 export class ApiError extends Error {
   readonly status: number;
-  readonly errorCode: string;
+  readonly errorCode: number;
   readonly errorResponse: ApiErrorResponse;
 
   constructor(status: number, response: ApiErrorResponse) {
@@ -77,9 +77,19 @@ async function parseErrorResponse(response: Response): Promise<ApiErrorResponse>
   } catch {
     return {
       error: "unknown_error",
-      error_code: "UNKNOWN",
+      error_code: -1,
       message: `Request failed with status ${String(response.status)}`,
     };
+  }
+}
+
+function redirectToConsentIfRequired(error: ApiErrorResponse): void {
+  if (error.error !== "consent_required" || !error.consent_url) {
+    return;
+  }
+
+  if (typeof window !== "undefined") {
+    window.location.assign(error.consent_url);
   }
 }
 
@@ -109,7 +119,9 @@ export async function apiClient<T>(
       const retryResponse = await fetch(url, buildFetchConfig(options));
 
       if (!retryResponse.ok) {
-        throw new ApiError(retryResponse.status, await parseErrorResponse(retryResponse));
+        const errorBody = await parseErrorResponse(retryResponse);
+        redirectToConsentIfRequired(errorBody);
+        throw new ApiError(retryResponse.status, errorBody);
       }
 
       if (retryResponse.status === 204) {
@@ -124,7 +136,9 @@ export async function apiClient<T>(
   }
 
   if (!response.ok) {
-    throw new ApiError(response.status, await parseErrorResponse(response));
+    const errorBody = await parseErrorResponse(response);
+    redirectToConsentIfRequired(errorBody);
+    throw new ApiError(response.status, errorBody);
   }
 
   if (response.status === 204) {

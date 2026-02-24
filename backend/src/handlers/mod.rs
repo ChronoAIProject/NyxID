@@ -9,6 +9,7 @@ pub mod auth;
 pub mod consent;
 pub mod connections;
 pub mod delegation;
+pub mod developer_apps;
 pub mod endpoints;
 pub mod health;
 pub mod llm_gateway;

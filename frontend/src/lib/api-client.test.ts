@@ -61,7 +61,7 @@ describe("apiClient", () => {
       json: () =>
         Promise.resolve({
           error: "bad_request",
-          error_code: "1000",
+          error_code: 1000,
           message: "Invalid input",
         }),
       headers: new Headers(),
@@ -77,7 +77,7 @@ describe("apiClient", () => {
       json: () =>
         Promise.resolve({
           error: "forbidden",
-          error_code: "1002",
+          error_code: 1002,
           message: "Access denied",
         }),
       headers: new Headers(),
@@ -90,7 +90,7 @@ describe("apiClient", () => {
       expect(err).toBeInstanceOf(ApiError);
       const apiErr = err as ApiError;
       expect(apiErr.status).toBe(403);
-      expect(apiErr.errorCode).toBe("1002");
+      expect(apiErr.errorCode).toBe(1002);
       expect(apiErr.message).toBe("Access denied");
     }
   });
@@ -110,7 +110,7 @@ describe("apiClient", () => {
       expect(err).toBeInstanceOf(ApiError);
       const apiErr = err as ApiError;
       expect(apiErr.status).toBe(500);
-      expect(apiErr.errorCode).toBe("UNKNOWN");
+      expect(apiErr.errorCode).toBe(-1);
     }
   });
 
@@ -125,7 +125,7 @@ describe("apiClient", () => {
 });
 
 describe("401 token refresh interceptor", () => {
-  function errorResponse(status: number, errorCode: string, message: string): Response {
+  function errorResponse(status: number, errorCode: number, message: string): Response {
     return {
       ok: false,
       status,
@@ -141,7 +141,7 @@ describe("401 token refresh interceptor", () => {
 
   it("refreshes token and retries on 401", async () => {
     // 1st call: original request returns 401
-    mockFetch.mockResolvedValueOnce(errorResponse(401, "1001", "Not authenticated"));
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Not authenticated"));
     // 2nd call: refresh endpoint succeeds
     mockFetch.mockResolvedValueOnce(jsonResponse({}, 200));
     // 3rd call: retried original request succeeds
@@ -159,9 +159,9 @@ describe("401 token refresh interceptor", () => {
 
   it("throws original 401 when refresh fails", async () => {
     // 1st call: original request returns 401
-    mockFetch.mockResolvedValueOnce(errorResponse(401, "1001", "Not authenticated"));
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Not authenticated"));
     // 2nd call: refresh endpoint fails
-    mockFetch.mockResolvedValueOnce(errorResponse(401, "1001", "Refresh failed"));
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Refresh failed"));
 
     try {
       await apiClient("/users/me");
@@ -178,11 +178,11 @@ describe("401 token refresh interceptor", () => {
 
   it("throws ApiError when retry after refresh also fails", async () => {
     // 1st call: original 401
-    mockFetch.mockResolvedValueOnce(errorResponse(401, "1001", "Not authenticated"));
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Not authenticated"));
     // 2nd call: refresh succeeds
     mockFetch.mockResolvedValueOnce(jsonResponse({}, 200));
     // 3rd call: retry fails with 403
-    mockFetch.mockResolvedValueOnce(errorResponse(403, "1002", "Forbidden"));
+    mockFetch.mockResolvedValueOnce(errorResponse(403, 1002, "Forbidden"));
 
     try {
       await apiClient("/admin/users");
@@ -196,7 +196,7 @@ describe("401 token refresh interceptor", () => {
   });
 
   it("returns undefined when retry yields 204", async () => {
-    mockFetch.mockResolvedValueOnce(errorResponse(401, "1001", "Expired"));
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Expired"));
     mockFetch.mockResolvedValueOnce(jsonResponse({}, 200));
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -222,7 +222,7 @@ describe("401 token refresh interceptor", () => {
 
     for (const endpoint of authEndpoints) {
       mockFetch.mockReset();
-      mockFetch.mockResolvedValueOnce(errorResponse(401, "1001", "Unauthorized"));
+      mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Unauthorized"));
 
       try {
         await apiClient(endpoint);
@@ -240,9 +240,9 @@ describe("401 token refresh interceptor", () => {
   it("coalesces concurrent refresh attempts into a single call", async () => {
     // Set up responses for 2 concurrent requests that both get 401
     // Request 1: 401
-    mockFetch.mockResolvedValueOnce(errorResponse(401, "1001", "Expired"));
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Expired"));
     // Request 2: 401
-    mockFetch.mockResolvedValueOnce(errorResponse(401, "1001", "Expired"));
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Expired"));
     // Single shared refresh call
     mockFetch.mockResolvedValueOnce(jsonResponse({}, 200));
     // Request 1 retry
@@ -268,7 +268,7 @@ describe("401 token refresh interceptor", () => {
   });
 
   it("handles network error during refresh gracefully", async () => {
-    mockFetch.mockResolvedValueOnce(errorResponse(401, "1001", "Expired"));
+    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Expired"));
     // Refresh call throws network error
     mockFetch.mockRejectedValueOnce(new TypeError("Failed to fetch"));
 

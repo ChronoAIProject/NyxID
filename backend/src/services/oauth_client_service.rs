@@ -106,10 +106,38 @@ pub async fn list_clients(db: &mongodb::Database) -> AppResult<Vec<OauthClient>>
     Ok(clients)
 }
 
+/// List OAuth clients created by a specific user.
+pub async fn list_clients_by_creator(
+    db: &mongodb::Database,
+    created_by: &str,
+) -> AppResult<Vec<OauthClient>> {
+    let clients: Vec<OauthClient> = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find(doc! { "created_by": created_by })
+        .sort(doc! { "created_at": -1 })
+        .await?
+        .try_collect()
+        .await?;
+
+    Ok(clients)
+}
+
 /// Fetch a single OAuth client by ID.
 pub async fn get_client(db: &mongodb::Database, client_id: &str) -> AppResult<OauthClient> {
     db.collection::<OauthClient>(OAUTH_CLIENTS)
         .find_one(doc! { "_id": client_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("OAuth client not found".to_string()))
+}
+
+/// Fetch a single OAuth client by ID and owner.
+pub async fn get_client_for_creator(
+    db: &mongodb::Database,
+    client_id: &str,
+    created_by: &str,
+) -> AppResult<OauthClient> {
+    db.collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one(doc! { "_id": client_id, "created_by": created_by })
         .await?
         .ok_or_else(|| AppError::NotFound("OAuth client not found".to_string()))
 }
@@ -141,6 +169,51 @@ pub async fn update_redirect_uris(
     Ok(())
 }
 
+/// Update mutable fields on an OAuth client owned by a specific user.
+pub async fn update_client_for_creator(
+    db: &mongodb::Database,
+    client_id: &str,
+    created_by: &str,
+    client_name: Option<&str>,
+    redirect_uris: Option<&[String]>,
+    delegation_scopes: Option<&str>,
+) -> AppResult<OauthClient> {
+    let mut set_doc = doc! {
+        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+    };
+
+    if let Some(name) = client_name {
+        set_doc.insert("client_name", name);
+    }
+
+    if let Some(uris) = redirect_uris {
+        set_doc.insert(
+            "redirect_uris",
+            bson::to_bson(uris).map_err(|e| {
+                AppError::Internal(format!("Failed to convert redirect_uris to bson: {e}"))
+            })?,
+        );
+    }
+
+    if let Some(scopes) = delegation_scopes {
+        set_doc.insert("delegation_scopes", scopes);
+    }
+
+    let result = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .update_one(
+            doc! { "_id": client_id, "created_by": created_by, "is_active": true },
+            doc! { "$set": set_doc },
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("OAuth client not found".to_string()));
+    }
+
+    get_client_for_creator(db, client_id, created_by).await
+}
+
 /// Soft-delete an OAuth client by marking it inactive.
 pub async fn delete_client(db: &mongodb::Database, client_id: &str) -> AppResult<()> {
     let now = Utc::now();
@@ -161,4 +234,60 @@ pub async fn delete_client(db: &mongodb::Database, client_id: &str) -> AppResult
     }
 
     Ok(())
+}
+
+/// Soft-delete an OAuth client owned by a specific user.
+pub async fn delete_client_for_creator(
+    db: &mongodb::Database,
+    client_id: &str,
+    created_by: &str,
+) -> AppResult<()> {
+    let now = Utc::now();
+    let result = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .update_one(
+            doc! { "_id": client_id, "created_by": created_by },
+            doc! { "$set": {
+                "is_active": false,
+                "updated_at": bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("OAuth client not found".to_string()));
+    }
+
+    Ok(())
+}
+
+/// Rotate client secret for a confidential OAuth client owned by a specific user.
+pub async fn rotate_client_secret_for_creator(
+    db: &mongodb::Database,
+    client_id: &str,
+    created_by: &str,
+) -> AppResult<(OauthClient, String)> {
+    let client = get_client_for_creator(db, client_id, created_by).await?;
+
+    if client.client_type != "confidential" {
+        return Err(AppError::BadRequest(
+            "Only confidential clients can rotate secret".to_string(),
+        ));
+    }
+
+    let new_secret = generate_random_token();
+    let new_hash = hash_token(&new_secret);
+
+    db.collection::<OauthClient>(OAUTH_CLIENTS)
+        .update_one(
+            doc! { "_id": client_id, "created_by": created_by, "is_active": true },
+            doc! { "$set": {
+                "client_secret_hash": new_hash,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+
+    let updated = get_client_for_creator(db, client_id, created_by).await?;
+    Ok((updated, new_secret))
 }

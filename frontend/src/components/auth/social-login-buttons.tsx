@@ -59,7 +59,7 @@ export function SocialLoginButtons() {
     if (!returnUrl.startsWith(window.location.origin)) {
       return;
     }
-    window.location.href = returnUrl;
+    window.location.assign(returnUrl);
   }
 
   if (enabledProviders.length === 0) {

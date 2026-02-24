@@ -7,6 +7,8 @@ import {
   Plug,
   Settings,
   BookOpen,
+  BookMarked,
+  Code,
   Users,
   ShieldCheck,
   UsersRound,
@@ -27,6 +29,11 @@ const NAV_ITEMS = [
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
   { to: "/guide", icon: BookOpen, label: "Guide" },
+] as const;
+
+const DEVELOPER_NAV_ITEMS = [
+  { to: "/developer/apps", icon: Code, label: "Developer Apps" },
+  { to: "/integration-guide", icon: BookMarked, label: "Integration Guide" },
 ] as const;
 
 const ADMIN_NAV_ITEMS = [
@@ -117,8 +124,23 @@ export function Sidebar() {
         </nav>
       </div>
 
-      {/* ── Bottom: Admin + Account ── */}
+      {/* ── Bottom: Developer + Admin + Account ── */}
       <div className="flex flex-col gap-6">
+        {/* Developer section */}
+        <div className="flex flex-col gap-1">
+          <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
+            Developer
+          </p>
+          {DEVELOPER_NAV_ITEMS.map((item) => (
+            <NavButton
+              key={item.to}
+              item={item}
+              isActive={isNavActive(item.to, currentPath, DEVELOPER_NAV_ITEMS)}
+              onClick={() => void navigate({ to: item.to as string })}
+            />
+          ))}
+        </div>
+
         {/* Admin section */}
         {user?.is_admin && (
           <div className="flex flex-col gap-1">

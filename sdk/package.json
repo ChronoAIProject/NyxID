@@ -1,0 +1,14 @@
+{
+  "name": "@nyxid/sdk-workspace",
+  "private": true,
+  "workspaces": [
+    "oauth-core",
+    "oauth-react",
+    "demo-react"
+  ],
+  "scripts": {
+    "build": "npm run -ws build",
+    "clean": "npm run -ws clean",
+    "prepublish:all": "npm run -ws prepublishOnly"
+  }
+}
