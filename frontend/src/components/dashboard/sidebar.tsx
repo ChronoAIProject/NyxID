@@ -1,4 +1,4 @@
-import { useRouterState, useNavigate } from "@tanstack/react-router";
+import { useRouterState, Link } from "@tanstack/react-router";
 import {
   LayoutDashboard,
   Key,
@@ -61,20 +61,17 @@ function isNavActive(
   );
 }
 
-/* ── Shared nav button renderer ── */
-function NavButton({
+/* ── Shared nav link renderer ── */
+function NavLink({
   item,
   isActive,
-  onClick,
 }: {
-  readonly item: { readonly icon: React.ComponentType<{ className?: string }>; readonly label: string };
+  readonly item: { readonly to: string; readonly icon: React.ComponentType<{ className?: string }>; readonly label: string };
   readonly isActive: boolean;
-  readonly onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <Link
+      to={item.to}
       className={cn(
         "relative flex w-full items-center gap-[14px] rounded-[10px] px-4 py-3.5 text-sm transition-colors",
         isActive
@@ -85,14 +82,13 @@ function NavButton({
     >
       <item.icon className={cn("h-[18px] w-[18px] shrink-0", isActive ? "text-primary" : "text-text-tertiary")} />
       {item.label}
-    </button>
+    </Link>
   );
 }
 
 /* ── VoidPortal Sidebar ── */
 export function Sidebar() {
   const routerState = useRouterState();
-  const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
 
@@ -114,11 +110,10 @@ export function Sidebar() {
         {/* Main Nav */}
         <nav className="flex flex-col gap-1">
           {NAV_ITEMS.map((item) => (
-            <NavButton
+            <NavLink
               key={item.to}
               item={item}
               isActive={isNavActive(item.to, currentPath, NAV_ITEMS)}
-              onClick={() => void navigate({ to: item.to as string })}
             />
           ))}
         </nav>
@@ -132,11 +127,10 @@ export function Sidebar() {
             Developer
           </p>
           {DEVELOPER_NAV_ITEMS.map((item) => (
-            <NavButton
+            <NavLink
               key={item.to}
               item={item}
               isActive={isNavActive(item.to, currentPath, DEVELOPER_NAV_ITEMS)}
-              onClick={() => void navigate({ to: item.to as string })}
             />
           ))}
         </div>
@@ -148,11 +142,10 @@ export function Sidebar() {
               Admin
             </p>
             {ADMIN_NAV_ITEMS.map((item) => (
-              <NavButton
+              <NavLink
                 key={item.to}
                 item={item}
                 isActive={isNavActive(item.to, currentPath, ADMIN_NAV_ITEMS)}
-                onClick={() => void navigate({ to: item.to as string })}
               />
             ))}
           </div>
