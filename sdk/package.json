@@ -1,5 +1,5 @@
 {
-  "name": "@nyxid/sdk-workspace",
+  "name": "@nyxids/sdk-workspace",
   "private": true,
   "workspaces": [
     "oauth-core",

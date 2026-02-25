@@ -1,5 +1,5 @@
 {
-  "name": "@nyxid/oauth-core",
+  "name": "@nyxids/oauth-core",
   "version": "0.1.0",
   "description": "NyxID OAuth core SDK with PKCE and token handling",
   "type": "module",

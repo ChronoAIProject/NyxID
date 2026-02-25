@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNyxID } from "@nyxid/oauth-react";
-import type { LoginRedirectOptions } from "@nyxid/oauth-core";
+import { useNyxID } from "@nyxids/oauth-react";
+import type { LoginRedirectOptions } from "@nyxids/oauth-core";
 
 type PromptValue = "" | "none" | "login" | "consent" | "login consent";
 

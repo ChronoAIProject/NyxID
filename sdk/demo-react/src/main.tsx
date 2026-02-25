@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { NyxIDProvider, createNyxClient } from "@nyxid/oauth-react";
+import { NyxIDProvider, createNyxClient } from "@nyxids/oauth-react";
 import { App } from "./App";
 import "./styles.css";
 

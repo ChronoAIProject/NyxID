@@ -1,5 +1,5 @@
 {
-  "name": "@nyxid/oauth-react-demo",
+  "name": "@nyxids/oauth-react-demo",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@nyxid/oauth-react": "^0.1.0",
+    "@nyxids/oauth-react": "^0.1.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
