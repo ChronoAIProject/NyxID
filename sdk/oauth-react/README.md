@@ -1,17 +1,17 @@
-# @nyxid/oauth-react
+# @nyxids/oauth-react
 
 React bindings for NyxID OAuth SDK.
 
 ## Install
 
 ```bash
-npm install @nyxid/oauth-react @nyxid/oauth-core
+npm install @nyxids/oauth-react @nyxids/oauth-core
 ```
 
 ## Usage
 
 ```tsx
-import { NyxIDProvider, createNyxClient, useNyxID } from "@nyxid/oauth-react";
+import { NyxIDProvider, createNyxClient, useNyxID } from "@nyxids/oauth-react";
 
 const client = createNyxClient({
   baseUrl: "https://auth.example.com",

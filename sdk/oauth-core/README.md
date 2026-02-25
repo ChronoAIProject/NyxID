@@ -1,17 +1,17 @@
-# @nyxid/oauth-core
+# @nyxids/oauth-core
 
 Core OAuth SDK for NyxID.
 
 ## Install
 
 ```bash
-npm install @nyxid/oauth-core
+npm install @nyxids/oauth-core
 ```
 
 ## Usage
 
 ```ts
-import { NyxIDClient } from "@nyxid/oauth-core";
+import { NyxIDClient } from "@nyxids/oauth-core";
 
 const client = new NyxIDClient({
   baseUrl: "https://auth.example.com",

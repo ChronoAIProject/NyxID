@@ -1,6 +1,6 @@
 # NyxID OAuth React Demo
 
-Minimal demo app that uses `@nyxid/oauth-react` to authenticate against NyxID.
+Minimal demo app that uses `@nyxids/oauth-react` to authenticate against NyxID.
 
 ## What it demonstrates
 

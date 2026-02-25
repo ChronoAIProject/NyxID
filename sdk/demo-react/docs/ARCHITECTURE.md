@@ -26,5 +26,5 @@ demo-react/
 
 ## Dependency Boundary
 
-- Depends only on `@nyxid/oauth-react` and React runtime.
+- Depends only on `@nyxids/oauth-react` and React runtime.
 - No coupling to the main NyxID frontend app code.

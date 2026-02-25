@@ -32,6 +32,6 @@ sdk/
 
 ## Dependency Boundary
 
-- `oauth-react` depends on `@nyxid/oauth-core` via workspace linkage.
-- `demo-react` depends on `@nyxid/oauth-react` via workspace linkage.
+- `oauth-react` depends on `@nyxids/oauth-core` via workspace linkage.
+- `demo-react` depends on `@nyxids/oauth-react` via workspace linkage.
 - SDK workspace remains independent from app runtime code in `frontend/`.

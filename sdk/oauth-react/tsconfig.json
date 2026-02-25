@@ -9,8 +9,8 @@
     "baseUrl": ".",
     "typeRoots": ["../../frontend/node_modules/@types"],
     "paths": {
-      "@nyxid/oauth-core": ["../oauth-core/dist/index"],
-      "@nyxid/oauth-core/*": ["../oauth-core/dist/*"]
+      "@nyxids/oauth-core": ["../oauth-core/dist/index"],
+      "@nyxids/oauth-core/*": ["../oauth-core/dist/*"]
     },
     "declaration": true,
     "declarationMap": true,

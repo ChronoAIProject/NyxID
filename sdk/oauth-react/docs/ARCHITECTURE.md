@@ -18,5 +18,5 @@ oauth-react/
 
 ## Dependency Boundary
 
-- Depends on `@nyxid/oauth-core` for protocol logic.
+- Depends on `@nyxids/oauth-core` for protocol logic.
 - Exposes React-only API surface (`NyxIDProvider`, `useNyxID`, `createNyxClient`).

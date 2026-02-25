@@ -12,7 +12,7 @@ import {
   type NyxIDClientConfig,
   type NyxIDTokenSet,
   type OAuthUserInfo,
-} from "@nyxid/oauth-core";
+} from "@nyxids/oauth-core";
 
 interface NyxIDContextValue {
   readonly client: NyxIDClient;
