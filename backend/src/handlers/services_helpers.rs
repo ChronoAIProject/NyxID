@@ -93,7 +93,10 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
 }
 
 /// Validate that a base_url is safe to proxy to (not a private/internal address).
-pub fn validate_base_url(url: &str) -> AppResult<()> {
+///
+/// In development mode, private/internal addresses (localhost, 127.0.0.1, etc.)
+/// are allowed so that locally-running downstream services can be registered.
+pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
     // Must start with https:// or http://
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(AppError::ValidationError(
@@ -109,6 +112,11 @@ pub fn validate_base_url(url: &str) -> AppResult<()> {
     let host = parsed.host_str().ok_or_else(|| {
         AppError::ValidationError("base_url must contain a hostname".to_string())
     })?;
+
+    // Skip private-address checks in development mode
+    if allow_private {
+        return Ok(());
+    }
 
     // Block private/reserved hostnames
     let blocked_hosts = [

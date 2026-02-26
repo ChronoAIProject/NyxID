@@ -240,8 +240,8 @@ pub async fn create_provider(
         })?;
 
         // SSRF validation on OAuth provider URLs
-        validate_base_url(authorization_url)?;
-        validate_base_url(token_url)?;
+        validate_base_url(authorization_url, state.config.is_development())?;
+        validate_base_url(token_url, state.config.is_development())?;
 
         Some(provider_service::OAuthProviderInput {
             authorization_url: authorization_url.clone(),
@@ -284,15 +284,15 @@ pub async fn create_provider(
         })?;
 
         // SSRF validation on all URLs
-        validate_base_url(authorization_url)?;
-        validate_base_url(token_url)?;
-        validate_base_url(device_code_url)?;
-        validate_base_url(device_token_url)?;
+        validate_base_url(authorization_url, state.config.is_development())?;
+        validate_base_url(token_url, state.config.is_development())?;
+        validate_base_url(device_code_url, state.config.is_development())?;
+        validate_base_url(device_token_url, state.config.is_development())?;
         if let Some(ref url) = body.device_verification_url {
-            validate_base_url(url)?;
+            validate_base_url(url, state.config.is_development())?;
         }
         if let Some(ref url) = body.hosted_callback_url {
-            validate_base_url(url)?;
+            validate_base_url(url, state.config.is_development())?;
         }
 
         Some(provider_service::DeviceCodeProviderInput {
@@ -372,22 +372,22 @@ pub async fn update_provider(
 
     // SSRF validation on URLs if provided
     if let Some(ref url) = body.authorization_url {
-        validate_base_url(url)?;
+        validate_base_url(url, state.config.is_development())?;
     }
     if let Some(ref url) = body.token_url {
-        validate_base_url(url)?;
+        validate_base_url(url, state.config.is_development())?;
     }
     if let Some(ref url) = body.device_code_url {
-        validate_base_url(url)?;
+        validate_base_url(url, state.config.is_development())?;
     }
     if let Some(ref url) = body.device_token_url {
-        validate_base_url(url)?;
+        validate_base_url(url, state.config.is_development())?;
     }
     if let Some(ref url) = body.device_verification_url {
-        validate_base_url(url)?;
+        validate_base_url(url, state.config.is_development())?;
     }
     if let Some(ref url) = body.hosted_callback_url {
-        validate_base_url(url)?;
+        validate_base_url(url, state.config.is_development())?;
     }
 
     let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;

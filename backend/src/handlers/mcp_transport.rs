@@ -11,6 +11,7 @@ use tokio_stream::StreamExt;
 
 use crate::crypto::{aes, jwt};
 use crate::models::mcp_session;
+use crate::models::service_account::{ServiceAccount, COLLECTION_NAME as SERVICE_ACCOUNTS};
 use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::services::{audit_service, mcp_service};
 use crate::AppState;
@@ -185,6 +186,11 @@ async fn authenticate_mcp(
     if let Some(token) = token {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
+                // Service account tokens have sa=true; verify against
+                // the service_accounts collection instead of users.
+                if claims.sa == Some(true) {
+                    return verify_service_account_active(state, claims.sub).await;
+                }
                 return verify_user_active(state, claims.sub).await;
             }
             Err(_) if session_fallback => {
@@ -226,6 +232,21 @@ async fn verify_user_active(state: &AppState, user_id: String) -> Result<String,
     match user {
         Some(u) if u.is_active => Ok(user_id),
         _ => Err(mcp_401(&state.config.base_url)),
+    }
+}
+
+/// Check that a service account exists and is active.
+async fn verify_service_account_active(state: &AppState, sa_id: String) -> Result<String, Response> {
+    let sa = state
+        .db
+        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+        .find_one(doc! { "_id": &sa_id, "is_active": true })
+        .await
+        .map_err(|_| rpc_error(None, -32603, "Internal error"))?;
+
+    match sa {
+        Some(_) => Ok(sa_id),
+        None => Err(mcp_401(&state.config.base_url)),
     }
 }
 
