@@ -11,6 +11,7 @@ import { Toaster } from "@/components/ui/toast";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { useAuthStore } from "@/stores/auth-store";
+import { isNative } from "@/lib/platform";
 
 import {
   LoginPage,
@@ -44,6 +45,7 @@ import {
   IntegrationGuidePage,
   OAuthConsentPage,
   OAuthErrorPage,
+  PrivacyPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
@@ -68,7 +70,7 @@ const authLayout = createRoute({
       const returnTo = new URLSearchParams(window.location.search).get(
         "return_to",
       );
-      if (returnTo && returnTo.startsWith(window.location.origin + "/")) {
+      if (returnTo && !isNative && returnTo.startsWith(window.location.origin + "/")) {
         window.location.assign(returnTo);
         return;
       }
@@ -96,7 +98,11 @@ const oauthConsentRoute = createRoute({
   beforeLoad: () => {
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (!isAuthenticated && !isLoading) {
-      const returnTo = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+      const returnPath = `${window.location.pathname}${window.location.search}`;
+      if (isNative) {
+        throw redirect({ to: "/login", search: { return_to: returnPath } });
+      }
+      const returnTo = `${window.location.origin}${returnPath}`;
       window.location.assign(
         `/login?return_to=${encodeURIComponent(returnTo)}`,
       );
@@ -110,6 +116,12 @@ const oauthErrorRoute = createRoute({
   path: "/error",
   getParentRoute: () => rootRoute,
   component: OAuthErrorPage,
+});
+
+const privacyRoute = createRoute({
+  path: "/privacy",
+  getParentRoute: () => rootRoute,
+  component: PrivacyPage,
 });
 
 const dashboardLayout = createRoute({
@@ -305,6 +317,7 @@ const routeTree = rootRoute.addChildren([
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
   oauthErrorRoute,
+  privacyRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
     apiKeysRoute,

@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { usePublicConfig } from "@/hooks/use-public-config";
+import { openExternal } from "@/lib/navigation";
 
 const SOCIAL_PROVIDERS = [
   {
@@ -59,7 +60,7 @@ export function SocialLoginButtons() {
     if (!returnUrl.startsWith(window.location.origin)) {
       return;
     }
-    window.location.assign(returnUrl);
+    void openExternal(returnUrl);
   }
 
   if (enabledProviders.length === 0) {

@@ -16,6 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { KeyRound } from "lucide-react";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
+import { hardRedirect } from "@/lib/navigation";
 
 export function ProviderGrid() {
   const { data: providers, isLoading: providersLoading } = useProviders();
@@ -50,7 +51,7 @@ export function ProviderGrid() {
     setActiveProviderId(providerId);
     try {
       const response = await initiateOAuthMutation.mutateAsync(providerId);
-      window.location.href = response.authorization_url;
+      hardRedirect(response.authorization_url);
     } catch (error) {
       if (error instanceof ApiError) {
         toast.error(error.message);

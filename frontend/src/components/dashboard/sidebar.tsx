@@ -65,13 +65,16 @@ function isNavActive(
 function NavLink({
   item,
   isActive,
+  onClick,
 }: {
   readonly item: { readonly to: string; readonly icon: React.ComponentType<{ className?: string }>; readonly label: string };
   readonly isActive: boolean;
+  readonly onClick?: () => void;
 }) {
   return (
     <Link
       to={item.to}
+      onClick={onClick}
       className={cn(
         "relative flex w-full items-center gap-[14px] rounded-[10px] px-4 py-3.5 text-sm transition-colors",
         isActive
@@ -87,7 +90,7 @@ function NavLink({
 }
 
 /* ── VoidPortal Sidebar ── */
-export function Sidebar() {
+export function Sidebar({ onNavigate }: { readonly onNavigate?: () => void } = {}) {
   const routerState = useRouterState();
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
@@ -98,7 +101,7 @@ export function Sidebar() {
     : user?.email?.slice(0, 2).toUpperCase() ?? "U";
 
   return (
-    <aside className="flex w-[280px] flex-col justify-between border-r border-border bg-sidebar px-7 py-10">
+    <aside className="flex h-full w-[280px] flex-col justify-between overflow-y-auto border-r border-border bg-sidebar px-7 py-10">
       {/* ── Top: Logo + Navigation ── */}
       <div className="flex flex-col gap-12">
         {/* Logo */}
@@ -114,6 +117,7 @@ export function Sidebar() {
               key={item.to}
               item={item}
               isActive={isNavActive(item.to, currentPath, NAV_ITEMS)}
+              onClick={onNavigate}
             />
           ))}
         </nav>
@@ -131,6 +135,7 @@ export function Sidebar() {
               key={item.to}
               item={item}
               isActive={isNavActive(item.to, currentPath, DEVELOPER_NAV_ITEMS)}
+              onClick={onNavigate}
             />
           ))}
         </div>
@@ -146,6 +151,7 @@ export function Sidebar() {
                 key={item.to}
                 item={item}
                 isActive={isNavActive(item.to, currentPath, ADMIN_NAV_ITEMS)}
+                onClick={onNavigate}
               />
             ))}
           </div>

@@ -54,7 +54,10 @@ export function OAuthConsentPage() {
 
   if (missing) {
     return (
-      <div className="mx-auto flex min-h-[70vh] w-full max-w-2xl items-center px-6 py-10">
+      <div
+        className="mx-auto flex min-h-dvh w-full max-w-2xl items-center px-6 py-10"
+        style={{ paddingTop: "max(2.5rem, var(--sat))", paddingBottom: "max(2.5rem, var(--sab))" }}
+      >
         <Card className="w-full">
           <CardHeader>
             <CardTitle>Invalid consent request</CardTitle>
@@ -68,7 +71,10 @@ export function OAuthConsentPage() {
   }
 
   return (
-    <div className="mx-auto flex min-h-[70vh] w-full max-w-2xl items-center px-6 py-10">
+    <div
+      className="mx-auto flex min-h-dvh w-full max-w-2xl items-center px-6 py-10"
+      style={{ paddingTop: "max(2.5rem, var(--sat))", paddingBottom: "max(2.5rem, var(--sab))" }}
+    >
       <Card className="w-full">
         <CardHeader className="space-y-4">
           <div className="flex items-center gap-3">

@@ -34,20 +34,19 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
   return (
     <Card className="border-primary/30 bg-primary/10">
       <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Zap className="h-5 w-5 text-primary" />
-            <div>
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-2">
+            <Zap className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+            <div className="min-w-0">
               <CardTitle className="text-base">LLM Gateway</CardTitle>
               <CardDescription className="text-xs">
-                Route LLM requests through NyxID with your connected provider
-                credentials.
+                Route LLM requests through NyxID with your connected provider credentials.
               </CardDescription>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             {readyProviders.length > 0 && (
-              <Badge variant="success">
+              <Badge variant="success" className="hidden whitespace-nowrap sm:inline-flex">
                 {String(readyProviders.length)} provider
                 {readyProviders.length === 1 ? "" : "s"} ready
               </Badge>
@@ -69,6 +68,12 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
             </Button>
           </div>
         </div>
+        {readyProviders.length > 0 && (
+          <Badge variant="success" className="mt-2 w-fit sm:hidden">
+            {String(readyProviders.length)} provider
+            {readyProviders.length === 1 ? "" : "s"} ready
+          </Badge>
+        )}
       </CardHeader>
 
       {expanded && (

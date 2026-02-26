@@ -121,16 +121,16 @@ export function DeveloperAppsPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="font-display text-5xl font-normal tracking-tight">
+          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
             Developer Apps
           </h2>
-          <p className="text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Register and manage OAuth applications for your products.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             type="button"
             variant="outline"
@@ -274,7 +274,7 @@ export function DeveloperAppsPage() {
                   {app.is_active ? "active" : "inactive"}
                 </Badge>
               </div>
-              <CardDescription>
+              <CardDescription className="break-all">
                 Client ID:{" "}
                 <span className="font-mono text-xs text-foreground">
                   {app.id}

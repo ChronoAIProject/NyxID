@@ -1,6 +1,13 @@
 import type { ApiErrorResponse } from "@/types/api";
+import { isNative } from "./platform";
 
-const BASE_URL = "/api/v1";
+// Web: relative path (Vite proxy handles /api -> backend in dev, same origin in prod)
+// Native: absolute URL from env (no proxy available in WebView)
+const API_ORIGIN = isNative
+  ? (import.meta.env.VITE_API_URL as string | undefined) ?? ""
+  : "";
+
+const BASE_URL = `${API_ORIGIN}/api/v1`;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -89,7 +96,8 @@ function redirectToConsentIfRequired(error: ApiErrorResponse): void {
   }
 
   if (typeof window !== "undefined") {
-    window.location.assign(error.consent_url);
+    const url = error.consent_url;
+    void import("./navigation").then(({ openExternal }) => openExternal(url));
   }
 }
 
