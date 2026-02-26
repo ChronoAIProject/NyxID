@@ -59,7 +59,7 @@ export function DashboardPage() {
   return (
     <div className="flex flex-col gap-12">
       <div className="flex flex-col gap-2">
-        <h2 className="font-display text-5xl font-normal tracking-tight">
+        <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
           Welcome back{user?.name ? `, ${user.name}` : ""}
         </h2>
         <p className="text-sm text-muted-foreground">
@@ -88,7 +88,7 @@ export function DashboardPage() {
             {stat.loading ? (
               <Skeleton className="h-10 w-20" />
             ) : (
-              <div className={cn("font-display text-[36px] font-normal leading-tight", stat.valueColor ?? "text-foreground")}>
+              <div className={cn("font-display text-[28px] font-normal leading-tight md:text-[36px]", stat.valueColor ?? "text-foreground")}>
                 {stat.value}
               </div>
             )}

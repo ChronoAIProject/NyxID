@@ -20,6 +20,7 @@ import {
 } from "@/schemas/service-accounts";
 import { formatDate, copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
+import { hardRedirect } from "@/lib/navigation";
 import { ApiKeyDialog } from "@/components/dashboard/api-key-dialog";
 import { SaDeviceCodeDialog } from "@/components/dashboard/sa-device-code-dialog";
 import type { ProviderConfig } from "@/types/api";
@@ -168,7 +169,7 @@ export function AdminServiceAccountDetailPage() {
         saId,
         providerId: provider.id,
       });
-      window.location.href = response.authorization_url;
+      hardRedirect(response.authorization_url);
     } catch (err) {
       if (err instanceof ApiError) {
         toast.error(err.message);

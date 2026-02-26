@@ -131,18 +131,18 @@ export function ProviderListPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="font-display text-5xl font-normal tracking-tight">
+          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
             Manage Providers
           </h2>
-          <p className="text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Create and manage OAuth and API key providers.
           </p>
         </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogTrigger asChild>
-            <Button>
+            <Button className="w-fit">
               <Plus className="mr-2 h-4 w-4" />
               Add Provider
             </Button>

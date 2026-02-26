@@ -22,10 +22,11 @@ interface LoginFormProps {
 
 /** Trusted origins for return_to redirect validation (open-redirect prevention). */
 const BACKEND_URL = (
-  import.meta.env.VITE_BACKEND_URL ?? "http://localhost:3001"
+  (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
+  (import.meta.env.VITE_API_URL as string | undefined) ??
+  ""
 ).replace(/\/+$/, "");
 
-/** Same-origin OAuth redirects go through the frontend nginx proxy. */
 const FRONTEND_ORIGIN = window.location.origin;
 
 export function LoginForm({ returnTo }: LoginFormProps) {

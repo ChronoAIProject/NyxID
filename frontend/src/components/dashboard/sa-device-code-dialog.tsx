@@ -22,6 +22,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
+import { copyToClipboard } from "@/lib/utils";
 import { toast } from "sonner";
 
 type FlowStep = "requesting" | "show_code" | "success" | "error";
@@ -179,7 +180,7 @@ export function SaDeviceCodeDialog({
   }
 
   function handleCopyCode() {
-    void navigator.clipboard.writeText(userCode).then(() => {
+    void copyToClipboard(userCode).then(() => {
       toast.success("Code copied to clipboard");
     });
   }

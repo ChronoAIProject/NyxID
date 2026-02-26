@@ -66,16 +66,24 @@
 
 * {
   border-color: var(--color-border);
+  -webkit-tap-highlight-color: transparent;
 }
 
 html,
 body {
-  overflow: hidden;
   height: 100%;
 }
 
 body {
   font-family: var(--font-sans);
+}
+
+/* ── Safe area CSS vars for layout components ── */
+:root {
+  --sat: env(safe-area-inset-top);
+  --sab: env(safe-area-inset-bottom);
+  --sal: env(safe-area-inset-left);
+  --sar: env(safe-area-inset-right);
 }
 
 /* ── Scrollbar ── */
@@ -97,10 +105,37 @@ body {
   background: var(--color-muted-foreground);
 }
 
+/* ── Touch-friendly: ensure hover-only elements are visible on touch ── */
+@media (hover: none) {
+  .group-hover\:opacity-100 {
+    opacity: 1 !important;
+  }
+}
+
+/* ── iOS zoom prevention: force 16px on inputs to prevent auto-zoom ── */
+@supports (-webkit-touch-callout: none) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
 /* ── Portal Mark logo wordmark (VoidPortal) ── */
 .logo-wordmark {
   font-family: var(--font-logo);
   font-weight: 400;
   letter-spacing: 1px;
   color: var(--color-void-300);
+}
+
+/* ── Splash screen animations ── */
+@keyframes splash-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.85; transform: scale(1.03); }
+}
+
+@keyframes splash-fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
 }

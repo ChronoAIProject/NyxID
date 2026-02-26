@@ -125,3 +125,6 @@ export const OAuthConsentPage = lazy(() =>
 export const OAuthErrorPage = lazy(() =>
   import("@/pages/oauth-error").then((m) => ({ default: m.OAuthErrorPage })),
 );
+export const PrivacyPage = lazy(() =>
+  import("@/pages/privacy").then((m) => ({ default: m.PrivacyPage })),
+);

@@ -107,7 +107,7 @@ export function IntegrationGuidePage() {
   return (
     <div className="space-y-8">
       <div className="space-y-2">
-        <h2 className="font-display text-5xl font-normal tracking-tight">
+        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">
           Integration Guide
         </h2>
         <p className="text-muted-foreground">

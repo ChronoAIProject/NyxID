@@ -95,7 +95,7 @@ export function GuidePage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="font-display text-5xl font-normal tracking-tight">Guide</h2>
+        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">Guide</h2>
         <p className="text-muted-foreground">
           Learn how to set up and use NyxID for identity management and MCP proxy access.
         </p>

@@ -1,3 +1,4 @@
+import { useNavigate } from "@tanstack/react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
@@ -15,6 +16,7 @@ const ERROR_LABELS: Record<string, string> = {
 };
 
 export function OAuthErrorPage() {
+  const navigate = useNavigate();
   const search = new URLSearchParams(window.location.search);
   const code = search.get("code") ?? "unknown_error";
   const message =
@@ -23,7 +25,13 @@ export function OAuthErrorPage() {
   const title = ERROR_LABELS[code] ?? "Authorization Error";
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-background p-4">
+    <div
+      className="flex min-h-dvh flex-col items-center justify-center bg-background p-4"
+      style={{
+        paddingTop: "max(1rem, var(--sat))",
+        paddingBottom: "max(1rem, var(--sab))",
+      }}
+    >
       <div className="flex w-full max-w-[460px] flex-col items-center gap-8">
         <div className="flex items-center gap-3">
           <PortalMarkLogo size={36} className="shrink-0" />
@@ -52,7 +60,7 @@ export function OAuthErrorPage() {
               >
                 Go Back
               </Button>
-              <Button onClick={() => (window.location.href = "/")}>
+              <Button onClick={() => void navigate({ to: "/" })}>
                 Home
               </Button>
             </div>

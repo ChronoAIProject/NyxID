@@ -19,9 +19,9 @@ export function PageHeader({
       {breadcrumbs && breadcrumbs.length > 0 && (
         <Breadcrumb items={breadcrumbs} />
       )}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-col gap-2">
-          <h2 className="font-display text-5xl font-normal tracking-tight">
+          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
             {title}
           </h2>
           {description && (

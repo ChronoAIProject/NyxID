@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use axum::{extract::DefaultBodyLimit, extract::Extension, middleware as axum_mw};
+use axum::http::HeaderValue;
 use clap::Parser;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
@@ -172,11 +173,23 @@ async fn main() {
         }
     });
 
-    // Configure CORS - restrict methods and headers explicitly
+    // ── CORS origin policy ──
+    // Dev: mirror any origin (Vite, Capacitor, etc.)
+    // Prod: whitelist FRONTEND_URL + Capacitor iOS/Android origins
+    let cors_origin = if config.is_development() {
+        AllowOrigin::mirror_request()
+    } else {
+        let frontend: HeaderValue = config.frontend_url.parse().expect("Invalid FRONTEND_URL");
+        AllowOrigin::predicate(move |origin: &HeaderValue, _| {
+            if origin == &frontend {
+                return true;
+            }
+            let s = origin.to_str().unwrap_or("");
+            s == "capacitor://localhost" || s == "http://localhost"
+        })
+    };
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::exact(
-            config.frontend_url.parse().expect("Invalid FRONTEND_URL"),
-        ))
+        .allow_origin(cors_origin)
         .allow_methods(AllowMethods::list([
             axum::http::Method::GET,
             axum::http::Method::POST,

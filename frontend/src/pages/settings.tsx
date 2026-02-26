@@ -11,6 +11,8 @@ import {
   type ChangePasswordFormData,
 } from "@/schemas/auth";
 import { copyToClipboard, formatDate } from "@/lib/utils";
+import { openExternal } from "@/lib/navigation";
+import { isNative } from "@/lib/platform";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -69,7 +71,7 @@ export function SettingsPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="font-display text-5xl font-normal tracking-tight">Settings</h2>
+        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">Settings</h2>
         <p className="text-muted-foreground">
           Manage your account settings and preferences.
         </p>
@@ -558,7 +560,8 @@ function McpTab() {
         </CardHeader>
         <CardContent className="space-y-4">
           <Button
-            onClick={() => window.open(cursorDeeplink, "_blank")}
+            onClick={() => void openExternal(cursorDeeplink)}
+            disabled={isNative}
             className="w-full"
           >
             <ExternalLink className="mr-2 h-4 w-4" aria-hidden="true" />
