@@ -4,6 +4,7 @@ import { useNavigate, Link } from "@tanstack/react-router";
 import { loginSchema, type LoginFormData } from "@/schemas/auth";
 import { useLogin } from "@/hooks/use-auth";
 import { ApiError } from "@/lib/api-client";
+import { isTrustedRedirect } from "@/lib/urls";
 import {
   Form,
   FormControl,
@@ -19,15 +20,6 @@ import { SocialLoginButtons } from "@/components/auth/social-login-buttons";
 interface LoginFormProps {
   readonly returnTo?: string;
 }
-
-/** Trusted origins for return_to redirect validation (open-redirect prevention). */
-const BACKEND_URL = (
-  (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
-  (import.meta.env.VITE_API_URL as string | undefined) ??
-  ""
-).replace(/\/+$/, "");
-
-const FRONTEND_ORIGIN = window.location.origin;
 
 export function LoginForm({ returnTo }: LoginFormProps) {
   const navigate = useNavigate();
@@ -49,11 +41,7 @@ export function LoginForm({ returnTo }: LoginFormProps) {
         // authorize endpoint so it can issue the authorization code.
         // Accept same-origin URLs (proxied through frontend nginx) or the
         // explicit backend URL. Reject anything else to prevent open-redirect.
-        if (
-          returnTo &&
-          (returnTo.startsWith(FRONTEND_ORIGIN + "/") ||
-            returnTo.startsWith(BACKEND_URL + "/"))
-        ) {
+        if (returnTo && isTrustedRedirect(returnTo)) {
           window.location.assign(returnTo);
           return;
         }
