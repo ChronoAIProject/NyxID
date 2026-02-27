@@ -11,7 +11,6 @@ import { Toaster } from "@/components/ui/toast";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { useAuthStore } from "@/stores/auth-store";
-import { isNative } from "@/lib/platform";
 
 import {
   LoginPage,
@@ -70,7 +69,7 @@ const authLayout = createRoute({
       const returnTo = new URLSearchParams(window.location.search).get(
         "return_to",
       );
-      if (returnTo && !isNative && returnTo.startsWith(window.location.origin + "/")) {
+      if (returnTo && returnTo.startsWith(window.location.origin + "/")) {
         window.location.assign(returnTo);
         return;
       }
@@ -99,9 +98,6 @@ const oauthConsentRoute = createRoute({
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (!isAuthenticated && !isLoading) {
       const returnPath = `${window.location.pathname}${window.location.search}`;
-      if (isNative) {
-        throw redirect({ to: "/login", search: { return_to: returnPath } });
-      }
       const returnTo = `${window.location.origin}${returnPath}`;
       window.location.assign(
         `/login?return_to=${encodeURIComponent(returnTo)}`,

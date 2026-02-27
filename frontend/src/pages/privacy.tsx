@@ -152,9 +152,8 @@ export function PrivacyPage() {
           <Section title="8. Cookies & Local Storage">
             <p>
               NyxID uses HTTP-only secure cookies for session management. We use
-              browser local storage (via Capacitor Preferences on mobile) to
-              persist authentication state. We do not use third-party tracking
-              cookies or analytics services.
+              browser local storage to persist authentication state. We do not
+              use third-party tracking cookies or analytics services.
             </p>
           </Section>
 

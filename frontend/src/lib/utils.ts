@@ -41,12 +41,6 @@ export function maskApiKey(keyPrefix: string): string {
 }
 
 export async function copyToClipboard(text: string): Promise<void> {
-  const { isNative } = await import("./platform");
-  if (isNative) {
-    const { Clipboard } = await import("@capacitor/clipboard");
-    await Clipboard.write({ string: text });
-    return;
-  }
   if (!navigator.clipboard) {
     throw new Error("Clipboard API is not available in this browser context");
   }

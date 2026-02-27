@@ -12,7 +12,6 @@ import {
 } from "@/schemas/auth";
 import { copyToClipboard, formatDate } from "@/lib/utils";
 import { openExternal } from "@/lib/navigation";
-import { isNative } from "@/lib/platform";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -561,7 +560,6 @@ function McpTab() {
         <CardContent className="space-y-4">
           <Button
             onClick={() => void openExternal(cursorDeeplink)}
-            disabled={isNative}
             className="w-full"
           >
             <ExternalLink className="mr-2 h-4 w-4" aria-hidden="true" />

@@ -1,11 +1,6 @@
 import type { ApiErrorResponse } from "@/types/api";
-import { isNative } from "./platform";
 
-// Web: relative path (Vite proxy handles /api -> backend in dev, same origin in prod)
-// Native: absolute URL from env (no proxy available in WebView)
-const API_ORIGIN = isNative
-  ? (import.meta.env.VITE_API_URL as string | undefined) ?? ""
-  : "";
+const API_ORIGIN = "";
 
 const BASE_URL = `${API_ORIGIN}/api/v1`;
 

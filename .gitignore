@@ -39,17 +39,6 @@ docker-compose.override.yml
 # ─── Deployment ───
 k8s/
 
-# ─── Capacitor (iOS/Android) ───
-frontend/ios/App/App/public/
-frontend/ios/App/Pods/
-frontend/ios/App/build/
-frontend/ios/App/App/capacitor.config.json
-frontend/ios/App/App/config.xml
-frontend/ios/capacitor-cordova-ios-plugins/
-**/xcuserdata/
-**/*.xcuserstate
-**/DerivedData/
-frontend/android/app/src/main/assets/public/
 
 .claude
 .playwright-mcp

@@ -129,13 +129,3 @@ body {
   color: var(--color-void-300);
 }
 
-/* ── Splash screen animations ── */
-@keyframes splash-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.85; transform: scale(1.03); }
-}
-
-@keyframes splash-fade-up {
-  from { opacity: 0; transform: translateY(12px); }
-  to { opacity: 1; transform: translateY(0); }
-}
