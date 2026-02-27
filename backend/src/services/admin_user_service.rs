@@ -406,6 +406,54 @@ pub async fn delete_user_cascade(
     Ok(())
 }
 
+/// Delete own account — same cascade as admin delete but without
+/// the self-protection check.
+pub async fn delete_own_account(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<()> {
+    let _user = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let now = Utc::now();
+    db.collection::<User>(USERS)
+        .update_one(
+            doc! { "_id": user_id },
+            doc! { "$set": {
+                "is_active": false,
+                "updated_at": bson::DateTime::from_chrono(now),
+            }},
+        )
+        .await?;
+
+    let filter = doc! { "user_id": user_id };
+    let collections = [
+        SESSIONS,
+        REFRESH_TOKENS,
+        API_KEYS,
+        USER_SERVICE_CONNECTIONS,
+        USER_PROVIDER_TOKENS,
+        MFA_FACTORS,
+        AUTHORIZATION_CODES,
+        OAUTH_STATES,
+    ];
+
+    for coll_name in collections {
+        db.collection::<bson::Document>(coll_name)
+            .delete_many(filter.clone())
+            .await?;
+    }
+
+    db.collection::<User>(USERS)
+        .delete_one(doc! { "_id": user_id })
+        .await?;
+
+    Ok(())
+}
+
 /// Manually verify a user's email address.
 ///
 /// Sets email_verified = true and clears the verification token.

@@ -34,6 +34,14 @@ pub struct AppConfig {
     pub google_client_secret: Option<String>,
     pub github_client_id: Option<String>,
     pub github_client_secret: Option<String>,
+    /// Apple Sign In: Services ID (e.g. com.nyxid.auth)
+    pub apple_client_id: Option<String>,
+    /// Apple Sign In: Team ID (10-char alphanumeric)
+    pub apple_team_id: Option<String>,
+    /// Apple Sign In: Key ID for the private key
+    pub apple_key_id: Option<String>,
+    /// Apple Sign In: Path to .p8 private key file
+    pub apple_private_key_path: Option<String>,
 
     // SMTP configuration
     pub smtp_host: Option<String>,
@@ -108,6 +116,10 @@ impl AppConfig {
             google_client_secret: env::var("GOOGLE_CLIENT_SECRET").ok(),
             github_client_id: env::var("GITHUB_CLIENT_ID").ok(),
             github_client_secret: env::var("GITHUB_CLIENT_SECRET").ok(),
+            apple_client_id: env::var("APPLE_CLIENT_ID").ok(),
+            apple_team_id: env::var("APPLE_TEAM_ID").ok(),
+            apple_key_id: env::var("APPLE_KEY_ID").ok(),
+            apple_private_key_path: env::var("APPLE_PRIVATE_KEY_PATH").ok(),
 
             smtp_host: env::var("SMTP_HOST").ok(),
             smtp_port: env::var("SMTP_PORT").ok().and_then(|v| v.parse().ok()),
@@ -221,6 +233,10 @@ mod tests {
             google_client_secret: None,
             github_client_id: None,
             github_client_secret: None,
+            apple_client_id: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_private_key_path: None,
             smtp_host: None,
             smtp_port: None,
             smtp_username: None,

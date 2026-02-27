@@ -49,12 +49,16 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/reset-password", post(handlers::auth::reset_password))
         .route("/setup", post(handlers::auth::setup))
         .route("/social/{provider}", get(handlers::social_auth::authorize))
-        .route("/social/{provider}/callback", get(handlers::social_auth::callback))
+        .route("/social/{provider}/callback",
+            get(handlers::social_auth::callback_get)
+                .post(handlers::social_auth::callback_post))
+        .route("/native-token-exchange", post(handlers::auth::native_token_exchange))
         .nest("/mfa", mfa_routes);
 
     let user_routes = Router::new()
-        .route("/me", get(handlers::users::get_me))
-        .route("/me", put(handlers::users::update_me))
+        .route("/me", get(handlers::users::get_me)
+            .put(handlers::users::update_me)
+            .delete(handlers::users::delete_me))
         .route("/me/consents", get(handlers::consent::list_my_consents))
         .route("/me/consents/{client_id}", delete(handlers::consent::revoke_my_consent));
 

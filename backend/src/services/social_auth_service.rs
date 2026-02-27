@@ -1,6 +1,7 @@
 use chrono::Utc;
+use jsonwebtoken::{self as jwt, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use mongodb::bson::{self, doc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -12,6 +13,7 @@ use crate::models::user::{User, COLLECTION_NAME as USERS};
 pub enum SocialProvider {
     GitHub,
     Google,
+    Apple,
 }
 
 impl SocialProvider {
@@ -20,6 +22,7 @@ impl SocialProvider {
         match s {
             "github" => Some(Self::GitHub),
             "google" => Some(Self::Google),
+            "apple" => Some(Self::Apple),
             _ => None,
         }
     }
@@ -28,7 +31,13 @@ impl SocialProvider {
         match self {
             Self::GitHub => "github",
             Self::Google => "google",
+            Self::Apple => "apple",
         }
+    }
+
+    /// Apple callback is POST (form_post response_mode), others are GET.
+    pub fn callback_is_post(&self) -> bool {
+        matches!(self, Self::Apple)
     }
 }
 
@@ -84,10 +93,29 @@ pub fn build_authorization_url(
                 client_id, redirect_uri, scope, state,
             ))
         }
+        SocialProvider::Apple => {
+            let client_id = config.apple_client_id.as_deref().ok_or_else(|| {
+                AppError::SocialAuthFailed("Apple provider not configured".to_string())
+            })?;
+            config.apple_team_id.as_deref().ok_or_else(|| {
+                AppError::SocialAuthFailed("Apple provider not configured".to_string())
+            })?;
+
+            let raw_redirect = format!("{base_url}/api/v1/auth/social/apple/callback");
+            let redirect_uri = urlencoding::encode(&raw_redirect);
+            let scope = urlencoding::encode("name email");
+
+            Ok(format!(
+                "https://appleid.apple.com/auth/authorize?client_id={}&redirect_uri={}&scope={}&state={}&response_type=code%20id_token&response_mode=form_post",
+                client_id, redirect_uri, scope, state,
+            ))
+        }
     }
 }
 
-// --- Token exchange response types ---
+// ===================================================================
+// Token exchange response types
+// ===================================================================
 
 #[derive(Deserialize)]
 struct GitHubTokenResponse {
@@ -101,6 +129,69 @@ struct GoogleTokenResponse {
     access_token: Option<String>,
     error: Option<String>,
     error_description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AppleTokenResponse {
+    id_token: Option<String>,
+    error: Option<String>,
+}
+
+// ===================================================================
+// Apple client_secret JWT generation
+// ===================================================================
+
+#[derive(Serialize)]
+struct AppleClientSecretClaims {
+    iss: String,
+    iat: i64,
+    exp: i64,
+    aud: String,
+    sub: String,
+}
+
+/// Generate the ephemeral client_secret JWT that Apple requires.
+/// Signed with the .p8 ES256 private key from Apple Developer.
+fn generate_apple_client_secret(config: &AppConfig) -> AppResult<String> {
+    let team_id = config.apple_team_id.as_deref().ok_or_else(|| {
+        AppError::SocialAuthFailed("Apple team_id not configured".to_string())
+    })?;
+    let key_id = config.apple_key_id.as_deref().ok_or_else(|| {
+        AppError::SocialAuthFailed("Apple key_id not configured".to_string())
+    })?;
+    let client_id = config.apple_client_id.as_deref().ok_or_else(|| {
+        AppError::SocialAuthFailed("Apple client_id not configured".to_string())
+    })?;
+    let key_path = config.apple_private_key_path.as_deref().ok_or_else(|| {
+        AppError::SocialAuthFailed("Apple private key path not configured".to_string())
+    })?;
+
+    let key_pem = std::fs::read_to_string(key_path).map_err(|e| {
+        tracing::error!(error = %e, path = %key_path, "Failed to read Apple private key");
+        AppError::SocialAuthFailed("Apple private key not found".to_string())
+    })?;
+
+    let now = Utc::now().timestamp();
+    let claims = AppleClientSecretClaims {
+        iss: team_id.to_string(),
+        iat: now,
+        exp: now + 300, // 5 min validity
+        aud: "https://appleid.apple.com".to_string(),
+        sub: client_id.to_string(),
+    };
+
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(key_id.to_string());
+
+    let encoding_key = EncodingKey::from_ec_pem(key_pem.as_bytes()).map_err(|e| {
+        tracing::error!(error = %e, "Failed to parse Apple ES256 key");
+        AppError::SocialAuthFailed("Invalid Apple private key".to_string())
+    })?;
+
+    jwt::encode(&header, &claims, &encoding_key).map_err(|e| {
+        tracing::error!(error = %e, "Failed to sign Apple client_secret");
+        AppError::SocialAuthFailed("Failed to generate Apple client secret".to_string())
+    })
 }
 
 /// Exchange an authorization code for an access token.
@@ -209,6 +300,47 @@ pub async fn exchange_code(
                 AppError::SocialAuthFailed("No access token in Google response".to_string())
             })
         }
+        SocialProvider::Apple => {
+            let client_id = config.apple_client_id.as_deref().ok_or_else(|| {
+                AppError::SocialAuthFailed("Apple provider not configured".to_string())
+            })?;
+            let client_secret = generate_apple_client_secret(config)?;
+            let redirect_uri = format!("{base_url}/api/v1/auth/social/apple/callback");
+
+            let resp = http_client
+                .post("https://appleid.apple.com/auth/token")
+                .form(&[
+                    ("client_id", client_id),
+                    ("client_secret", &client_secret),
+                    ("code", code),
+                    ("redirect_uri", &redirect_uri),
+                    ("grant_type", "authorization_code"),
+                ])
+                .send()
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Apple token exchange HTTP error");
+                    AppError::SocialAuthFailed("Failed to exchange code with Apple".to_string())
+                })?;
+
+            let body: AppleTokenResponse = resp.json().await.map_err(|e| {
+                tracing::error!(error = %e, "Apple token response parse error");
+                AppError::SocialAuthFailed("Failed to exchange code with Apple".to_string())
+            })?;
+
+            if let Some(ref err) = body.error {
+                tracing::debug!(provider = "apple", error = %err, "Apple token exchange error");
+                return Err(AppError::SocialAuthFailed(
+                    "Failed to exchange code with Apple".to_string(),
+                ));
+            }
+
+            // Apple returns an id_token (JWT) instead of a plain access_token.
+            // We return it here; fetch_user_profile will decode the claims.
+            body.id_token.ok_or_else(|| {
+                AppError::SocialAuthFailed("No id_token in Apple response".to_string())
+            })
+        }
     }
 }
 
@@ -239,14 +371,19 @@ struct GoogleUserInfo {
 }
 
 /// Fetch the user profile from the social provider using the access token.
+///
+/// For Apple, `access_token` is actually the `id_token` JWT — decoded here.
 pub async fn fetch_user_profile(
     provider: SocialProvider,
     access_token: &str,
     http_client: &reqwest::Client,
+    apple_user_json: Option<&str>,
+    config: &AppConfig,
 ) -> AppResult<SocialProfile> {
     match provider {
         SocialProvider::GitHub => fetch_github_profile(access_token, http_client).await,
         SocialProvider::Google => fetch_google_profile(access_token, http_client).await,
+        SocialProvider::Apple => fetch_apple_profile(access_token, apple_user_json, http_client, config).await,
     }
 }
 
@@ -350,6 +487,135 @@ async fn fetch_google_profile(
         email: info.email,
         display_name: info.name,
         avatar_url: info.picture,
+    })
+}
+
+// ===================================================================
+// Apple id_token verification
+// ===================================================================
+
+#[derive(Deserialize)]
+struct AppleIdTokenClaims {
+    sub: String,
+    email: Option<String>,
+    email_verified: Option<serde_json::Value>,
+}
+
+/// Apple sends user name only on first authorization — as a JSON form field.
+#[derive(Deserialize)]
+struct AppleUserName {
+    #[serde(rename = "firstName")]
+    first_name: Option<String>,
+    #[serde(rename = "lastName")]
+    last_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AppleUserPayload {
+    name: Option<AppleUserName>,
+}
+
+#[derive(Deserialize)]
+struct AppleJwk {
+    kty: String,
+    kid: String,
+    #[allow(dead_code)]
+    alg: String,
+    n: String,
+    e: String,
+}
+
+#[derive(Deserialize)]
+struct AppleJwks {
+    keys: Vec<AppleJwk>,
+}
+
+async fn fetch_apple_profile(
+    id_token: &str,
+    apple_user_json: Option<&str>,
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+) -> AppResult<SocialProfile> {
+    let client_id = config.apple_client_id.as_deref().ok_or_else(|| {
+        AppError::SocialAuthFailed("Apple client_id not configured".to_string())
+    })?;
+
+    // Decode header to get `kid`
+    let header = jwt::decode_header(id_token).map_err(|e| {
+        tracing::error!(error = %e, "Apple id_token header decode failed");
+        AppError::SocialAuthFailed("Invalid Apple id_token".to_string())
+    })?;
+    let kid = header.kid.ok_or_else(|| {
+        AppError::SocialAuthFailed("Apple id_token missing kid".to_string())
+    })?;
+
+    // Fetch Apple's public keys
+    let jwks: AppleJwks = http_client
+        .get("https://appleid.apple.com/auth/keys")
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Apple JWKS fetch error");
+            AppError::SocialAuthFailed("Failed to fetch Apple public keys".to_string())
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Apple JWKS parse error");
+            AppError::SocialAuthFailed("Invalid Apple JWKS response".to_string())
+        })?;
+
+    let jwk = jwks.keys.iter().find(|k| k.kid == kid && k.kty == "RSA").ok_or_else(|| {
+        AppError::SocialAuthFailed("No matching Apple public key found".to_string())
+    })?;
+
+    let decoding_key = DecodingKey::from_rsa_components(&jwk.n, &jwk.e).map_err(|e| {
+        tracing::error!(error = %e, "Apple RSA key decode failed");
+        AppError::SocialAuthFailed("Invalid Apple public key".to_string())
+    })?;
+
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&["https://appleid.apple.com"]);
+    validation.set_audience(&[client_id]);
+
+    let token_data = jwt::decode::<AppleIdTokenClaims>(id_token, &decoding_key, &validation)
+        .map_err(|e| {
+            tracing::error!(error = %e, "Apple id_token verification failed");
+            AppError::SocialAuthFailed("Apple id_token verification failed".to_string())
+        })?;
+
+    let claims = token_data.claims;
+
+    let email = claims.email.ok_or(AppError::SocialAuthNoEmail)?;
+
+    // Apple sends email_verified as either bool or string "true"
+    let verified = match &claims.email_verified {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s == "true",
+        _ => false,
+    };
+    if !verified {
+        return Err(AppError::SocialAuthNoEmail);
+    }
+
+    // Apple sends user name only on first authorization as a form field
+    let display_name = apple_user_json
+        .and_then(|json| serde_json::from_str::<AppleUserPayload>(json).ok())
+        .and_then(|u| u.name)
+        .and_then(|n| {
+            let parts: Vec<&str> = [n.first_name.as_deref(), n.last_name.as_deref()]
+                .iter()
+                .filter_map(|s| *s)
+                .collect();
+            if parts.is_empty() { None } else { Some(parts.join(" ")) }
+        });
+
+    Ok(SocialProfile {
+        provider: SocialProvider::Apple,
+        provider_id: claims.sub,
+        email,
+        display_name,
+        avatar_url: None, // Apple does not provide avatar
     })
 }
 
@@ -484,27 +750,36 @@ mod tests {
     fn provider_from_str_valid() {
         assert_eq!(SocialProvider::parse("github"), Some(SocialProvider::GitHub));
         assert_eq!(SocialProvider::parse("google"), Some(SocialProvider::Google));
+        assert_eq!(SocialProvider::parse("apple"), Some(SocialProvider::Apple));
     }
 
     #[test]
     fn provider_from_str_invalid() {
-        assert_eq!(SocialProvider::parse("apple"), None);
         assert_eq!(SocialProvider::parse(""), None);
         assert_eq!(SocialProvider::parse("GitHub"), None);
+        assert_eq!(SocialProvider::parse("facebook"), None);
     }
 
     #[test]
     fn provider_as_str() {
         assert_eq!(SocialProvider::GitHub.as_str(), "github");
         assert_eq!(SocialProvider::Google.as_str(), "google");
+        assert_eq!(SocialProvider::Apple.as_str(), "apple");
     }
 
     #[test]
     fn provider_roundtrip() {
-        for name in &["github", "google"] {
+        for name in &["github", "google", "apple"] {
             let provider = SocialProvider::parse(name).unwrap();
             assert_eq!(provider.as_str(), *name);
         }
+    }
+
+    #[test]
+    fn apple_callback_is_post() {
+        assert!(SocialProvider::Apple.callback_is_post());
+        assert!(!SocialProvider::GitHub.callback_is_post());
+        assert!(!SocialProvider::Google.callback_is_post());
     }
 
     fn make_test_config(
@@ -529,6 +804,10 @@ mod tests {
             google_client_secret: google_secret.map(String::from),
             github_client_id: github_id.map(String::from),
             github_client_secret: github_secret.map(String::from),
+            apple_client_id: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_private_key_path: None,
             smtp_host: None,
             smtp_port: None,
             smtp_username: None,

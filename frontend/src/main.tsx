@@ -6,6 +6,7 @@ import { StatusBar, Style } from "@capacitor/status-bar";
 import { router } from "./router";
 import { useAuthStore } from "./stores/auth-store";
 import { isNative } from "./lib/platform";
+import { registerDeepLinkHandler } from "./lib/native-auth";
 import { SplashScreen } from "./components/splash-screen";
 import "./app.css";
 
@@ -33,6 +34,10 @@ function Root() {
   const [showSplash, setShowSplash] = useState(true);
 
   useEffect(() => {
+    registerDeepLinkHandler(() => {
+      void useAuthStore.getState().checkAuth();
+      void router.navigate({ to: "/" });
+    });
     useAuthStore.getState().checkAuth().finally(() => setReady(true));
   }, []);
 

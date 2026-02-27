@@ -618,3 +618,53 @@ pub async fn setup(
         message: "Admin account created successfully.".to_string(),
     }))
 }
+
+// ===================================================================
+// Native token exchange
+// ===================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct NativeTokenExchangeRequest {
+    pub session_token: String,
+    pub access_token: String,
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NativeTokenExchangeResponse {
+    pub ok: bool,
+}
+
+/// POST /api/v1/auth/native-token-exchange
+///
+/// Accept tokens received via the native deep-link OAuth flow and set them
+/// as HttpOnly cookies in the WKWebView context.
+pub async fn native_token_exchange(
+    State(state): State<AppState>,
+    Json(body): Json<NativeTokenExchangeRequest>,
+) -> AppResult<(HeaderMap, Json<NativeTokenExchangeResponse>)> {
+    let secure = state.config.use_secure_cookies();
+    let domain = state.config.cookie_domain();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        build_cookie(SESSION_COOKIE_NAME, &body.session_token, 30 * 24 * 3600, "/", secure, domain)
+            .parse()
+            .map_err(|_| AppError::Internal("Cookie build error".to_string()))?,
+    );
+    headers.append(
+        header::SET_COOKIE,
+        build_cookie(ACCESS_TOKEN_COOKIE_NAME, &body.access_token, state.config.jwt_access_ttl_secs, "/", secure, domain)
+            .parse()
+            .map_err(|_| AppError::Internal("Cookie build error".to_string()))?,
+    );
+    headers.append(
+        header::SET_COOKIE,
+        build_cookie("nyx_refresh_token", &body.refresh_token, state.config.jwt_refresh_ttl_secs, "/api/v1/auth/refresh", secure, domain)
+            .parse()
+            .map_err(|_| AppError::Internal("Cookie build error".to_string()))?,
+    );
+
+    Ok((headers, Json(NativeTokenExchangeResponse { ok: true })))
+}

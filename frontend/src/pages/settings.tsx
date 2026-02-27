@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useUser, useMfaDisable } from "@/hooks/use-auth";
 import { api, ApiError } from "@/lib/api-client";
@@ -64,6 +64,7 @@ import {
   ExternalLink,
   Copy,
   Check,
+  AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -431,7 +432,89 @@ function SecurityTab() {
           </Form>
         </CardContent>
       </Card>
+
+      <DeleteAccountCard />
     </div>
+  );
+}
+
+function DeleteAccountCard() {
+  const [open, setOpen] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
+  const logout = useAuthStore((s) => s.logout);
+
+  const deleteAccount = useMutation({
+    mutationFn: () => api.delete<{ message: string }>("/users/me"),
+    onSuccess: () => {
+      toast.success("Account deleted");
+      logout();
+    },
+    onError: (error) => {
+      if (error instanceof ApiError) {
+        toast.error(error.message);
+      } else {
+        toast.error("Failed to delete account");
+      }
+    },
+  });
+
+  function handleClose() {
+    setOpen(false);
+    setConfirmText("");
+  }
+
+  return (
+    <>
+      <Card className="border-destructive/30">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-destructive">
+            <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+            Danger Zone
+          </CardTitle>
+          <CardDescription>
+            Permanently delete your account and all associated data. This action
+            cannot be undone.
+          </CardDescription>
+        </CardHeader>
+        <CardFooter>
+          <Button variant="destructive" onClick={() => setOpen(true)}>
+            Delete account
+          </Button>
+        </CardFooter>
+      </Card>
+
+      <Dialog open={open} onOpenChange={handleClose}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Account</DialogTitle>
+            <DialogDescription>
+              This will permanently delete your account, sessions, API keys, and
+              all connected services. Type <strong>delete my account</strong> to
+              confirm.
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            value={confirmText}
+            onChange={(e) => setConfirmText(e.target.value)}
+            placeholder="delete my account"
+            autoFocus
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={handleClose}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={confirmText !== "delete my account"}
+              onClick={() => deleteAccount.mutate()}
+              isLoading={deleteAccount.isPending}
+            >
+              Delete permanently
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

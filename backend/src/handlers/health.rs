@@ -40,6 +40,9 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
     if state.config.google_client_id.is_some() && state.config.google_client_secret.is_some() {
         social_providers.push("google".to_string());
     }
+    if state.config.apple_client_id.is_some() && state.config.apple_team_id.is_some() {
+        social_providers.push("apple".to_string());
+    }
 
     Json(PublicConfigResponse {
         mcp_url: format!("{base}/mcp"),

@@ -1,11 +1,26 @@
-use axum::{extract::State, Json};
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::Json;
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::services::{admin_user_service, audit_service};
 use crate::AppState;
+
+fn extract_ip(h: &HeaderMap) -> Option<String> {
+    h.get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+}
+
+fn extract_ua(h: &HeaderMap) -> Option<String> {
+    h.get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+}
 
 // --- Request / Response types ---
 
@@ -140,5 +155,47 @@ pub async fn update_me(
         display_name: updated.display_name,
         avatar_url: updated.avatar_url,
         message: "Profile updated successfully".to_string(),
+    }))
+}
+
+// --- Delete account ---
+
+#[derive(Debug, Serialize)]
+pub struct DeleteAccountResponse {
+    pub message: String,
+}
+
+/// DELETE /api/v1/users/me
+///
+/// Permanently delete the authenticated user's account and all related data.
+pub async fn delete_me(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+) -> AppResult<Json<DeleteAccountResponse>> {
+    let user_id = auth_user.user_id.to_string();
+
+    let user = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let email = user.email.clone();
+
+    admin_user_service::delete_own_account(&state.db, &user_id).await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "user.account.deleted".to_string(),
+        Some(serde_json::json!({ "email": &email })),
+        extract_ip(&headers),
+        extract_ua(&headers),
+    );
+
+    Ok(Json(DeleteAccountResponse {
+        message: "Account deleted successfully".to_string(),
     }))
 }

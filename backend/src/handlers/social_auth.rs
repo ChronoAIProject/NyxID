@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
+    Form,
 };
 use serde::Deserialize;
 
@@ -14,15 +15,20 @@ use crate::services::{audit_service, social_auth_service, token_service};
 use crate::AppState;
 
 const SOCIAL_STATE_COOKIE: &str = "nyx_social_state";
+const SOCIAL_PLATFORM_COOKIE: &str = "nyx_social_platform";
 const SOCIAL_STATE_MAX_AGE: i64 = 600; // 10 minutes
+const NATIVE_APP_SCHEME: &str = "nyxid";
+
+#[derive(Debug, Deserialize)]
+pub struct AuthorizeQuery {
+    pub platform: Option<String>,
+}
 
 /// GET /api/v1/auth/social/{provider}
-///
-/// Initiates the OAuth flow by generating a CSRF state token,
-/// setting a state cookie, and redirecting to the provider's authorization URL.
 pub async fn authorize(
     State(state): State<AppState>,
     Path(provider_name): Path<String>,
+    Query(query): Query<AuthorizeQuery>,
 ) -> AppResult<(StatusCode, HeaderMap, ())> {
     let provider = social_auth_service::SocialProvider::parse(&provider_name).ok_or_else(|| {
         AppError::SocialAuthFailed(format!("Unsupported provider: {provider_name}"))
@@ -36,6 +42,7 @@ pub async fn authorize(
 
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
+    let is_native = query.platform.as_deref() == Some("native");
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -51,6 +58,24 @@ pub async fn authorize(
         .parse()
         .map_err(|_| AppError::Internal("Cookie error".to_string()))?,
     );
+
+    // Tag the flow so the callback knows to redirect via custom URL scheme
+    if is_native {
+        headers.append(
+            header::SET_COOKIE,
+            build_cookie(
+                SOCIAL_PLATFORM_COOKIE,
+                "native",
+                SOCIAL_STATE_MAX_AGE,
+                "/api/v1/auth/social",
+                secure,
+                domain,
+            )
+            .parse()
+            .map_err(|_| AppError::Internal("Cookie error".to_string()))?,
+        );
+    }
+
     headers.insert(
         header::LOCATION,
         authorization_url
@@ -61,6 +86,10 @@ pub async fn authorize(
     Ok((StatusCode::FOUND, headers, ()))
 }
 
+// ===================================================================
+// Callback parameter structs
+// ===================================================================
+
 #[derive(Debug, Deserialize)]
 pub struct CallbackQuery {
     pub code: Option<String>,
@@ -69,82 +98,143 @@ pub struct CallbackQuery {
     pub error_description: Option<String>,
 }
 
-/// GET /api/v1/auth/social/{provider}/callback
-///
-/// Handles the OAuth callback: validates state, exchanges code for token,
-/// fetches the user profile, creates/finds the user, issues session tokens,
-/// and redirects to the frontend.
-pub async fn callback(
+/// Apple uses response_mode=form_post, so callback params arrive as POST form.
+#[derive(Debug, Deserialize)]
+pub struct AppleCallbackForm {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub id_token: Option<String>,
+    pub user: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Unified callback params extracted from GET query or POST form.
+struct CallbackParams {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    /// Apple-only: user JSON (name) sent only on first authorization
+    apple_user: Option<String>,
+}
+
+// ===================================================================
+// GET callback (Google, GitHub)
+// ===================================================================
+
+pub async fn callback_get(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(provider_name): Path<String>,
     Query(params): Query<CallbackQuery>,
     headers: HeaderMap,
 ) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
+    handle_callback(
+        state,
+        peer,
+        provider_name,
+        CallbackParams {
+            code: params.code,
+            state: params.state,
+            error: params.error,
+            apple_user: None,
+        },
+        headers,
+    )
+    .await
+}
+
+// ===================================================================
+// POST callback (Apple form_post)
+// ===================================================================
+
+pub async fn callback_post(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(provider_name): Path<String>,
+    headers: HeaderMap,
+    Form(form): Form<AppleCallbackForm>,
+) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
+    handle_callback(
+        state,
+        peer,
+        provider_name,
+        CallbackParams {
+            code: form.code,
+            state: form.state,
+            error: form.error,
+            apple_user: form.user,
+        },
+        headers,
+    )
+    .await
+}
+
+// ===================================================================
+// Unified callback handler
+// ===================================================================
+
+async fn handle_callback(
+    state: AppState,
+    peer: SocketAddr,
+    provider_name: String,
+    params: CallbackParams,
+    headers: HeaderMap,
+) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
     let frontend_url = &state.config.frontend_url;
+    let is_native = extract_cookie_value(&headers, SOCIAL_PLATFORM_COOKIE)
+        .as_deref() == Some("native");
 
-    // Parse provider
     let provider = match social_auth_service::SocialProvider::parse(&provider_name) {
         Some(p) => p,
-        None => return Err(redirect_with_error(frontend_url, "social_auth_unsupported", secure, domain)),
+        None => return Err(redirect_with_error(frontend_url, "social_auth_unsupported", secure, domain, is_native)),
     };
 
-    // Check for provider error response
     if params.error.is_some() {
-        tracing::warn!(
-            error = ?params.error,
-            desc = ?params.error_description,
-            "Provider returned error"
-        );
-        return Err(redirect_with_error(frontend_url, "social_auth_denied", secure, domain));
+        tracing::warn!(error = ?params.error, "Provider returned error");
+        return Err(redirect_with_error(frontend_url, "social_auth_denied", secure, domain, is_native));
     }
 
-    // Extract code and state
     let code = match params.code {
         Some(ref c) if !c.is_empty() => c.as_str(),
-        _ => return Err(redirect_with_error(frontend_url, "social_auth_invalid", secure, domain)),
+        _ => return Err(redirect_with_error(frontend_url, "social_auth_invalid", secure, domain, is_native)),
     };
     let state_param = match params.state {
         Some(ref s) if !s.is_empty() => s.as_str(),
-        _ => return Err(redirect_with_error(frontend_url, "social_auth_invalid", secure, domain)),
+        _ => return Err(redirect_with_error(frontend_url, "social_auth_invalid", secure, domain, is_native)),
     };
 
-    // Validate CSRF state (constant-time comparison to prevent timing attacks)
+    // CSRF state validation
     let computed_hash = hash_token(state_param);
     let cookie_hash = extract_cookie_value(&headers, SOCIAL_STATE_COOKIE);
     match cookie_hash {
         Some(ref h) if constant_time_eq(h.as_bytes(), computed_hash.as_bytes()) => {}
-        _ => return Err(redirect_with_error(frontend_url, "social_auth_csrf", secure, domain)),
+        _ => return Err(redirect_with_error(frontend_url, "social_auth_csrf", secure, domain, is_native)),
     }
 
-    // Exchange code for access token
-    let access_token = social_auth_service::exchange_code(
-        provider,
-        code,
-        &state.config,
-        &state.http_client,
+    let token = social_auth_service::exchange_code(
+        provider, code, &state.config, &state.http_client,
     )
     .await
     .map_err(|e| {
         tracing::warn!(error = %e, "Social auth code exchange failed");
-        redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
+        redirect_with_error(frontend_url, "social_auth_exchange", secure, domain, is_native)
     })?;
 
-    // Fetch user profile
     let profile = social_auth_service::fetch_user_profile(
         provider,
-        &access_token,
+        &token,
         &state.http_client,
+        params.apple_user.as_deref(),
+        &state.config,
     )
     .await
     .map_err(|e| {
         tracing::warn!(error = %e, "Social auth profile fetch failed");
-        redirect_with_error(frontend_url, "social_auth_profile", secure, domain)
+        redirect_with_error(frontend_url, "social_auth_profile", secure, domain, is_native)
     })?;
 
-    // Find or create user
     let user = social_auth_service::find_or_create_user(&state.db, &profile)
         .await
         .map_err(|e| {
@@ -155,28 +245,22 @@ pub async fn callback(
                 AppError::SocialAuthDeactivated => "social_auth_deactivated",
                 _ => "social_auth_exchange",
             };
-            redirect_with_error(frontend_url, error_key, secure, domain)
+            redirect_with_error(frontend_url, error_key, secure, domain, is_native)
         })?;
 
-    // Issue session and tokens
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
 
     let tokens = token_service::create_session_and_issue_tokens(
-        &state.db,
-        &state.config,
-        &state.jwt_keys,
-        &user.id,
-        ip.as_deref(),
-        ua.as_deref(),
+        &state.db, &state.config, &state.jwt_keys, &user.id,
+        ip.as_deref(), ua.as_deref(),
     )
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "Social auth session creation failed");
-        redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
+        redirect_with_error(frontend_url, "social_auth_exchange", secure, domain, is_native)
     })?;
 
-    // Audit log
     audit_service::log_async(
         state.db.clone(),
         Some(user.id.clone()),
@@ -185,102 +269,84 @@ pub async fn callback(
             "provider": provider.as_str(),
             "session_id": tokens.session_id,
         })),
-        ip,
-        ua,
+        ip, ua,
     );
 
-    // Build response with auth cookies
-    let mut response_headers = HeaderMap::new();
+    // ── Native app: redirect via custom URL scheme with tokens ──
+    if is_native {
+        let mut resp = HeaderMap::new();
+        let redirect = format!(
+            "{}://auth/callback?session_token={}&access_token={}&refresh_token={}",
+            NATIVE_APP_SCHEME,
+            urlencoding::encode(&tokens.session_token),
+            urlencoding::encode(&tokens.access_token),
+            urlencoding::encode(&tokens.refresh_token),
+        );
+        if let Ok(loc) = redirect.parse() {
+            resp.insert(header::LOCATION, loc);
+        }
+        if let Ok(c) = clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure, domain).parse() {
+            resp.append(header::SET_COOKIE, c);
+        }
+        if let Ok(c) = clear_cookie(SOCIAL_PLATFORM_COOKIE, "/api/v1/auth/social", secure, domain).parse() {
+            resp.append(header::SET_COOKIE, c);
+        }
+        return Ok((StatusCode::FOUND, resp, ()));
+    }
 
-    // Session cookie (30 days)
-    response_headers.insert(
-        header::SET_COOKIE,
-        build_cookie(
-            SESSION_COOKIE_NAME,
-            &tokens.session_token,
-            30 * 24 * 3600,
-            "/",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
-    );
+    // ── Web: set cookies and redirect to frontend ──
+    let mut resp = HeaderMap::new();
+    let err = |_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain, false);
 
-    // Access token cookie
-    response_headers.append(
-        header::SET_COOKIE,
-        build_cookie(
-            ACCESS_TOKEN_COOKIE_NAME,
-            &tokens.access_token,
-            tokens.access_expires_in,
-            "/",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
-    );
-
-    // Refresh token cookie
-    response_headers.append(
-        header::SET_COOKIE,
-        build_cookie(
-            "nyx_refresh_token",
-            &tokens.refresh_token,
-            state.config.jwt_refresh_ttl_secs,
-            "/api/v1/auth/refresh",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
-    );
-
-    // Clear state cookie
-    response_headers.append(
-        header::SET_COOKIE,
+    resp.insert(header::SET_COOKIE,
+        build_cookie(SESSION_COOKIE_NAME, &tokens.session_token, 30 * 24 * 3600, "/", secure, domain)
+            .parse().map_err(err)?);
+    resp.append(header::SET_COOKIE,
+        build_cookie(ACCESS_TOKEN_COOKIE_NAME, &tokens.access_token, tokens.access_expires_in, "/", secure, domain)
+            .parse().map_err(err)?);
+    resp.append(header::SET_COOKIE,
+        build_cookie("nyx_refresh_token", &tokens.refresh_token, state.config.jwt_refresh_ttl_secs, "/api/v1/auth/refresh", secure, domain)
+            .parse().map_err(err)?);
+    resp.append(header::SET_COOKIE,
         clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure, domain)
-            .parse()
-            .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
-    );
+            .parse().map_err(err)?);
 
-    // Redirect to frontend root (dashboard lives at /)
     let redirect_url = state.config.frontend_url.trim_end_matches('/').to_string() + "/";
-    response_headers.insert(
-        header::LOCATION,
-        redirect_url
-            .parse()
-            .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
-    );
+    resp.insert(header::LOCATION, redirect_url.parse().map_err(err)?);
 
-    Ok((StatusCode::FOUND, response_headers, ()))
+    Ok((StatusCode::FOUND, resp, ()))
 }
 
-/// Build an error redirect response that clears the state cookie.
+/// Build an error redirect response that clears state cookies.
 fn redirect_with_error(
     frontend_url: &str,
     error: &str,
     secure: bool,
     domain: Option<&str>,
+    is_native: bool,
 ) -> (StatusCode, HeaderMap, ()) {
     let mut headers = HeaderMap::new();
-    let base = frontend_url.trim_end_matches('/');
-    let url = format!("{}/login?error={}", base, error);
+
+    let url = if is_native {
+        format!("{}://auth/callback?error={}", NATIVE_APP_SCHEME, error)
+    } else {
+        let base = frontend_url.trim_end_matches('/');
+        format!("{}/login?error={}", base, error)
+    };
+
     if let Ok(location) = url.parse() {
         headers.insert(header::LOCATION, location);
     }
     if let Ok(cookie) = clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure, domain).parse() {
         headers.append(header::SET_COOKIE, cookie);
     }
+    if let Ok(cookie) = clear_cookie(SOCIAL_PLATFORM_COOKIE, "/api/v1/auth/social", secure, domain).parse() {
+        headers.append(header::SET_COOKIE, cookie);
+    }
     (StatusCode::FOUND, headers, ())
 }
 
 /// Extract a cookie value by name from the request headers.
-///
-/// Reads only the first `Cookie` header. Per RFC 6265 section 5.4, the user
-/// agent SHOULD send all cookies in a single header. Multiple `Cookie` headers
-/// are non-standard and not handled here; this is an accepted limitation.
 fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get("cookie")
