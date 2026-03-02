@@ -107,7 +107,7 @@ pub async fn list_api_keys(
 ) -> AppResult<Vec<ApiKey>> {
     let keys: Vec<ApiKey> = db
         .collection::<ApiKey>(API_KEYS)
-        .find(doc! { "user_id": user_id })
+        .find(doc! { "user_id": user_id, "is_active": true })
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()

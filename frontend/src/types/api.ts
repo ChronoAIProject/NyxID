@@ -18,17 +18,16 @@ export interface ApiKey {
   readonly created_at: string;
   readonly last_used_at: string | null;
   readonly expires_at: string | null;
-  readonly revoked: boolean;
+  readonly is_active: boolean;
 }
 
 export interface ApiKeyCreateResponse {
   readonly id: string;
   readonly name: string;
-  readonly key: string;
+  readonly full_key: string;
   readonly key_prefix: string;
   readonly scopes: string;
   readonly created_at: string;
-  readonly expires_at: string | null;
 }
 
 export interface OAuthClient {

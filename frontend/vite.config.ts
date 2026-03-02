@@ -36,8 +36,13 @@ export default defineConfig({
       "^/oauth(?:/.*)?$": "http://localhost:3001",
       "/mcp": "http://localhost:3001",
       "/.well-known": "http://localhost:3001",
+      "/health": "http://localhost:3001",
     },
   },
+  preview: {
+    port: 5173,
+  },
+  appType: "spa",
   test: {
     globals: true,
     environment: "happy-dom",
