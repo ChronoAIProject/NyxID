@@ -59,6 +59,21 @@ pub struct AppConfig {
     /// When set, cookies include `Domain=<value>` so they are shared across
     /// subdomains. Leave unset for single-domain / localhost development.
     pub cookie_domain: Option<String>,
+
+    /// Telegram Bot API token for sending approval notifications.
+    pub telegram_bot_token: Option<String>,
+
+    /// Secret token for verifying Telegram webhook callbacks.
+    pub telegram_webhook_secret: Option<String>,
+
+    /// Public URL where Telegram sends webhook callbacks.
+    pub telegram_webhook_url: Option<String>,
+
+    /// Telegram bot username (without @) for link instructions.
+    pub telegram_bot_username: Option<String>,
+
+    /// Interval in seconds between approval expiry sweeps (default: 5).
+    pub approval_expiry_interval_secs: u64,
 }
 
 impl AppConfig {
@@ -133,6 +148,17 @@ impl AppConfig {
                 .unwrap_or(3600),
 
             cookie_domain: env::var("COOKIE_DOMAIN").ok().filter(|s| !s.is_empty()),
+
+            telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN").ok().filter(|s| !s.is_empty()),
+            telegram_webhook_secret: env::var("TELEGRAM_WEBHOOK_SECRET").ok().filter(|s| !s.is_empty()),
+            telegram_webhook_url: env::var("TELEGRAM_WEBHOOK_URL").ok().filter(|s| !s.is_empty()),
+
+            telegram_bot_username: env::var("TELEGRAM_BOT_USERNAME").ok().filter(|s| !s.is_empty()),
+
+            approval_expiry_interval_secs: env::var("APPROVAL_EXPIRY_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
         }
     }
 
@@ -231,6 +257,11 @@ mod tests {
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
             cookie_domain: None,
+            telegram_bot_token: None,
+            telegram_webhook_secret: None,
+            telegram_webhook_url: None,
+            telegram_bot_username: None,
+            approval_expiry_interval_secs: 5,
         }
     }
 

@@ -172,6 +172,53 @@ async fn main() {
         }
     });
 
+    // Spawn background task to expire timed-out approval requests
+    let db_for_expiry = state.db.clone();
+    let config_for_expiry = state.config.clone();
+    let http_for_expiry = state.http_client.clone();
+    let expiry_interval_secs = config.approval_expiry_interval_secs;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(expiry_interval_secs));
+        loop {
+            interval.tick().await;
+            if let Err(e) = services::approval_service::expire_pending_requests(
+                &db_for_expiry,
+                &config_for_expiry,
+                &http_for_expiry,
+            )
+            .await
+            {
+                tracing::warn!("Approval expiry task error: {e}");
+            }
+        }
+    });
+
+    // Telegram integration: webhook mode (production) or polling mode (development)
+    if let (Some(bot_token), Some(webhook_url), Some(webhook_secret)) = (
+        &config.telegram_bot_token,
+        &config.telegram_webhook_url,
+        &config.telegram_webhook_secret,
+    ) {
+        // Production: register webhook with Telegram
+        match services::telegram_service::set_webhook(
+            &state.http_client,
+            bot_token,
+            webhook_url,
+            webhook_secret,
+        )
+        .await
+        {
+            Ok(()) => tracing::info!("Telegram webhook registered: {webhook_url}"),
+            Err(e) => tracing::error!("Failed to register Telegram webhook: {e}"),
+        }
+    } else if config.telegram_bot_token.is_some() {
+        // Development fallback: poll getUpdates when no webhook URL is configured
+        let polling_state = state.clone();
+        tokio::spawn(async move {
+            services::telegram_poller::run_polling_loop(polling_state).await;
+        });
+    }
+
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::exact(
             config.frontend_url.parse().expect("Invalid FRONTEND_URL"),

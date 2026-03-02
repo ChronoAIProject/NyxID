@@ -17,6 +17,9 @@ pub struct ErrorResponse {
     /// Browser URL to complete consent flow (consent_required only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consent_url: Option<String>,
+    /// Approval request ID (approval_required only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// Application-level error variants.
@@ -115,6 +118,9 @@ pub enum AppError {
 
     #[error("Unsupported grant type: {0}")]
     UnsupportedGrantType(String),
+
+    #[error("Approval required")]
+    ApprovalRequired { request_id: String },
 }
 
 impl AppError {
@@ -146,6 +152,7 @@ impl AppError {
             Self::SocialAuthDeactivated => StatusCode::FORBIDDEN,
             Self::ConsentRequired { .. } => StatusCode::FORBIDDEN,
             Self::UnsupportedGrantType(_) => StatusCode::BAD_REQUEST,
+            Self::ApprovalRequired { .. } => StatusCode::FORBIDDEN,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -183,6 +190,7 @@ impl AppError {
             Self::SocialAuthDeactivated => 6003,
             Self::ConsentRequired { .. } => 3003,
             Self::UnsupportedGrantType(_) => 3004,
+            Self::ApprovalRequired { .. } => 7000,
         }
     }
 
@@ -248,6 +256,7 @@ impl AppError {
             Self::SocialAuthDeactivated => "social_auth_deactivated",
             Self::ConsentRequired { .. } => "consent_required",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
+            Self::ApprovalRequired { .. } => "approval_required",
         }
     }
 }
@@ -272,6 +281,10 @@ impl IntoResponse for AppError {
             AppError::ConsentRequired { consent_url } => Some(consent_url.clone()),
             _ => None,
         };
+        let approval_request_id = match &self {
+            AppError::ApprovalRequired { request_id } => Some(request_id.clone()),
+            _ => None,
+        };
 
         let body = ErrorResponse {
             error: self.error_key().to_string(),
@@ -287,10 +300,15 @@ impl IntoResponse for AppError {
                 AppError::ConsentRequired { .. } => {
                     "Consent required. Complete authorization in browser flow.".to_string()
                 }
+                AppError::ApprovalRequired { .. } => {
+                    "Approval required. A notification has been sent to the resource owner."
+                        .to_string()
+                }
                 other => other.to_string(),
             },
             session_token: mfa_session_token,
             consent_url,
+            request_id: approval_request_id,
         };
 
         (status, axum::Json(body)).into_response()
@@ -338,6 +356,10 @@ mod tests {
         assert_eq!(AppError::SocialAuthNoEmail.status_code(), StatusCode::BAD_REQUEST);
         assert_eq!(AppError::SocialAuthDeactivated.status_code(), StatusCode::FORBIDDEN);
         assert_eq!(AppError::UnsupportedGrantType("x".into()).status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            AppError::ApprovalRequired { request_id: "x".into() }.status_code(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[test]
@@ -372,6 +394,7 @@ mod tests {
             AppError::SocialAuthNoEmail.error_code(),
             AppError::SocialAuthDeactivated.error_code(),
             AppError::UnsupportedGrantType("".into()).error_code(),
+            AppError::ApprovalRequired { request_id: "".into() }.error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(codes.len(), unique.len(), "All error codes should be unique");
@@ -411,6 +434,10 @@ mod tests {
         assert_eq!(AppError::SocialAuthNoEmail.error_key(), "social_auth_no_email");
         assert_eq!(AppError::SocialAuthDeactivated.error_key(), "social_auth_deactivated");
         assert_eq!(AppError::UnsupportedGrantType("".into()).error_key(), "unsupported_grant_type");
+        assert_eq!(
+            AppError::ApprovalRequired { request_id: "".into() }.error_key(),
+            "approval_required"
+        );
     }
 
     #[test]
@@ -446,12 +473,14 @@ mod tests {
             message: "Invalid input".to_string(),
             session_token: None,
             consent_url: None,
+            request_id: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["error"], "bad_request");
         assert_eq!(json["error_code"], 1000);
         assert!(json.get("session_token").is_none());
         assert!(json.get("consent_url").is_none());
+        assert!(json.get("request_id").is_none());
     }
 
     #[test]
@@ -462,6 +491,7 @@ mod tests {
             message: "MFA verification required".to_string(),
             session_token: Some("mfa-session-tok".to_string()),
             consent_url: None,
+            request_id: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["session_token"], "mfa-session-tok");

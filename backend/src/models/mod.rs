@@ -1,4 +1,6 @@
 pub mod api_key;
+pub mod approval_grant;
+pub mod approval_request;
 pub mod audit_log;
 pub mod authorization_code;
 pub mod bson_bytes;
@@ -8,6 +10,7 @@ pub mod downstream_service;
 pub mod group;
 pub mod mcp_session;
 pub mod mfa_factor;
+pub mod notification_channel;
 pub mod oauth_client;
 pub mod oauth_state;
 pub mod provider_config;

@@ -23,6 +23,7 @@ This guide covers deploying NyxID in development, staging, and production enviro
 - [Initial Admin Setup](#initial-admin-setup)
 - [CLI Reference](#cli-reference)
 - [MCP Proxy Deployment](#mcp-proxy-deployment)
+- [Telegram Bot Setup](#telegram-bot-setup)
 - [Security Hardening Checklist](#security-hardening-checklist)
 - [Troubleshooting](#troubleshooting)
 
@@ -1262,6 +1263,110 @@ This is the generic callback endpoint that handles all provider OAuth flows.
 
 ---
 
+## Telegram Bot Setup
+
+The approval system uses a Telegram bot to send push notifications for access approval requests. This is optional -- the approval system works via the web UI without Telegram.
+
+### 1. Create a Telegram Bot
+
+1. Open Telegram and search for [@BotFather](https://t.me/BotFather)
+2. Send `/newbot` and follow the prompts to name your bot
+3. BotFather will give you a **bot token** (e.g. `123456789:ABCdef...`)
+4. Note the **bot username** (e.g. `NyxIDBot`)
+
+### 2. Configure Environment Variables
+
+Add to your `.env` or environment:
+
+```bash
+TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNO     # From BotFather
+TELEGRAM_BOT_USERNAME=NyxIDBot                     # Without @
+```
+
+For **production (webhook mode)**, also set:
+
+```bash
+TELEGRAM_WEBHOOK_SECRET=your-random-secret-string  # Generate with: openssl rand -hex 32
+TELEGRAM_WEBHOOK_URL=https://auth.nyxid.dev/api/v1/webhooks/telegram
+```
+
+The `TELEGRAM_WEBHOOK_URL` must be a publicly accessible HTTPS URL that Telegram can reach.
+
+For **development (long polling mode)**, omit `TELEGRAM_WEBHOOK_URL` and `TELEGRAM_WEBHOOK_SECRET`. The backend will automatically fall back to `getUpdates` long polling -- no public URL or tunnel required.
+
+### 3. Delivery Modes
+
+NyxID supports two Telegram delivery modes, selected automatically based on environment configuration:
+
+| Mode | When | How |
+|------|------|-----|
+| **Webhook** (production) | `TELEGRAM_WEBHOOK_URL` + `TELEGRAM_WEBHOOK_SECRET` are set | Backend calls `setWebhook` at startup. Telegram pushes updates to `POST /api/v1/webhooks/telegram`. |
+| **Long polling** (development) | Only `TELEGRAM_BOT_TOKEN` is set | Backend calls `deleteWebhook` at startup, then polls `getUpdates` in a background task (30s timeout). |
+
+Both modes share the same update processing logic and support all features (approval callbacks, account linking).
+
+#### Webhook Mode Setup
+
+Register the webhook URL with Telegram using the Bot API:
+
+```bash
+curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://auth.nyxid.dev/api/v1/webhooks/telegram",
+    "secret_token": "your-random-secret-string",
+    "allowed_updates": ["callback_query", "message"]
+  }'
+```
+
+Verify the webhook is set:
+
+```bash
+curl "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+```
+
+> **Note:** The backend also registers the webhook at startup when the env vars are set. The manual curl command is useful for verification or re-registration.
+
+#### Long Polling Mode Setup
+
+No additional setup needed. Just set `TELEGRAM_BOT_TOKEN` (and optionally `TELEGRAM_BOT_USERNAME`) and start the backend. The polling loop starts automatically and logs:
+
+```
+INFO nyxid: Telegram polling mode: starting getUpdates loop
+```
+
+If a webhook was previously registered, the backend calls `deleteWebhook` first to avoid conflicts.
+
+### 4. User Account Linking
+
+Users link their Telegram account from the NyxID settings page:
+
+1. User navigates to **Settings > Notifications** in the NyxID dashboard
+2. Clicks **Link Telegram** to generate a one-time link code
+3. Sends `/start NYXID-XXXXXXXX` to the bot in Telegram
+4. The bot confirms the link and starts sending approval notifications
+
+### 5. Development Setup
+
+For local development, **long polling mode** is recommended (see above). Simply set `TELEGRAM_BOT_TOKEN` and omit the webhook variables.
+
+If you prefer webhook mode locally, you need a public URL:
+
+- **ngrok**: `ngrok http 3001` and use the generated HTTPS URL
+- **Cloudflare Tunnel**: `cloudflared tunnel --url http://localhost:3001`
+
+Set `TELEGRAM_WEBHOOK_URL` to the public URL + `/api/v1/webhooks/telegram`.
+
+### 6. Approval Expiry Configuration
+
+The background task that expires timed-out approval requests runs every `APPROVAL_EXPIRY_INTERVAL_SECS` seconds (default: 5). Adjust this if you need more or less frequent expiry checks:
+
+```bash
+APPROVAL_EXPIRY_INTERVAL_SECS=10  # Check every 10 seconds
+```
+
+---
+
 ## Security Hardening Checklist
 
 ### Before Going Live
@@ -1273,6 +1378,9 @@ This is the generic callback endpoint that handles all provider OAuth flows.
 - [ ] `FRONTEND_URL` uses `https://` (CORS origin)
 - [ ] `DATABASE_URL` uses TLS (`?tls=true`)
 - [ ] MongoDB authentication is enabled with a strong password
+- [ ] If using Telegram approval in webhook mode: `TELEGRAM_WEBHOOK_SECRET` is a randomly generated string
+- [ ] If using Telegram approval in webhook mode: `TELEGRAM_WEBHOOK_URL` uses `https://`
+- [ ] If using Telegram approval in polling mode (dev only): `TELEGRAM_WEBHOOK_URL` is not set
 - [ ] SMTP is configured for transactional email (verify-email, reset-password)
 - [ ] Social login secrets are set (if using social login)
 - [ ] TLS is terminated at the reverse proxy

@@ -13,8 +13,8 @@ use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, chatgpt_translator, delegation_service, llm_gateway_service,
-    proxy_service,
+    approval_service, audit_service, chatgpt_translator, delegation_service,
+    llm_gateway_service, notification_service, proxy_service,
 };
 use crate::AppState;
 
@@ -87,6 +87,10 @@ pub async fn llm_proxy_request(
         &service_id,
     )
     .await?;
+
+    // Check approval if user has it enabled
+    let request_method_str = request.method().as_str().to_string();
+    check_llm_approval(&state, &auth_user, &user_id_str, &service_id, &service, &path, &request_method_str).await?;
 
     // Resolve delegated credentials (provider tokens)
     let delegated = delegation_service::resolve_delegated_credentials(
@@ -262,6 +266,9 @@ pub async fn gateway_request(
         &service_id,
     )
     .await?;
+
+    // Check approval if user has it enabled
+    check_llm_approval(&state, &auth_user, &user_id_str, &service_id, &service, &path, "POST").await?;
 
     // Resolve delegated credentials
     let delegated = delegation_service::resolve_delegated_credentials(
@@ -776,3 +783,81 @@ fn parse_next_sse_event(
         data: data_parts.join("\n"),
     })
 }
+
+/// Check approval for LLM proxy request.
+async fn check_llm_approval(
+    state: &AppState,
+    auth_user: &AuthUser,
+    user_id_str: &str,
+    service_id: &str,
+    service: &crate::models::downstream_service::DownstreamService,
+    path: &str,
+    method_str: &str,
+) -> AppResult<()> {
+    let requires_approval =
+        approval_service::user_requires_approval(&state.db, user_id_str).await?;
+
+    if !requires_approval {
+        return Ok(());
+    }
+
+    // Only direct browser sessions bypass approval
+    if auth_user.auth_method == crate::mw::auth::AuthMethod::Session {
+        return Ok(());
+    }
+
+    let requester_type = match auth_user.auth_method {
+        crate::mw::auth::AuthMethod::ApiKey => "api_key",
+        crate::mw::auth::AuthMethod::Delegated => "delegated",
+        crate::mw::auth::AuthMethod::ServiceAccount => "service_account",
+        crate::mw::auth::AuthMethod::AccessToken => "access_token",
+        crate::mw::auth::AuthMethod::Session => unreachable!(),
+    };
+
+    let requester_id = auth_user
+        .acting_client_id
+        .as_deref()
+        .unwrap_or(user_id_str);
+
+    let has_grant = approval_service::check_approval(
+        &state.db,
+        user_id_str,
+        service_id,
+        requester_type,
+        requester_id,
+    )
+    .await?;
+
+    if has_grant {
+        return Ok(());
+    }
+
+    let channel =
+        notification_service::get_or_create_channel(&state.db, user_id_str).await?;
+
+    let timeout_secs = channel.approval_timeout_secs;
+    let approval_request = approval_service::create_approval_request(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        user_id_str,
+        service_id,
+        &service.name,
+        &service.slug,
+        requester_type,
+        requester_id,
+        None,
+        &format!("llm:{} {}", method_str, path),
+        timeout_secs,
+    )
+    .await?;
+
+    // Block until the user approves/rejects or timeout expires
+    approval_service::wait_for_decision(
+        &state.db,
+        &approval_request.id,
+        timeout_secs,
+    )
+    .await
+}
+

@@ -238,6 +238,21 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let delegation_routes = Router::new()
         .route("/refresh", post(handlers::delegation::refresh_delegation_token));
 
+    // Notification settings (human-only)
+    let notification_routes = Router::new()
+        .route("/settings", get(handlers::notifications::get_settings)
+            .put(handlers::notifications::update_settings))
+        .route("/telegram/link", post(handlers::notifications::telegram_link))
+        .route("/telegram", delete(handlers::notifications::telegram_disconnect));
+
+    // Approval management (human-only; status polling is in api_v1_delegated)
+    let approval_routes = Router::new()
+        .route("/requests", get(handlers::approvals::list_requests))
+        .route("/requests/{request_id}/decide",
+            post(handlers::approvals::decide_request))
+        .route("/grants", get(handlers::approvals::list_grants))
+        .route("/grants/{grant_id}", delete(handlers::approvals::revoke_grant));
+
     let developer_routes = Router::new()
         .route(
             "/oauth-clients",
@@ -260,6 +275,8 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let api_v1_delegated = Router::new()
         .nest("/llm", llm_routes)
         .nest("/delegation", delegation_routes)
+        .route("/approvals/requests/{request_id}/status",
+            get(handlers::approvals::get_request_status))
         .route("/proxy/services", get(handlers::proxy::list_proxy_services))
         .route("/proxy/s/{slug}/{*path}", axum::routing::any(handlers::proxy::proxy_request_by_slug))
         .route("/proxy/{service_id}/{*path}", axum::routing::any(handlers::proxy::proxy_request));
@@ -280,6 +297,8 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest("/mcp", mcp_routes)
         .nest("/developer", developer_routes)
         .nest("/admin", admin_routes)
+        .nest("/notifications", notification_routes)
+        .nest("/approvals", approval_routes)
         .route("/public/config", get(handlers::health::public_config))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens));
@@ -299,8 +318,13 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest("/oauth", oauth_routes)
         .layer(oauth_public_cors());
 
+    // Webhook routes -- unauthenticated (verified by secret token)
+    let webhook_routes = Router::new()
+        .route("/telegram", post(handlers::webhooks::telegram_webhook));
+
     let private = Router::new()
         .route("/health", get(handlers::health::health_check))
+        .nest("/api/v1/webhooks", webhook_routes)
         .nest("/api/v1", api_v1)
         .route(
             "/mcp",

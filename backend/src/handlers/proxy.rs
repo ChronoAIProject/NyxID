@@ -16,7 +16,10 @@ use crate::models::downstream_service::{DownstreamService, COLLECTION_NAME as DO
 use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::models::user_service_connection::{UserServiceConnection, COLLECTION_NAME as USER_SERVICE_CONNECTIONS};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, delegation_service, identity_service, proxy_service};
+use crate::services::{
+    approval_service, audit_service, delegation_service, identity_service,
+    notification_service, proxy_service,
+};
 use crate::AppState;
 
 /// Response headers that are safe to forward back to the client.
@@ -105,6 +108,73 @@ async fn execute_proxy(
             return Err(e);
         }
     };
+
+    // Check approval if user has it enabled.
+    // Only direct browser sessions bypass approval; API keys, delegated tokens,
+    // and service accounts all require approval since they represent programmatic access.
+    let requires_approval = approval_service::user_requires_approval(
+        &state.db,
+        &user_id_str,
+    )
+    .await?;
+
+    if requires_approval && auth_user.auth_method != crate::mw::auth::AuthMethod::Session {
+        let requester_type = match auth_user.auth_method {
+            crate::mw::auth::AuthMethod::ApiKey => "api_key",
+            crate::mw::auth::AuthMethod::Delegated => "delegated",
+            crate::mw::auth::AuthMethod::ServiceAccount => "service_account",
+            crate::mw::auth::AuthMethod::AccessToken => "access_token",
+            crate::mw::auth::AuthMethod::Session => unreachable!(),
+        };
+
+        let requester_id = auth_user
+            .acting_client_id
+            .as_deref()
+            .unwrap_or(&user_id_str);
+
+        let has_grant = approval_service::check_approval(
+            &state.db,
+            &user_id_str,
+            service_id,
+            requester_type,
+            requester_id,
+        )
+        .await?;
+
+        if !has_grant {
+            let channel = notification_service::get_or_create_channel(
+                &state.db,
+                &user_id_str,
+            )
+            .await?;
+
+            let request_method = request.method().as_str().to_string();
+            let timeout_secs = channel.approval_timeout_secs;
+            let approval_request = approval_service::create_approval_request(
+                &state.db,
+                &state.config,
+                &state.http_client,
+                &user_id_str,
+                service_id,
+                &target.service.name,
+                &target.service.slug,
+                requester_type,
+                requester_id,
+                None,
+                &format!("proxy:{} {}", request_method, path),
+                timeout_secs,
+            )
+            .await?;
+
+            // Block until the user approves/rejects or timeout expires
+            approval_service::wait_for_decision(
+                &state.db,
+                &approval_request.id,
+                timeout_secs,
+            )
+            .await?;
+        }
+    }
 
     // Build identity headers if configured on the service
     let mut identity_headers = Vec::new();

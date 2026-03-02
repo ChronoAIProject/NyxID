@@ -492,5 +492,96 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── approval_requests ──
+    let approval_requests = db.collection::<mongodb::bson::Document>("approval_requests");
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "status": 1 })
+                .build(),
+        )
+        .await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "idempotency_key": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "created_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(90 * 24 * 60 * 60))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // ── approval_grants ──
+    let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
+    approval_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "user_id": 1,
+                    "service_id": 1,
+                    "requester_type": 1,
+                    "requester_id": 1,
+                })
+                .build(),
+        )
+        .await?;
+    approval_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    approval_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "granted_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    // ── notification_channels ──
+    let notification_channels = db.collection::<mongodb::bson::Document>("notification_channels");
+    notification_channels
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    notification_channels
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "telegram_link_code": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+    notification_channels
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "telegram_chat_id": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+
     Ok(())
 }

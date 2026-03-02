@@ -23,6 +23,20 @@ use crate::AppState;
 ///
 /// This acts as an Axum extractor: handlers that include `AuthUser` in their
 /// parameters will automatically reject unauthenticated requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthMethod {
+    /// Browser session cookie
+    Session,
+    /// Bearer access token (JWT)
+    AccessToken,
+    /// X-API-Key header
+    ApiKey,
+    /// Service account client credentials
+    ServiceAccount,
+    /// Delegated access token
+    Delegated,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub user_id: Uuid,
@@ -31,6 +45,8 @@ pub struct AuthUser {
     pub scope: String,
     /// If this is a delegated request, the OAuth client_id of the acting service.
     pub acting_client_id: Option<String>,
+    /// How the user authenticated this request.
+    pub auth_method: AuthMethod,
 }
 
 /// Name of the session cookie.
@@ -116,6 +132,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             session_id: None,
                             scope: claims.scope.clone(),
                             acting_client_id: None,
+                            auth_method: AuthMethod::ServiceAccount,
                         });
                     }
 
@@ -144,11 +161,18 @@ impl FromRequestParts<AppState> for AuthUser {
                         }
                     }
 
+                    let auth_method = if claims.act.is_some() {
+                        AuthMethod::Delegated
+                    } else {
+                        AuthMethod::AccessToken
+                    };
+
                     return Ok(AuthUser {
                         user_id,
                         session_id: None,
                         scope: claims.scope.clone(),
                         acting_client_id: claims.act.map(|a| a.sub),
+                        auth_method,
                     });
                 }
             }
@@ -203,6 +227,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                     session_id: Some(session_id),
                                     scope: String::new(),
                                     acting_client_id: None,
+                                    auth_method: AuthMethod::Session,
                                 });
                             }
                             _ => {
@@ -253,11 +278,18 @@ impl FromRequestParts<AppState> for AuthUser {
                     }
                 }
 
+                let auth_method = if claims.act.is_some() {
+                    AuthMethod::Delegated
+                } else {
+                    AuthMethod::AccessToken
+                };
+
                 return Ok(AuthUser {
                     user_id,
                     session_id: None,
                     scope: claims.scope.clone(),
                     acting_client_id: claims.act.map(|a| a.sub),
+                    auth_method,
                 });
             }
 
@@ -298,6 +330,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     session_id: None,
                     scope: key.scopes.clone(),
                     acting_client_id: None,
+                    auth_method: AuthMethod::ApiKey,
                 });
             }
 

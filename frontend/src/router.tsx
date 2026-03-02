@@ -45,6 +45,9 @@ import {
   OAuthConsentPage,
   OAuthErrorPage,
   PrivacyPage,
+  NotificationSettingsPage,
+  ApprovalHistoryPage,
+  ApprovalGrantsPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
@@ -246,6 +249,24 @@ const providerEditRoute = createRoute({
   component: ProviderEditPage,
 });
 
+const notificationSettingsRoute = createRoute({
+  path: "/approvals/settings",
+  getParentRoute: () => dashboardLayout,
+  component: NotificationSettingsPage,
+});
+
+const approvalHistoryRoute = createRoute({
+  path: "/approvals/history",
+  getParentRoute: () => dashboardLayout,
+  component: ApprovalHistoryPage,
+});
+
+const approvalGrantsRoute = createRoute({
+  path: "/approvals/grants",
+  getParentRoute: () => dashboardLayout,
+  component: ApprovalGrantsPage,
+});
+
 const adminLayout = createRoute({
   path: "/admin",
   getParentRoute: () => dashboardLayout,
@@ -336,6 +357,9 @@ const routeTree = rootRoute.addChildren([
     developerAppsRoute,
     developerAppDetailRoute,
     integrationGuideRoute,
+    notificationSettingsRoute,
+    approvalHistoryRoute,
+    approvalGrantsRoute,
     adminLayout.addChildren([
       adminUsersRoute,
       adminUserDetailRoute,

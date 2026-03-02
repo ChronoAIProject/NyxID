@@ -37,6 +37,9 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Admin Roles](#admin-roles)
   - [Admin Groups](#admin-groups)
   - [Admin Service Accounts](#admin-service-accounts)
+  - [Notification Settings](#notification-settings)
+  - [Approval Management](#approval-management)
+  - [Webhooks](#webhooks)
 
 ---
 
@@ -110,6 +113,7 @@ Internal errors never leak implementation details. The `message` for error codes
 | 6001 | `social_auth_conflict`     | 409         | Email already linked to another provider |
 | 6002 | `social_auth_no_email`     | 400         | No verified email from provider          |
 | 6003 | `social_auth_deactivated`  | 403         | Social login account is deactivated      |
+| 7000 | `approval_required`        | 403         | User approval required (proxy/LLM requests block until decision; this code is used for async status polling) |
 
 ---
 
@@ -2464,11 +2468,13 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Response:** The downstream service's response status code, allowed headers, and body are returned directly. Only a safe allowlist of response headers is forwarded.
 
+**Transaction Approval:** If the resource owner has `approval_required` enabled and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing approval grant. If no grant exists, an approval request is created (with Telegram notification if configured) and the **HTTP connection is held open** until the user approves/rejects or the configured timeout expires. If approved, the request proceeds and the downstream response is returned. If rejected or timed out, a `403 Forbidden` is returned. Direct browser sessions (session cookie auth) bypass approval.
+
 **Limits:** Request body is limited to 10 MB for proxy requests.
 
 **Errors:**
 - `1000 bad_request` -- Service is inactive, service is a provider, invalid proxy path, or connection missing credential
-- `1002 forbidden` -- No active connection to this service
+- `1002 forbidden` -- No active connection to this service, or approval was rejected/timed out
 - `1003 not_found` -- Service does not exist
 
 **Example:**
@@ -2491,7 +2497,7 @@ curl -X POST http://localhost:3001/api/v1/proxy/d1e2f3a4-b5c6-7890-1234-567890ab
 
 Forward any HTTP request to a downstream service using the service's slug instead of its UUID. This endpoint is functionally identical to `ANY /api/v1/proxy/{service_id}/{*path}` but provides developer-friendly URLs.
 
-The slug is resolved to the service UUID internally. All proxy behavior (credential injection, identity propagation, delegation token injection, path validation, header allowlists, body size limits) is the same as the UUID-based endpoint.
+The slug is resolved to the service UUID internally. All proxy behavior (credential injection, identity propagation, delegation token injection, transaction approval, path validation, header allowlists, body size limits) is the same as the UUID-based endpoint.
 
 Only active services are resolved by slug. Inactive services return `1003 not_found`.
 
@@ -2622,6 +2628,8 @@ Three access modes are available:
 3. **Status endpoint** -- Check which providers are ready for the current user
 
 Streaming (`"stream": true`) is not yet supported. All requests must set `stream: false` or omit the field.
+
+**Transaction Approval:** The same blocking approval flow applies to LLM gateway endpoints as to the proxy. If the resource owner has `approval_required` enabled and the request uses a non-session auth method (API key, delegated token, service account, or access token), the connection is held open until the user approves/rejects or the timeout expires. See the [Proxy](#proxy) section for details.
 
 #### GET /api/v1/llm/status
 
@@ -5238,6 +5246,337 @@ Service account access tokens include:
 | `sa`         | boolean| Always `true` for service account tokens           |
 
 Service account tokens do **not** include `sid`, `roles`, `groups`, `permissions`, `act`, or `delegated` claims. No refresh tokens are issued for service accounts.
+
+---
+
+## Notification Settings
+
+Manage notification channels and approval preferences. All endpoints require authentication (human-only, no service accounts or delegated tokens).
+
+### Get Notification Settings
+
+```
+GET /api/v1/notifications/settings
+Authorization: Bearer <access_token>
+```
+
+**Response (200):**
+
+```json
+{
+  "telegram_connected": true,
+  "telegram_username": "johndoe",
+  "telegram_enabled": true,
+  "approval_required": true,
+  "approval_timeout_secs": 30,
+  "grant_expiry_days": 30
+}
+```
+
+**curl:**
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/notifications/settings
+```
+
+### Update Notification Settings
+
+```
+PUT /api/v1/notifications/settings
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+**Request:**
+
+```json
+{
+  "telegram_enabled": true,
+  "approval_required": true,
+  "approval_timeout_secs": 60,
+  "grant_expiry_days": 14
+}
+```
+
+All fields are optional. Only provided fields are updated.
+
+**Validation:**
+- `approval_timeout_secs`: 10..=300
+- `grant_expiry_days`: 1..=365
+- `telegram_enabled: true` requires a linked Telegram account
+
+**Response (200):** Same shape as GET response.
+
+**curl:**
+
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"approval_required": true, "approval_timeout_secs": 60}' \
+  http://localhost:3001/api/v1/notifications/settings
+```
+
+### Generate Telegram Link Code
+
+```
+POST /api/v1/notifications/telegram/link
+Authorization: Bearer <access_token>
+```
+
+Generates a one-time code that the user sends to the NyxID Telegram bot via `/start <code>`.
+
+**Response (200):**
+
+```json
+{
+  "link_code": "NYXID-A1B2C3D4",
+  "bot_username": "NyxIDBot",
+  "expires_in_secs": 300,
+  "instructions": "Send /start NYXID-A1B2C3D4 to @NyxIDBot on Telegram"
+}
+```
+
+**curl:**
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/notifications/telegram/link
+```
+
+### Disconnect Telegram
+
+```
+DELETE /api/v1/notifications/telegram
+Authorization: Bearer <access_token>
+```
+
+Clears the linked Telegram account and disables Telegram notifications.
+
+**Response (200):**
+
+```json
+{
+  "message": "Telegram disconnected"
+}
+```
+
+**curl:**
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/notifications/telegram
+```
+
+---
+
+## Approval Management
+
+View approval history, manage grants, and approve/reject requests via the web UI. Most endpoints require authentication (human-only). The status polling endpoint is also accessible by delegated tokens and service accounts.
+
+**Blocking vs. polling:** The primary approval flow is blocking -- proxy and LLM gateway requests hold the HTTP connection open until approval/rejection/timeout. The status polling endpoint below is a secondary mechanism for callers that use async workflows or need to monitor approval status from a separate connection.
+
+### List Approval Requests (History)
+
+```
+GET /api/v1/approvals/requests?status=pending&page=1&per_page=20
+Authorization: Bearer <access_token>
+```
+
+**Query parameters:**
+
+| Parameter  | Type   | Default | Description                                |
+|------------|--------|---------|--------------------------------------------|
+| `status`   | string |         | Filter by status: `pending`, `approved`, `rejected`, `expired` |
+| `page`     | number | `1`     | Page number (1-indexed)                    |
+| `per_page` | number | `20`    | Results per page (max 100)                 |
+
+**Response (200):**
+
+```json
+{
+  "requests": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "service_name": "OpenAI API",
+      "service_slug": "openai",
+      "requester_type": "service_account",
+      "requester_label": "CI Pipeline",
+      "operation_summary": "proxy:POST /v1/chat/completions",
+      "status": "approved",
+      "created_at": "2026-03-03T00:00:00+00:00",
+      "decided_at": "2026-03-03T00:00:05+00:00",
+      "decision_channel": "telegram"
+    }
+  ],
+  "total": 42,
+  "page": 1,
+  "per_page": 20
+}
+```
+
+**curl:**
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3001/api/v1/approvals/requests?status=pending"
+```
+
+### Poll Approval Request Status
+
+```
+GET /api/v1/approvals/requests/{request_id}/status
+Authorization: Bearer <access_token>
+```
+
+Status endpoint for monitoring approval requests. The primary flow is blocking (proxy/LLM connections wait for approval), but this endpoint is available for async callers that manage approval status separately. Also accessible by delegated tokens and service accounts.
+
+UUID v4 request IDs provide sufficient unguessability (~122 bits of entropy), so no ownership verification is required.
+
+**Response (200):**
+
+```json
+{
+  "status": "pending",
+  "expires_at": "2026-03-03T00:00:30+00:00"
+}
+```
+
+Status values: `pending`, `approved`, `rejected`, `expired`.
+
+When status changes to `approved`, the caller can retry the original proxy request (the grant now exists).
+
+**curl:**
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/approvals/requests/550e8400-e29b-41d4-a716-446655440000/status
+```
+
+### Approve/Reject via Web UI
+
+```
+POST /api/v1/approvals/requests/{request_id}/decide
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+**Request:**
+
+```json
+{
+  "approved": true
+}
+```
+
+Only the resource owner (the user who must approve) can call this endpoint.
+
+**Response (200):**
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "approved",
+  "decided_at": "2026-03-03T00:00:05+00:00"
+}
+```
+
+**Error (404):** Request not found or already processed (replay-safe).
+
+**curl:**
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"approved": true}' \
+  http://localhost:3001/api/v1/approvals/requests/550e8400-e29b-41d4-a716-446655440000/decide
+```
+
+### List Active Grants
+
+```
+GET /api/v1/approvals/grants?page=1&per_page=20
+Authorization: Bearer <access_token>
+```
+
+Returns active (non-expired, non-revoked) approval grants for the current user.
+
+**Response (200):**
+
+```json
+{
+  "grants": [
+    {
+      "id": "uuid",
+      "service_id": "uuid",
+      "service_name": "OpenAI API",
+      "requester_type": "service_account",
+      "requester_id": "uuid",
+      "requester_label": "CI Pipeline",
+      "granted_at": "2026-03-03T00:00:00+00:00",
+      "expires_at": "2026-04-02T00:00:00+00:00"
+    }
+  ],
+  "total": 5,
+  "page": 1,
+  "per_page": 20
+}
+```
+
+**curl:**
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/approvals/grants
+```
+
+### Revoke a Grant
+
+```
+DELETE /api/v1/approvals/grants/{grant_id}
+Authorization: Bearer <access_token>
+```
+
+Revokes a specific approval grant. The requester will need to re-approve on their next access attempt.
+
+**Response (200):**
+
+```json
+{
+  "message": "Grant revoked"
+}
+```
+
+**curl:**
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/approvals/grants/550e8400-e29b-41d4-a716-446655440000
+```
+
+---
+
+## Webhooks
+
+### Telegram Webhook
+
+```
+POST /api/v1/webhooks/telegram
+X-Telegram-Bot-Api-Secret-Token: <secret>
+Content-Type: application/json
+```
+
+Receives Telegram updates. This endpoint is unauthenticated (no JWT/session required) but verified via the `X-Telegram-Bot-Api-Secret-Token` header using constant-time comparison.
+
+Handles two types of updates:
+
+1. **Callback queries** -- User pressed Approve/Reject on an inline keyboard. The handler verifies the chat ID matches the approval request, processes the decision, and edits the Telegram message to show the result.
+
+2. **Messages** -- User sent `/start NYXID-XXXXXX` to link their Telegram account. The handler validates the link code, updates the notification channel, and sends a confirmation message.
+
+**Response:** Always `200 OK` (empty body) to prevent Telegram retries.
+
+This endpoint is not intended to be called directly by clients.
 
 ---
 

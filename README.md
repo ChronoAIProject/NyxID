@@ -161,6 +161,19 @@ It provides a complete identity layer: user registration, session management, Op
 - Per-client `delegation_scopes` configuration controls which scopes can be requested
 - Per-service `inject_delegation_token` and `delegation_token_scope` control MCP/proxy injection
 
+### Transaction Approval
+- Push-based approval for service access via Telegram (with architecture designed for future mobile app notifications)
+- **Blocking flow:** Proxy and LLM gateway requests hold the HTTP connection open until the user approves/rejects or the timeout expires, then return the downstream response or a 403 error -- no retry needed
+- Triggered for **all non-session auth methods** (API keys, delegated tokens, service accounts, access tokens) when the resource owner has approval enabled
+- Configurable approval timeout (10--300 seconds) and grant expiry (1--365 days)
+- Approval grants: once approved, access is granted for a configurable period without re-prompting
+- Web UI and Telegram approval: approve or reject from the NyxID dashboard or directly in Telegram
+- **Dual Telegram delivery:** Webhook mode for production (public HTTPS URL required) or automatic long polling fallback for development (no ngrok needed)
+- Approval history and grant management pages in the frontend
+- Idempotent approval requests (SHA-256 based idempotency keys prevent duplicates)
+- Approval status polling endpoint for programmatic callers
+- Background task auto-expires timed-out requests
+
 ### Security Hardening
 - Rate limiting: per-IP sliding window with global token-bucket fallback
 - Security headers: HSTS, CSP, X-Frame-Options (DENY), X-Content-Type-Options, Referrer-Policy, Permissions-Policy
@@ -219,7 +232,7 @@ It provides a complete identity layer: user registration, session management, Op
                                   |
                          +--------v---------+
                          |  MongoDB 8.0     |
-                         |  (19 collections)|
+                         |  (22 collections)|
                          +------------------+
 ```
 
@@ -414,6 +427,16 @@ For the full API reference with request/response schemas and example curl comman
 | DELETE | `/api/v1/admin/service-accounts/{sa_id}` | Admin | Delete (deactivate) a service account |
 | POST   | `/api/v1/admin/service-accounts/{sa_id}/rotate-secret` | Admin | Rotate client secret |
 | POST   | `/api/v1/admin/service-accounts/{sa_id}/revoke-tokens` | Admin | Revoke all tokens    |
+| GET    | `/api/v1/notifications/settings`            | Required | Get notification/approval settings    |
+| PUT    | `/api/v1/notifications/settings`            | Required | Update notification/approval settings |
+| POST   | `/api/v1/notifications/telegram/link`       | Required | Generate Telegram link code           |
+| DELETE | `/api/v1/notifications/telegram`            | Required | Disconnect Telegram                   |
+| GET    | `/api/v1/approvals/requests`                | Required | List approval requests (history)      |
+| GET    | `/api/v1/approvals/requests/{id}/status`    | Required | Poll approval request status          |
+| POST   | `/api/v1/approvals/requests/{id}/decide`    | Required | Approve/reject via web UI             |
+| GET    | `/api/v1/approvals/grants`                  | Required | List active approval grants           |
+| DELETE | `/api/v1/approvals/grants/{grant_id}`       | Required | Revoke an approval grant              |
+| POST   | `/api/v1/webhooks/telegram`                 | None*    | Telegram webhook (secret-verified)    |
 
 `POST /oauth/token` also supports `grant_type=client_credentials` for service account authentication.
 
@@ -480,6 +503,20 @@ chmod 600 keys/private.pem
 | `GITHUB_CLIENT_ID`     | GitHub OAuth client ID  |
 | `GITHUB_CLIENT_SECRET` | GitHub OAuth secret     |
 
+### Telegram / Approval System (Optional)
+
+| Variable                         | Default | Description                                      |
+|----------------------------------|---------|--------------------------------------------------|
+| `TELEGRAM_BOT_TOKEN`             |         | Telegram Bot API token (from @BotFather)         |
+| `TELEGRAM_WEBHOOK_SECRET`        |         | Secret for verifying Telegram webhook callbacks  |
+| `TELEGRAM_WEBHOOK_URL`           |         | Public URL for Telegram webhooks (e.g. `https://auth.nyxid.dev/api/v1/webhooks/telegram`). Omit to use long polling mode. |
+| `TELEGRAM_BOT_USERNAME`          |         | Bot username without @ (for link instructions)   |
+| `APPROVAL_EXPIRY_INTERVAL_SECS`  | `5`     | Interval between approval expiry sweeps (seconds)|
+
+The approval system is disabled when `TELEGRAM_BOT_TOKEN` is not set. Users can still enable approval and use the web UI for approving/rejecting requests.
+
+**Telegram delivery modes:** When `TELEGRAM_WEBHOOK_URL` (and `TELEGRAM_WEBHOOK_SECRET`) are set, the backend registers a webhook with Telegram at startup. When only `TELEGRAM_BOT_TOKEN` is set (no webhook URL), the backend automatically falls back to `getUpdates` long polling -- ideal for local development without ngrok or tunnels.
+
 ### SMTP (Optional)
 
 | Variable            | Description                       |
@@ -502,7 +539,7 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 
 ## Database Schema
 
-NyxID uses 19 MongoDB collections:
+NyxID uses 22 MongoDB collections:
 
 | Collection                 | Description                                          |
 |----------------------------|------------------------------------------------------|
@@ -525,6 +562,9 @@ NyxID uses 19 MongoDB collections:
 | `consents`                 | User OAuth consent records per client                 |
 | `service_accounts`         | Non-human (machine) identity definitions             |
 | `service_account_tokens`   | Issued service account JWT records for revocation    |
+| `approval_requests`        | Pending/resolved approval requests for proxy access  |
+| `approval_grants`          | Cached approval grants (time-limited, revocable)     |
+| `notification_channels`    | Per-user notification preferences and Telegram links |
 | `audit_log`                | Immutable audit trail of security events             |
 
 All documents use UUID identifiers, ISO 8601 timestamps, and appropriate indexes for query patterns.
@@ -652,6 +692,7 @@ The frontend uses:
 - [ ] Set `BASE_URL` and `FRONTEND_URL` to production origins
 - [ ] Configure social login provider credentials if needed
 - [ ] Configure SMTP for transactional email
+- [ ] Configure Telegram bot for approval notifications (optional: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_WEBHOOK_URL`)
 - [ ] Place behind a reverse proxy (nginx, Caddy) that sets `X-Forwarded-For`
 - [ ] Enable TLS termination at the reverse proxy
 - [ ] Set `RUST_LOG=nyxid=info,tower_http=warn` for production log levels
@@ -680,7 +721,7 @@ NyxID/
 |       |   |-- jwt.rs          RS256 JWT signing, verification, key management
 |       |   |-- aes.rs          AES-256-GCM encryption and decryption
 |       |   `-- token.rs        Random token generation, SHA-256 hashing
-|       |-- models/             MongoDB document definitions (22 modules, incl. role, group, consent, service_account)
+|       |-- models/             MongoDB document definitions (25 modules, incl. role, group, consent, service_account, approval)
 |       |-- handlers/           HTTP handler functions by domain
 |       |   |-- auth.rs         Register, login, logout, refresh, verify-email, forgot/reset-password
 |       |   |-- social_auth.rs  Social login: authorize redirect + OAuth callback
@@ -706,6 +747,9 @@ NyxID/
 |       |   |-- admin_helpers.rs Shared admin handler helpers (require_admin, IP/UA extraction)
 |       |   |-- consent.rs      User consent listing and revocation
 |       |   |-- delegation.rs   Delegation token refresh endpoint
+|       |   |-- approvals.rs    Approval request history, grants, decide, status polling
+|       |   |-- notifications.rs Notification settings CRUD, Telegram link/disconnect
+|       |   |-- webhooks.rs     Telegram webhook handler (callback queries + link commands)
 |       |   |-- mfa.rs          MFA setup and verification
 |       |   `-- health.rs       Health check
 |       |-- services/           Business logic layer
@@ -730,6 +774,9 @@ NyxID/
 |       |   |-- consent_service.rs  Consent creation, listing, revocation
 |       |   |-- service_account_service.rs Service account CRUD, client credentials auth, token revocation
 |       |   |-- rbac_helpers.rs     Resolve effective roles/groups/permissions for a user
+|       |   |-- approval_service.rs  Approval check, create, process, list, revoke grants
+|       |   |-- notification_service.rs Notification channel abstraction layer
+|       |   |-- telegram_service.rs Telegram Bot API client (send, edit, answer, webhook)
 |       |   |-- mcp_service.rs      MCP tool execution, delegation token injection
 |       |   |-- oauth_client_service.rs OAuth client management (admin)
 |       |   |-- service_endpoint_service.rs Service endpoint CRUD
@@ -761,7 +808,8 @@ NyxID/
         |   |-- use-rbac.ts    Role and group management hooks
         |   |-- use-consents.ts Consent management hooks
         |   |-- use-service-accounts.ts Service account management hooks
-        |   `-- use-llm-gateway.ts LLM gateway status hook
+        |   |-- use-llm-gateway.ts LLM gateway status hook
+        |   `-- use-approvals.ts Approval and notification settings hooks
         |-- components/
         |   |-- ui/             16 shadcn/ui primitives
         |   |-- auth/           Login, register, MFA forms
@@ -775,6 +823,9 @@ NyxID/
             |-- admin-service-accounts.tsx Admin service account list
             |-- admin-service-account-detail.tsx Admin service account detail
             |-- consents.tsx       User consent management
+            |-- notification-settings.tsx  Notification and approval settings
+            |-- approval-history.tsx  Approval request history (filterable)
+            |-- approval-grants.tsx   Active approval grants with revocation
             `-- (login, register, dashboard, admin-users, admin-user-detail, etc.)
 ```
 

@@ -14,6 +14,9 @@ import {
   UsersRound,
   KeyRound,
   Bot,
+  Bell,
+  ClipboardList,
+  Lock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
@@ -29,6 +32,12 @@ const NAV_ITEMS = [
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
   { to: "/guide", icon: BookOpen, label: "Guide" },
+] as const;
+
+const APPROVAL_NAV_ITEMS = [
+  { to: "/approvals/settings", icon: Bell, label: "Notifications" },
+  { to: "/approvals/history", icon: ClipboardList, label: "Approval History" },
+  { to: "/approvals/grants", icon: Lock, label: "Active Grants" },
 ] as const;
 
 const DEVELOPER_NAV_ITEMS = [
@@ -125,6 +134,21 @@ export function Sidebar({ onNavigate }: { readonly onNavigate?: () => void } = {
 
       {/* ── Bottom: Developer + Admin + Account ── */}
       <div className="flex flex-col gap-6">
+        {/* Approvals section */}
+        <div className="flex flex-col gap-1">
+          <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
+            Approvals
+          </p>
+          {APPROVAL_NAV_ITEMS.map((item) => (
+            <NavLink
+              key={item.to}
+              item={item}
+              isActive={isNavActive(item.to, currentPath, APPROVAL_NAV_ITEMS)}
+              onClick={onNavigate}
+            />
+          ))}
+        </div>
+
         {/* Developer section */}
         <div className="flex flex-col gap-1">
           <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
