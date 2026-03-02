@@ -93,7 +93,9 @@ All API routes under `/api/v1`:
 - `/connections` -- connect/disconnect services
 - `/providers` -- CRUD + OAuth/device-code/API-key flows + token management
 - `/admin` -- user management, audit log, OAuth clients, service accounts
-- `/proxy/{service_id}/{path}` -- authenticated proxy
+- `/proxy/{service_id}/{path}` -- authenticated proxy (UUID-based)
+- `/proxy/s/{slug}/{path}` -- authenticated proxy (slug-based)
+- `/proxy/services` -- service discovery (paginated list of proxyable services)
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
 - `/delegation/refresh` -- refresh delegated access tokens
 

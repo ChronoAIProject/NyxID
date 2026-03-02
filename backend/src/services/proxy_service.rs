@@ -32,6 +32,18 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "x-correlation-id",
 ];
 
+/// Resolve a downstream service by its slug.
+/// Returns the service document or NotFound.
+pub async fn resolve_service_by_slug(
+    db: &mongodb::Database,
+    slug: &str,
+) -> AppResult<DownstreamService> {
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "slug": slug, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))
+}
+
 /// Resolve the downstream service and credential for a proxy request.
 ///
 /// Enforces that the user has an active connection. For "connection" services,

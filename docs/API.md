@@ -24,6 +24,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Service Endpoints](#service-endpoints)
   - [MCP Config](#mcp-config)
   - [Proxy](#proxy)
+  - [Proxy Service Discovery](#proxy-service-discovery)
   - [LLM Gateway](#llm-gateway)
   - [MFA](#mfa-multi-factor-authentication)
   - [OAuth / OpenID Connect](#oauth--openid-connect)
@@ -2482,6 +2483,131 @@ curl -X POST http://localhost:3001/api/v1/proxy/d1e2f3a4-b5c6-7890-1234-567890ab
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '{"event": "page_view", "page": "/home"}'
+```
+
+---
+
+#### ANY /api/v1/proxy/s/{slug}/{*path}
+
+Forward any HTTP request to a downstream service using the service's slug instead of its UUID. This endpoint is functionally identical to `ANY /api/v1/proxy/{service_id}/{*path}` but provides developer-friendly URLs.
+
+The slug is resolved to the service UUID internally. All proxy behavior (credential injection, identity propagation, delegation token injection, path validation, header allowlists, body size limits) is the same as the UUID-based endpoint.
+
+Only active services are resolved by slug. Inactive services return `1003 not_found`.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter | Type   | Description                                        |
+|-----------|--------|----------------------------------------------------|
+| `slug`    | string | The service slug (e.g., `stripe`, `analytics`)     |
+| `*path`   | string | The path to forward (appended to service base URL) |
+
+**Supported Methods:** GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS
+
+**Errors:**
+- `1000 bad_request` -- Service is inactive, service is a provider, invalid proxy path, or connection missing credential
+- `1002 forbidden` -- No active connection to this service
+- `1003 not_found` -- No active service with this slug
+
+**Example:**
+
+```bash
+# GET request via slug with API key
+curl http://localhost:3001/api/v1/proxy/s/stripe/v1/charges \
+  -H "X-API-Key: nyx_k_a1b2c3d4..."
+
+# POST request via slug with Bearer token
+curl -X POST http://localhost:3001/api/v1/proxy/s/analytics/v1/events \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"event": "page_view", "page": "/home"}'
+```
+
+---
+
+### Proxy Service Discovery
+
+#### GET /api/v1/proxy/services
+
+List downstream services available for proxying, with their connection status and proxy URLs. This endpoint is designed for developers integrating via API keys who need to discover available services and construct proxy URLs.
+
+Services with `service_category = "provider"` are excluded (not proxyable). Only active services are returned.
+
+**Auth:** Required
+
+**Query Parameters:**
+
+| Parameter  | Type   | Default | Description                                |
+|------------|--------|---------|--------------------------------------------|
+| `page`     | int    | 1       | Page number (minimum 1)                    |
+| `per_page` | int    | 50      | Results per page (maximum 100)             |
+
+**Response (200):**
+
+```json
+{
+  "services": [
+    {
+      "id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+      "name": "Stripe API",
+      "slug": "stripe",
+      "description": "Payment processing",
+      "service_category": "connection",
+      "connected": true,
+      "requires_connection": true,
+      "proxy_url": "http://localhost:3001/api/v1/proxy/d1e2f3a4-b5c6-7890-1234-567890abcdef/{path}",
+      "proxy_url_slug": "http://localhost:3001/api/v1/proxy/s/stripe/{path}"
+    },
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "Internal Analytics",
+      "slug": "analytics",
+      "description": "Internal analytics service",
+      "service_category": "internal",
+      "connected": false,
+      "requires_connection": false,
+      "proxy_url": "http://localhost:3001/api/v1/proxy/a1b2c3d4-e5f6-7890-abcd-ef1234567890/{path}",
+      "proxy_url_slug": "http://localhost:3001/api/v1/proxy/s/analytics/{path}"
+    }
+  ],
+  "total": 2,
+  "page": 1,
+  "per_page": 50
+}
+```
+
+**Response Fields:**
+
+| Field                          | Type    | Description                                               |
+|--------------------------------|---------|-----------------------------------------------------------|
+| `services[].id`               | string  | Service UUID                                              |
+| `services[].name`             | string  | Service display name                                      |
+| `services[].slug`             | string  | Service slug (used in slug-based proxy URL)               |
+| `services[].description`      | string? | Service description (nullable)                            |
+| `services[].service_category` | string  | `"connection"` or `"internal"`                            |
+| `services[].connected`        | bool    | Whether the authenticated user has an active connection   |
+| `services[].requires_connection` | bool | Whether a connection is required before proxying          |
+| `services[].proxy_url`        | string  | UUID-based proxy URL template (replace `{path}`)         |
+| `services[].proxy_url_slug`   | string  | Slug-based proxy URL template (replace `{path}`)         |
+| `total`                       | int     | Total number of matching services                         |
+| `page`                        | int     | Current page number                                       |
+| `per_page`                    | int     | Results per page                                          |
+
+**Errors:**
+- `1001 unauthorized` -- Missing or invalid credentials
+
+**Example:**
+
+```bash
+# Discover services with API key
+curl http://localhost:3001/api/v1/proxy/services \
+  -H "X-API-Key: nyx_k_a1b2c3d4..."
+
+# With pagination
+curl "http://localhost:3001/api/v1/proxy/services?page=1&per_page=10" \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ---

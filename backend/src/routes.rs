@@ -253,6 +253,8 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let api_v1_delegated = Router::new()
         .nest("/llm", llm_routes)
         .nest("/delegation", delegation_routes)
+        .route("/proxy/services", get(handlers::proxy::list_proxy_services))
+        .route("/proxy/s/{slug}/{*path}", axum::routing::any(handlers::proxy::proxy_request_by_slug))
         .route("/proxy/{service_id}/{*path}", axum::routing::any(handlers::proxy::proxy_request));
 
     // Routes accessible by both users and service accounts (block delegated tokens)

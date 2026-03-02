@@ -208,6 +208,12 @@ All other headers (including `Authorization`, `Cookie`) are stripped.
 
 Proxy requests are limited to 10 MB request body. The global body size limit for other endpoints is 1 MB.
 
+### Slug-Based Proxy
+
+The slug-based proxy route (`ANY /api/v1/proxy/s/{slug}/{*path}`) resolves the slug to a service UUID via a MongoDB query on the `slug` field, then delegates to the same `execute_proxy()` pipeline used by the UUID-based route. All security properties (SSRF protection, path traversal prevention, header allowlists, body size limits, credential injection, audit logging) are inherited identically.
+
+Slug resolution only matches active services (`is_active: true`). Inactive services are not resolvable by slug.
+
 ---
 
 ## Credential Broker Security
@@ -443,6 +449,10 @@ Requests are authenticated in this order:
 4. `X-API-Key` header (hashed, looked up in DB)
 
 All methods verify the user is active before granting access.
+
+### API Key Scope Population
+
+When authenticating via API key, the key's configured scopes are populated into the `AuthUser.scope` field. This makes scopes available for downstream enforcement (e.g., future per-service scope requirements). Currently, no handler enforces API key scopes -- any valid API key can access all API-key-permitted endpoints. Scope enforcement is planned as a future enhancement.
 
 ---
 

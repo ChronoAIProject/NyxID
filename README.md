@@ -59,6 +59,8 @@ It provides a complete identity layer: user registration, session management, Op
 - Reverse proxy to internal or external services
 - Three service categories: **provider** (OIDC/SSO), **connection** (per-user credentials), **internal** (master credential)
 - Automatic credential injection: header, bearer token, query parameter, or basic auth
+- Developer-friendly slug-based proxy URLs (`/api/v1/proxy/s/{slug}/{path}`) alongside UUID-based URLs
+- Service discovery endpoint (`GET /api/v1/proxy/services`) for listing available services with proxy URLs and connection status
 - Connection enforcement: users must connect before proxying; per-user credentials for connection services, master credentials for internal services
 - SSRF protection (blocks private IPs, metadata endpoints, localhost)
 - Path traversal prevention (rejects `..` and `//` in proxy paths)
@@ -194,7 +196,7 @@ It provides a complete identity layer: user registration, session management, Op
                          |  |  users        |  GET/PUT /api/v1/users/me
                          |  |  api_keys     |  CRUD /api/v1/api-keys
                          |  |  services     |  CRUD /api/v1/services
-                         |  |  proxy        |  ANY  /api/v1/proxy/:id/*
+                         |  |  proxy        |  ANY  /api/v1/proxy/:id/*, /s/:slug/*
                          |  |  llm_gateway  |  ANY  /api/v1/llm/*
                          |  |  oauth        |  /oauth/authorize, /token, /userinfo
                          |  |  admin        |  /api/v1/admin/*
@@ -347,6 +349,8 @@ For the full API reference with request/response schemas and example curl comman
 | PUT    | `/api/v1/connections/{id}/credential`| Required | Update connection credential         |
 | DELETE | `/api/v1/connections/{service_id}`   | Required | Disconnect from a service            |
 | ANY    | `/api/v1/proxy/{service_id}/{*path}` | Required | Proxy request (requires connection)  |
+| ANY    | `/api/v1/proxy/s/{slug}/{*path}`     | Required | Proxy request via service slug       |
+| GET    | `/api/v1/proxy/services`             | Required | List proxyable services (paginated)  |
 | GET    | `/oauth/authorize`                   | Required | OIDC authorization endpoint          |
 | POST   | `/oauth/token`                       | None     | OIDC token endpoint (+ RFC 8693 token exchange) |
 | GET    | `/oauth/userinfo`                    | Required | OIDC userinfo endpoint               |

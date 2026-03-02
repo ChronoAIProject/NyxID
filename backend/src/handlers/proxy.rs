@@ -1,14 +1,20 @@
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{Method, Request, StatusCode},
     response::Response,
+    Json,
 };
+use futures::TryStreamExt;
 use mongodb::bson::doc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
+use crate::models::downstream_service::{DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES};
 use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::user_service_connection::{UserServiceConnection, COLLECTION_NAME as USER_SERVICE_CONNECTIONS};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, delegation_service, identity_service, proxy_service};
 use crate::AppState;
@@ -43,6 +49,34 @@ pub async fn proxy_request(
     Path((service_id, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    execute_proxy(&state, &auth_user, &service_id, &path, request).await
+}
+
+/// ANY /api/v1/proxy/s/:slug/*path
+///
+/// Resolve the service by slug, then forward via the shared proxy pipeline.
+pub async fn proxy_request_by_slug(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((slug, path)): Path<(String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    let service = proxy_service::resolve_service_by_slug(&state.db, &slug).await?;
+    execute_proxy(&state, &auth_user, &service.id, &path, request).await
+}
+
+/// Core proxy execution logic shared by UUID and slug handlers.
+///
+/// Takes the resolved service_id (UUID string) and executes the full proxy
+/// pipeline: resolve target, build identity headers, inject delegation token,
+/// resolve delegated credentials, forward request, and return response.
+async fn execute_proxy(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    path: &str,
+    request: Request<Body>,
+) -> AppResult<Response> {
     let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     let user_id_str = auth_user.user_id.to_string();
@@ -51,7 +85,7 @@ pub async fn proxy_request(
         &state.db,
         &encryption_key,
         &user_id_str,
-        &service_id,
+        service_id,
     )
     .await
     {
@@ -62,7 +96,7 @@ pub async fn proxy_request(
                 Some(user_id_str.clone()),
                 "proxy_request_denied".to_string(),
                 Some(serde_json::json!({
-                    "service_id": &service_id,
+                    "service_id": service_id,
                     "reason": e.to_string(),
                 })),
                 None,
@@ -154,7 +188,7 @@ pub async fn proxy_request(
         &state.db,
         &encryption_key,
         &user_id_str,
-        &service_id,
+        service_id,
     )
     .await
     .unwrap_or_default();
@@ -199,7 +233,7 @@ pub async fn proxy_request(
         &state.http_client,
         &target,
         reqwest_method,
-        &path,
+        path,
         query.as_deref(),
         reqwest_headers,
         body,
@@ -242,15 +276,133 @@ pub async fn proxy_request(
         Some(user_id_str),
         "proxy_request".to_string(),
         Some(serde_json::json!({
-            "service_id": &service_id,
+            "service_id": service_id,
             "method": method.as_str(),
-            "path": &path,
+            "path": path,
             "response_status": status.as_u16(),
-            "acting_client_id": auth_user.acting_client_id,
+            "acting_client_id": &auth_user.acting_client_id,
         })),
         None,
         None,
     );
 
     Ok(response)
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProxyServiceItem {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+    pub service_category: String,
+    /// Whether the user has an active connection to this service
+    pub connected: bool,
+    /// Whether a connection is required before proxying
+    pub requires_connection: bool,
+    /// UUID-based proxy URL
+    pub proxy_url: String,
+    /// Slug-based proxy URL (developer-friendly)
+    pub proxy_url_slug: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProxyServicesQuery {
+    pub page: Option<u64>,
+    pub per_page: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProxyServicesResponse {
+    pub services: Vec<ProxyServiceItem>,
+    pub total: u64,
+    pub page: u64,
+    pub per_page: u64,
+}
+
+/// GET /api/v1/proxy/services
+///
+/// List downstream services available for proxying with their proxy URLs.
+/// Excludes "provider" category services (not proxyable).
+/// Supports pagination via `page` and `per_page` query parameters.
+pub async fn list_proxy_services(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<ProxyServicesQuery>,
+) -> AppResult<Json<ProxyServicesResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let base = state.config.base_url.trim_end_matches('/');
+
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(50).min(100);
+    let offset = (page - 1) * per_page;
+
+    let filter = doc! {
+        "is_active": true,
+        "service_category": { "$ne": "provider" },
+    };
+
+    // Get total count for pagination metadata
+    let total = state
+        .db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .count_documents(filter.clone())
+        .await?;
+
+    // Get paginated active, non-provider services
+    let services: Vec<DownstreamService> = state
+        .db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(filter)
+        .sort(doc! { "name": 1 })
+        .skip(offset)
+        .limit(per_page as i64)
+        .await?
+        .try_collect()
+        .await?;
+
+    // Get user's active connections in a single query
+    let service_ids: Vec<&str> = services.iter().map(|s| s.id.as_str()).collect();
+    let connections: Vec<UserServiceConnection> = if service_ids.is_empty() {
+        vec![]
+    } else {
+        state
+            .db
+            .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
+            .find(doc! {
+                "user_id": &user_id_str,
+                "service_id": { "$in": &service_ids },
+                "is_active": true,
+            })
+            .await?
+            .try_collect()
+            .await?
+    };
+
+    let connected_set: HashSet<&str> = connections
+        .iter()
+        .map(|c| c.service_id.as_str())
+        .collect();
+
+    let items: Vec<ProxyServiceItem> = services
+        .iter()
+        .map(|s| ProxyServiceItem {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            slug: s.slug.clone(),
+            description: s.description.clone(),
+            service_category: s.service_category.clone(),
+            connected: connected_set.contains(s.id.as_str()),
+            requires_connection: s.requires_user_credential,
+            proxy_url: format!("{base}/api/v1/proxy/{}/{{path}}", s.id),
+            proxy_url_slug: format!("{base}/api/v1/proxy/s/{}/{{path}}", s.slug),
+        })
+        .collect();
+
+    Ok(Json(ProxyServicesResponse {
+        services: items,
+        total,
+        page,
+        per_page,
+    }))
 }

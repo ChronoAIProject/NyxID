@@ -157,7 +157,7 @@ Handlers are thin HTTP boundary functions. They:
 | `users.rs`    | get_me, update_me                                               |
 | `api_keys.rs` | list_keys, create_key, delete_key, rotate_key                   |
 | `services.rs` | list_services, create_service, delete_service                   |
-| `proxy.rs`    | proxy_request (wildcard, all HTTP methods)                      |
+| `proxy.rs`    | proxy_request (UUID-based), proxy_request_by_slug (slug-based), list_proxy_services (discovery) |
 | `oauth.rs`    | authorize, token, userinfo                                      |
 | `admin.rs`    | list_users, get_user, update_user, set_user_role, set_user_status, force_password_reset, delete_user, verify_user_email, list_user_sessions, revoke_user_sessions, list_audit_log, oauth client CRUD |
 | `admin_roles.rs` | list_roles, create_role, get_role, update_role, delete_role, get_user_roles, assign_role, revoke_role |
@@ -182,7 +182,7 @@ The service layer contains all business logic. Services receive database connect
 | `token_service.rs`  | Session creation, JWT token pair issuance, refresh token rotation with replay detection, MFA pending session management |
 | `oauth_service.rs`  | OAuth client validation, redirect URI verification, scope validation, authorization code creation/exchange, PKCE S256 verification, ID token generation |
 | `key_service.rs`    | API key creation (prefix + SHA-256 hash), listing, deletion (soft deactivation), rotation (atomic deactivate + recreate) |
-| `proxy_service.rs`  | Downstream service resolution, credential decryption, request forwarding with credential injection (header/bearer/query/basic), header allowlist enforcement |
+| `proxy_service.rs`  | Downstream service resolution (by UUID and slug), credential decryption, request forwarding with credential injection (header/bearer/query/basic), header allowlist enforcement |
 | `mfa_service.rs`    | TOTP secret generation with QR provisioning, code verification against encrypted secrets, recovery code management |
 | `admin_user_service.rs` | Admin user CRUD (update profile, set role, set status), cascade user deletion across 8 collections, force password reset, manual email verification, session listing and bulk revocation |
 | `role_service.rs`   | Role CRUD (slug uniqueness, system role protection), user role assignment/revocation, system role seeding at startup |
@@ -487,13 +487,25 @@ Client App          User Browser         NyxID Backend        Database
 
 ### Proxy Request Flow
 
+Two proxy URL formats are supported:
+- **UUID-based:** `ANY /api/v1/proxy/{service_id}/{*path}` -- uses the service UUID directly
+- **Slug-based:** `ANY /api/v1/proxy/s/{slug}/{*path}` -- resolves the slug to a service UUID via `proxy_service::resolve_service_by_slug()`, then delegates to the same shared `execute_proxy()` pipeline
+
+Both routes share a single `execute_proxy()` function that handles the full proxy pipeline (credential resolution, identity propagation, delegation token injection, request forwarding).
+
 ```
 Client                     NyxID Backend                     Downstream
   |                          |                                Service
   |  ANY /api/v1/proxy/      |                                  |
   |  {service_id}/path       |                                  |
+  |  -- or --                |                                  |
+  |  ANY /api/v1/proxy/      |                                  |
+  |  s/{slug}/path           |                                  |
   |------------------------->|                                  |
   |                          |  Authenticate user (AuthUser)    |
+  |                          |                                  |
+  |                          |  (If slug: resolve slug ->       |
+  |                          |   service_id via DB lookup)      |
   |                          |                                  |
   |                          |  Lookup downstream_service       |
   |                          |  Check: is_active = true         |
@@ -1306,6 +1318,8 @@ Delegated tokens are restricted to proxy and LLM gateway endpoints. All other en
 |----------------------------------|-----------------|--------------|
 | `/api/v1/llm/*`                 | Allowed         | Allowed      |
 | `/api/v1/proxy/{id}/{*path}`    | Allowed         | Allowed      |
+| `/api/v1/proxy/s/{slug}/{*path}`| Allowed         | Allowed      |
+| `/api/v1/proxy/services`        | Allowed         | Allowed      |
 | `/api/v1/delegation/refresh`    | Allowed         | Blocked (403)|
 | `/api/v1/auth/*`                | Blocked         | Allowed      |
 | `/api/v1/users/*`               | Blocked         | Allowed      |
@@ -1385,6 +1399,8 @@ The `reject_service_account_tokens` middleware restricts which endpoints service
 | Route Group                      | Service Account | Direct User Token |
 |----------------------------------|-----------------|-------------------|
 | `/api/v1/proxy/{id}/{*path}`    | Allowed         | Allowed           |
+| `/api/v1/proxy/s/{slug}/{*path}`| Allowed         | Allowed           |
+| `/api/v1/proxy/services`        | Allowed         | Allowed           |
 | `/api/v1/llm/*`                 | Allowed         | Allowed           |
 | `/api/v1/connections/*`         | Allowed         | Allowed           |
 | `/api/v1/providers/*`           | Allowed         | Allowed           |

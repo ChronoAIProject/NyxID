@@ -27,7 +27,7 @@ use crate::AppState;
 pub struct AuthUser {
     pub user_id: Uuid,
     pub session_id: Option<Uuid>,
-    /// Space-separated scopes from the access token (empty for session/API key auth).
+    /// Space-separated scopes from the access token or API key (empty for session auth).
     pub scope: String,
     /// If this is a delegated request, the OAuth client_id of the acting service.
     pub acting_client_id: Option<String>,
@@ -267,7 +267,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     .to_str()
                     .map_err(|_| AppError::Unauthorized("Invalid API key header".to_string()))?;
 
-                let (user_id_str, _key) =
+                let (user_id_str, key) =
                     crate::services::key_service::validate_api_key(&state.db, api_key).await?;
 
                 let user_id = Uuid::parse_str(&user_id_str).map_err(|_| {
@@ -296,7 +296,7 @@ impl FromRequestParts<AppState> for AuthUser {
                 return Ok(AuthUser {
                     user_id,
                     session_id: None,
-                    scope: String::new(),
+                    scope: key.scopes.clone(),
                     acting_client_id: None,
                 });
             }
