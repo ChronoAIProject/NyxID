@@ -176,7 +176,14 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/{sa_id}/providers/{provider_id}/connect/device-code/poll",
             post(handlers::admin_sa_providers::poll_device_code_for_sa))
         .route("/{sa_id}/providers/{provider_id}/disconnect",
-            delete(handlers::admin_sa_providers::disconnect_sa_provider));
+            delete(handlers::admin_sa_providers::disconnect_sa_provider))
+        .route("/{sa_id}/connections",
+            get(handlers::admin_sa_connections::list_sa_connections))
+        .route("/{sa_id}/connections/{service_id}",
+            post(handlers::admin_sa_connections::connect_sa_service)
+            .delete(handlers::admin_sa_connections::disconnect_sa_service))
+        .route("/{sa_id}/connections/{service_id}/credential",
+            put(handlers::admin_sa_connections::update_sa_connection_credential));
 
     let admin_routes = Router::new()
         .route("/users", get(handlers::admin::list_users)

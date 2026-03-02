@@ -107,3 +107,27 @@ export interface SaDeviceCodePollResponse {
   readonly status: string;
   readonly interval?: number;
 }
+
+export interface SaServiceConnection {
+  readonly service_id: string;
+  readonly service_name: string;
+  readonly service_category: string;
+  readonly auth_type: string | null;
+  readonly has_credential: boolean;
+  readonly credential_label: string | null;
+  readonly connected_at: string;
+}
+
+export interface SaServiceConnectionListResponse {
+  readonly connections: readonly SaServiceConnection[];
+}
+
+export interface SaServiceConnectResponse {
+  readonly service_id: string;
+  readonly service_name: string;
+  readonly connected_at: string;
+}
+
+export interface SaServiceConnectionActionResponse {
+  readonly message: string;
+}
