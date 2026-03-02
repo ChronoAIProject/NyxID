@@ -263,7 +263,7 @@ pub async fn create_service(
     }
 
     // Validate base_url against SSRF
-    validate_base_url(&body.base_url)?;
+    validate_base_url(&body.base_url, state.config.is_development())?;
 
     // Check slug uniqueness
     let existing = state
@@ -491,7 +491,7 @@ pub async fn update_service(
     }
 
     if let Some(ref base_url) = body.base_url {
-        validate_base_url(base_url)?;
+        validate_base_url(base_url, state.config.is_development())?;
         if base_url.len() > 2048 {
             return Err(AppError::ValidationError(
                 "base_url must not exceed 2048 characters".to_string(),
