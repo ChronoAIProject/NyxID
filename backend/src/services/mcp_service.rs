@@ -279,22 +279,23 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__call_tool".to_string(),
         description: "Execute any connected tool by name. Use nyx__search_tools first to \
-            discover available tools, then invoke them through this tool. Pass the exact \
-            tool name from search results and any required arguments."
+            discover available tools and their inputSchema, then invoke them through this \
+            tool. Pass the tool_name and arguments_json (a JSON string containing all \
+            required parameters from the tool's inputSchema)."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "tool_name": {
                     "type": "string",
-                    "description": "The full tool name from search results (e.g., 'sisyphus-maker__verify')"
+                    "description": "The full tool name from search results (e.g., 'chrono-graph-service__get_api_graphs_by_graphid_snapshot')"
                 },
-                "arguments": {
-                    "type": "object",
-                    "description": "Arguments to pass to the tool (matching the tool's input schema from search results)"
+                "arguments_json": {
+                    "type": "string",
+                    "description": "A JSON string containing all required arguments for the tool. Check the tool's inputSchema from nyx__search_tools results. Example: '{\"graphId\": \"dbeef00f-f2c7-4447-9686-3a6deba65a72\", \"depth\": 2}'. Pass '{}' if the tool takes no arguments."
                 }
             },
-            "required": ["tool_name"]
+            "required": ["tool_name", "arguments_json"]
         }),
     });
 

@@ -5,7 +5,7 @@ use axum::{
     http::{Method, Request, StatusCode},
     response::Response,
 };
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -305,11 +305,21 @@ async fn execute_proxy(
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
 
+    let is_sse = downstream_response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream"));
+
     let mut response_builder = Response::builder().status(status);
 
     // Forward only allowlisted response headers
     for (name, value) in downstream_response.headers().iter() {
         let name_lower = name.as_str().to_lowercase();
+        // Skip content-length for SSE — the body is streamed, length unknown
+        if is_sse && name_lower == "content-length" {
+            continue;
+        }
         if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
             && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
@@ -319,14 +329,52 @@ async fn execute_proxy(
         }
     }
 
-    let response_body = downstream_response
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to read downstream response: {e}")))?;
+    let response = if is_sse && status.is_success() {
+        // Stream SSE responses directly without buffering.
+        // Wrap the byte stream to log errors from the upstream so we can
+        // diagnose premature connection drops.
+        let service_id_owned = service_id.to_string();
+        let stream = downstream_response.bytes_stream().map(move |chunk| {
+            match &chunk {
+                Err(e) => {
+                    tracing::error!(
+                        service_id = %service_id_owned,
+                        error = %e,
+                        error_debug = ?e,
+                        "SSE stream error from upstream — connection dropped"
+                    );
+                }
+                _ => {}
+            }
+            chunk
+        });
+        let body = Body::from_stream(stream);
+        response_builder
+            .body(body)
+            .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
+    } else {
+        let response_body = downstream_response
+            .bytes()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to read downstream response: {e}")))?;
 
-    let response = response_builder
-        .body(Body::from(response_body))
-        .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?;
+        // Log non-2xx response bodies for diagnostics
+        if !status.is_success() {
+            let body_preview = String::from_utf8_lossy(
+                &response_body[..response_body.len().min(1024)]
+            );
+            tracing::error!(
+                service_id = %service_id,
+                status = %status,
+                body = %body_preview,
+                "Upstream returned error response"
+            );
+        }
+
+        response_builder
+            .body(Body::from(response_body))
+            .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
+    };
 
     // Audit log the proxy request
     audit_service::log_async(

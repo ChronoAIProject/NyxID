@@ -159,9 +159,12 @@ async fn main() {
     let jwk_json =
         crypto::jwt::public_key_jwk(&public_pem).expect("Failed to compute JWK from public key");
 
-    // Create a shared reqwest client for connection reuse
+    // Create a shared reqwest client for connection reuse.
+    // Use connect_timeout (not global timeout) so SSE streaming responses
+    // from LLM services are not killed after 30 seconds.
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
         .build()
         .expect("Failed to create HTTP client");
 

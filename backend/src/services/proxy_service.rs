@@ -254,6 +254,24 @@ pub async fn forward_request(
         }
     }
 
+    if let Some(ref body_bytes) = body {
+        // Log request body for LLM proxy calls to diagnose truncation issues
+        if url.contains("/responses") {
+            let body_str = String::from_utf8_lossy(body_bytes);
+            let preview = if body_str.len() > 2048 {
+                format!("{}...(truncated, total {} bytes)", &body_str[..2048], body_str.len())
+            } else {
+                body_str.to_string()
+            };
+            tracing::info!(
+                url = %url,
+                body_len = body_bytes.len(),
+                body = %preview,
+                "Proxy LLM request body"
+            );
+        }
+    }
+
     if let Some(body_bytes) = body {
         request = request.body(body_bytes);
     }
