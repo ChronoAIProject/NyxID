@@ -441,7 +441,12 @@ Approval requests use a SHA-256 idempotency key computed from `(user_id, service
 
 ### Status Polling Endpoint Security
 
-The `GET /api/v1/approvals/requests/{request_id}/status` endpoint does not verify ownership. This is by design: the `request_id` (UUID v4) is only returned in the 403 `approval_required` error response to the original caller, providing implicit authorization. The endpoint returns only status and expiry time -- no sensitive data. UUID v4 provides ~122 bits of unguessability.
+The `GET /api/v1/approvals/requests/{request_id}/status` endpoint requires authentication and verifies the original caller binding:
+- `approval_request.user_id` matches the authenticated resource owner
+- `approval_request.requester_type` matches the caller auth method
+- `approval_request.requester_id` matches the caller identity (user ID, service account ID, or delegated client ID)
+
+This prevents cross-caller polling even if another authenticated principal obtains a `request_id`.
 
 ### Approval Decision Authorization
 

@@ -96,18 +96,10 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // ── sessions ──
     let sessions = db.collection::<mongodb::bson::Document>("sessions");
     sessions
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "token_hash": 1 })
-                .build(),
-        )
+        .create_index(IndexModel::builder().keys(doc! { "token_hash": 1 }).build())
         .await?;
     sessions
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "user_id": 1 })
-                .build(),
-        )
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
     sessions
         .create_index(
@@ -125,11 +117,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // ── authorization_codes ──
     let auth_codes = db.collection::<mongodb::bson::Document>("authorization_codes");
     auth_codes
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "code_hash": 1 })
-                .build(),
-        )
+        .create_index(IndexModel::builder().keys(doc! { "code_hash": 1 }).build())
         .await?;
     auth_codes
         .create_index(
@@ -155,11 +143,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
     refresh_tokens
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "session_id": 1 })
-                .build(),
-        )
+        .create_index(IndexModel::builder().keys(doc! { "session_id": 1 }).build())
         .await?;
     refresh_tokens
         .create_index(
@@ -177,28 +161,16 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // ── api_keys ──
     let api_keys = db.collection::<mongodb::bson::Document>("api_keys");
     api_keys
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "key_hash": 1 })
-                .build(),
-        )
+        .create_index(IndexModel::builder().keys(doc! { "key_hash": 1 }).build())
         .await?;
     api_keys
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "user_id": 1 })
-                .build(),
-        )
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
     // ── mfa_factors ──
     let mfa = db.collection::<mongodb::bson::Document>("mfa_factors");
-    mfa.create_index(
-        IndexModel::builder()
-            .keys(doc! { "user_id": 1 })
-            .build(),
-    )
-    .await?;
+    mfa.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
 
     // ── downstream_services ──
     let services = db.collection::<mongodb::bson::Document>("downstream_services");
@@ -222,12 +194,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "provider_config_id": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .sparse(true)
-                        .unique(true)
-                        .build(),
-                )
+                .options(IndexOptions::builder().sparse(true).unique(true).build())
                 .build(),
         )
         .await?;
@@ -331,12 +298,8 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             .build(),
     )
     .await?;
-    spr.create_index(
-        IndexModel::builder()
-            .keys(doc! { "service_id": 1 })
-            .build(),
-    )
-    .await?;
+    spr.create_index(IndexModel::builder().keys(doc! { "service_id": 1 }).build())
+        .await?;
     spr.create_index(
         IndexModel::builder()
             .keys(doc! { "provider_config_id": 1 })
@@ -359,11 +322,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
     oauth_states
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "user_id": 1 })
-                .build(),
-        )
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
     // ── roles ──
@@ -414,11 +373,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
     consents
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "user_id": 1 })
-                .build(),
-        )
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
     // ── service_accounts ──
@@ -430,18 +385,10 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             .build(),
     )
     .await?;
-    sa.create_index(
-        IndexModel::builder()
-            .keys(doc! { "is_active": 1 })
-            .build(),
-    )
-    .await?;
-    sa.create_index(
-        IndexModel::builder()
-            .keys(doc! { "created_by": 1 })
-            .build(),
-    )
-    .await?;
+    sa.create_index(IndexModel::builder().keys(doc! { "is_active": 1 }).build())
+        .await?;
+    sa.create_index(IndexModel::builder().keys(doc! { "created_by": 1 }).build())
+        .await?;
 
     // ── service_account_tokens ──
     let sat = db.collection::<mongodb::bson::Document>("service_account_tokens");
@@ -485,11 +432,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
     mcp_sessions
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "user_id": 1 })
-                .build(),
-        )
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
     // ── approval_requests ──
@@ -501,17 +444,17 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
-    // Migration: drop the old non-partial unique index on idempotency_key if it exists,
-    // so we can replace it with a partial unique index (only pending requests).
-    let _ = approval_requests
-        .drop_index("idempotency_key_1")
-        .await;
+    // Migration: drop the legacy auto-named index on idempotency_key if it exists.
+    // The current index uses a stable explicit name to avoid accidental drop/recreate
+    // loops on startup.
+    let _ = approval_requests.drop_index("idempotency_key_1").await;
     approval_requests
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "idempotency_key": 1 })
                 .options(
                     IndexOptions::builder()
+                        .name("idempotency_key_pending_unique".to_string())
                         .unique(true)
                         .partial_filter_expression(doc! { "status": "pending" })
                         .build(),

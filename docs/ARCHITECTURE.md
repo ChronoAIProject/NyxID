@@ -975,6 +975,7 @@ Non-human (machine-to-machine) identities that authenticate via OAuth2 Client Cr
 | `is_active`              | boolean       | NOT NULL          | Whether the account can authenticate |
 | `rate_limit_override`    | number        | NULLABLE          | Optional per-account rate limit     |
 | `created_by`             | UUID (string) | NOT NULL          | Admin who created this account      |
+| `owner_user_id`          | UUID (string) | NULLABLE          | Resource owner for approval/notification policy (falls back to `created_by` for legacy records) |
 | `created_at`             | ISO 8601 date | NOT NULL          | Creation timestamp                  |
 | `updated_at`             | ISO 8601 date | NOT NULL          | Last update                         |
 | `last_authenticated_at`  | ISO 8601 date | NULLABLE          | Last successful authentication      |
@@ -1756,7 +1757,7 @@ The approval check is integrated into:
 - **Proxy handler** (`handlers/proxy.rs`): Checked after resolving the proxy target, before forwarding
 - **LLM gateway** (`handlers/llm_gateway.rs`): Same pattern for both provider-specific and gateway endpoints
 
-Approval is triggered for **all non-session authentication methods** (API keys, delegated tokens, service accounts, access tokens) when the resource owner has `approval_required` enabled. Direct browser sessions bypass approval. The `AuthMethod` enum on `AuthUser` (`Session`, `ApiKey`, `Delegated`, `ServiceAccount`, `AccessToken`) determines the code path:
+Approval is triggered for **all non-session authentication methods** (API keys, delegated tokens, service accounts, access tokens) when the resource owner has `approval_required` enabled. Direct browser sessions bypass approval. For service account traffic, the effective resource owner is `service_accounts.owner_user_id` (or `created_by` for legacy records). The `AuthMethod` enum on `AuthUser` (`Session`, `ApiKey`, `Delegated`, `ServiceAccount`, `AccessToken`) determines the code path:
 
 - `Session` -- Direct browser access, approval skipped
 - `ApiKey` -- User's API key, approval required

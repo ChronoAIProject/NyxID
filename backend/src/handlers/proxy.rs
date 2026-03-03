@@ -1,26 +1,30 @@
 use axum::{
+    Json,
     body::Body,
     extract::{Path, Query, State},
     http::{Method, Request, StatusCode},
     response::Response,
-    Json,
 };
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use crate::AppState;
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
-use crate::models::downstream_service::{DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
-use crate::models::user_service_connection::{UserServiceConnection, COLLECTION_NAME as USER_SERVICE_CONNECTIONS};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user_service_connection::{
+    COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
+};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    approval_service, audit_service, delegation_service, identity_service,
-    notification_service, proxy_service,
+    approval_service, audit_service, delegation_service, identity_service, notification_service,
+    proxy_service,
 };
-use crate::AppState;
 
 /// Response headers that are safe to forward back to the client.
 /// Uses an allowlist to prevent leaking internal headers from downstream services.
@@ -83,6 +87,7 @@ async fn execute_proxy(
     let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     let user_id_str = auth_user.user_id.to_string();
+    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
 
     let target = match proxy_service::resolve_proxy_target(
         &state.db,
@@ -112,41 +117,28 @@ async fn execute_proxy(
     // Check approval if user has it enabled.
     // Only direct browser sessions bypass approval; API keys, delegated tokens,
     // and service accounts all require approval since they represent programmatic access.
-    let requires_approval = approval_service::user_requires_approval(
-        &state.db,
-        &user_id_str,
-    )
-    .await?;
+    let requires_approval =
+        approval_service::user_requires_approval(&state.db, &approval_owner_user_id).await?;
 
     if requires_approval && auth_user.auth_method != crate::mw::auth::AuthMethod::Session {
-        let requester_type = match auth_user.auth_method {
-            crate::mw::auth::AuthMethod::ApiKey => "api_key",
-            crate::mw::auth::AuthMethod::Delegated => "delegated",
-            crate::mw::auth::AuthMethod::ServiceAccount => "service_account",
-            crate::mw::auth::AuthMethod::AccessToken => "access_token",
-            crate::mw::auth::AuthMethod::Session => unreachable!(),
-        };
-
-        let requester_id = auth_user
-            .acting_client_id
-            .as_deref()
-            .unwrap_or(&user_id_str);
+        let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
+            AppError::Forbidden("Session auth does not require approval".to_string())
+        })?;
+        let requester_id = auth_user.approval_requester_id();
 
         let has_grant = approval_service::check_approval(
             &state.db,
-            &user_id_str,
+            &approval_owner_user_id,
             service_id,
             requester_type,
-            requester_id,
+            &requester_id,
         )
         .await?;
 
         if !has_grant {
-            let channel = notification_service::get_or_create_channel(
-                &state.db,
-                &user_id_str,
-            )
-            .await?;
+            let channel =
+                notification_service::get_or_create_channel(&state.db, &approval_owner_user_id)
+                    .await?;
 
             let request_method = request.method().as_str().to_string();
             let timeout_secs = channel.approval_timeout_secs;
@@ -154,12 +146,12 @@ async fn execute_proxy(
                 &state.db,
                 &state.config,
                 &state.http_client,
-                &user_id_str,
+                &approval_owner_user_id,
                 service_id,
                 &target.service.name,
                 &target.service.slug,
                 requester_type,
-                requester_id,
+                &requester_id,
                 None,
                 &format!("proxy:{} {}", request_method, path),
                 timeout_secs,
@@ -167,12 +159,8 @@ async fn execute_proxy(
             .await?;
 
             // Block until the user approves/rejects or timeout expires
-            approval_service::wait_for_decision(
-                &state.db,
-                &approval_request.id,
-                timeout_secs,
-            )
-            .await?;
+            approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+                .await?;
         }
     }
 
@@ -208,10 +196,7 @@ async fn execute_proxy(
                     &target.service,
                 ) {
                     Ok(assertion) => {
-                        identity_headers.push((
-                            "X-NyxID-Identity-Token".to_string(),
-                            assertion,
-                        ));
+                        identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -238,10 +223,7 @@ async fn execute_proxy(
             crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
         ) {
             Ok(delegation_token) => {
-                identity_headers.push((
-                    "X-NyxID-Delegation-Token".to_string(),
-                    delegation_token,
-                ));
+                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
             }
             Err(e) => {
                 tracing::warn!(
@@ -293,9 +275,10 @@ async fn execute_proxy(
     let mut reqwest_headers = reqwest::header::HeaderMap::new();
     for (name, value) in headers.iter() {
         if let Ok(reqwest_name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            && let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
-                reqwest_headers.insert(reqwest_name, reqwest_value);
-            }
+            && let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
+        {
+            reqwest_headers.insert(reqwest_name, reqwest_value);
+        }
     }
 
     // Reuse the shared reqwest::Client from AppState for connection pooling
@@ -324,11 +307,10 @@ async fn execute_proxy(
         if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
             && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-                && let Ok(header_value) =
-                    axum::http::header::HeaderValue::from_bytes(value.as_bytes())
-                {
-                    response_builder = response_builder.header(header_name, header_value);
-                }
+            && let Ok(header_value) = axum::http::header::HeaderValue::from_bytes(value.as_bytes())
+        {
+            response_builder = response_builder.header(header_name, header_value);
+        }
     }
 
     let response_body = downstream_response
@@ -449,10 +431,7 @@ pub async fn list_proxy_services(
             .await?
     };
 
-    let connected_set: HashSet<&str> = connections
-        .iter()
-        .map(|c| c.service_id.as_str())
-        .collect();
+    let connected_set: HashSet<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
 
     let items: Vec<ProxyServiceItem> = services
         .iter()

@@ -937,6 +937,12 @@ For callers that received `approval_required`, provide a polling endpoint:
 GET /api/v1/approvals/requests/{request_id}/status
 ```
 
+The endpoint must require authentication and verify caller binding against the
+stored approval request:
+- `approval_request.user_id` matches effective resource owner
+- `approval_request.requester_type` matches auth method
+- `approval_request.requester_id` matches caller identity
+
 **Response (200):**
 ```json
 {
@@ -995,8 +1001,8 @@ let api_v1_human_only = Router::new()
     .nest("/auth", auth_routes)
     ...
 
-// Approval status polling -- accessible by delegated tokens too
-// (so service accounts and OAuth clients can poll for approval status)
+// Approval status polling -- delegated/service-account capable, but still authenticated
+// and bound to the original requester identity.
 // Add to api_v1_delegated
 let api_v1_delegated = Router::new()
     .route("/approvals/requests/{request_id}/status",

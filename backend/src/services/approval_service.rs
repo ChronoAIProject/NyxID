@@ -1,22 +1,19 @@
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
+use mongodb::Database;
 use mongodb::bson::{self, doc};
 use mongodb::options::{FindOneAndUpdateOptions, FindOptions, ReturnDocument};
-use mongodb::Database;
 use sha2::{Digest, Sha256};
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
 use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as GRANTS};
 use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as REQUESTS};
-use crate::models::notification_channel::{NotificationChannel, COLLECTION_NAME as CHANNELS};
+use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
 use crate::services::notification_service;
 
 /// Check whether a user has the approval system enabled.
-pub async fn user_requires_approval(
-    db: &Database,
-    user_id: &str,
-) -> AppResult<bool> {
+pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<bool> {
     let channel = db
         .collection::<NotificationChannel>(CHANNELS)
         .find_one(doc! { "user_id": user_id })
@@ -72,72 +69,68 @@ pub async fn create_approval_request(
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
     let idempotency_key =
         compute_idempotency_key(user_id, service_id, requester_type, requester_id);
+    let mut inserted_request: Option<ApprovalRequest> = None;
+    for _attempt in 0..2 {
+        // Check for existing pending request with the same idempotency key.
+        // This handles normal idempotent retries and the winner in concurrent inserts.
+        if let Some(existing) = collection
+            .find_one(doc! {
+                "idempotency_key": &idempotency_key,
+                "status": "pending",
+            })
+            .await?
+        {
+            return Ok(existing);
+        }
 
-    // Check for existing pending request with the same idempotency key
-    if let Some(existing) = collection
-        .find_one(doc! {
-            "idempotency_key": &idempotency_key,
-            "status": "pending",
-        })
-        .await?
-    {
-        return Ok(existing);
-    }
+        let now = Utc::now();
+        let expires_at = now + Duration::seconds(i64::from(timeout_secs));
 
-    let now = Utc::now();
-    let expires_at = now + Duration::seconds(i64::from(timeout_secs));
+        let request = ApprovalRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            service_id: service_id.to_string(),
+            service_name: service_name.to_string(),
+            service_slug: service_slug.to_string(),
+            requester_type: requester_type.to_string(),
+            requester_id: requester_id.to_string(),
+            requester_label: requester_label.map(String::from),
+            operation_summary: operation_summary.to_string(),
+            status: "pending".to_string(),
+            idempotency_key: idempotency_key.clone(),
+            notification_channel: None,
+            telegram_message_id: None,
+            telegram_chat_id: None,
+            expires_at,
+            decided_at: None,
+            decision_channel: None,
+            created_at: now,
+        };
 
-    let request = ApprovalRequest {
-        id: uuid::Uuid::new_v4().to_string(),
-        user_id: user_id.to_string(),
-        service_id: service_id.to_string(),
-        service_name: service_name.to_string(),
-        service_slug: service_slug.to_string(),
-        requester_type: requester_type.to_string(),
-        requester_id: requester_id.to_string(),
-        requester_label: requester_label.map(String::from),
-        operation_summary: operation_summary.to_string(),
-        status: "pending".to_string(),
-        idempotency_key,
-        notification_channel: None,
-        telegram_message_id: None,
-        telegram_chat_id: None,
-        expires_at,
-        decided_at: None,
-        decision_channel: None,
-        created_at: now,
-    };
-
-    // Insert the request -- duplicate idempotency_key for pending requests will fail
-    // due to the partial unique index. If it fails with duplicate key, return the
-    // existing pending request (concurrent insert race).
-    match collection.insert_one(&request).await {
-        Ok(_) => {}
-        Err(e) => {
-            if is_duplicate_key_error(&e) {
-                if let Some(existing) = collection
-                    .find_one(doc! {
-                        "idempotency_key": &request.idempotency_key,
-                        "status": "pending",
-                    })
-                    .await?
-                {
-                    return Ok(existing);
-                }
-                // Race: the pending request was decided between our check and insert.
-                // Retry by recursing (the next attempt will succeed since no pending
-                // request with this key exists).
-                return Err(AppError::Internal(
-                    "Approval request conflict, please retry".to_string(),
-                ));
+        match collection.insert_one(&request).await {
+            Ok(_) => {
+                inserted_request = Some(request);
+                break;
             }
-            return Err(AppError::DatabaseError(e));
+            Err(e) if is_duplicate_key_error(&e) => {
+                // Concurrent insert race: another request inserted/processed first.
+                // Retry once to read the pending row or create a new row if no longer pending.
+                continue;
+            }
+            Err(e) => return Err(AppError::DatabaseError(e)),
         }
     }
 
+    let request = inserted_request
+        .ok_or_else(|| AppError::Conflict("Approval request conflict, please retry".to_string()))?;
+
     // Send notification
     match notification_service::send_approval_notification(
-        db, config, http_client, user_id, &request,
+        db,
+        config,
+        http_client,
+        user_id,
+        &request,
     )
     .await
     {
@@ -208,16 +201,13 @@ pub async fn process_decision(
         )
         .await?
         .ok_or_else(|| {
-            AppError::NotFound(
-                "Approval request not found or already processed".to_string(),
-            )
+            AppError::NotFound("Approval request not found or already processed".to_string())
         })?;
 
     // On approval: create a grant
     if approved {
         let channel = notification_service::get_or_create_channel(db, &updated.user_id).await?;
-        let grant_expiry =
-            now + Duration::days(i64::from(channel.grant_expiry_days));
+        let grant_expiry = now + Duration::days(i64::from(channel.grant_expiry_days));
 
         let grant = ApprovalGrant {
             id: uuid::Uuid::new_v4().to_string(),
@@ -270,9 +260,7 @@ pub async fn expire_pending_requests(
             "status": "pending",
             "expires_at": { "$lte": now },
         })
-        .with_options(
-            FindOptions::builder().limit(100).build(),
-        )
+        .with_options(FindOptions::builder().limit(100).build())
         .await?
         .try_collect()
         .await?;
@@ -344,9 +332,7 @@ pub async fn wait_for_decision(
                 ));
             }
             "expired" => {
-                return Err(AppError::Forbidden(
-                    "Approval request expired".to_string(),
-                ));
+                return Err(AppError::Forbidden("Approval request expired".to_string()));
             }
             "pending" => {
                 if Utc::now() >= deadline {
@@ -401,10 +387,7 @@ pub async fn list_requests(
 }
 
 /// Get a single approval request by ID (for status polling).
-pub async fn get_request(
-    db: &Database,
-    request_id: &str,
-) -> AppResult<ApprovalRequest> {
+pub async fn get_request(db: &Database, request_id: &str) -> AppResult<ApprovalRequest> {
     db.collection::<ApprovalRequest>(REQUESTS)
         .find_one(doc! { "_id": request_id })
         .await?
@@ -449,11 +432,7 @@ pub async fn list_grants(
 }
 
 /// Revoke a specific approval grant.
-pub async fn revoke_grant(
-    db: &Database,
-    user_id: &str,
-    grant_id: &str,
-) -> AppResult<()> {
+pub async fn revoke_grant(db: &Database, user_id: &str, grant_id: &str) -> AppResult<()> {
     let result = db
         .collection::<ApprovalGrant>(GRANTS)
         .update_one(
@@ -474,10 +453,7 @@ pub async fn revoke_grant(
 
 /// Revoke all grants for a user.
 #[allow(dead_code)]
-pub async fn revoke_all_grants(
-    db: &Database,
-    user_id: &str,
-) -> AppResult<u64> {
+pub async fn revoke_all_grants(db: &Database, user_id: &str) -> AppResult<u64> {
     let result = db
         .collection::<ApprovalGrant>(GRANTS)
         .update_many(

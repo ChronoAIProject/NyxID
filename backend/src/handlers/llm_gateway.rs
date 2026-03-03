@@ -1,22 +1,22 @@
 use axum::{
+    Json,
     body::Body,
     extract::{Path, State},
     http::{Method, Request, StatusCode},
     response::Response,
-    Json,
 };
 use futures::StreamExt;
 use mongodb::bson::doc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::AppState;
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    approval_service, audit_service, chatgpt_translator, delegation_service,
-    llm_gateway_service, notification_service, proxy_service,
+    approval_service, audit_service, chatgpt_translator, delegation_service, llm_gateway_service,
+    notification_service, proxy_service,
 };
-use crate::AppState;
 
 /// Maximum size for upstream response bodies (50 MB).
 const MAX_RESPONSE_BODY_SIZE: usize = 50 * 1024 * 1024;
@@ -49,12 +49,9 @@ pub async fn llm_status(
 ) -> AppResult<Json<llm_gateway_service::LlmStatusResponse>> {
     let user_id_str = auth_user.user_id.to_string();
 
-    let status = llm_gateway_service::get_llm_status(
-        &state.db,
-        &user_id_str,
-        &state.config.base_url,
-    )
-    .await?;
+    let status =
+        llm_gateway_service::get_llm_status(&state.db, &user_id_str, &state.config.base_url)
+            .await?;
 
     Ok(Json(status))
 }
@@ -74,23 +71,26 @@ pub async fn llm_proxy_request(
 
     // Resolve the downstream service for this provider slug
     let (service, _provider) =
-        llm_gateway_service::resolve_llm_service_by_slug(&state.db, &provider_slug)
-            .await?;
+        llm_gateway_service::resolve_llm_service_by_slug(&state.db, &provider_slug).await?;
 
     let service_id = service.id.clone();
 
     // Use existing proxy_service to resolve the proxy target
-    let target = proxy_service::resolve_proxy_target(
-        &state.db,
-        &encryption_key,
-        &user_id_str,
-        &service_id,
-    )
-    .await?;
+    let target =
+        proxy_service::resolve_proxy_target(&state.db, &encryption_key, &user_id_str, &service_id)
+            .await?;
 
     // Check approval if user has it enabled
     let request_method_str = request.method().as_str().to_string();
-    check_llm_approval(&state, &auth_user, &user_id_str, &service_id, &service, &path, &request_method_str).await?;
+    check_llm_approval(
+        &state,
+        &auth_user,
+        &service_id,
+        &service,
+        &path,
+        &request_method_str,
+    )
+    .await?;
 
     // Resolve delegated credentials (provider tokens)
     let delegated = delegation_service::resolve_delegated_credentials(
@@ -118,10 +118,8 @@ pub async fn llm_proxy_request(
     // OpenAI Codex: use WebSocket transport with Responses API translation
     // (Cloudflare blocks regular HTTP to chatgpt.com, but allows WebSocket)
     let response = if provider_slug == "openai-codex" && !body_bytes.is_empty() {
-        let body_json: serde_json::Value =
-            serde_json::from_slice(&body_bytes).map_err(|e| {
-                AppError::BadRequest(format!("Invalid JSON body: {e}"))
-            })?;
+        let body_json: serde_json::Value = serde_json::from_slice(&body_bytes)
+            .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
 
         // Path determines response format: chat/completions → Chat Completions,
         // responses → Responses API passthrough
@@ -214,15 +212,11 @@ pub async fn gateway_request(
             "Request body is required with a 'model' field".to_string(),
         ));
     } else {
-        serde_json::from_slice(&body_bytes).map_err(|e| {
-            AppError::BadRequest(format!("Invalid JSON body: {e}"))
-        })?
+        serde_json::from_slice(&body_bytes)
+            .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?
     };
 
-    let is_streaming = body_json
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        == Some(true);
+    let is_streaming = body_json.get("stream").and_then(|v| v.as_bool()) == Some(true);
 
     let model = body_json
         .get("model")
@@ -232,26 +226,20 @@ pub async fn gateway_request(
         })?;
 
     // Resolve provider slug from model name
-    let primary_slug = llm_gateway_service::resolve_provider_for_model(model)
-        .ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "Unknown model: '{model}'. Cannot determine provider."
-            ))
-        })?;
+    let primary_slug = llm_gateway_service::resolve_provider_for_model(model).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "Unknown model: '{model}'. Cannot determine provider."
+        ))
+    })?;
 
     // Try to find the user's active token for the resolved provider.
     // For OpenAI models, fall back to openai-codex if openai is not connected.
-    let provider_slug = resolve_provider_slug_with_fallback(
-        &state.db,
-        &user_id_str,
-        primary_slug,
-    )
-    .await?;
+    let provider_slug =
+        resolve_provider_slug_with_fallback(&state.db, &user_id_str, primary_slug).await?;
 
     // Resolve the downstream service
     let (service, _provider) =
-        llm_gateway_service::resolve_llm_service_by_slug(&state.db, &provider_slug)
-            .await?;
+        llm_gateway_service::resolve_llm_service_by_slug(&state.db, &provider_slug).await?;
 
     let service_id = service.id.clone();
 
@@ -259,16 +247,12 @@ pub async fn gateway_request(
     let translator = llm_gateway_service::get_translator(&provider_slug);
 
     // Resolve proxy target
-    let target = proxy_service::resolve_proxy_target(
-        &state.db,
-        &encryption_key,
-        &user_id_str,
-        &service_id,
-    )
-    .await?;
+    let target =
+        proxy_service::resolve_proxy_target(&state.db, &encryption_key, &user_id_str, &service_id)
+            .await?;
 
     // Check approval if user has it enabled
-    check_llm_approval(&state, &auth_user, &user_id_str, &service_id, &service, &path, "POST").await?;
+    check_llm_approval(&state, &auth_user, &service_id, &service, &path, "POST").await?;
 
     // Resolve delegated credentials
     let delegated = delegation_service::resolve_delegated_credentials(
@@ -329,28 +313,26 @@ pub async fn gateway_request(
     }
 
     // L-4: Extend delegated credentials immutably via iterator chaining
-    let delegated: Vec<_> = delegated
-        .into_iter()
-        .chain(extra_headers.iter().map(|(key, value)| {
-            delegation_service::DelegatedCredential {
-                provider_slug: provider_slug.clone(),
-                injection_method: "header".to_string(),
-                injection_key: key.clone(),
-                credential: value.clone(),
-            }
-        }))
-        .collect();
+    let delegated: Vec<_> =
+        delegated
+            .into_iter()
+            .chain(extra_headers.iter().map(|(key, value)| {
+                delegation_service::DelegatedCredential {
+                    provider_slug: provider_slug.clone(),
+                    injection_method: "header".to_string(),
+                    injection_key: key.clone(),
+                    credential: value.clone(),
+                }
+            }))
+            .collect();
 
     // OpenAI Codex: use WebSocket transport (Cloudflare blocks HTTP to chatgpt.com)
     let response = if provider_slug == "openai-codex" {
         let bearer_token = extract_bearer_token(&delegated)?;
         // final_body_bytes is already the translated Responses API body
-        let translated_body: serde_json::Value = serde_json::from_slice(
-            final_body_bytes.as_deref().unwrap_or(&[]),
-        )
-        .map_err(|e| {
-            AppError::Internal(format!("Failed to parse translated body: {e}"))
-        })?;
+        let translated_body: serde_json::Value =
+            serde_json::from_slice(final_body_bytes.as_deref().unwrap_or(&[]))
+                .map_err(|e| AppError::Internal(format!("Failed to parse translated body: {e}")))?;
 
         // Path determines response format: chat/completions → translate back
         // to Chat Completions, responses → return Responses API as-is
@@ -384,8 +366,7 @@ pub async fn gateway_request(
                 build_translated_sse_response(downstream_response, translator).await?
             } else {
                 // Non-streaming: buffer and translate the full response
-                build_translated_json_response(downstream_response, translator.as_ref())
-                    .await?
+                build_translated_json_response(downstream_response, translator.as_ref()).await?
             }
         } else {
             build_filtered_response(downstream_response).await?
@@ -420,9 +401,9 @@ async fn resolve_provider_slug_with_fallback(
     user_id: &str,
     primary_slug: &str,
 ) -> AppResult<String> {
-    use crate::models::provider_config::{ProviderConfig, COLLECTION_NAME as PROVIDER_CONFIGS};
+    use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
     use crate::models::user_provider_token::{
-        UserProviderToken, COLLECTION_NAME as USER_PROVIDER_TOKENS,
+        COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
     };
 
     // Find the primary provider
@@ -508,12 +489,9 @@ fn convert_method(method: &Method) -> AppResult<reqwest::Method> {
 fn convert_headers(headers: &axum::http::HeaderMap) -> reqwest::header::HeaderMap {
     let mut reqwest_headers = reqwest::header::HeaderMap::new();
     for (name, value) in headers.iter() {
-        if let Ok(reqwest_name) =
-            reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
+        if let Ok(reqwest_name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
         {
-            if let Ok(reqwest_value) =
-                reqwest::header::HeaderValue::from_bytes(value.as_bytes())
-            {
+            if let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
                 reqwest_headers.insert(reqwest_name, reqwest_value);
             }
         }
@@ -522,12 +500,11 @@ fn convert_headers(headers: &axum::http::HeaderMap) -> reqwest::header::HeaderMa
 }
 
 /// Read a reqwest response body with a size limit.
-async fn read_response_with_limit(
-    response: reqwest::Response,
-) -> AppResult<bytes::Bytes> {
-    let resp_bytes = response.bytes().await.map_err(|e| {
-        AppError::Internal(format!("Failed to read downstream response: {e}"))
-    })?;
+async fn read_response_with_limit(response: reqwest::Response) -> AppResult<bytes::Bytes> {
+    let resp_bytes = response
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to read downstream response: {e}")))?;
 
     if resp_bytes.len() > MAX_RESPONSE_BODY_SIZE {
         return Err(AppError::Internal(
@@ -538,9 +515,7 @@ async fn read_response_with_limit(
     Ok(resp_bytes)
 }
 
-async fn build_filtered_response(
-    downstream_response: reqwest::Response,
-) -> AppResult<Response> {
+async fn build_filtered_response(downstream_response: reqwest::Response) -> AppResult<Response> {
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
 
@@ -565,8 +540,7 @@ async fn build_filtered_response(
                 if let Ok(header_value) =
                     axum::http::header::HeaderValue::from_bytes(value.as_bytes())
                 {
-                    response_builder =
-                        response_builder.header(header_name, header_value);
+                    response_builder = response_builder.header(header_name, header_value);
                 }
             }
         }
@@ -598,22 +572,16 @@ async fn build_translated_json_response(
     let resp_bytes = read_response_with_limit(downstream_response).await?;
 
     if status.is_success() {
-        let resp_json: serde_json::Value =
-            serde_json::from_slice(&resp_bytes).map_err(|e| {
-                AppError::Internal(format!(
-                    "Failed to parse provider response as JSON: {e}"
-                ))
-            })?;
+        let resp_json: serde_json::Value = serde_json::from_slice(&resp_bytes).map_err(|e| {
+            AppError::Internal(format!("Failed to parse provider response as JSON: {e}"))
+        })?;
 
         let translated = translator.translate_response(resp_json)?;
         let translated_bytes = serde_json::to_vec(&translated).map_err(|e| {
-            AppError::Internal(format!(
-                "Failed to serialize translated response: {e}"
-            ))
+            AppError::Internal(format!("Failed to serialize translated response: {e}"))
         })?;
 
-        let axum_status = StatusCode::from_u16(status.as_u16())
-            .unwrap_or(StatusCode::BAD_GATEWAY);
+        let axum_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
         let mut response_builder = Response::builder()
             .status(axum_status)
@@ -626,17 +594,12 @@ async fn build_translated_json_response(
                 && ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
             {
                 if let Ok(header_name) =
-                    axum::http::header::HeaderName::from_bytes(
-                        name.as_str().as_bytes(),
-                    )
+                    axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
                 {
                     if let Ok(header_value) =
-                        axum::http::header::HeaderValue::from_bytes(
-                            value.as_bytes(),
-                        )
+                        axum::http::header::HeaderValue::from_bytes(value.as_bytes())
                     {
-                        response_builder =
-                            response_builder.header(header_name, header_value);
+                        response_builder = response_builder.header(header_name, header_value);
                     }
                 }
             }
@@ -644,13 +607,10 @@ async fn build_translated_json_response(
 
         response_builder
             .body(Body::from(translated_bytes))
-            .map_err(|e| {
-                AppError::Internal(format!("Failed to build response: {e}"))
-            })
+            .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))
     } else {
         // M-6: Translate error responses to OpenAI error format
-        let axum_status = StatusCode::from_u16(status.as_u16())
-            .unwrap_or(StatusCode::BAD_GATEWAY);
+        let axum_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
         let error_message = serde_json::from_slice::<serde_json::Value>(&resp_bytes)
             .ok()
@@ -659,9 +619,7 @@ async fn build_translated_json_response(
                     .and_then(|m| m.as_str())
                     .map(String::from)
             })
-            .unwrap_or_else(|| {
-                format!("Upstream provider error (HTTP {})", status.as_u16())
-            });
+            .unwrap_or_else(|| format!("Upstream provider error (HTTP {})", status.as_u16()));
 
         let error_body = serde_json::json!({
             "error": {
@@ -671,17 +629,14 @@ async fn build_translated_json_response(
             }
         });
 
-        let error_bytes = serde_json::to_vec(&error_body).map_err(|e| {
-            AppError::Internal(format!("Failed to serialize error response: {e}"))
-        })?;
+        let error_bytes = serde_json::to_vec(&error_body)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize error response: {e}")))?;
 
         Response::builder()
             .status(axum_status)
             .header("content-type", "application/json")
             .body(Body::from(error_bytes))
-            .map_err(|e| {
-                AppError::Internal(format!("Failed to build response: {e}"))
-            })
+            .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))
     }
 }
 
@@ -699,11 +654,9 @@ async fn build_translated_sse_response(
         return build_translated_json_response(downstream_response, translator.as_ref()).await;
     }
 
-    let axum_status =
-        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK);
+    let axum_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK);
 
-    let (tx, rx) =
-        tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
 
     tokio::spawn(async move {
         let mut buffer = String::new();
@@ -719,11 +672,7 @@ async fn build_translated_sse_response(
                         if let Some(translated) =
                             translator.translate_stream_event(&event, &mut state)
                         {
-                            if tx
-                                .send(Ok(bytes::Bytes::from(translated)))
-                                .await
-                                .is_err()
-                            {
+                            if tx.send(Ok(bytes::Bytes::from(translated))).await.is_err() {
                                 return; // client disconnected
                             }
                         }
@@ -731,10 +680,7 @@ async fn build_translated_sse_response(
                 }
                 Err(e) => {
                     let _ = tx
-                        .send(Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            e,
-                        )))
+                        .send(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
                         .await;
                     return;
                 }
@@ -755,9 +701,7 @@ async fn build_translated_sse_response(
 /// Parse the next complete SSE event from a buffer.
 /// Returns `None` if no complete event is available yet.
 /// Consumes the parsed event text (including the `\n\n` delimiter) from the buffer.
-fn parse_next_sse_event(
-    buffer: &mut String,
-) -> Option<llm_gateway_service::SseEvent> {
+fn parse_next_sse_event(buffer: &mut String) -> Option<llm_gateway_service::SseEvent> {
     let end = buffer.find("\n\n")?;
     let event_text = buffer[..end].to_string();
     buffer.drain(..end + 2);
@@ -788,14 +732,14 @@ fn parse_next_sse_event(
 async fn check_llm_approval(
     state: &AppState,
     auth_user: &AuthUser,
-    user_id_str: &str,
     service_id: &str,
     service: &crate::models::downstream_service::DownstreamService,
     path: &str,
     method_str: &str,
 ) -> AppResult<()> {
+    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let requires_approval =
-        approval_service::user_requires_approval(&state.db, user_id_str).await?;
+        approval_service::user_requires_approval(&state.db, &approval_owner_user_id).await?;
 
     if !requires_approval {
         return Ok(());
@@ -806,25 +750,17 @@ async fn check_llm_approval(
         return Ok(());
     }
 
-    let requester_type = match auth_user.auth_method {
-        crate::mw::auth::AuthMethod::ApiKey => "api_key",
-        crate::mw::auth::AuthMethod::Delegated => "delegated",
-        crate::mw::auth::AuthMethod::ServiceAccount => "service_account",
-        crate::mw::auth::AuthMethod::AccessToken => "access_token",
-        crate::mw::auth::AuthMethod::Session => unreachable!(),
-    };
-
-    let requester_id = auth_user
-        .acting_client_id
-        .as_deref()
-        .unwrap_or(user_id_str);
+    let requester_type = auth_user
+        .approval_requester_type()
+        .ok_or_else(|| AppError::Forbidden("Session auth does not require approval".to_string()))?;
+    let requester_id = auth_user.approval_requester_id();
 
     let has_grant = approval_service::check_approval(
         &state.db,
-        user_id_str,
+        &approval_owner_user_id,
         service_id,
         requester_type,
-        requester_id,
+        &requester_id,
     )
     .await?;
 
@@ -833,19 +769,19 @@ async fn check_llm_approval(
     }
 
     let channel =
-        notification_service::get_or_create_channel(&state.db, user_id_str).await?;
+        notification_service::get_or_create_channel(&state.db, &approval_owner_user_id).await?;
 
     let timeout_secs = channel.approval_timeout_secs;
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
         &state.http_client,
-        user_id_str,
+        &approval_owner_user_id,
         service_id,
         &service.name,
         &service.slug,
         requester_type,
-        requester_id,
+        &requester_id,
         None,
         &format!("llm:{} {}", method_str, path),
         timeout_secs,
@@ -853,11 +789,5 @@ async fn check_llm_approval(
     .await?;
 
     // Block until the user approves/rejects or timeout expires
-    approval_service::wait_for_decision(
-        &state.db,
-        &approval_request.id,
-        timeout_secs,
-    )
-    .await
+    approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs).await
 }
-

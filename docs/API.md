@@ -5372,7 +5372,7 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 
 ## Approval Management
 
-View approval history, manage grants, and approve/reject requests via the web UI. Most endpoints require authentication (human-only). The status polling endpoint is also accessible by delegated tokens and service accounts.
+View approval history, manage grants, and approve/reject requests via the web UI. All endpoints require authentication. The status polling endpoint is also accessible by delegated tokens and service accounts.
 
 **Blocking vs. polling:** The primary approval flow is blocking -- proxy and LLM gateway requests hold the HTTP connection open until approval/rejection/timeout. The status polling endpoint below is a secondary mechanism for callers that use async workflows or need to monitor approval status from a separate connection.
 
@@ -5431,7 +5431,12 @@ Authorization: Bearer <access_token>
 
 Status endpoint for monitoring approval requests. The primary flow is blocking (proxy/LLM connections wait for approval), but this endpoint is available for async callers that manage approval status separately. Also accessible by delegated tokens and service accounts.
 
-UUID v4 request IDs provide sufficient unguessability (~122 bits of entropy), so no ownership verification is required.
+The caller must authenticate and match the original approval request binding:
+- resource owner (`approval_request.user_id`)
+- `requester_type`
+- `requester_id`
+
+This prevents authenticated callers from polling approval requests that belong to a different caller context.
 
 **Response (200):**
 

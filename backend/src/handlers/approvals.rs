@@ -1,13 +1,13 @@
 use axum::{
-    extract::{Path, Query, State},
     Json,
+    extract::{Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
 
-use crate::errors::AppResult;
+use crate::AppState;
+use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{approval_service, audit_service};
-use crate::AppState;
 
 // --- Response types ---
 
@@ -150,16 +150,28 @@ pub async fn list_requests(
 /// Polling endpoint for callers that received approval_required.
 /// Accessible by delegated tokens and service accounts.
 ///
-/// SECURITY: This endpoint does not verify ownership (requester_id match).
-/// This is by design: the request_id (UUID v4) is only returned in the 403
-/// `approval_required` error response to the original caller, providing
-/// implicit authorization. The endpoint returns only status and expiry time,
-/// no sensitive data. UUID v4 provides sufficient unguessability (~122 bits).
+/// SECURITY: caller must authenticate and match the original requester binding
+/// (resource owner + requester_type + requester_id).
 pub async fn get_request_status(
     State(state): State<AppState>,
+    auth_user: AuthUser,
     Path(request_id): Path<String>,
 ) -> AppResult<Json<ApprovalStatusResponse>> {
     let request = approval_service::get_request(&state.db, &request_id).await?;
+    let owner_user_id = auth_user.effective_approval_owner_user_id();
+    let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
+        AppError::Forbidden("Session-authenticated callers cannot poll approval status".to_string())
+    })?;
+    let requester_id = auth_user.approval_requester_id();
+
+    if request.user_id != owner_user_id
+        || request.requester_type != requester_type
+        || request.requester_id != requester_id
+    {
+        return Err(AppError::Forbidden(
+            "You are not authorized to view this approval request".to_string(),
+        ));
+    }
 
     Ok(Json(ApprovalStatusResponse {
         status: request.status,
