@@ -15,7 +15,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{
     audit_service, consent_service, oauth_client_service, oauth_service, service_account_service,
-    token_exchange_service,
+    social_token_exchange_service, token_exchange_service,
 };
 
 // --- Request / Response types ---
@@ -68,6 +68,8 @@ pub struct TokenRequest {
     pub subject_token_type: Option<String>,
     /// Requested scope (used by token exchange)
     pub scope: Option<String>,
+    /// Social provider hint for external token exchange ("google" or "github")
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -829,10 +831,6 @@ async fn token_inner(
                 .client_id
                 .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing client_id".to_string()))?;
-            let client_secret = body
-                .client_secret
-                .as_deref()
-                .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
             let subject_token = body
                 .subject_token
                 .as_deref()
@@ -842,39 +840,80 @@ async fn token_inner(
                 .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing subject_token_type".to_string()))?;
 
-            let result = token_exchange_service::exchange_token(
-                &state.db,
-                &state.config,
-                &state.jwt_keys,
-                client_id,
-                client_secret,
-                subject_token,
-                subject_token_type,
-                body.scope.as_deref(),
-            )
-            .await?;
+            // Route based on `provider` presence:
+            // - provider present: social token exchange (provider-specific token type validation)
+            // - provider absent + access_token type: delegated token exchange
+            if let Some(provider) = body.provider.as_deref() {
+                let result = social_token_exchange_service::exchange_social_token(
+                    &state.db,
+                    &state.config,
+                    &state.jwt_keys,
+                    &state.jwks_cache,
+                    &state.http_client,
+                    client_id,
+                    body.client_secret.as_deref(),
+                    subject_token,
+                    subject_token_type,
+                    provider,
+                )
+                .await?;
 
-            audit_service::log_async(
-                state.db.clone(),
-                Some(result.user_id.clone()),
-                "token_exchange".to_string(),
-                Some(serde_json::json!({
-                    "client_id": client_id,
-                    "scope": &result.scope,
-                })),
-                None,
-                None,
-            );
+                Ok(Json(TokenResponse {
+                    access_token: result.access_token,
+                    token_type: "Bearer".to_string(),
+                    expires_in: result.expires_in,
+                    refresh_token: Some(result.refresh_token),
+                    id_token: result.id_token,
+                    scope: Some(result.scope),
+                    issued_token_type: Some(
+                        "urn:ietf:params:oauth:token-type:access_token".to_string(),
+                    ),
+                }))
+            } else if subject_token_type == "urn:ietf:params:oauth:token-type:access_token" {
+                // Existing: Delegated token exchange (NyxID access token -> delegated token)
+                let client_secret = body
+                    .client_secret
+                    .as_deref()
+                    .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
 
-            Ok(Json(TokenResponse {
-                access_token: result.access_token,
-                token_type: result.token_type,
-                expires_in: result.expires_in,
-                refresh_token: None,
-                id_token: None,
-                scope: Some(result.scope),
-                issued_token_type: Some(result.issued_token_type),
-            }))
+                let result = token_exchange_service::exchange_token(
+                    &state.db,
+                    &state.config,
+                    &state.jwt_keys,
+                    client_id,
+                    client_secret,
+                    subject_token,
+                    subject_token_type,
+                    body.scope.as_deref(),
+                )
+                .await?;
+
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(result.user_id.clone()),
+                    "token_exchange".to_string(),
+                    Some(serde_json::json!({
+                        "client_id": client_id,
+                        "scope": &result.scope,
+                    })),
+                    None,
+                    None,
+                );
+
+                Ok(Json(TokenResponse {
+                    access_token: result.access_token,
+                    token_type: result.token_type,
+                    expires_in: result.expires_in,
+                    refresh_token: None,
+                    id_token: None,
+                    scope: Some(result.scope),
+                    issued_token_type: Some(result.issued_token_type),
+                }))
+            } else {
+                Err(AppError::BadRequest(format!(
+                    "Unsupported subject_token_type: {subject_token_type}"
+                )))
+            }
         }
 
         // OAuth2 Client Credentials Grant (service accounts)
@@ -1219,9 +1258,8 @@ pub async fn register_client(
     }
 
     // Dynamic registration only creates public clients (PKCE-based, no secret).
-    // Public clients cannot authenticate with client_secret, which is required
-    // for the RFC 8693 token exchange grant. Therefore delegation_scopes is
-    // intentionally empty to prevent token exchange for dynamically registered clients.
+    // Delegated RFC 8693 token exchange is controlled by `delegation_scopes`;
+    // keeping it empty disables delegated token exchange for dynamic clients.
     let (client, _secret) = oauth_client_service::create_client(
         &state.db,
         &client_name,

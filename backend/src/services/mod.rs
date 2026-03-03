@@ -24,6 +24,7 @@ pub mod role_service;
 pub mod service_account_service;
 pub mod service_endpoint_service;
 pub mod social_auth_service;
+pub mod social_token_exchange_service;
 pub mod telegram_poller;
 pub mod telegram_service;
 pub mod token_exchange_service;
