@@ -35,6 +35,12 @@ pub struct AppConfig {
     pub github_client_id: Option<String>,
     pub github_client_secret: Option<String>,
 
+    // Apple Sign In
+    pub apple_client_id: Option<String>,
+    pub apple_team_id: Option<String>,
+    pub apple_key_id: Option<String>,
+    pub apple_private_key_path: Option<String>,
+
     // SMTP configuration
     pub smtp_host: Option<String>,
     pub smtp_port: Option<u16>,
@@ -144,6 +150,13 @@ impl AppConfig {
             google_client_secret: env::var("GOOGLE_CLIENT_SECRET").ok(),
             github_client_id: env::var("GITHUB_CLIENT_ID").ok(),
             github_client_secret: env::var("GITHUB_CLIENT_SECRET").ok(),
+
+            apple_client_id: env::var("APPLE_CLIENT_ID").ok().filter(|s| !s.is_empty()),
+            apple_team_id: env::var("APPLE_TEAM_ID").ok().filter(|s| !s.is_empty()),
+            apple_key_id: env::var("APPLE_KEY_ID").ok().filter(|s| !s.is_empty()),
+            apple_private_key_path: env::var("APPLE_PRIVATE_KEY_PATH")
+                .ok()
+                .filter(|s| !s.is_empty()),
 
             smtp_host: env::var("SMTP_HOST").ok(),
             smtp_port: env::var("SMTP_PORT").ok().and_then(|v| v.parse().ok()),
@@ -267,6 +280,14 @@ impl AppConfig {
         self.cookie_domain.as_deref()
     }
 
+    /// Returns true if all Apple Sign In credentials are configured.
+    pub fn apple_configured(&self) -> bool {
+        self.apple_client_id.is_some()
+            && self.apple_team_id.is_some()
+            && self.apple_key_id.is_some()
+            && self.apple_private_key_path.is_some()
+    }
+
     /// Validate and initialize push notification config at startup.
     /// Reads the FCM service account JSON to extract `project_id`.
     /// Verifies APNs key and required companion fields.
@@ -350,6 +371,10 @@ mod tests {
             google_client_secret: None,
             github_client_id: None,
             github_client_secret: None,
+            apple_client_id: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_private_key_path: None,
             smtp_host: None,
             smtp_port: None,
             smtp_username: None,

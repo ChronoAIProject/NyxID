@@ -288,7 +288,7 @@ export interface LlmStatusResponse {
  * via POST /oauth/token with grant_type=urn:ietf:params:oauth:grant-type:token-exchange.
  */
 
-export type SocialTokenExchangeProvider = "google" | "github";
+export type SocialTokenExchangeProvider = "google" | "github" | "apple";
 
 export interface SocialTokenExchangeRequest {
   readonly grant_type: "urn:ietf:params:oauth:grant-type:token-exchange";

@@ -148,6 +148,7 @@ async fn exchange_social_token_inner(
             )
             .await?
         }
+        SocialProvider::Apple => verify_apple_token(jwks_cache, config, subject_token).await?,
     };
 
     // Step 4: Find or create user
@@ -233,14 +234,37 @@ fn validate_subject_token_type(
 ) -> AppResult<()> {
     match (provider, subject_token_type) {
         (SocialProvider::Google, SUBJECT_TOKEN_TYPE_ID_TOKEN)
+        | (SocialProvider::Apple, SUBJECT_TOKEN_TYPE_ID_TOKEN)
         | (SocialProvider::GitHub, SUBJECT_TOKEN_TYPE_ACCESS_TOKEN) => Ok(()),
         (SocialProvider::Google, _) => Err(AppError::BadRequest(
             "Google social exchange requires subject_token_type=urn:ietf:params:oauth:token-type:id_token".to_string(),
+        )),
+        (SocialProvider::Apple, _) => Err(AppError::BadRequest(
+            "Apple social exchange requires subject_token_type=urn:ietf:params:oauth:token-type:id_token".to_string(),
         )),
         (SocialProvider::GitHub, _) => Err(AppError::BadRequest(
             "GitHub social exchange requires subject_token_type=urn:ietf:params:oauth:token-type:access_token".to_string(),
         )),
     }
+}
+
+/// Verify an Apple ID token via JWKS and build a SocialProfile.
+async fn verify_apple_token(
+    jwks_cache: &JwksCache,
+    config: &AppConfig,
+    token: &str,
+) -> AppResult<SocialProfile> {
+    let apple_client_id = config.apple_client_id.as_deref().ok_or_else(|| {
+        AppError::ExternalProviderNotConfigured(
+            "Apple provider not configured (missing APPLE_CLIENT_ID)".to_string(),
+        )
+    })?;
+
+    let claims = jwks_cache
+        .verify_apple_id_token(token, apple_client_id)
+        .await?;
+
+    social_auth_service::profile_from_apple_id_token(&claims)
 }
 
 /// Verify that the provided GitHub access token belongs to NyxID's configured
@@ -338,11 +362,12 @@ mod tests {
     fn provider_parsing_valid() {
         assert!(SocialProvider::parse("google").is_some());
         assert!(SocialProvider::parse("github").is_some());
+        assert!(SocialProvider::parse("apple").is_some());
     }
 
     #[test]
     fn provider_parsing_invalid() {
-        assert!(SocialProvider::parse("apple").is_none());
+        assert!(SocialProvider::parse("facebook").is_none());
         assert!(SocialProvider::parse("").is_none());
         assert!(SocialProvider::parse("Google").is_none());
     }
@@ -378,6 +403,24 @@ mod tests {
             validate_subject_token_type(
                 SocialProvider::GitHub,
                 "urn:ietf:params:oauth:token-type:id_token"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn subject_token_type_apple() {
+        assert!(
+            validate_subject_token_type(
+                SocialProvider::Apple,
+                "urn:ietf:params:oauth:token-type:id_token"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_subject_token_type(
+                SocialProvider::Apple,
+                "urn:ietf:params:oauth:token-type:access_token"
             )
             .is_err()
         );
