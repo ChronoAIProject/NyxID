@@ -16,6 +16,10 @@ import type {
   SaDeviceCodeInitiateResponse,
   SaDeviceCodePollRequest,
   SaDeviceCodePollResponse,
+  SaServiceConnection,
+  SaServiceConnectionListResponse,
+  SaServiceConnectResponse,
+  SaServiceConnectionActionResponse,
 } from "@/types/service-accounts";
 
 export function useServiceAccounts(page: number, perPage: number, search?: string) {
@@ -265,6 +269,98 @@ export function usePollDeviceCodeForSa() {
           queryKey: ["admin", "service-accounts", saId, "providers"],
         });
       }
+    },
+  });
+}
+
+export function useSaConnections(saId: string) {
+  return useQuery({
+    queryKey: ["admin", "service-accounts", saId, "connections"],
+    queryFn: async (): Promise<readonly SaServiceConnection[]> => {
+      const res = await api.get<SaServiceConnectionListResponse>(
+        `/admin/service-accounts/${saId}/connections`,
+      );
+      return res.connections;
+    },
+    enabled: saId.length > 0,
+  });
+}
+
+export function useConnectSaService() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      saId,
+      serviceId,
+      credential,
+      credentialLabel,
+    }: {
+      readonly saId: string;
+      readonly serviceId: string;
+      readonly credential?: string;
+      readonly credentialLabel?: string;
+    }): Promise<SaServiceConnectResponse> => {
+      return api.post<SaServiceConnectResponse>(
+        `/admin/service-accounts/${saId}/connections/${serviceId}`,
+        { credential, credential_label: credentialLabel },
+      );
+    },
+    onSuccess: (_, { saId }) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["admin", "service-accounts", saId, "connections"],
+      });
+    },
+  });
+}
+
+export function useUpdateSaConnectionCredential() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      saId,
+      serviceId,
+      credential,
+      credentialLabel,
+    }: {
+      readonly saId: string;
+      readonly serviceId: string;
+      readonly credential: string;
+      readonly credentialLabel?: string;
+    }): Promise<SaServiceConnectionActionResponse> => {
+      return api.put<SaServiceConnectionActionResponse>(
+        `/admin/service-accounts/${saId}/connections/${serviceId}/credential`,
+        { credential, credential_label: credentialLabel },
+      );
+    },
+    onSuccess: (_, { saId }) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["admin", "service-accounts", saId, "connections"],
+      });
+    },
+  });
+}
+
+export function useDisconnectSaService() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      saId,
+      serviceId,
+    }: {
+      readonly saId: string;
+      readonly serviceId: string;
+    }): Promise<SaServiceConnectionActionResponse> => {
+      return api.delete<SaServiceConnectionActionResponse>(
+        `/admin/service-accounts/${saId}/connections/${serviceId}`,
+      );
+    },
+    onSuccess: (_, { saId }) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["admin", "service-accounts", saId, "connections"],
+      });
     },
   });
 }

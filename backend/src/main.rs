@@ -1,10 +1,10 @@
-use std::net::SocketAddr;
 use axum::{extract::DefaultBodyLimit, extract::Extension, middleware as axum_mw};
 use clap::Parser;
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
 mod crypto;
@@ -23,6 +23,8 @@ use config::AppConfig;
 use crypto::jwt::JwtKeys;
 use models::mcp_session::McpSessionStore;
 
+use services::push_service::{ApnsAuth, FcmAuth};
+
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
 pub struct AppState {
@@ -34,6 +36,10 @@ pub struct AppState {
     pub jwk_json: serde_json::Value,
     /// Hybrid in-memory + MongoDB MCP session store
     pub mcp_sessions: Arc<McpSessionStore>,
+    /// FCM push notification auth (None if not configured)
+    pub fcm_auth: Option<Arc<FcmAuth>>,
+    /// APNs push notification auth (None if not configured)
+    pub apns_auth: Option<Arc<ApnsAuth>>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -54,14 +60,15 @@ async fn main() {
 
     // Initialize structured logging
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("nyxid=info,tower_http=info")
-        }))
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("nyxid=info,tower_http=info")),
+        )
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
     // Load configuration
-    let config = AppConfig::from_env();
+    let mut config = AppConfig::from_env();
 
     // Connect to database
     let db = db::create_connection(&config)
@@ -102,6 +109,43 @@ async fn main() {
     // Validate encryption key at startup
     config.validate_encryption_key();
 
+    // Validate and initialize push notification config (reads FCM JSON, verifies APNs key)
+    config.validate_push_config();
+
+    // Initialize push notification auth
+    let fcm_auth = if config.fcm_service_account_path.is_some() {
+        match FcmAuth::from_service_account_file(
+            config.fcm_service_account_path.as_deref().unwrap(),
+        ) {
+            Ok(auth) => Some(Arc::new(auth)),
+            Err(e) => {
+                tracing::error!("Failed to initialize FCM auth: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let apns_auth = if config.apns_key_path.is_some() {
+        match ApnsAuth::new(
+            config.apns_key_path.as_deref().unwrap(),
+            config.apns_key_id.as_deref().expect("APNS_KEY_ID required"),
+            config
+                .apns_team_id
+                .as_deref()
+                .expect("APNS_TEAM_ID required"),
+        ) {
+            Ok(auth) => Some(Arc::new(auth)),
+            Err(e) => {
+                tracing::error!("Failed to initialize APNs auth: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Load JWT signing keys
     let jwt_keys = JwtKeys::from_config(&config).expect("Failed to load JWT keys");
     tracing::info!("JWT keys loaded (kid={})", jwt_keys.kid);
@@ -109,8 +153,8 @@ async fn main() {
     // Compute JWK from the public key for the JWKS endpoint
     let public_pem = std::fs::read_to_string(&config.jwt_public_key_path)
         .expect("Failed to read public key for JWK");
-    let jwk_json = crypto::jwt::public_key_jwk(&public_pem)
-        .expect("Failed to compute JWK from public key");
+    let jwk_json =
+        crypto::jwt::public_key_jwk(&public_pem).expect("Failed to compute JWK from public key");
 
     // Create a shared reqwest client for connection reuse
     let http_client = reqwest::Client::builder()
@@ -136,13 +180,13 @@ async fn main() {
         http_client,
         jwk_json,
         mcp_sessions: mcp_sessions.clone(),
+        fcm_auth: fcm_auth.clone(),
+        apns_auth: apns_auth.clone(),
     };
 
     // Create rate limiters
-    let global_rate_limiter = mw::rate_limit::create_rate_limiter(
-        config.rate_limit_per_second,
-        config.rate_limit_burst,
-    );
+    let global_rate_limiter =
+        mw::rate_limit::create_rate_limiter(config.rate_limit_per_second, config.rate_limit_burst);
     let per_ip_rate_limiter = mw::rate_limit::create_per_ip_rate_limiter(
         config.rate_limit_burst, // per-IP max requests per window
         1,                       // 1-second window
@@ -171,6 +215,58 @@ async fn main() {
             ));
         }
     });
+
+    // Spawn background task to expire timed-out approval requests
+    let db_for_expiry = state.db.clone();
+    let config_for_expiry = state.config.clone();
+    let http_for_expiry = state.http_client.clone();
+    let fcm_for_expiry = state.fcm_auth.clone();
+    let apns_for_expiry = state.apns_auth.clone();
+    let expiry_interval_secs = config.approval_expiry_interval_secs;
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(expiry_interval_secs));
+        loop {
+            interval.tick().await;
+            if let Err(e) = services::approval_service::expire_pending_requests(
+                &db_for_expiry,
+                &config_for_expiry,
+                &http_for_expiry,
+                fcm_for_expiry.as_deref(),
+                apns_for_expiry.as_deref(),
+            )
+            .await
+            {
+                tracing::warn!("Approval expiry task error: {e}");
+            }
+        }
+    });
+
+    // Telegram integration: webhook mode (production) or polling mode (development)
+    if let (Some(bot_token), Some(webhook_url), Some(webhook_secret)) = (
+        &config.telegram_bot_token,
+        &config.telegram_webhook_url,
+        &config.telegram_webhook_secret,
+    ) {
+        // Production: register webhook with Telegram
+        match services::telegram_service::set_webhook(
+            &state.http_client,
+            bot_token,
+            webhook_url,
+            webhook_secret,
+        )
+        .await
+        {
+            Ok(()) => tracing::info!("Telegram webhook registered: {webhook_url}"),
+            Err(e) => tracing::error!("Failed to register Telegram webhook: {e}"),
+        }
+    } else if config.telegram_bot_token.is_some() {
+        // Development fallback: poll getUpdates when no webhook URL is configured
+        let polling_state = state.clone();
+        tokio::spawn(async move {
+            services::telegram_poller::run_polling_loop(polling_state).await;
+        });
+    }
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::exact(
@@ -204,9 +300,7 @@ async fn main() {
         .layer(axum_mw::from_fn(
             mw::security_headers::security_headers_middleware,
         ))
-        .layer(axum_mw::from_fn(
-            mw::rate_limit::rate_limit_middleware,
-        ))
+        .layer(axum_mw::from_fn(mw::rate_limit::rate_limit_middleware))
         .layer(Extension(per_ip_rate_limiter))
         .layer(Extension(global_rate_limiter))
         .layer(TraceLayer::new_for_http());
@@ -219,9 +313,12 @@ async fn main() {
 
     tracing::info!("Listening on {addr}");
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .expect("Server error");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("Server error");
 }
 
 /// Run the --promote-admin CLI command, then return.

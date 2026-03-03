@@ -128,3 +128,18 @@ export const OAuthErrorPage = lazy(() =>
 export const PrivacyPage = lazy(() =>
   import("@/pages/privacy").then((m) => ({ default: m.PrivacyPage })),
 );
+export const NotificationSettingsPage = lazy(() =>
+  import("@/pages/notification-settings").then((m) => ({
+    default: m.NotificationSettingsPage,
+  })),
+);
+export const ApprovalHistoryPage = lazy(() =>
+  import("@/pages/approval-history").then((m) => ({
+    default: m.ApprovalHistoryPage,
+  })),
+);
+export const ApprovalGrantsPage = lazy(() =>
+  import("@/pages/approval-grants").then((m) => ({
+    default: m.ApprovalGrantsPage,
+  })),
+);

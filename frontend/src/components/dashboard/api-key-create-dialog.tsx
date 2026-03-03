@@ -50,7 +50,7 @@ export function ApiKeyCreateDialog() {
   async function onSubmit(data: CreateApiKeyFormData) {
     try {
       const result = await createMutation.mutateAsync(data);
-      setCreatedKey(result.key);
+      setCreatedKey(result.full_key);
       toast.success("API key created successfully");
     } catch (error) {
       if (error instanceof ApiError) {

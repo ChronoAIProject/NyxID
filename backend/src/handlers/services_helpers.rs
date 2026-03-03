@@ -1,11 +1,13 @@
 use mongodb::bson::doc;
 use serde::Serialize;
 
-use crate::errors::{AppError, AppResult};
-use crate::models::downstream_service::{DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
-use crate::mw::auth::AuthUser;
 use crate::AppState;
+use crate::errors::{AppError, AppResult};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::mw::auth::AuthUser;
 
 use super::services::ServiceResponse;
 
@@ -21,9 +23,7 @@ pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     if !user_model.is_admin {
-        return Err(AppError::Forbidden(
-            "Admin access required".to_string(),
-        ));
+        return Err(AppError::Forbidden("Admin access required".to_string()));
     }
 
     Ok(())
@@ -93,7 +93,10 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
 }
 
 /// Validate that a base_url is safe to proxy to (not a private/internal address).
-pub fn validate_base_url(url: &str) -> AppResult<()> {
+///
+/// In development mode, private/internal addresses (localhost, 127.0.0.1, etc.)
+/// are allowed so that locally-running downstream services can be registered.
+pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
     // Must start with https:// or http://
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(AppError::ValidationError(
@@ -102,13 +105,17 @@ pub fn validate_base_url(url: &str) -> AppResult<()> {
     }
 
     // Parse the URL to extract the hostname
-    let parsed = url::Url::parse(url).map_err(|_| {
-        AppError::ValidationError("Invalid base_url format".to_string())
-    })?;
+    let parsed = url::Url::parse(url)
+        .map_err(|_| AppError::ValidationError("Invalid base_url format".to_string()))?;
 
-    let host = parsed.host_str().ok_or_else(|| {
-        AppError::ValidationError("base_url must contain a hostname".to_string())
-    })?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AppError::ValidationError("base_url must contain a hostname".to_string()))?;
+
+    // Skip private-address checks in development mode
+    if allow_private {
+        return Ok(());
+    }
 
     // Block private/reserved hostnames
     let blocked_hosts = [

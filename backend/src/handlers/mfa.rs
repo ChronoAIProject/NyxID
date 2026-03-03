@@ -1,23 +1,23 @@
 use std::net::SocketAddr;
 
 use axum::{
-    extract::{ConnectInfo, State},
-    http::{header, HeaderMap},
     Json,
+    extract::{ConnectInfo, State},
+    http::{HeaderMap, header},
 };
 use chrono::Utc;
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::auth::{build_cookie, extract_ip, extract_user_agent, LoginResponse};
-use crate::models::mfa_factor::{MfaFactor, COLLECTION_NAME as MFA_FACTORS};
-use crate::models::session::{Session, COLLECTION_NAME as SESSIONS};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
-use crate::mw::auth::{AuthUser, ACCESS_TOKEN_COOKIE_NAME, SESSION_COOKIE_NAME};
+use crate::handlers::auth::{LoginResponse, build_cookie, extract_ip, extract_user_agent};
+use crate::models::mfa_factor::{COLLECTION_NAME as MFA_FACTORS, MfaFactor};
+use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
 use crate::services::{audit_service, mfa_service, token_service};
-use crate::AppState;
 
 // --- Request / Response types ---
 
@@ -74,13 +74,8 @@ pub async fn setup(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let result = mfa_service::setup_totp(
-        &state.db,
-        &encryption_key,
-        &user_id_str,
-        &user.email,
-    )
-    .await?;
+    let result =
+        mfa_service::setup_totp(&state.db, &encryption_key, &user_id_str, &user.email).await?;
 
     Ok(Json(MfaSetupResponse {
         factor_id: result.factor_id,

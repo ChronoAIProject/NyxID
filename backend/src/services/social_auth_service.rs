@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 /// Supported social login providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,9 +135,7 @@ pub async fn exchange_code(
                 .await
                 .map_err(|e| {
                     tracing::error!(error = %e, "GitHub token exchange HTTP error");
-                    AppError::SocialAuthFailed(
-                        "Failed to exchange code with GitHub".to_string(),
-                    )
+                    AppError::SocialAuthFailed("Failed to exchange code with GitHub".to_string())
                 })?;
 
             let body: GitHubTokenResponse = resp.json().await.map_err(|e| {
@@ -183,9 +181,7 @@ pub async fn exchange_code(
                 .await
                 .map_err(|e| {
                     tracing::error!(error = %e, "Google token exchange HTTP error");
-                    AppError::SocialAuthFailed(
-                        "Failed to exchange code with Google".to_string(),
-                    )
+                    AppError::SocialAuthFailed("Failed to exchange code with Google".to_string())
                 })?;
 
             let body: GoogleTokenResponse = resp.json().await.map_err(|e| {
@@ -400,9 +396,7 @@ pub async fn find_or_create_user(
     // pattern used by Auth0, Supabase Auth, and Firebase Auth. The provider
     // has already verified the email address as part of its own OAuth flow.
     let email_lower = profile.email.to_lowercase();
-    let existing_email = users
-        .find_one(doc! { "email": &email_lower })
-        .await?;
+    let existing_email = users.find_one(doc! { "email": &email_lower }).await?;
 
     if let Some(user) = existing_email {
         if !user.is_active {
@@ -482,8 +476,14 @@ mod tests {
 
     #[test]
     fn provider_from_str_valid() {
-        assert_eq!(SocialProvider::parse("github"), Some(SocialProvider::GitHub));
-        assert_eq!(SocialProvider::parse("google"), Some(SocialProvider::Google));
+        assert_eq!(
+            SocialProvider::parse("github"),
+            Some(SocialProvider::GitHub)
+        );
+        assert_eq!(
+            SocialProvider::parse("google"),
+            Some(SocialProvider::Google)
+        );
     }
 
     #[test]
@@ -539,6 +539,18 @@ mod tests {
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
             cookie_domain: None,
+            telegram_bot_token: None,
+            telegram_webhook_secret: None,
+            telegram_webhook_url: None,
+            telegram_bot_username: None,
+            approval_expiry_interval_secs: 5,
+            fcm_service_account_path: None,
+            fcm_project_id: None,
+            apns_key_path: None,
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
+            apns_sandbox: true,
         }
     }
 

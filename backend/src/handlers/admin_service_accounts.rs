@@ -1,17 +1,17 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::HeaderMap,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::errors::AppResult;
 use crate::handlers::admin::AdminActionResponse;
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
 use crate::models::service_account::ServiceAccount;
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, service_account_service};
-use crate::AppState;
 
 // --- Request types ---
 
@@ -162,7 +162,9 @@ pub async fn create_service_account(
         role_ids: sa.role_ids,
         is_active: sa.is_active,
         created_at: sa.created_at.to_rfc3339(),
-        message: "Service account created. Save the client_secret now -- it cannot be retrieved later.".to_string(),
+        message:
+            "Service account created. Save the client_secret now -- it cannot be retrieved later."
+                .to_string(),
     }))
 }
 
@@ -280,8 +282,7 @@ pub async fn rotate_secret(
 ) -> AppResult<Json<RotateSecretResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    let (updated, raw_secret) =
-        service_account_service::rotate_secret(&state.db, &sa_id).await?;
+    let (updated, raw_secret) = service_account_service::rotate_secret(&state.db, &sa_id).await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -299,7 +300,8 @@ pub async fn rotate_secret(
         client_id: updated.client_id,
         client_secret: raw_secret,
         secret_prefix: updated.secret_prefix,
-        message: "Secret rotated. All existing tokens have been revoked. Save the new secret now.".to_string(),
+        message: "Secret rotated. All existing tokens have been revoked. Save the new secret now."
+            .to_string(),
     }))
 }
 
@@ -315,8 +317,7 @@ pub async fn revoke_tokens(
     // Verify it exists
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
 
-    let revoked_count =
-        service_account_service::revoke_all_tokens(&state.db, &sa_id).await?;
+    let revoked_count = service_account_service::revoke_all_tokens(&state.db, &sa_id).await?;
 
     audit_service::log_async(
         state.db.clone(),

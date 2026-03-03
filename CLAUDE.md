@@ -63,17 +63,17 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (21 models, 19 collections)
-|-- services/            # Business logic (25 services, incl. service_account_service)
-|-- handlers/            # HTTP handlers (26 handler modules, incl. admin_service_accounts)
+|-- models/              # MongoDB document structs (25 models, 23 collections)
+|-- services/            # Business logic (29 services, incl. approval_service, notification_service, push_service, telegram_service)
+|-- handlers/            # HTTP handlers (30 handler modules, incl. approvals, notifications, device_tokens, webhooks)
 |-- crypto/              # JWT, AES, password hashing, token generation
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
 frontend/src/
-|-- pages/               # Route pages (20 pages)
+|-- pages/               # Route pages (23 pages, incl. approval-history, approval-grants, notification-settings)
 |-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/)
-|-- hooks/               # TanStack Query hooks (8 hooks)
+|-- hooks/               # TanStack Query hooks (9 hooks, incl. use-approvals)
 |-- schemas/             # Zod validation schemas (7 schema files + tests)
 |-- stores/              # Zustand stores (auth-store)
 |-- lib/                 # API client, constants, utils
@@ -93,9 +93,14 @@ All API routes under `/api/v1`:
 - `/connections` -- connect/disconnect services
 - `/providers` -- CRUD + OAuth/device-code/API-key flows + token management
 - `/admin` -- user management, audit log, OAuth clients, service accounts
-- `/proxy/{service_id}/{path}` -- authenticated proxy
+- `/proxy/{service_id}/{path}` -- authenticated proxy (UUID-based)
+- `/proxy/s/{slug}/{path}` -- authenticated proxy (slug-based)
+- `/proxy/services` -- service discovery (paginated list of proxyable services)
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
 - `/delegation/refresh` -- refresh delegated access tokens
+- `/notifications` -- notification settings CRUD, Telegram link/disconnect, device token management (register/list/remove)
+- `/approvals` -- approval request history, grants, decide, status polling, per-service approval configs
+- `/webhooks/telegram` -- Telegram webhook (unauthenticated, secret-verified)
 
 - `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation, provider management (connect via API key/OAuth redirect/device-code, list, disconnect providers on behalf of SAs)
 
@@ -123,6 +128,21 @@ SA_TOKEN_TTL_SECS=3600              # 1 hour (service account tokens)
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
 RATE_LIMIT_BURST=30
+
+# Telegram / Approval System (optional)
+TELEGRAM_BOT_TOKEN=                     # From @BotFather
+TELEGRAM_WEBHOOK_SECRET=                # Random string for webhook verification
+TELEGRAM_WEBHOOK_URL=                   # e.g. https://auth.nyxid.dev/api/v1/webhooks/telegram
+TELEGRAM_BOT_USERNAME=                  # Bot username without @
+APPROVAL_EXPIRY_INTERVAL_SECS=5         # Interval between expiry sweeps
+
+# Mobile Push Notifications (optional)
+FCM_SERVICE_ACCOUNT_PATH=               # Path to Firebase service account JSON
+APNS_KEY_PATH=                          # Path to APNs .p8 private key
+APNS_KEY_ID=                            # APNs Key ID (Apple Developer portal)
+APNS_TEAM_ID=                           # APNs Team ID (Apple Developer portal)
+APNS_TOPIC=                             # APNs topic / iOS bundle ID (e.g. dev.nyxid.app)
+APNS_SANDBOX=true                       # Use APNs sandbox (default: true in dev)
 
 # Optional
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET

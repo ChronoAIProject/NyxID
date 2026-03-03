@@ -10,9 +10,9 @@ use crate::crypto::jwt::JwtKeys;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::authorization_code::{AuthorizationCode, COLLECTION_NAME as AUTH_CODES};
-use crate::models::oauth_client::{OauthClient, COLLECTION_NAME as OAUTH_CLIENTS};
-use crate::models::refresh_token::{RefreshToken, COLLECTION_NAME as REFRESH_TOKENS};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 /// Validate an OAuth client and its redirect URI.
 pub async fn validate_client(
@@ -42,8 +42,7 @@ pub async fn validate_client(
     // Both are safe because our authorize endpoint requires PKCE (S256), which
     // prevents authorization code interception attacks.
     if client.client_type == "public"
-        && (is_loopback_redirect_uri(redirect_uri)
-            || is_private_use_uri_scheme(redirect_uri))
+        && (is_loopback_redirect_uri(redirect_uri) || is_private_use_uri_scheme(redirect_uri))
     {
         return Ok(client);
     }
@@ -144,23 +143,16 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 ///
 /// Compares the SHA-256 hash of the provided secret against the stored hash.
 /// Public clients (client_type == "public") do not require a secret.
-fn validate_client_secret(
-    client: &OauthClient,
-    client_secret: Option<&str>,
-) -> AppResult<()> {
+fn validate_client_secret(client: &OauthClient, client_secret: Option<&str>) -> AppResult<()> {
     if client.client_type == "confidential" {
         let secret = client_secret.ok_or_else(|| {
-            AppError::Unauthorized(
-                "client_secret is required for confidential clients".to_string(),
-            )
+            AppError::Unauthorized("client_secret is required for confidential clients".to_string())
         })?;
 
         let provided_hash = hash_token(secret);
 
         if !constant_time_eq(&provided_hash, &client.client_secret_hash) {
-            return Err(AppError::Unauthorized(
-                "Invalid client_secret".to_string(),
-            ));
+            return Err(AppError::Unauthorized("Invalid client_secret".to_string()));
         }
     }
 
@@ -209,29 +201,30 @@ pub async fn exchange_authorization_code(
                 .await?;
 
             if let Some(ref used_code) = maybe_used
-                && used_code.used {
-                    tracing::warn!(
-                        client_id = %client_id,
-                        user_id = %used_code.user_id,
-                        "Authorization code replay detected, revoking associated refresh tokens"
-                    );
+                && used_code.used
+            {
+                tracing::warn!(
+                    client_id = %client_id,
+                    user_id = %used_code.user_id,
+                    "Authorization code replay detected, revoking associated refresh tokens"
+                );
 
-                    // Revoke all refresh tokens for this client + user combination
-                    db.collection::<RefreshToken>(REFRESH_TOKENS)
-                        .update_many(
-                            doc! {
-                                "client_id": client_id,
-                                "user_id": &used_code.user_id,
-                                "revoked": false,
-                            },
-                            doc! { "$set": { "revoked": true } },
-                        )
-                        .await?;
+                // Revoke all refresh tokens for this client + user combination
+                db.collection::<RefreshToken>(REFRESH_TOKENS)
+                    .update_many(
+                        doc! {
+                            "client_id": client_id,
+                            "user_id": &used_code.user_id,
+                            "revoked": false,
+                        },
+                        doc! { "$set": { "revoked": true } },
+                    )
+                    .await?;
 
-                    return Err(AppError::BadRequest(
-                        "Authorization code has already been used".to_string(),
-                    ));
-                }
+                return Err(AppError::BadRequest(
+                    "Authorization code has already been used".to_string(),
+                ));
+            }
 
             return Err(AppError::BadRequest(
                 "Invalid authorization code".to_string(),
@@ -260,13 +253,9 @@ pub async fn exchange_authorization_code(
 
     // PKCE verification (S256 only)
     if let Some(challenge) = &stored.code_challenge {
-        let verifier = code_verifier
-            .ok_or(AppError::PkceVerificationFailed)?;
+        let verifier = code_verifier.ok_or(AppError::PkceVerificationFailed)?;
 
-        let method = stored
-            .code_challenge_method
-            .as_deref()
-            .unwrap_or("S256");
+        let method = stored.code_challenge_method.as_deref().unwrap_or("S256");
 
         // Only S256 is supported -- reject any other method
         if method != "S256" {
@@ -277,8 +266,8 @@ pub async fn exchange_authorization_code(
 
         let mut hasher = Sha256::new();
         hasher.update(verifier.as_bytes());
-        let computed_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(hasher.finalize());
+        let computed_challenge =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
 
         // Use constant-time comparison to prevent timing attacks
         if !constant_time_eq(&computed_challenge, challenge) {
@@ -287,26 +276,25 @@ pub async fn exchange_authorization_code(
     }
 
     // Parse user_id back to Uuid for JWT generation
-    let user_uuid = Uuid::parse_str(&stored.user_id).map_err(|e| {
-        AppError::Internal(format!("Invalid user_id in authorization code: {e}"))
-    })?;
+    let user_uuid = Uuid::parse_str(&stored.user_id)
+        .map_err(|e| AppError::Internal(format!("Invalid user_id in authorization code: {e}")))?;
 
     // Resolve RBAC data filtered by the granted scope
-    let rbac_data = crate::services::rbac_helpers::build_rbac_claim_data(
-        db,
-        &stored.user_id,
-        &stored.scope,
-    )
-    .await?;
+    let rbac_data =
+        crate::services::rbac_helpers::build_rbac_claim_data(db, &stored.user_id, &stored.scope)
+            .await?;
 
     // Generate tokens with RBAC claims
     let access_token = crate::crypto::jwt::generate_access_token(
-        jwt_keys, config, &user_uuid, &stored.scope, Some(&rbac_data),
+        jwt_keys,
+        config,
+        &user_uuid,
+        &stored.scope,
+        Some(&rbac_data),
     )?;
 
-    let (refresh_token_jwt, refresh_jti) = crate::crypto::jwt::generate_refresh_token(
-        jwt_keys, config, &user_uuid,
-    )?;
+    let (refresh_token_jwt, refresh_jti) =
+        crate::crypto::jwt::generate_refresh_token(jwt_keys, config, &user_uuid)?;
 
     // Persist OAuth refresh token to database for revocation support
     let refresh_id = Uuid::new_v4().to_string();

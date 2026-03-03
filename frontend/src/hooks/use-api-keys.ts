@@ -22,7 +22,13 @@ export function useCreateApiKey() {
     mutationFn: async (
       data: CreateApiKeyFormData,
     ): Promise<ApiKeyCreateResponse> => {
-      return api.post<ApiKeyCreateResponse>("/api-keys", data);
+      // Backend expects scopes as a space-separated string, not an array
+      const payload = {
+        name: data.name,
+        scopes: data.scopes.join(" "),
+        expires_at: data.expires_at ?? null,
+      };
+      return api.post<ApiKeyCreateResponse>("/api-keys", payload);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["api-keys"] });

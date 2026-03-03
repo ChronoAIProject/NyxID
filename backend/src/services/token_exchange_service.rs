@@ -2,10 +2,10 @@ use mongodb::bson::doc;
 use uuid::Uuid;
 
 use crate::config::AppConfig;
-use crate::crypto::jwt::{self, JwtKeys, DELEGATED_TOKEN_TTL_SECS};
+use crate::crypto::jwt::{self, DELEGATED_TOKEN_TTL_SECS, JwtKeys};
 use crate::errors::{AppError, AppResult};
-use crate::models::oauth_client::{OauthClient, COLLECTION_NAME as OAUTH_CLIENTS};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::services::{audit_service, consent_service, oauth_service};
 
 /// Result of a successful token exchange.
@@ -36,8 +36,7 @@ pub async fn exchange_token(
     requested_scope: Option<&str>,
 ) -> AppResult<TokenExchangeResponse> {
     // Step 1: Authenticate the requesting client
-    let client =
-        oauth_service::authenticate_client(db, client_id, Some(client_secret)).await?;
+    let client = oauth_service::authenticate_client(db, client_id, Some(client_secret)).await?;
 
     // Step 2: Validate subject_token_type
     if subject_token_type != "urn:ietf:params:oauth:token-type:access_token" {
@@ -72,13 +71,7 @@ pub async fn exchange_token(
     let user_id_str = &subject_claims.sub;
 
     // Step 4: Verify user has consented to this client
-    let consent = consent_service::check_consent(
-        db,
-        user_id_str,
-        client_id,
-        "openid",
-    )
-    .await?;
+    let consent = consent_service::check_consent(db, user_id_str, client_id, "openid").await?;
 
     if consent.is_none() {
         log_exchange_failure(db, Some(user_id_str), client_id, "consent_missing");
@@ -94,9 +87,8 @@ pub async fn exchange_token(
     )?;
 
     // Step 6: Issue delegated access token (short-lived: 5 minutes)
-    let user_uuid = Uuid::parse_str(user_id_str).map_err(|e| {
-        AppError::Internal(format!("Invalid user_id in subject token: {e}"))
-    })?;
+    let user_uuid = Uuid::parse_str(user_id_str)
+        .map_err(|e| AppError::Internal(format!("Invalid user_id in subject token: {e}")))?;
     let delegated_token = jwt::generate_delegated_access_token(
         jwt_keys,
         config,
@@ -186,13 +178,7 @@ pub async fn refresh_delegation_token(
     // Verify user still has active consent for this client.
     // Without this check, a client could indefinitely refresh delegation
     // tokens even after the user revokes consent.
-    let consent = consent_service::check_consent(
-        db,
-        user_id,
-        acting_client_id,
-        "openid",
-    )
-    .await?;
+    let consent = consent_service::check_consent(db, user_id, acting_client_id, "openid").await?;
 
     if consent.is_none() {
         log_exchange_failure(db, Some(user_id), acting_client_id, "consent_revoked");
@@ -206,9 +192,8 @@ pub async fn refresh_delegation_token(
     // original token was issued.
     let validated_scope = validate_delegation_scope(scope, &client.delegation_scopes)?;
 
-    let user_uuid = Uuid::parse_str(user_id).map_err(|e| {
-        AppError::Internal(format!("Invalid user_id: {e}"))
-    })?;
+    let user_uuid = Uuid::parse_str(user_id)
+        .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
     let new_token = jwt::generate_delegated_access_token(
         jwt_keys,
@@ -288,8 +273,7 @@ mod tests {
 
     #[test]
     fn validate_delegation_scope_allows_multiple() {
-        let result =
-            validate_delegation_scope("llm:proxy proxy:*", "llm:proxy proxy:* llm:status");
+        let result = validate_delegation_scope("llm:proxy proxy:*", "llm:proxy proxy:* llm:status");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "llm:proxy proxy:*");
     }

@@ -5,7 +5,7 @@ describe("createApiKeySchema", () => {
   it("accepts valid API key data", () => {
     const result = createApiKeySchema.safeParse({
       name: "My API Key",
-      scopes: ["read:profile"],
+      scopes: ["read"],
     });
     expect(result.success).toBe(true);
   });
@@ -13,7 +13,7 @@ describe("createApiKeySchema", () => {
   it("accepts data with nullable expires_at", () => {
     const result = createApiKeySchema.safeParse({
       name: "Test Key",
-      scopes: ["read:profile", "write:profile"],
+      scopes: ["read", "write"],
       expires_at: null,
     });
     expect(result.success).toBe(true);
@@ -28,10 +28,18 @@ describe("createApiKeySchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts proxy scope for service access", () => {
+    const result = createApiKeySchema.safeParse({
+      name: "Proxy Key",
+      scopes: ["read", "proxy"],
+    });
+    expect(result.success).toBe(true);
+  });
+
   it("rejects empty name", () => {
     const result = createApiKeySchema.safeParse({
       name: "",
-      scopes: ["read:profile"],
+      scopes: ["read"],
     });
     expect(result.success).toBe(false);
   });
@@ -39,7 +47,7 @@ describe("createApiKeySchema", () => {
   it("rejects name over 64 characters", () => {
     const result = createApiKeySchema.safeParse({
       name: "a".repeat(65),
-      scopes: ["read:profile"],
+      scopes: ["read"],
     });
     expect(result.success).toBe(false);
   });
@@ -60,6 +68,14 @@ describe("createApiKeySchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects old frontend scope format", () => {
+    const result = createApiKeySchema.safeParse({
+      name: "Test Key",
+      scopes: ["read:profile"],
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("accepts all valid scopes", () => {
     const result = createApiKeySchema.safeParse({
       name: "Full Access Key",
@@ -71,12 +87,13 @@ describe("createApiKeySchema", () => {
 
 describe("API_KEY_SCOPES", () => {
   it("contains expected scopes", () => {
-    expect(API_KEY_SCOPES).toContain("read:profile");
-    expect(API_KEY_SCOPES).toContain("write:profile");
+    expect(API_KEY_SCOPES).toContain("read");
+    expect(API_KEY_SCOPES).toContain("write");
+    expect(API_KEY_SCOPES).toContain("proxy");
     expect(API_KEY_SCOPES).toContain("admin");
   });
 
-  it("has 7 scopes", () => {
-    expect(API_KEY_SCOPES).toHaveLength(7);
+  it("has 9 scopes", () => {
+    expect(API_KEY_SCOPES).toHaveLength(9);
   });
 });

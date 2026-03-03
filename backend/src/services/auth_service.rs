@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::crypto::password;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
@@ -40,9 +40,10 @@ pub async fn register_user(
     }
 
     if password_raw.len() > MAX_PASSWORD_LENGTH {
-        return Err(AppError::ValidationError(
-            format!("Password must be at most {} characters", MAX_PASSWORD_LENGTH),
-        ));
+        return Err(AppError::ValidationError(format!(
+            "Password must be at most {} characters",
+            MAX_PASSWORD_LENGTH
+        )));
     }
 
     // Check for existing user - return fake success to prevent email enumeration
@@ -120,9 +121,7 @@ pub async fn authenticate_user(
         .collection::<User>(USERS)
         .find_one(doc! { "email": email.to_lowercase() })
         .await?
-        .ok_or_else(|| {
-            AppError::AuthenticationFailed("Invalid email or password".to_string())
-        })?;
+        .ok_or_else(|| AppError::AuthenticationFailed("Invalid email or password".to_string()))?;
 
     if !user.is_active {
         return Err(AppError::Forbidden("Account is deactivated".to_string()));
@@ -167,9 +166,7 @@ pub async fn verify_email(db: &mongodb::Database, token: &str) -> AppResult<Stri
         .collection::<User>(USERS)
         .find_one(doc! { "email_verification_token": &token_hash })
         .await?
-        .ok_or_else(|| {
-            AppError::BadRequest("Invalid or expired verification token".to_string())
-        })?;
+        .ok_or_else(|| AppError::BadRequest("Invalid or expired verification token".to_string()))?;
 
     if user.email_verified {
         return Err(AppError::BadRequest("Email already verified".to_string()));
@@ -195,7 +192,10 @@ pub async fn verify_email(db: &mongodb::Database, token: &str) -> AppResult<Stri
 /// Initiate a password reset by generating a reset token.
 ///
 /// Stores the hash of the token, not the raw token.
-pub async fn initiate_password_reset(db: &mongodb::Database, email: &str) -> AppResult<Option<String>> {
+pub async fn initiate_password_reset(
+    db: &mongodb::Database,
+    email: &str,
+) -> AppResult<Option<String>> {
     let user = db
         .collection::<User>(USERS)
         .find_one(doc! { "email": email.to_lowercase() })
@@ -240,9 +240,10 @@ pub async fn reset_password(
     }
 
     if new_password.len() > MAX_PASSWORD_LENGTH {
-        return Err(AppError::ValidationError(
-            format!("Password must be at most {} characters", MAX_PASSWORD_LENGTH),
-        ));
+        return Err(AppError::ValidationError(format!(
+            "Password must be at most {} characters",
+            MAX_PASSWORD_LENGTH
+        )));
     }
 
     let token_hash = hash_token(token);
@@ -251,9 +252,7 @@ pub async fn reset_password(
         .collection::<User>(USERS)
         .find_one(doc! { "password_reset_token": &token_hash })
         .await?
-        .ok_or_else(|| {
-            AppError::BadRequest("Invalid or expired reset token".to_string())
-        })?;
+        .ok_or_else(|| AppError::BadRequest("Invalid or expired reset token".to_string()))?;
 
     // Check token expiration
     if let Some(expires_at) = user.password_reset_expires_at {
@@ -288,19 +287,14 @@ pub async fn reset_password(
 ///
 /// Sets `is_admin = true` and `email_verified = true` on the user.
 /// Returns the user ID on success.
-pub async fn promote_user_to_admin(
-    db: &mongodb::Database,
-    email: &str,
-) -> AppResult<String> {
+pub async fn promote_user_to_admin(db: &mongodb::Database, email: &str) -> AppResult<String> {
     let normalized = email.to_lowercase();
 
     let user = db
         .collection::<User>(USERS)
         .find_one(doc! { "email": &normalized })
         .await?
-        .ok_or_else(|| {
-            AppError::NotFound(format!("No user found with email: {}", normalized))
-        })?;
+        .ok_or_else(|| AppError::NotFound(format!("No user found with email: {}", normalized)))?;
 
     if user.is_admin {
         return Err(AppError::Conflict(format!(

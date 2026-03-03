@@ -1,13 +1,19 @@
 import { z } from "zod";
 
+/**
+ * Valid API key scopes -- must match backend VALID_API_KEY_SCOPES
+ * in services/key_service.rs.
+ */
 export const API_KEY_SCOPES = [
-  "read:profile",
-  "write:profile",
-  "read:services",
-  "write:services",
-  "read:connections",
-  "write:connections",
+  "read",
+  "write",
   "admin",
+  "openid",
+  "profile",
+  "email",
+  "services:read",
+  "services:write",
+  "proxy",
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];

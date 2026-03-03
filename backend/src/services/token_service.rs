@@ -7,8 +7,8 @@ use crate::crypto::jwt::{self, JwtKeys};
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::mcp_session::McpSessionStore;
-use crate::models::refresh_token::{RefreshToken, COLLECTION_NAME as REFRESH_TOKENS};
-use crate::models::session::{Session, COLLECTION_NAME as SESSIONS};
+use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
+use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 
 /// Grace period (in seconds) after refresh token rotation during which
 /// reuse of the old token is treated as a legitimate retry rather than theft.
@@ -48,9 +48,8 @@ pub async fn create_session_and_issue_tokens(
     ip_address: Option<&str>,
     user_agent: Option<&str>,
 ) -> AppResult<IssuedTokens> {
-    let user_uuid = Uuid::parse_str(user_id).map_err(|e| {
-        AppError::Internal(format!("Invalid user_id: {e}"))
-    })?;
+    let user_uuid = Uuid::parse_str(user_id)
+        .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
     let session_token = generate_random_token();
     let session_token_hash = hash_token(&session_token);
@@ -227,7 +226,10 @@ pub async fn refresh_tokens(
                             found_active = Some(r);
                             break;
                         }
-                        Some(RefreshToken { replaced_by: Some(next_id), .. }) => {
+                        Some(RefreshToken {
+                            replaced_by: Some(next_id),
+                            ..
+                        }) => {
                             // This token was itself rotated by a concurrent request.
                             // Follow the chain to the next replacement.
                             tracing::debug!(
@@ -299,9 +301,8 @@ pub async fn refresh_tokens(
     };
 
     let user_id_str = active_token.user_id.clone();
-    let user_id = Uuid::parse_str(&user_id_str).map_err(|e| {
-        AppError::Internal(format!("Invalid user_id in refresh token: {e}"))
-    })?;
+    let user_id = Uuid::parse_str(&user_id_str)
+        .map_err(|e| AppError::Internal(format!("Invalid user_id in refresh token: {e}")))?;
     let session_id = active_token.session_id.clone();
     let now = Utc::now();
 

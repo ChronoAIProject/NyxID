@@ -4,9 +4,9 @@ use mongodb::bson::doc;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::group::{Group, COLLECTION_NAME as GROUPS};
-use crate::models::role::{Role, COLLECTION_NAME as ROLES};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
+use crate::models::role::{COLLECTION_NAME as ROLES, Role};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 /// Create a new role.
 pub async fn create_role(
@@ -56,10 +56,7 @@ pub async fn get_role(db: &mongodb::Database, role_id: &str) -> AppResult<Role> 
 }
 
 /// List all roles (with optional client_id filter).
-pub async fn list_roles(
-    db: &mongodb::Database,
-    client_id: Option<&str>,
-) -> AppResult<Vec<Role>> {
+pub async fn list_roles(db: &mongodb::Database, client_id: Option<&str>) -> AppResult<Vec<Role>> {
     let filter = match client_id {
         Some(cid) => doc! { "client_id": cid },
         None => doc! {},
@@ -216,10 +213,7 @@ pub async fn revoke_role_from_user(
 }
 
 /// Get all directly-assigned roles for a user.
-pub async fn get_user_roles(
-    db: &mongodb::Database,
-    user_id: &str,
-) -> AppResult<Vec<Role>> {
+pub async fn get_user_roles(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<Role>> {
     let user = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": user_id })
@@ -263,9 +257,7 @@ pub async fn seed_system_roles(db: &mongodb::Database) -> AppResult<()> {
             created_at: now,
             updated_at: now,
         };
-        db.collection::<Role>(ROLES)
-            .insert_one(&admin_role)
-            .await?;
+        db.collection::<Role>(ROLES).insert_one(&admin_role).await?;
         tracing::info!("Seeded system role: admin");
     }
 
@@ -288,9 +280,7 @@ pub async fn seed_system_roles(db: &mongodb::Database) -> AppResult<()> {
             created_at: now,
             updated_at: now,
         };
-        db.collection::<Role>(ROLES)
-            .insert_one(&user_role)
-            .await?;
+        db.collection::<Role>(ROLES).insert_one(&user_role).await?;
         tracing::info!("Seeded system role: user");
     }
 

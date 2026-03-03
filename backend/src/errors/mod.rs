@@ -17,6 +17,9 @@ pub struct ErrorResponse {
     /// Browser URL to complete consent flow (consent_required only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consent_url: Option<String>,
+    /// Approval request ID (approval_required only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 /// Application-level error variants.
@@ -115,23 +118,26 @@ pub enum AppError {
 
     #[error("Unsupported grant type: {0}")]
     UnsupportedGrantType(String),
+
+    #[error("Approval required")]
+    ApprovalRequired { request_id: String },
 }
 
 impl AppError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) | Self::ValidationError(_) => StatusCode::BAD_REQUEST,
-            Self::Unauthorized(_)
-            | Self::AuthenticationFailed(_)
-            | Self::TokenExpired => StatusCode::UNAUTHORIZED,
+            Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
+                StatusCode::UNAUTHORIZED
+            }
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
-            Self::PkceVerificationFailed
-            | Self::InvalidRedirectUri
-            | Self::InvalidScope(_) => StatusCode::BAD_REQUEST,
+            Self::PkceVerificationFailed | Self::InvalidRedirectUri | Self::InvalidScope(_) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::RoleNotFound(_) | Self::GroupNotFound(_) | Self::ConsentNotFound => {
                 StatusCode::NOT_FOUND
             }
@@ -146,6 +152,7 @@ impl AppError {
             Self::SocialAuthDeactivated => StatusCode::FORBIDDEN,
             Self::ConsentRequired { .. } => StatusCode::FORBIDDEN,
             Self::UnsupportedGrantType(_) => StatusCode::BAD_REQUEST,
+            Self::ApprovalRequired { .. } => StatusCode::FORBIDDEN,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -183,6 +190,7 @@ impl AppError {
             Self::SocialAuthDeactivated => 6003,
             Self::ConsentRequired { .. } => 3003,
             Self::UnsupportedGrantType(_) => 3004,
+            Self::ApprovalRequired { .. } => 7000,
         }
     }
 
@@ -248,6 +256,7 @@ impl AppError {
             Self::SocialAuthDeactivated => "social_auth_deactivated",
             Self::ConsentRequired { .. } => "consent_required",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
+            Self::ApprovalRequired { .. } => "approval_required",
         }
     }
 }
@@ -272,6 +281,10 @@ impl IntoResponse for AppError {
             AppError::ConsentRequired { consent_url } => Some(consent_url.clone()),
             _ => None,
         };
+        let approval_request_id = match &self {
+            AppError::ApprovalRequired { request_id } => Some(request_id.clone()),
+            _ => None,
+        };
 
         let body = ErrorResponse {
             error: self.error_key().to_string(),
@@ -281,16 +294,19 @@ impl IntoResponse for AppError {
                 AppError::Internal(_) | AppError::DatabaseError(_) => {
                     "An internal error occurred".to_string()
                 }
-                AppError::MfaRequired { .. } => {
-                    "MFA verification required".to_string()
-                }
+                AppError::MfaRequired { .. } => "MFA verification required".to_string(),
                 AppError::ConsentRequired { .. } => {
                     "Consent required. Complete authorization in browser flow.".to_string()
+                }
+                AppError::ApprovalRequired { .. } => {
+                    "Approval required. A notification has been sent to the resource owner."
+                        .to_string()
                 }
                 other => other.to_string(),
             },
             session_token: mfa_session_token,
             consent_url,
+            request_id: approval_request_id,
         };
 
         (status, axum::Json(body)).into_response()
@@ -306,38 +322,132 @@ mod tests {
 
     #[test]
     fn status_codes() {
-        assert_eq!(AppError::BadRequest("x".into()).status_code(), StatusCode::BAD_REQUEST);
-        assert_eq!(AppError::Unauthorized("x".into()).status_code(), StatusCode::UNAUTHORIZED);
-        assert_eq!(AppError::Forbidden("x".into()).status_code(), StatusCode::FORBIDDEN);
-        assert_eq!(AppError::NotFound("x".into()).status_code(), StatusCode::NOT_FOUND);
-        assert_eq!(AppError::Conflict("x".into()).status_code(), StatusCode::CONFLICT);
-        assert_eq!(AppError::RateLimited.status_code(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(AppError::Internal("x".into()).status_code(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(AppError::ValidationError("x".into()).status_code(), StatusCode::BAD_REQUEST);
-        assert_eq!(AppError::AuthenticationFailed("x".into()).status_code(), StatusCode::UNAUTHORIZED);
-        assert_eq!(AppError::TokenExpired.status_code(), StatusCode::UNAUTHORIZED);
         assert_eq!(
-            AppError::MfaRequired { session_token: "tok".into() }.status_code(),
+            AppError::BadRequest("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::Unauthorized("x".into()).status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AppError::Forbidden("x".into()).status_code(),
             StatusCode::FORBIDDEN
         );
-        assert_eq!(AppError::PkceVerificationFailed.status_code(), StatusCode::BAD_REQUEST);
-        assert_eq!(AppError::InvalidRedirectUri.status_code(), StatusCode::BAD_REQUEST);
-        assert_eq!(AppError::InvalidScope("x".into()).status_code(), StatusCode::BAD_REQUEST);
-        assert_eq!(AppError::RoleNotFound("x".into()).status_code(), StatusCode::NOT_FOUND);
-        assert_eq!(AppError::GroupNotFound("x".into()).status_code(), StatusCode::NOT_FOUND);
-        assert_eq!(AppError::ConsentNotFound.status_code(), StatusCode::NOT_FOUND);
-        assert_eq!(AppError::RoleAlreadyAssigned.status_code(), StatusCode::CONFLICT);
-        assert_eq!(AppError::GroupMembershipExists.status_code(), StatusCode::CONFLICT);
-        assert_eq!(AppError::SystemRoleProtected("x".into()).status_code(), StatusCode::FORBIDDEN);
-        assert_eq!(AppError::DuplicateSlug("x".into()).status_code(), StatusCode::CONFLICT);
-        assert_eq!(AppError::CircularGroupHierarchy.status_code(), StatusCode::BAD_REQUEST);
-        assert_eq!(AppError::ServiceAccountNotFound("x".into()).status_code(), StatusCode::NOT_FOUND);
-        assert_eq!(AppError::ServiceAccountInactive.status_code(), StatusCode::FORBIDDEN);
-        assert_eq!(AppError::SocialAuthFailed("x".into()).status_code(), StatusCode::BAD_REQUEST);
-        assert_eq!(AppError::SocialAuthConflict.status_code(), StatusCode::CONFLICT);
-        assert_eq!(AppError::SocialAuthNoEmail.status_code(), StatusCode::BAD_REQUEST);
-        assert_eq!(AppError::SocialAuthDeactivated.status_code(), StatusCode::FORBIDDEN);
-        assert_eq!(AppError::UnsupportedGrantType("x".into()).status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            AppError::NotFound("x".into()).status_code(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppError::Conflict("x".into()).status_code(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            AppError::RateLimited.status_code(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            AppError::Internal("x".into()).status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            AppError::ValidationError("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::AuthenticationFailed("x".into()).status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AppError::TokenExpired.status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            AppError::MfaRequired {
+                session_token: "tok".into()
+            }
+            .status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            AppError::PkceVerificationFailed.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::InvalidRedirectUri.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::InvalidScope("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::RoleNotFound("x".into()).status_code(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppError::GroupNotFound("x".into()).status_code(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppError::ConsentNotFound.status_code(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppError::RoleAlreadyAssigned.status_code(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            AppError::GroupMembershipExists.status_code(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            AppError::SystemRoleProtected("x".into()).status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            AppError::DuplicateSlug("x".into()).status_code(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            AppError::CircularGroupHierarchy.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::ServiceAccountNotFound("x".into()).status_code(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppError::ServiceAccountInactive.status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            AppError::SocialAuthFailed("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::SocialAuthConflict.status_code(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            AppError::SocialAuthNoEmail.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::SocialAuthDeactivated.status_code(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            AppError::UnsupportedGrantType("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::ApprovalRequired {
+                request_id: "x".into()
+            }
+            .status_code(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[test]
@@ -353,7 +463,10 @@ mod tests {
             AppError::ValidationError("".into()).error_code(),
             AppError::AuthenticationFailed("".into()).error_code(),
             AppError::TokenExpired.error_code(),
-            AppError::MfaRequired { session_token: "".into() }.error_code(),
+            AppError::MfaRequired {
+                session_token: "".into(),
+            }
+            .error_code(),
             AppError::PkceVerificationFailed.error_code(),
             AppError::InvalidRedirectUri.error_code(),
             AppError::InvalidScope("".into()).error_code(),
@@ -372,70 +485,201 @@ mod tests {
             AppError::SocialAuthNoEmail.error_code(),
             AppError::SocialAuthDeactivated.error_code(),
             AppError::UnsupportedGrantType("".into()).error_code(),
+            AppError::ApprovalRequired {
+                request_id: "".into(),
+            }
+            .error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
-        assert_eq!(codes.len(), unique.len(), "All error codes should be unique");
+        assert_eq!(
+            codes.len(),
+            unique.len(),
+            "All error codes should be unique"
+        );
     }
 
     #[test]
     fn error_keys() {
         assert_eq!(AppError::BadRequest("".into()).error_key(), "bad_request");
-        assert_eq!(AppError::Unauthorized("".into()).error_key(), "unauthorized");
+        assert_eq!(
+            AppError::Unauthorized("".into()).error_key(),
+            "unauthorized"
+        );
         assert_eq!(AppError::Forbidden("".into()).error_key(), "forbidden");
         assert_eq!(AppError::NotFound("".into()).error_key(), "not_found");
         assert_eq!(AppError::Conflict("".into()).error_key(), "conflict");
         assert_eq!(AppError::RateLimited.error_key(), "rate_limited");
         assert_eq!(AppError::Internal("".into()).error_key(), "internal_error");
-        assert_eq!(AppError::ValidationError("".into()).error_key(), "validation_error");
-        assert_eq!(AppError::AuthenticationFailed("".into()).error_key(), "authentication_failed");
+        assert_eq!(
+            AppError::ValidationError("".into()).error_key(),
+            "validation_error"
+        );
+        assert_eq!(
+            AppError::AuthenticationFailed("".into()).error_key(),
+            "authentication_failed"
+        );
         assert_eq!(AppError::TokenExpired.error_key(), "token_expired");
         assert_eq!(
-            AppError::MfaRequired { session_token: "".into() }.error_key(),
+            AppError::MfaRequired {
+                session_token: "".into()
+            }
+            .error_key(),
             "mfa_required"
         );
-        assert_eq!(AppError::PkceVerificationFailed.error_key(), "pkce_verification_failed");
-        assert_eq!(AppError::InvalidRedirectUri.error_key(), "invalid_redirect_uri");
-        assert_eq!(AppError::InvalidScope("".into()).error_key(), "invalid_scope");
-        assert_eq!(AppError::RoleNotFound("".into()).error_key(), "role_not_found");
-        assert_eq!(AppError::GroupNotFound("".into()).error_key(), "group_not_found");
+        assert_eq!(
+            AppError::PkceVerificationFailed.error_key(),
+            "pkce_verification_failed"
+        );
+        assert_eq!(
+            AppError::InvalidRedirectUri.error_key(),
+            "invalid_redirect_uri"
+        );
+        assert_eq!(
+            AppError::InvalidScope("".into()).error_key(),
+            "invalid_scope"
+        );
+        assert_eq!(
+            AppError::RoleNotFound("".into()).error_key(),
+            "role_not_found"
+        );
+        assert_eq!(
+            AppError::GroupNotFound("".into()).error_key(),
+            "group_not_found"
+        );
         assert_eq!(AppError::ConsentNotFound.error_key(), "consent_not_found");
-        assert_eq!(AppError::RoleAlreadyAssigned.error_key(), "role_already_assigned");
-        assert_eq!(AppError::GroupMembershipExists.error_key(), "group_membership_exists");
-        assert_eq!(AppError::SystemRoleProtected("".into()).error_key(), "system_role_protected");
-        assert_eq!(AppError::DuplicateSlug("".into()).error_key(), "duplicate_slug");
-        assert_eq!(AppError::CircularGroupHierarchy.error_key(), "circular_group_hierarchy");
-        assert_eq!(AppError::ServiceAccountNotFound("".into()).error_key(), "service_account_not_found");
-        assert_eq!(AppError::ServiceAccountInactive.error_key(), "service_account_inactive");
-        assert_eq!(AppError::SocialAuthFailed("".into()).error_key(), "social_auth_failed");
-        assert_eq!(AppError::SocialAuthConflict.error_key(), "social_auth_conflict");
-        assert_eq!(AppError::SocialAuthNoEmail.error_key(), "social_auth_no_email");
-        assert_eq!(AppError::SocialAuthDeactivated.error_key(), "social_auth_deactivated");
-        assert_eq!(AppError::UnsupportedGrantType("".into()).error_key(), "unsupported_grant_type");
+        assert_eq!(
+            AppError::RoleAlreadyAssigned.error_key(),
+            "role_already_assigned"
+        );
+        assert_eq!(
+            AppError::GroupMembershipExists.error_key(),
+            "group_membership_exists"
+        );
+        assert_eq!(
+            AppError::SystemRoleProtected("".into()).error_key(),
+            "system_role_protected"
+        );
+        assert_eq!(
+            AppError::DuplicateSlug("".into()).error_key(),
+            "duplicate_slug"
+        );
+        assert_eq!(
+            AppError::CircularGroupHierarchy.error_key(),
+            "circular_group_hierarchy"
+        );
+        assert_eq!(
+            AppError::ServiceAccountNotFound("".into()).error_key(),
+            "service_account_not_found"
+        );
+        assert_eq!(
+            AppError::ServiceAccountInactive.error_key(),
+            "service_account_inactive"
+        );
+        assert_eq!(
+            AppError::SocialAuthFailed("".into()).error_key(),
+            "social_auth_failed"
+        );
+        assert_eq!(
+            AppError::SocialAuthConflict.error_key(),
+            "social_auth_conflict"
+        );
+        assert_eq!(
+            AppError::SocialAuthNoEmail.error_key(),
+            "social_auth_no_email"
+        );
+        assert_eq!(
+            AppError::SocialAuthDeactivated.error_key(),
+            "social_auth_deactivated"
+        );
+        assert_eq!(
+            AppError::UnsupportedGrantType("".into()).error_key(),
+            "unsupported_grant_type"
+        );
+        assert_eq!(
+            AppError::ApprovalRequired {
+                request_id: "".into()
+            }
+            .error_key(),
+            "approval_required"
+        );
     }
 
     #[test]
     fn oauth_error_codes() {
-        assert_eq!(AppError::UnsupportedGrantType("x".into()).oauth_error_code(), "unsupported_grant_type");
-        assert_eq!(AppError::PkceVerificationFailed.oauth_error_code(), "invalid_grant");
-        assert_eq!(AppError::InvalidRedirectUri.oauth_error_code(), "invalid_grant");
-        assert_eq!(AppError::InvalidScope("x".into()).oauth_error_code(), "invalid_scope");
-        assert_eq!(AppError::Unauthorized("x".into()).oauth_error_code(), "invalid_client");
-        assert_eq!(AppError::AuthenticationFailed("x".into()).oauth_error_code(), "invalid_client");
-        assert_eq!(AppError::ServiceAccountNotFound("x".into()).oauth_error_code(), "invalid_client");
-        assert_eq!(AppError::ServiceAccountInactive.oauth_error_code(), "invalid_client");
-        assert_eq!(AppError::NotFound("x".into()).oauth_error_code(), "invalid_grant");
-        assert_eq!(AppError::BadRequest("x".into()).oauth_error_code(), "invalid_request");
-        assert_eq!(AppError::ConsentRequired { consent_url: "x".into() }.oauth_error_code(), "consent_required");
+        assert_eq!(
+            AppError::UnsupportedGrantType("x".into()).oauth_error_code(),
+            "unsupported_grant_type"
+        );
+        assert_eq!(
+            AppError::PkceVerificationFailed.oauth_error_code(),
+            "invalid_grant"
+        );
+        assert_eq!(
+            AppError::InvalidRedirectUri.oauth_error_code(),
+            "invalid_grant"
+        );
+        assert_eq!(
+            AppError::InvalidScope("x".into()).oauth_error_code(),
+            "invalid_scope"
+        );
+        assert_eq!(
+            AppError::Unauthorized("x".into()).oauth_error_code(),
+            "invalid_client"
+        );
+        assert_eq!(
+            AppError::AuthenticationFailed("x".into()).oauth_error_code(),
+            "invalid_client"
+        );
+        assert_eq!(
+            AppError::ServiceAccountNotFound("x".into()).oauth_error_code(),
+            "invalid_client"
+        );
+        assert_eq!(
+            AppError::ServiceAccountInactive.oauth_error_code(),
+            "invalid_client"
+        );
+        assert_eq!(
+            AppError::NotFound("x".into()).oauth_error_code(),
+            "invalid_grant"
+        );
+        assert_eq!(
+            AppError::BadRequest("x".into()).oauth_error_code(),
+            "invalid_request"
+        );
+        assert_eq!(
+            AppError::ConsentRequired {
+                consent_url: "x".into()
+            }
+            .oauth_error_code(),
+            "consent_required"
+        );
     }
 
     #[test]
     fn display_messages() {
-        assert_eq!(format!("{}", AppError::BadRequest("oops".into())), "Bad request: oops");
+        assert_eq!(
+            format!("{}", AppError::BadRequest("oops".into())),
+            "Bad request: oops"
+        );
         assert_eq!(format!("{}", AppError::TokenExpired), "Token expired");
         assert_eq!(format!("{}", AppError::RateLimited), "Rate limited");
-        assert_eq!(format!("{}", AppError::PkceVerificationFailed), "PKCE verification failed");
-        assert_eq!(format!("{}", AppError::InvalidRedirectUri), "Invalid redirect URI");
-        assert_eq!(format!("{}", AppError::MfaRequired { session_token: "t".into() }), "MFA required");
+        assert_eq!(
+            format!("{}", AppError::PkceVerificationFailed),
+            "PKCE verification failed"
+        );
+        assert_eq!(
+            format!("{}", AppError::InvalidRedirectUri),
+            "Invalid redirect URI"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                AppError::MfaRequired {
+                    session_token: "t".into()
+                }
+            ),
+            "MFA required"
+        );
     }
 
     #[test]
@@ -446,12 +690,14 @@ mod tests {
             message: "Invalid input".to_string(),
             session_token: None,
             consent_url: None,
+            request_id: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["error"], "bad_request");
         assert_eq!(json["error_code"], 1000);
         assert!(json.get("session_token").is_none());
         assert!(json.get("consent_url").is_none());
+        assert!(json.get("request_id").is_none());
     }
 
     #[test]
@@ -462,6 +708,7 @@ mod tests {
             message: "MFA verification required".to_string(),
             session_token: Some("mfa-session-tok".to_string()),
             consent_url: None,
+            request_id: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["session_token"], "mfa-session-tok");

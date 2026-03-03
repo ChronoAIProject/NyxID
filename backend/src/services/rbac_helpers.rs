@@ -5,9 +5,9 @@ use mongodb::bson::doc;
 
 use crate::crypto::jwt::{IdTokenAuthContext, RbacClaimData};
 use crate::errors::AppResult;
-use crate::models::group::{Group, COLLECTION_NAME as GROUPS};
-use crate::models::role::{Role, COLLECTION_NAME as ROLES};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
+use crate::models::role::{COLLECTION_NAME as ROLES, Role};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 /// Resolved RBAC data for a user, ready to inject into JWT claims.
 pub struct UserRbacData {
@@ -20,10 +20,7 @@ pub struct UserRbacData {
 ///
 /// Collects directly-assigned roles, group-inherited roles, and flattened
 /// permissions. Performs at most 3 MongoDB queries.
-pub async fn resolve_user_rbac(
-    db: &mongodb::Database,
-    user_id: &str,
-) -> AppResult<UserRbacData> {
+pub async fn resolve_user_rbac(db: &mongodb::Database, user_id: &str) -> AppResult<UserRbacData> {
     let user = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": user_id })

@@ -9,11 +9,12 @@ use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
+use crate::AppState;
 use crate::crypto::{aes, jwt};
 use crate::models::mcp_session;
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::services::{audit_service, mcp_service};
-use crate::AppState;
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -119,8 +120,7 @@ fn tool_result_with_notifications(
         error: None,
     };
 
-    let mut events: Vec<Result<Event, Infallible>> =
-        Vec::with_capacity(1 + notifications.len());
+    let mut events: Vec<Result<Event, Infallible>> = Vec::with_capacity(1 + notifications.len());
 
     events.push(Ok(Event::default()
         .event("message")
@@ -185,6 +185,11 @@ async fn authenticate_mcp(
     if let Some(token) = token {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
+                // Service account tokens have sa=true; verify against
+                // the service_accounts collection instead of users.
+                if claims.sa == Some(true) {
+                    return verify_service_account_active(state, claims.sub).await;
+                }
                 return verify_user_active(state, claims.sub).await;
             }
             Err(_) if session_fallback => {
@@ -201,9 +206,7 @@ async fn authenticate_mcp(
     }
 
     // --- Session-based auth fallback ---
-    let session_id = headers
-        .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok());
+    let session_id = headers.get("mcp-session-id").and_then(|v| v.to_str().ok());
 
     if let Some(sid) = session_id {
         if let Some(user_id) = state.mcp_sessions.get_user_id(sid) {
@@ -226,6 +229,24 @@ async fn verify_user_active(state: &AppState, user_id: String) -> Result<String,
     match user {
         Some(u) if u.is_active => Ok(user_id),
         _ => Err(mcp_401(&state.config.base_url)),
+    }
+}
+
+/// Check that a service account exists and is active.
+async fn verify_service_account_active(
+    state: &AppState,
+    sa_id: String,
+) -> Result<String, Response> {
+    let sa = state
+        .db
+        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+        .find_one(doc! { "_id": &sa_id, "is_active": true })
+        .await
+        .map_err(|_| rpc_error(None, -32603, "Internal error"))?;
+
+    match sa {
+        Some(_) => Ok(sa_id),
+        None => Err(mcp_401(&state.config.base_url)),
     }
 }
 
@@ -266,7 +287,10 @@ fn send_tools_list_changed(state: &AppState, session_id: &str) {
         "method": "notifications/tools/list_changed",
     });
 
-    if !state.mcp_sessions.send_notification(session_id, notification) {
+    if !state
+        .mcp_sessions
+        .send_notification(session_id, notification)
+    {
         tracing::debug!(
             session_id,
             "Failed to send tools/list_changed notification (no SSE listener)"
@@ -278,11 +302,7 @@ fn send_tools_list_changed(state: &AppState, session_id: &str) {
 // POST /mcp -- JSON-RPC request handler
 // ---------------------------------------------------------------------------
 
-pub async fn mcp_post(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: String,
-) -> Response {
+pub async fn mcp_post(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
     // Manual JSON parse for proper JSON-RPC error on malformed input
     let request: JsonRpcRequest = match serde_json::from_str(&body) {
         Ok(r) => r,
@@ -368,14 +388,13 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
     };
 
     // Convert mpsc::Receiver into an SSE-compatible stream
-    let stream =
-        tokio_stream::wrappers::ReceiverStream::new(rx).map(|notification| {
-            Ok::<_, Infallible>(
-                Event::default()
-                    .event("message")
-                    .data(notification.to_string()),
-            )
-        });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(|notification| {
+        Ok::<_, Infallible>(
+            Event::default()
+                .event("message")
+                .data(notification.to_string()),
+        )
+    });
 
     Sse::new(stream)
         .keep_alive(
@@ -460,7 +479,13 @@ fn handle_initialize(state: &AppState, user_id: &str, request: &JsonRpcRequest) 
 
     let header_value = match axum::http::HeaderValue::from_str(&session_id) {
         Ok(v) => v,
-        Err(_) => return rpc_error(request.id.clone(), -32603, "Failed to create session header"),
+        Err(_) => {
+            return rpc_error(
+                request.id.clone(),
+                -32603,
+                "Failed to create session header",
+            );
+        }
     };
 
     let mut response = axum::Json(body).into_response();
@@ -765,11 +790,7 @@ async fn handle_meta_call_tool(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
-            return tool_result(
-                request_id,
-                &format!("Tool execution failed: {e}"),
-                true,
-            );
+            return tool_result(request_id, &format!("Tool execution failed: {e}"), true);
         }
     };
 
@@ -845,10 +866,9 @@ async fn handle_meta_search(
     let search_result = mcp_service::search_all_tools(&services, query);
 
     // Activate the services that had matches
-    let changed = state.mcp_sessions.activate_services(
-        session_id,
-        &search_result.matched_service_ids,
-    );
+    let changed = state
+        .mcp_sessions
+        .activate_services(session_id, &search_result.matched_service_ids);
 
     // Send notification via GET SSE channel (fallback for clients that have it)
     if changed {
@@ -953,9 +973,7 @@ async fn handle_meta_connect(
         None => return tool_result(request_id, "service_id is required", true),
     };
     let credential = arguments.get("credential").and_then(|c| c.as_str());
-    let credential_label = arguments
-        .get("credential_label")
-        .and_then(|l| l.as_str());
+    let credential_label = arguments.get("credential_label").and_then(|l| l.as_str());
 
     let encryption_key = match aes::parse_hex_key(&state.config.encryption_key) {
         Ok(k) => k,
@@ -977,10 +995,9 @@ async fn handle_meta_connect(
     {
         Ok(result) => {
             // Activate the newly connected service
-            let changed = state.mcp_sessions.activate_services(
-                session_id,
-                &[service_id.to_string()],
-            );
+            let changed = state
+                .mcp_sessions
+                .activate_services(session_id, &[service_id.to_string()]);
 
             // Send via GET SSE channel (fallback for clients that have it)
             if changed {
@@ -1023,7 +1040,8 @@ async fn handle_meta_connect(
         Err(e) => {
             tracing::warn!("connect_service failed: {e}");
             let msg = match &e {
-                crate::errors::AppError::Internal(_) | crate::errors::AppError::DatabaseError(_) => {
+                crate::errors::AppError::Internal(_)
+                | crate::errors::AppError::DatabaseError(_) => {
                     "Failed to connect to service".to_string()
                 }
                 other => other.to_string(),

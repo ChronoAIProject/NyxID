@@ -6,11 +6,11 @@ use uuid::Uuid;
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
-use crate::models::provider_config::{ProviderConfig, COLLECTION_NAME};
+use crate::models::provider_config::{COLLECTION_NAME, ProviderConfig};
 use crate::models::service_provider_requirement::{
-    ServiceProviderRequirement, COLLECTION_NAME as REQUIREMENTS,
+    COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
 };
 use crate::models::user_provider_token::COLLECTION_NAME as USER_PROVIDER_TOKENS;
 
@@ -30,12 +30,7 @@ pub async fn seed_default_providers(
 
     // Helper: check if a provider with this slug already exists
     macro_rules! slug_exists {
-        ($slug:expr) => {{
-            collection
-                .find_one(doc! { "slug": $slug })
-                .await?
-                .is_some()
-        }};
+        ($slug:expr) => {{ collection.find_one(doc! { "slug": $slug }).await?.is_some() }};
     }
 
     // 1. OpenAI (API Key)
@@ -44,9 +39,7 @@ pub async fn seed_default_providers(
             id: Uuid::new_v4().to_string(),
             slug: "openai".to_string(),
             name: "OpenAI".to_string(),
-            description: Some(
-                "OpenAI API access using API keys (pay-per-use billing)".to_string(),
-            ),
+            description: Some("OpenAI API access using API keys (pay-per-use billing)".to_string()),
             provider_type: "api_key".to_string(),
             authorization_url: None,
             token_url: None,
@@ -76,10 +69,7 @@ pub async fn seed_default_providers(
     }
 
     // Upgrade existing openai-codex providers with corrected device code URLs
-    if let Some(existing) = collection
-        .find_one(doc! { "slug": "openai-codex" })
-        .await?
-    {
+    if let Some(existing) = collection.find_one(doc! { "slug": "openai-codex" }).await? {
         let needs_update = existing.device_code_url.as_deref()
             != Some("https://auth.openai.com/api/accounts/deviceauth/usercode")
             || existing.device_verification_url.is_none();
@@ -104,8 +94,7 @@ pub async fn seed_default_providers(
 
     // 2. OpenAI Codex (Device Code - ChatGPT subscription)
     if !slug_exists!("openai-codex") {
-        let client_id_enc =
-            aes::encrypt(b"app_EMoamEEZ73f0CkXaXp7hrann", &encryption_key)?;
+        let client_id_enc = aes::encrypt(b"app_EMoamEEZ73f0CkXaXp7hrann", &encryption_key)?;
 
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -115,9 +104,7 @@ pub async fn seed_default_providers(
                 "Connect your ChatGPT subscription (Plus/Pro/Team) for AI model access".to_string(),
             ),
             provider_type: "device_code".to_string(),
-            authorization_url: Some(
-                "https://auth.openai.com/oauth/authorize".to_string(),
-            ),
+            authorization_url: Some("https://auth.openai.com/oauth/authorize".to_string()),
             token_url: Some("https://auth.openai.com/oauth/token".to_string()),
             revocation_url: None,
             default_scopes: Some(vec![
@@ -135,25 +122,22 @@ pub async fn seed_default_providers(
             device_token_url: Some(
                 "https://auth.openai.com/api/accounts/deviceauth/token".to_string(),
             ),
-            device_verification_url: Some(
-                "https://auth.openai.com/codex/device".to_string(),
-            ),
-            hosted_callback_url: Some(
-                "https://auth.openai.com/deviceauth/callback".to_string(),
-            ),
+            device_verification_url: Some("https://auth.openai.com/codex/device".to_string()),
+            hosted_callback_url: Some("https://auth.openai.com/deviceauth/callback".to_string()),
             api_key_instructions: None,
             api_key_url: None,
             icon_url: None,
-            documentation_url: Some(
-                "https://developers.openai.com/codex/auth/".to_string(),
-            ),
+            documentation_url: Some("https://developers.openai.com/codex/auth/".to_string()),
             is_active: true,
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
         };
         collection.insert_one(&provider).await?;
-        tracing::info!(slug = "openai-codex", "Seeded default provider: OpenAI Codex");
+        tracing::info!(
+            slug = "openai-codex",
+            "Seeded default provider: OpenAI Codex"
+        );
         seeded_count += 1;
     }
 
@@ -179,9 +163,7 @@ pub async fn seed_default_providers(
             api_key_instructions: Some(
                 "Get your API key from https://console.anthropic.com/settings/keys".to_string(),
             ),
-            api_key_url: Some(
-                "https://console.anthropic.com/settings/keys".to_string(),
-            ),
+            api_key_url: Some("https://console.anthropic.com/settings/keys".to_string()),
             icon_url: None,
             documentation_url: Some("https://docs.anthropic.com".to_string()),
             is_active: true,
@@ -200,9 +182,7 @@ pub async fn seed_default_providers(
             id: Uuid::new_v4().to_string(),
             slug: "google-ai".to_string(),
             name: "Google AI Studio".to_string(),
-            description: Some(
-                "Google Gemini API access via AI Studio".to_string(),
-            ),
+            description: Some("Google Gemini API access via AI Studio".to_string()),
             provider_type: "api_key".to_string(),
             authorization_url: None,
             token_url: None,
@@ -227,7 +207,10 @@ pub async fn seed_default_providers(
             updated_at: now,
         };
         collection.insert_one(&provider).await?;
-        tracing::info!(slug = "google-ai", "Seeded default provider: Google AI Studio");
+        tracing::info!(
+            slug = "google-ai",
+            "Seeded default provider: Google AI Studio"
+        );
         seeded_count += 1;
     }
 
@@ -288,9 +271,7 @@ pub async fn seed_default_providers(
             api_key_instructions: Some(
                 "Get your API key from https://dashboard.cohere.com/api-keys".to_string(),
             ),
-            api_key_url: Some(
-                "https://dashboard.cohere.com/api-keys".to_string(),
-            ),
+            api_key_url: Some("https://dashboard.cohere.com/api-keys".to_string()),
             icon_url: None,
             documentation_url: Some("https://docs.cohere.com".to_string()),
             is_active: true,
@@ -482,7 +463,10 @@ pub async fn seed_default_llm_services(
             id: service_id.clone(),
             name: seed.service_name.to_string(),
             slug: seed.service_slug.to_string(),
-            description: Some(format!("{} proxied via NyxID LLM gateway", seed.service_name)),
+            description: Some(format!(
+                "{} proxied via NyxID LLM gateway",
+                seed.service_name
+            )),
             base_url: seed.base_url.to_string(),
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
@@ -532,7 +516,10 @@ pub async fn seed_default_llm_services(
     }
 
     if seeded_count > 0 {
-        tracing::info!(count = seeded_count, "LLM downstream service seeding complete");
+        tracing::info!(
+            count = seeded_count,
+            "LLM downstream service seeding complete"
+        );
     }
 
     Ok(())
@@ -655,7 +642,11 @@ pub async fn create_provider(
         authorization_url: oauth_config
             .as_ref()
             .map(|o| o.authorization_url.clone())
-            .or_else(|| device_code_config.as_ref().map(|d| d.authorization_url.clone())),
+            .or_else(|| {
+                device_code_config
+                    .as_ref()
+                    .map(|d| d.authorization_url.clone())
+            }),
         token_url: oauth_config
             .as_ref()
             .map(|o| o.token_url.clone())
@@ -664,20 +655,30 @@ pub async fn create_provider(
         default_scopes: oauth_config
             .as_ref()
             .and_then(|o| o.default_scopes.clone())
-            .or_else(|| device_code_config.as_ref().and_then(|d| d.default_scopes.clone())),
+            .or_else(|| {
+                device_code_config
+                    .as_ref()
+                    .and_then(|d| d.default_scopes.clone())
+            }),
         client_id_encrypted: client_id_enc,
         client_secret_encrypted: client_secret_enc,
-        supports_pkce: oauth_config
-            .as_ref()
-            .is_some_and(|o| o.supports_pkce)
+        supports_pkce: oauth_config.as_ref().is_some_and(|o| o.supports_pkce)
             || device_code_config.as_ref().is_some_and(|d| d.supports_pkce),
-        device_code_url: device_code_config.as_ref().map(|d| d.device_code_url.clone()),
-        device_token_url: device_code_config.as_ref().map(|d| d.device_token_url.clone()),
+        device_code_url: device_code_config
+            .as_ref()
+            .map(|d| d.device_code_url.clone()),
+        device_token_url: device_code_config
+            .as_ref()
+            .map(|d| d.device_token_url.clone()),
         device_verification_url: device_code_config
             .as_ref()
             .and_then(|d| d.device_verification_url.clone()),
-        hosted_callback_url: device_code_config.as_ref().and_then(|d| d.hosted_callback_url.clone()),
-        api_key_instructions: api_key_config.as_ref().and_then(|a| a.api_key_instructions.clone()),
+        hosted_callback_url: device_code_config
+            .as_ref()
+            .and_then(|d| d.hosted_callback_url.clone()),
+        api_key_instructions: api_key_config
+            .as_ref()
+            .and_then(|a| a.api_key_instructions.clone()),
         api_key_url: api_key_config.as_ref().and_then(|a| a.api_key_url.clone()),
         icon_url: icon_url.map(String::from),
         documentation_url: documentation_url.map(String::from),
@@ -710,10 +711,7 @@ pub async fn list_providers(db: &mongodb::Database) -> AppResult<Vec<ProviderCon
 }
 
 /// Get a single provider by ID.
-pub async fn get_provider(
-    db: &mongodb::Database,
-    provider_id: &str,
-) -> AppResult<ProviderConfig> {
+pub async fn get_provider(db: &mongodb::Database, provider_id: &str) -> AppResult<ProviderConfig> {
     db.collection::<ProviderConfig>(COLLECTION_NAME)
         .find_one(doc! { "_id": provider_id })
         .await?
@@ -722,10 +720,7 @@ pub async fn get_provider(
 
 /// Get a single provider by slug.
 #[allow(dead_code)]
-pub async fn get_provider_by_slug(
-    db: &mongodb::Database,
-    slug: &str,
-) -> AppResult<ProviderConfig> {
+pub async fn get_provider_by_slug(db: &mongodb::Database, slug: &str) -> AppResult<ProviderConfig> {
     db.collection::<ProviderConfig>(COLLECTION_NAME)
         .find_one(doc! { "slug": slug })
         .await?
@@ -823,10 +818,7 @@ pub async fn update_provider(
 
     let updated = db
         .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find_one_and_update(
-            doc! { "_id": provider_id },
-            doc! { "$set": set_doc },
-        )
+        .find_one_and_update(doc! { "_id": provider_id }, doc! { "$set": set_doc })
         .with_options(
             FindOneAndUpdateOptions::builder()
                 .return_document(ReturnDocument::After)
@@ -841,10 +833,7 @@ pub async fn update_provider(
 }
 
 /// Soft-delete a provider. Also revokes all user tokens for this provider.
-pub async fn delete_provider(
-    db: &mongodb::Database,
-    provider_id: &str,
-) -> AppResult<()> {
+pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppResult<()> {
     let _existing = get_provider(db, provider_id).await?;
 
     let now = Utc::now();

@@ -59,17 +59,55 @@ pub struct AppConfig {
     /// When set, cookies include `Domain=<value>` so they are shared across
     /// subdomains. Leave unset for single-domain / localhost development.
     pub cookie_domain: Option<String>,
+
+    /// Telegram Bot API token for sending approval notifications.
+    pub telegram_bot_token: Option<String>,
+
+    /// Secret token for verifying Telegram webhook callbacks.
+    pub telegram_webhook_secret: Option<String>,
+
+    /// Public URL where Telegram sends webhook callbacks.
+    pub telegram_webhook_url: Option<String>,
+
+    /// Telegram bot username (without @) for link instructions.
+    pub telegram_bot_username: Option<String>,
+
+    /// Interval in seconds between approval expiry sweeps (default: 5).
+    pub approval_expiry_interval_secs: u64,
+
+    // -- FCM (Firebase Cloud Messaging) --
+    /// Path to FCM service account JSON file.
+    pub fcm_service_account_path: Option<String>,
+
+    /// FCM project ID (extracted from service account JSON at startup).
+    pub fcm_project_id: Option<String>,
+
+    // -- APNs (Apple Push Notification service) --
+    /// Path to APNs .p8 private key file.
+    pub apns_key_path: Option<String>,
+
+    /// APNs Key ID (from Apple Developer portal).
+    pub apns_key_id: Option<String>,
+
+    /// APNs Team ID (from Apple Developer portal).
+    pub apns_team_id: Option<String>,
+
+    /// APNs topic (bundle ID of the iOS app, e.g. "dev.nyxid.app").
+    pub apns_topic: Option<String>,
+
+    /// Use APNs sandbox instead of production.
+    /// Default: true in development, false otherwise.
+    pub apns_sandbox: bool,
 }
 
 impl AppConfig {
     /// Load configuration from environment variables.
     /// Panics on missing required variables to fail fast at startup.
     pub fn from_env() -> Self {
-        let environment = env::var("ENVIRONMENT")
-            .unwrap_or_else(|_| "development".to_string());
+        let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string());
+        let is_dev = environment == "development" || environment == "dev";
 
-        let base_url = env::var("BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:3001".to_string());
+        let base_url = env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3001".to_string());
 
         Self {
             port: env::var("PORT")
@@ -78,8 +116,7 @@ impl AppConfig {
                 .unwrap_or(3001),
             frontend_url: env::var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
-            database_url: env::var("DATABASE_URL")
-                .expect("DATABASE_URL must be set"),
+            database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             database_max_connections: env::var("DATABASE_MAX_CONNECTIONS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -91,8 +128,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "keys/private.pem".to_string()),
             jwt_public_key_path: env::var("JWT_PUBLIC_KEY_PATH")
                 .unwrap_or_else(|_| "keys/public.pem".to_string()),
-            jwt_issuer: env::var("JWT_ISSUER")
-                .unwrap_or_else(|_| base_url.clone()),
+            jwt_issuer: env::var("JWT_ISSUER").unwrap_or_else(|_| base_url.clone()),
 
             base_url,
             jwt_access_ttl_secs: env::var("JWT_ACCESS_TTL_SECS")
@@ -133,6 +169,39 @@ impl AppConfig {
                 .unwrap_or(3600),
 
             cookie_domain: env::var("COOKIE_DOMAIN").ok().filter(|s| !s.is_empty()),
+
+            telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            telegram_webhook_secret: env::var("TELEGRAM_WEBHOOK_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            telegram_webhook_url: env::var("TELEGRAM_WEBHOOK_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
+
+            telegram_bot_username: env::var("TELEGRAM_BOT_USERNAME")
+                .ok()
+                .filter(|s| !s.is_empty()),
+
+            approval_expiry_interval_secs: env::var("APPROVAL_EXPIRY_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
+
+            fcm_service_account_path: env::var("FCM_SERVICE_ACCOUNT_PATH")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            fcm_project_id: None, // derived from service account JSON at startup
+
+            apns_key_path: env::var("APNS_KEY_PATH").ok().filter(|s| !s.is_empty()),
+            apns_key_id: env::var("APNS_KEY_ID").ok().filter(|s| !s.is_empty()),
+            apns_team_id: env::var("APNS_TEAM_ID").ok().filter(|s| !s.is_empty()),
+            apns_topic: env::var("APNS_TOPIC").ok().filter(|s| !s.is_empty()),
+            apns_sandbox: env::var("APNS_SANDBOX")
+                .ok()
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(is_dev),
         }
     }
 
@@ -156,8 +225,8 @@ impl AppConfig {
             );
         }
 
-        let key_bytes = hex::decode(&self.encryption_key)
-            .expect("ENCRYPTION_KEY is not valid hexadecimal");
+        let key_bytes =
+            hex::decode(&self.encryption_key).expect("ENCRYPTION_KEY is not valid hexadecimal");
 
         if key_bytes.len() != 32 {
             panic!("ENCRYPTION_KEY must decode to exactly 32 bytes");
@@ -197,6 +266,66 @@ impl AppConfig {
     pub fn cookie_domain(&self) -> Option<&str> {
         self.cookie_domain.as_deref()
     }
+
+    /// Validate and initialize push notification config at startup.
+    /// Reads the FCM service account JSON to extract `project_id`.
+    /// Verifies APNs key and required companion fields.
+    pub fn validate_push_config(&mut self) {
+        // FCM validation
+        if let Some(path) = &self.fcm_service_account_path {
+            let content = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("Failed to read FCM service account at {path}: {e}"));
+            let json: serde_json::Value = serde_json::from_str(&content)
+                .unwrap_or_else(|e| panic!("Invalid JSON in FCM service account at {path}: {e}"));
+
+            let project_id = json
+                .get("project_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("FCM service account JSON missing 'project_id' field"));
+
+            // Verify required fields exist
+            json.get("client_email")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| panic!("FCM service account JSON missing 'client_email' field"));
+
+            json.get("private_key")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| panic!("FCM service account JSON missing 'private_key' field"));
+
+            self.fcm_project_id = Some(project_id.to_string());
+            tracing::info!(
+                project_id = %project_id,
+                "FCM push notifications enabled"
+            );
+        }
+
+        // APNs validation
+        if let Some(path) = &self.apns_key_path {
+            std::fs::metadata(path)
+                .unwrap_or_else(|e| panic!("APNs key file not readable at {path}: {e}"));
+
+            if self.apns_key_id.is_none() {
+                panic!("APNS_KEY_ID is required when APNS_KEY_PATH is set");
+            }
+            if self.apns_team_id.is_none() {
+                panic!("APNS_TEAM_ID is required when APNS_KEY_PATH is set");
+            }
+
+            let team_id = self.apns_team_id.as_deref().unwrap();
+            let sandbox_label = if self.apns_sandbox {
+                "sandbox"
+            } else {
+                "production"
+            };
+            tracing::info!(
+                team_id = %team_id,
+                environment = %sandbox_label,
+                "APNs push notifications enabled"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -231,12 +360,28 @@ mod tests {
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
             cookie_domain: None,
+            telegram_bot_token: None,
+            telegram_webhook_secret: None,
+            telegram_webhook_url: None,
+            telegram_bot_username: None,
+            approval_expiry_interval_secs: 5,
+            fcm_service_account_path: None,
+            fcm_project_id: None,
+            apns_key_path: None,
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
+            apns_sandbox: true,
         }
     }
 
     #[test]
     fn is_development_true() {
-        let cfg = make_config("http://localhost:3001", "development", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "http://localhost:3001",
+            "development",
+            "aa".repeat(32).as_str(),
+        );
         assert!(cfg.is_development());
         let cfg2 = make_config("http://localhost:3001", "dev", "aa".repeat(32).as_str());
         assert!(cfg2.is_development());
@@ -244,37 +389,61 @@ mod tests {
 
     #[test]
     fn is_development_false_for_production() {
-        let cfg = make_config("https://auth.example.com", "production", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "https://auth.example.com",
+            "production",
+            "aa".repeat(32).as_str(),
+        );
         assert!(!cfg.is_development());
     }
 
     #[test]
     fn is_production_true() {
-        let cfg = make_config("https://auth.example.com", "production", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "https://auth.example.com",
+            "production",
+            "aa".repeat(32).as_str(),
+        );
         assert!(cfg.is_production());
     }
 
     #[test]
     fn is_production_false() {
-        let cfg = make_config("http://localhost:3001", "development", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "http://localhost:3001",
+            "development",
+            "aa".repeat(32).as_str(),
+        );
         assert!(!cfg.is_production());
     }
 
     #[test]
     fn secure_cookies_for_https() {
-        let cfg = make_config("https://auth.example.com", "production", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "https://auth.example.com",
+            "production",
+            "aa".repeat(32).as_str(),
+        );
         assert!(cfg.use_secure_cookies());
     }
 
     #[test]
     fn no_secure_cookies_for_localhost() {
-        let cfg = make_config("http://localhost:3001", "development", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "http://localhost:3001",
+            "development",
+            "aa".repeat(32).as_str(),
+        );
         assert!(!cfg.use_secure_cookies());
     }
 
     #[test]
     fn no_secure_cookies_for_127_0_0_1() {
-        let cfg = make_config("http://127.0.0.1:3001", "development", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "http://127.0.0.1:3001",
+            "development",
+            "aa".repeat(32).as_str(),
+        );
         assert!(!cfg.use_secure_cookies());
     }
 

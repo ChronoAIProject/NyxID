@@ -1,20 +1,20 @@
 use std::net::SocketAddr;
 
 use axum::{
-    extract::{ConnectInfo, State},
-    http::{header, HeaderMap},
     Json,
+    extract::{ConnectInfo, State},
+    http::{HeaderMap, header},
 };
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use mongodb::bson::doc;
 
-use crate::errors::{AppError, AppResult};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
-use crate::mw::auth::{AuthUser, ACCESS_TOKEN_COOKIE_NAME, SESSION_COOKIE_NAME};
-use crate::services::{audit_service, auth_service, token_service};
 use crate::AppState;
+use crate::errors::{AppError, AppResult};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
+use crate::services::{audit_service, auth_service, token_service};
 
 // --- Request / Response types ---
 
@@ -22,7 +22,11 @@ use crate::AppState;
 pub struct RegisterRequest {
     #[validate(email(message = "Invalid email address"))]
     pub email: String,
-    #[validate(length(min = 8, max = 128, message = "Password must be between 8 and 128 characters"))]
+    #[validate(length(
+        min = 8,
+        max = 128,
+        message = "Password must be between 8 and 128 characters"
+    ))]
     pub password: String,
     pub display_name: Option<String>,
 }
@@ -101,7 +105,14 @@ pub(crate) fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
 /// Build a Set-Cookie header value for an HttpOnly, SameSite=Lax cookie.
 /// The Secure flag is set based on the deployment environment.
 /// When `domain` is provided, includes `Domain=<value>` for cross-subdomain sharing.
-pub(crate) fn build_cookie(name: &str, value: &str, max_age_secs: i64, path: &str, secure: bool, domain: Option<&str>) -> String {
+pub(crate) fn build_cookie(
+    name: &str,
+    value: &str,
+    max_age_secs: i64,
+    path: &str,
+    secure: bool,
+    domain: Option<&str>,
+) -> String {
     let secure_flag = if secure { "; Secure" } else { "" };
     let domain_attr = domain.map(|d| format!("; Domain={d}")).unwrap_or_default();
     format!(
@@ -193,7 +204,8 @@ pub async fn login(
                     ));
                 }
 
-                let encryption_key = crate::crypto::aes::parse_hex_key(&state.config.encryption_key)?;
+                let encryption_key =
+                    crate::crypto::aes::parse_hex_key(&state.config.encryption_key)?;
                 let valid = crate::services::mfa_service::verify_totp(
                     &state.db,
                     &encryption_key,
@@ -216,12 +228,8 @@ pub async fn login(
                 let temp_token_hash = crate::crypto::token::hash_token(&temp_token);
 
                 // Store the MFA session as a short-lived session record
-                token_service::create_mfa_pending_session(
-                    &state.db,
-                    &user.id,
-                    &temp_token_hash,
-                )
-                .await?;
+                token_service::create_mfa_pending_session(&state.db, &user.id, &temp_token_hash)
+                    .await?;
 
                 return Err(AppError::MfaRequired {
                     session_token: temp_token,
@@ -316,7 +324,12 @@ pub async fn logout(
     headers: HeaderMap,
 ) -> AppResult<(HeaderMap, Json<LogoutResponse>)> {
     if let Some(session_id) = auth_user.session_id {
-        token_service::revoke_session(&state.db, &session_id.to_string(), Some(&state.mcp_sessions)).await?;
+        token_service::revoke_session(
+            &state.db,
+            &session_id.to_string(),
+            Some(&state.mcp_sessions),
+        )
+        .await?;
     }
 
     audit_service::log_async(
@@ -505,7 +518,11 @@ pub async fn forgot_password(
 #[derive(Debug, Deserialize, Validate)]
 pub struct ResetPasswordRequest {
     pub token: String,
-    #[validate(length(min = 8, max = 128, message = "Password must be between 8 and 128 characters"))]
+    #[validate(length(
+        min = 8,
+        max = 128,
+        message = "Password must be between 8 and 128 characters"
+    ))]
     pub new_password: String,
 }
 
@@ -537,7 +554,11 @@ pub async fn reset_password(
 pub struct SetupRequest {
     #[validate(email(message = "Invalid email address"))]
     pub email: String,
-    #[validate(length(min = 8, max = 128, message = "Password must be between 8 and 128 characters"))]
+    #[validate(length(
+        min = 8,
+        max = 128,
+        message = "Password must be between 8 and 128 characters"
+    ))]
     pub password: String,
     pub display_name: Option<String>,
 }

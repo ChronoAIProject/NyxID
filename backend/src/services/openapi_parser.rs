@@ -99,11 +99,7 @@ pub async fn parse_openapi_spec(
 }
 
 /// Extract or generate a tool-safe name from the operation.
-fn extract_name(
-    operation: &serde_json::Value,
-    method: &str,
-    path: &str,
-) -> String {
+fn extract_name(operation: &serde_json::Value, method: &str, path: &str) -> String {
     if let Some(id) = operation.get("operationId").and_then(|v| v.as_str()) {
         sanitize_name(id)
     } else {
@@ -233,14 +229,16 @@ fn extract_request_body_swagger2(
 
     // Check operation-level first, then path-level
     if let Some(params) = operation.get("parameters")
-        && let Some(schema) = find_body_param(params) {
-            return Some(schema);
-        }
+        && let Some(schema) = find_body_param(params)
+    {
+        return Some(schema);
+    }
 
     if let Some(params) = path_obj.get("parameters")
-        && let Some(schema) = find_body_param(params) {
-            return Some(schema);
-        }
+        && let Some(schema) = find_body_param(params)
+    {
+        return Some(schema);
+    }
 
     None
 }
@@ -313,16 +311,16 @@ mod tests {
     #[test]
     fn extract_description_from_description_field() {
         let op = serde_json::json!({"description": "Detailed description"});
-        assert_eq!(extract_description(&op), Some("Detailed description".to_string()));
+        assert_eq!(
+            extract_description(&op),
+            Some("Detailed description".to_string())
+        );
     }
 
     #[test]
     fn extract_description_combines_summary_and_description() {
         let op = serde_json::json!({"summary": "Short", "description": "Long"});
-        assert_eq!(
-            extract_description(&op),
-            Some("Short\n\nLong".to_string())
-        );
+        assert_eq!(extract_description(&op), Some("Short\n\nLong".to_string()));
     }
 
     #[test]
@@ -333,15 +331,14 @@ mod tests {
 
     #[test]
     fn extract_parameters_merges_path_and_op_level() {
-        let path_obj: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
-            serde_json::json!({
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({
                 "parameters": [{"name": "id", "in": "path"}],
                 "get": {
                     "parameters": [{"name": "limit", "in": "query"}]
                 }
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
         let operation = &path_obj["get"];
         let params = extract_parameters(operation, &path_obj);
         let arr = params.unwrap();

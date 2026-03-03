@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::crypto::password;
 use crate::errors::{AppError, AppResult};
-use crate::models::session::{Session, COLLECTION_NAME as SESSIONS};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
@@ -60,9 +60,10 @@ pub async fn create_user(
         ));
     }
     if password_raw.len() > MAX_PASSWORD_LENGTH {
-        return Err(AppError::ValidationError(
-            format!("Password must be at most {} characters", MAX_PASSWORD_LENGTH),
-        ));
+        return Err(AppError::ValidationError(format!(
+            "Password must be at most {} characters",
+            MAX_PASSWORD_LENGTH
+        )));
     }
 
     // Validate role
@@ -87,11 +88,12 @@ pub async fn create_user(
 
     // Validate display name length
     if let Some(name) = display_name
-        && name.len() > 200 {
-            return Err(AppError::ValidationError(
-                "Display name must be 200 characters or less".to_string(),
-            ));
-        }
+        && name.len() > 200
+    {
+        return Err(AppError::ValidationError(
+            "Display name must be 200 characters or less".to_string(),
+        ));
+    }
 
     let password_hash = password::hash_password(password_raw)?;
     let now = Utc::now();
@@ -332,8 +334,7 @@ pub async fn force_password_reset(
         ));
     }
 
-    let token =
-        crate::services::auth_service::initiate_password_reset(db, &user.email).await?;
+    let token = crate::services::auth_service::initiate_password_reset(db, &user.email).await?;
 
     // Revoke all sessions to force re-authentication
     revoke_all_user_sessions(db, user_id).await?;
@@ -417,9 +418,7 @@ pub async fn verify_email(db: &mongodb::Database, user_id: &str) -> AppResult<()
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     if user.email_verified {
-        return Err(AppError::BadRequest(
-            "Email already verified".to_string(),
-        ));
+        return Err(AppError::BadRequest("Email already verified".to_string()));
     }
 
     let now = Utc::now();
@@ -438,10 +437,7 @@ pub async fn verify_email(db: &mongodb::Database, user_id: &str) -> AppResult<()
 }
 
 /// List all sessions for a user, sorted by created_at descending.
-pub async fn list_user_sessions(
-    db: &mongodb::Database,
-    user_id: &str,
-) -> AppResult<Vec<Session>> {
+pub async fn list_user_sessions(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<Session>> {
     use futures::TryStreamExt;
 
     // Verify user exists
@@ -465,10 +461,7 @@ pub async fn list_user_sessions(
 /// Revoke all non-revoked sessions and refresh tokens for a user.
 ///
 /// Returns the number of sessions revoked.
-pub async fn revoke_all_user_sessions(
-    db: &mongodb::Database,
-    user_id: &str,
-) -> AppResult<u64> {
+pub async fn revoke_all_user_sessions(db: &mongodb::Database, user_id: &str) -> AppResult<u64> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
     // Revoke active sessions

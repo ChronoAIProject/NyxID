@@ -6,7 +6,6 @@
 ///
 /// These helpers serialize as BSON Binary (compact, canonical) but deserialize
 /// from either BSON Binary or BSON Array for backward compatibility.
-
 use bson::Bson;
 use serde::{Deserialize, Deserializer, Serializer};
 
@@ -16,12 +15,10 @@ fn bytes_from_bson<E: serde::de::Error>(bson: Bson) -> Result<Vec<u8>, E> {
         Bson::Array(arr) => arr
             .into_iter()
             .map(|v| match v {
-                Bson::Int32(n) => u8::try_from(n).map_err(|_| {
-                    E::custom(format!("array element {n} out of u8 range"))
-                }),
-                Bson::Int64(n) => u8::try_from(n).map_err(|_| {
-                    E::custom(format!("array element {n} out of u8 range"))
-                }),
+                Bson::Int32(n) => u8::try_from(n)
+                    .map_err(|_| E::custom(format!("array element {n} out of u8 range"))),
+                Bson::Int64(n) => u8::try_from(n)
+                    .map_err(|_| E::custom(format!("array element {n} out of u8 range"))),
                 other => Err(E::custom(format!(
                     "expected integer in byte array, got {other:?}"
                 ))),

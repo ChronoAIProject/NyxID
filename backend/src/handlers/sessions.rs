@@ -1,16 +1,13 @@
-use axum::{
-    extract::State,
-    Json,
-};
+use axum::{Json, extract::State};
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use serde::Serialize;
 
-use crate::errors::AppResult;
-use crate::models::session::{Session, COLLECTION_NAME as SESSIONS};
-use crate::mw::auth::AuthUser;
 use crate::AppState;
+use crate::errors::AppResult;
+use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
+use crate::mw::auth::AuthUser;
 
 // --- Response types ---
 

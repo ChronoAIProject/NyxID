@@ -1,16 +1,16 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::HeaderMap,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::errors::AppResult;
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
 use crate::models::role::Role;
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, role_service};
-use crate::AppState;
 
 // --- Request / Response types ---
 
@@ -254,10 +254,7 @@ pub async fn get_user_roles(
 
     Ok(Json(UserRolesResponse {
         direct_roles: direct_roles.into_iter().map(role_to_response).collect(),
-        inherited_roles: inherited_roles
-            .into_iter()
-            .map(role_to_response)
-            .collect(),
+        inherited_roles: inherited_roles.into_iter().map(role_to_response).collect(),
         effective_permissions: rbac.permissions,
     }))
 }

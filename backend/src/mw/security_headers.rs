@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    http::{header, Request},
+    http::{Request, header},
     middleware::Next,
     response::Response,
 };
@@ -15,10 +15,7 @@ use axum::{
 /// - Referrer-Policy
 /// - Permissions-Policy
 /// - X-XSS-Protection
-pub async fn security_headers_middleware(
-    request: Request<Body>,
-    next: Next,
-) -> Response {
+pub async fn security_headers_middleware(request: Request<Body>, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
@@ -31,16 +28,10 @@ pub async fn security_headers_middleware(
     );
 
     // Prevent MIME-type sniffing
-    headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        "nosniff".parse().unwrap(),
-    );
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
 
     // Prevent framing (clickjacking protection)
-    headers.insert(
-        header::X_FRAME_OPTIONS,
-        "DENY".parse().unwrap(),
-    );
+    headers.insert(header::X_FRAME_OPTIONS, "DENY".parse().unwrap());
 
     // Content Security Policy — only set if the handler hasn't already provided one
     // (e.g. oauth_success_page sets a custom CSP allowing inline style/script).
@@ -78,10 +69,7 @@ pub async fn security_headers_middleware(
         header::CACHE_CONTROL,
         "no-store, no-cache, must-revalidate".parse().unwrap(),
     );
-    headers.insert(
-        header::PRAGMA,
-        "no-cache".parse().unwrap(),
-    );
+    headers.insert(header::PRAGMA, "no-cache".parse().unwrap());
 
     response
 }

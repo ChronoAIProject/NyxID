@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::{self, doc};
 use mongodb::Database;
+use mongodb::bson::{self, doc};
 use rand::RngCore;
 use serde::Serialize;
 use uuid::Uuid;
@@ -10,10 +10,8 @@ use crate::config::AppConfig;
 use crate::crypto::jwt::{self, JwtKeys};
 use crate::crypto::token::{constant_time_eq, hash_token};
 use crate::errors::{AppError, AppResult};
-use crate::models::service_account::{ServiceAccount, COLLECTION_NAME as SERVICE_ACCOUNTS};
-use crate::models::service_account_token::{
-    ServiceAccountToken, COLLECTION_NAME as SA_TOKENS,
-};
+use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
+use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 
 #[derive(Debug, Serialize)]
 pub struct ClientCredentialsResponse {
@@ -112,6 +110,7 @@ pub async fn create_service_account(
         is_active: true,
         rate_limit_override,
         created_by: created_by.to_string(),
+        owner_user_id: Some(created_by.to_string()),
         created_at: now,
         updated_at: now,
         last_authenticated_at: None,
@@ -340,9 +339,7 @@ pub async fn authenticate_client_credentials(
         .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
         .find_one(doc! { "client_id": client_id })
         .await?
-        .ok_or_else(|| {
-            AppError::AuthenticationFailed("Invalid client credentials".to_string())
-        })?;
+        .ok_or_else(|| AppError::AuthenticationFailed("Invalid client credentials".to_string()))?;
 
     if !sa.is_active {
         return Err(AppError::AuthenticationFailed(

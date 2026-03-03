@@ -1,36 +1,79 @@
 use axum::{
-    extract::FromRequestParts,
-    http::request::Parts,
-    middleware::Next,
-    response::IntoResponse,
+    extract::FromRequestParts, http::request::Parts, middleware::Next, response::IntoResponse,
 };
 use base64::Engine as _;
 use mongodb::bson::doc;
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::crypto::jwt;
 use crate::crypto::token::hash_token;
 use crate::errors::AppError;
-use crate::models::service_account::{ServiceAccount, COLLECTION_NAME as SERVICE_ACCOUNTS};
-use crate::models::service_account_token::{
-    ServiceAccountToken, COLLECTION_NAME as SA_TOKENS,
-};
-use crate::models::session::{Session, COLLECTION_NAME as SESSIONS};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
-use crate::AppState;
+use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
+use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
+use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 /// Authenticated user extracted from session cookie or Bearer token.
 ///
 /// This acts as an Axum extractor: handlers that include `AuthUser` in their
 /// parameters will automatically reject unauthenticated requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthMethod {
+    /// Browser session cookie
+    Session,
+    /// Bearer access token (JWT)
+    AccessToken,
+    /// X-API-Key header
+    ApiKey,
+    /// Service account client credentials
+    ServiceAccount,
+    /// Delegated access token
+    Delegated,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub user_id: Uuid,
     pub session_id: Option<Uuid>,
-    /// Space-separated scopes from the access token (empty for session/API key auth).
+    /// Space-separated scopes from the access token or API key (empty for session auth).
     pub scope: String,
     /// If this is a delegated request, the OAuth client_id of the acting service.
     pub acting_client_id: Option<String>,
+    /// Resource-owner user ID used for approval/notification decisions.
+    /// For service-account auth this points to the SA owner; otherwise `None`.
+    pub approval_owner_user_id: Option<String>,
+    /// How the user authenticated this request.
+    pub auth_method: AuthMethod,
+}
+
+impl AuthUser {
+    /// Resource owner whose approval settings should be consulted.
+    pub fn effective_approval_owner_user_id(&self) -> String {
+        self.approval_owner_user_id
+            .clone()
+            .unwrap_or_else(|| self.user_id.to_string())
+    }
+
+    /// Canonical requester type used in approval request and grant records.
+    /// Session callers never enter approval flow.
+    pub fn approval_requester_type(&self) -> Option<&'static str> {
+        match self.auth_method {
+            AuthMethod::ApiKey => Some("api_key"),
+            AuthMethod::Delegated => Some("delegated"),
+            AuthMethod::ServiceAccount => Some("service_account"),
+            AuthMethod::AccessToken => Some("access_token"),
+            AuthMethod::Session => None,
+        }
+    }
+
+    /// Canonical requester ID used in approval request and grant records.
+    /// Delegated tokens use acting client_id; all others use token subject.
+    pub fn approval_requester_id(&self) -> String {
+        self.acting_client_id
+            .clone()
+            .unwrap_or_else(|| self.user_id.to_string())
+    }
 }
 
 /// Name of the session cookie.
@@ -55,17 +98,15 @@ impl FromRequestParts<AppState> for AuthUser {
         async move {
             // Try Bearer token first
             if let Some(auth_header) = parts.headers.get("authorization") {
-                let auth_str = auth_header
-                    .to_str()
-                    .map_err(|_| AppError::Unauthorized("Invalid authorization header".to_string()))?;
+                let auth_str = auth_header.to_str().map_err(|_| {
+                    AppError::Unauthorized("Invalid authorization header".to_string())
+                })?;
 
                 if let Some(token) = auth_str.strip_prefix("Bearer ") {
                     let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)?;
 
                     if claims.token_type != "access" {
-                        return Err(AppError::Unauthorized(
-                            "Expected access token".to_string(),
-                        ));
+                        return Err(AppError::Unauthorized("Expected access token".to_string()));
                     }
 
                     // Check if this is a service account token
@@ -73,14 +114,12 @@ impl FromRequestParts<AppState> for AuthUser {
                         let sa_id = claims.sub.clone();
 
                         // Verify the service account exists and is active
-                        let _sa = state
+                        let sa = state
                             .db
                             .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
                             .find_one(doc! { "_id": &sa_id, "is_active": true })
                             .await
-                            .map_err(|e| {
-                                AppError::Internal(format!("SA lookup failed: {e}"))
-                            })?
+                            .map_err(|e| AppError::Internal(format!("SA lookup failed: {e}")))?
                             .ok_or_else(|| {
                                 AppError::Unauthorized(
                                     "Service account is inactive or not found".to_string(),
@@ -106,9 +145,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         }
 
                         let sa_uuid = Uuid::parse_str(&sa_id).map_err(|_| {
-                            AppError::Unauthorized(
-                                "Invalid service account ID".to_string(),
-                            )
+                            AppError::Unauthorized("Invalid service account ID".to_string())
                         })?;
 
                         return Ok(AuthUser {
@@ -116,12 +153,13 @@ impl FromRequestParts<AppState> for AuthUser {
                             session_id: None,
                             scope: claims.scope.clone(),
                             acting_client_id: None,
+                            approval_owner_user_id: Some(sa.effective_owner_user_id().to_string()),
+                            auth_method: AuthMethod::ServiceAccount,
                         });
                     }
 
-                    let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
-                        AppError::Unauthorized("Invalid token subject".to_string())
-                    })?;
+                    let user_id = Uuid::parse_str(&claims.sub)
+                        .map_err(|_| AppError::Unauthorized("Invalid token subject".to_string()))?;
 
                     let user_id_str = user_id.to_string();
 
@@ -131,9 +169,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         .collection::<User>(USERS)
                         .find_one(doc! { "_id": &user_id_str })
                         .await
-                        .map_err(|e| {
-                            AppError::Internal(format!("User lookup failed: {e}"))
-                        })?;
+                        .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
 
                     match user_model {
                         Some(u) if u.is_active => {}
@@ -144,11 +180,19 @@ impl FromRequestParts<AppState> for AuthUser {
                         }
                     }
 
+                    let auth_method = if claims.act.is_some() {
+                        AuthMethod::Delegated
+                    } else {
+                        AuthMethod::AccessToken
+                    };
+
                     return Ok(AuthUser {
                         user_id,
                         session_id: None,
                         scope: claims.scope.clone(),
                         acting_client_id: claims.act.map(|a| a.sub),
+                        approval_owner_user_id: None,
+                        auth_method,
                     });
                 }
             }
@@ -173,47 +217,47 @@ impl FromRequestParts<AppState> for AuthUser {
                     .map_err(|e| AppError::Internal(format!("Session lookup failed: {e}")))?;
 
                 if let Some(sess) = session
-                    && sess.expires_at > chrono::Utc::now() {
-                        let user_id = Uuid::parse_str(&sess.user_id).map_err(|_| {
-                            AppError::Internal("Invalid user_id in session".to_string())
-                        })?;
-                        let session_id = Uuid::parse_str(&sess.id).map_err(|_| {
-                            AppError::Internal("Invalid session id".to_string())
-                        })?;
+                    && sess.expires_at > chrono::Utc::now()
+                {
+                    let user_id = Uuid::parse_str(&sess.user_id).map_err(|_| {
+                        AppError::Internal("Invalid user_id in session".to_string())
+                    })?;
+                    let session_id = Uuid::parse_str(&sess.id)
+                        .map_err(|_| AppError::Internal("Invalid session id".to_string()))?;
 
-                        // Verify the user account is still active
-                        let user_model = state
-                            .db
-                            .collection::<User>(USERS)
-                            .find_one(doc! { "_id": &sess.user_id })
-                            .await
-                            .map_err(|e| {
-                                AppError::Internal(format!("User lookup failed: {e}"))
-                            })?;
+                    // Verify the user account is still active
+                    let user_model = state
+                        .db
+                        .collection::<User>(USERS)
+                        .find_one(doc! { "_id": &sess.user_id })
+                        .await
+                        .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
 
-                        match user_model {
-                            Some(u) if u.is_active => {
-                                // Session-based auth uses an empty scope string.
-                                // RBAC-scoped claims (roles, groups) are only
-                                // included in OAuth tokens that explicitly request
-                                // those scopes. Session users can retrieve RBAC
-                                // data via the /oauth/userinfo endpoint instead.
-                                return Ok(AuthUser {
-                                    user_id,
-                                    session_id: Some(session_id),
-                                    scope: String::new(),
-                                    acting_client_id: None,
-                                });
-                            }
-                            _ => {
-                                // User not found or inactive -- reject session
-                                tracing::warn!(
-                                    user_id = %sess.user_id,
-                                    "Session auth rejected: user inactive or not found"
-                                );
-                            }
+                    match user_model {
+                        Some(u) if u.is_active => {
+                            // Session-based auth uses an empty scope string.
+                            // RBAC-scoped claims (roles, groups) are only
+                            // included in OAuth tokens that explicitly request
+                            // those scopes. Session users can retrieve RBAC
+                            // data via the /oauth/userinfo endpoint instead.
+                            return Ok(AuthUser {
+                                user_id,
+                                session_id: Some(session_id),
+                                scope: String::new(),
+                                acting_client_id: None,
+                                approval_owner_user_id: None,
+                                auth_method: AuthMethod::Session,
+                            });
+                        }
+                        _ => {
+                            // User not found or inactive -- reject session
+                            tracing::warn!(
+                                user_id = %sess.user_id,
+                                "Session auth rejected: user inactive or not found"
+                            );
                         }
                     }
+                }
             }
 
             // Also try access token cookie
@@ -223,14 +267,11 @@ impl FromRequestParts<AppState> for AuthUser {
                 let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)?;
 
                 if claims.token_type != "access" {
-                    return Err(AppError::Unauthorized(
-                        "Expected access token".to_string(),
-                    ));
+                    return Err(AppError::Unauthorized("Expected access token".to_string()));
                 }
 
-                let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
-                    AppError::Unauthorized("Invalid token subject".to_string())
-                })?;
+                let user_id = Uuid::parse_str(&claims.sub)
+                    .map_err(|_| AppError::Unauthorized("Invalid token subject".to_string()))?;
 
                 let user_id_str = user_id.to_string();
 
@@ -240,9 +281,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     .collection::<User>(USERS)
                     .find_one(doc! { "_id": &user_id_str })
                     .await
-                    .map_err(|e| {
-                        AppError::Internal(format!("User lookup failed: {e}"))
-                    })?;
+                    .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
 
                 match user_model {
                     Some(u) if u.is_active => {}
@@ -253,11 +292,19 @@ impl FromRequestParts<AppState> for AuthUser {
                     }
                 }
 
+                let auth_method = if claims.act.is_some() {
+                    AuthMethod::Delegated
+                } else {
+                    AuthMethod::AccessToken
+                };
+
                 return Ok(AuthUser {
                     user_id,
                     session_id: None,
                     scope: claims.scope.clone(),
                     acting_client_id: claims.act.map(|a| a.sub),
+                    approval_owner_user_id: None,
+                    auth_method,
                 });
             }
 
@@ -267,12 +314,11 @@ impl FromRequestParts<AppState> for AuthUser {
                     .to_str()
                     .map_err(|_| AppError::Unauthorized("Invalid API key header".to_string()))?;
 
-                let (user_id_str, _key) =
+                let (user_id_str, key) =
                     crate::services::key_service::validate_api_key(&state.db, api_key).await?;
 
-                let user_id = Uuid::parse_str(&user_id_str).map_err(|_| {
-                    AppError::Internal("Invalid user_id in API key".to_string())
-                })?;
+                let user_id = Uuid::parse_str(&user_id_str)
+                    .map_err(|_| AppError::Internal("Invalid user_id in API key".to_string()))?;
 
                 // Verify the user account is still active
                 let user_model = state
@@ -280,9 +326,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     .collection::<User>(USERS)
                     .find_one(doc! { "_id": &user_id_str })
                     .await
-                    .map_err(|e| {
-                        AppError::Internal(format!("User lookup failed: {e}"))
-                    })?;
+                    .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
 
                 match user_model {
                     Some(u) if u.is_active => {}
@@ -296,8 +340,10 @@ impl FromRequestParts<AppState> for AuthUser {
                 return Ok(AuthUser {
                     user_id,
                     session_id: None,
-                    scope: String::new(),
+                    scope: key.scopes.clone(),
                     acting_client_id: None,
+                    approval_owner_user_id: None,
+                    auth_method: AuthMethod::ApiKey,
                 });
             }
 
@@ -433,12 +479,10 @@ fn is_jwt_service_account(token: &str) -> bool {
 
     let payload = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1]) {
         Ok(bytes) => bytes,
-        Err(_) => {
-            match base64::engine::general_purpose::URL_SAFE.decode(parts[1]) {
-                Ok(bytes) => bytes,
-                Err(_) => return false,
-            }
-        }
+        Err(_) => match base64::engine::general_purpose::URL_SAFE.decode(parts[1]) {
+            Ok(bytes) => bytes,
+            Err(_) => return false,
+        },
     };
 
     if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload) {
@@ -498,7 +542,10 @@ mod tests {
 
     #[test]
     fn parse_cookie_single() {
-        assert_eq!(parse_cookie("nyx_session=abc123", "nyx_session"), Some("abc123"));
+        assert_eq!(
+            parse_cookie("nyx_session=abc123", "nyx_session"),
+            Some("abc123")
+        );
     }
 
     #[test]
@@ -636,5 +683,4 @@ mod tests {
         let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
         assert!(!is_jwt_delegated(&fake_jwt));
     }
-
 }
