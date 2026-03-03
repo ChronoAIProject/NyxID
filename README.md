@@ -162,7 +162,7 @@ It provides a complete identity layer: user registration, session management, Op
 - Per-service `inject_delegation_token` and `delegation_token_scope` control MCP/proxy injection
 
 ### Transaction Approval
-- Push-based approval for service access via Telegram (with architecture designed for future mobile app notifications)
+- Push-based approval for service access via Telegram and mobile push notifications (FCM + APNs)
 - **Blocking flow:** Proxy and LLM gateway requests hold the HTTP connection open until the user approves/rejects or the timeout expires, then return the downstream response or a 403 error -- no retry needed
 - Triggered for **all non-session auth methods** (API keys, delegated tokens, service accounts, access tokens) when the resource owner has approval enabled
 - **Per-service approval configuration:** Override the global approval toggle on a per-service basis (e.g., require approval for OpenAI but auto-approve internal services). 3-tier resolution: per-service config -> global setting -> default (no approval)
@@ -432,6 +432,9 @@ For the full API reference with request/response schemas and example curl comman
 | PUT    | `/api/v1/notifications/settings`            | Required | Update notification/approval settings |
 | POST   | `/api/v1/notifications/telegram/link`       | Required | Generate Telegram link code           |
 | DELETE | `/api/v1/notifications/telegram`            | Required | Disconnect Telegram                   |
+| POST   | `/api/v1/notifications/devices`             | Required | Register push device token            |
+| GET    | `/api/v1/notifications/devices`             | Required | List registered push devices          |
+| DELETE | `/api/v1/notifications/devices/{device_id}` | Required | Remove a push device                  |
 | GET    | `/api/v1/approvals/requests`                | Required | List approval requests (history)      |
 | GET    | `/api/v1/approvals/requests/{id}/status`    | Required | Poll approval request status          |
 | POST   | `/api/v1/approvals/requests/{id}/decide`    | Required | Approve/reject via web UI             |
@@ -517,7 +520,20 @@ chmod 600 keys/private.pem
 | `TELEGRAM_BOT_USERNAME`          |         | Bot username without @ (for link instructions)   |
 | `APPROVAL_EXPIRY_INTERVAL_SECS`  | `5`     | Interval between approval expiry sweeps (seconds)|
 
-The approval system is disabled when `TELEGRAM_BOT_TOKEN` is not set. Users can still enable approval and use the web UI for approving/rejecting requests.
+The approval system works without Telegram -- users can always approve/reject via the web UI. Telegram delivery requires `TELEGRAM_BOT_TOKEN`.
+
+### Mobile Push Notifications (Optional)
+
+| Variable                         | Default | Description                                          |
+|----------------------------------|---------|------------------------------------------------------|
+| `FCM_SERVICE_ACCOUNT_PATH`       |         | Path to Firebase service account JSON file           |
+| `APNS_KEY_PATH`                  |         | Path to APNs .p8 private key file                    |
+| `APNS_KEY_ID`                    |         | APNs Key ID (from Apple Developer portal)            |
+| `APNS_TEAM_ID`                   |         | APNs Team ID (from Apple Developer portal)           |
+| `APNS_TOPIC`                     |         | APNs topic / iOS app bundle ID (e.g. `dev.nyxid.app`)|
+| `APNS_SANDBOX`                   | `true` in dev, `false` in prod | Use APNs sandbox environment |
+
+FCM and APNs are independent -- configure either or both. Push notifications are sent in parallel alongside Telegram. Invalid device tokens are automatically cleaned up when the push service reports them as unregistered.
 
 **Telegram delivery modes:** When `TELEGRAM_WEBHOOK_URL` (and `TELEGRAM_WEBHOOK_SECRET`) are set, the backend registers a webhook with Telegram at startup. When only `TELEGRAM_BOT_TOKEN` is set (no webhook URL), the backend automatically falls back to `getUpdates` long polling -- ideal for local development without ngrok or tunnels.
 
@@ -569,7 +585,7 @@ NyxID uses 23 MongoDB collections:
 | `approval_requests`        | Pending/resolved approval requests for proxy access  |
 | `approval_grants`          | Cached approval grants (time-limited, revocable)     |
 | `service_approval_configs` | Per-service approval overrides (per user)            |
-| `notification_channels`    | Per-user notification preferences and Telegram links |
+| `notification_channels`    | Per-user notification preferences, Telegram links, and push device tokens |
 | `audit_log`                | Immutable audit trail of security events             |
 
 All documents use UUID identifiers, ISO 8601 timestamps, and appropriate indexes for query patterns.
@@ -698,6 +714,8 @@ The frontend uses:
 - [ ] Configure social login provider credentials if needed
 - [ ] Configure SMTP for transactional email
 - [ ] Configure Telegram bot for approval notifications (optional: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_WEBHOOK_URL`)
+- [ ] Configure FCM for mobile push (optional: generate Firebase service account JSON, set `FCM_SERVICE_ACCOUNT_PATH`)
+- [ ] Configure APNs for mobile push (optional: obtain .p8 key from Apple Developer, set `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC`, `APNS_SANDBOX=false`)
 - [ ] Place behind a reverse proxy (nginx, Caddy) that sets `X-Forwarded-For`
 - [ ] Enable TLS termination at the reverse proxy
 - [ ] Set `RUST_LOG=nyxid=info,tower_http=warn` for production log levels
@@ -754,6 +772,7 @@ NyxID/
 |       |   |-- delegation.rs   Delegation token refresh endpoint
 |       |   |-- approvals.rs    Approval request history, grants, decide, status polling
 |       |   |-- notifications.rs Notification settings CRUD, Telegram link/disconnect
+|       |   |-- device_tokens.rs Push device token registration, listing, removal
 |       |   |-- webhooks.rs     Telegram webhook handler (callback queries + link commands)
 |       |   |-- mfa.rs          MFA setup and verification
 |       |   `-- health.rs       Health check
@@ -780,7 +799,8 @@ NyxID/
 |       |   |-- service_account_service.rs Service account CRUD, client credentials auth, token revocation
 |       |   |-- rbac_helpers.rs     Resolve effective roles/groups/permissions for a user
 |       |   |-- approval_service.rs  Approval check, create, process, list, revoke grants
-|       |   |-- notification_service.rs Notification channel abstraction layer
+|       |   |-- notification_service.rs Multi-channel notification delivery (Telegram + FCM + APNs)
+|       |   |-- push_service.rs      FCM HTTP v1 + APNs HTTP/2 push notification clients
 |       |   |-- telegram_service.rs Telegram Bot API client (send, edit, answer, webhook)
 |       |   |-- mcp_service.rs      MCP tool execution, delegation token injection
 |       |   |-- oauth_client_service.rs OAuth client management (admin)

@@ -20,6 +20,8 @@ pub struct NotificationSettingsResponse {
     pub approval_required: bool,
     pub approval_timeout_secs: u32,
     pub grant_expiry_days: u32,
+    pub push_enabled: bool,
+    pub push_device_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +30,7 @@ pub struct UpdateNotificationSettingsRequest {
     pub approval_required: Option<bool>,
     pub approval_timeout_secs: Option<u32>,
     pub grant_expiry_days: Option<u32>,
+    pub push_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,6 +92,14 @@ pub async fn update_settings(
         ));
     }
 
+    // Cannot enable push without at least one registered device
+    if body.push_enabled == Some(true) && channel.push_devices.is_empty() {
+        return Err(AppError::BadRequest(
+            "Cannot enable push notifications without registering at least one device first"
+                .to_string(),
+        ));
+    }
+
     let now = bson::DateTime::from_chrono(Utc::now());
     let mut update_doc = doc! { "updated_at": now };
 
@@ -109,6 +120,9 @@ pub async fn update_settings(
         debug_assert!(v <= i32::MAX as u32, "grant_expiry_days exceeds i32::MAX");
         update_doc.insert("grant_expiry_days", v as i32);
     }
+    if let Some(v) = body.push_enabled {
+        update_doc.insert("push_enabled", v);
+    }
 
     state
         .db
@@ -127,6 +141,7 @@ pub async fn update_settings(
             "approval_required": updated.approval_required,
             "approval_timeout_secs": updated.approval_timeout_secs,
             "grant_expiry_days": updated.grant_expiry_days,
+            "push_enabled": updated.push_enabled,
         })),
         None,
         None,
@@ -244,5 +259,7 @@ fn to_settings_response(channel: &NotificationChannel) -> NotificationSettingsRe
         approval_required: channel.approval_required,
         approval_timeout_secs: channel.approval_timeout_secs,
         grant_expiry_days: channel.grant_expiry_days,
+        push_enabled: channel.push_enabled,
+        push_device_count: channel.push_devices.len(),
     }
 }

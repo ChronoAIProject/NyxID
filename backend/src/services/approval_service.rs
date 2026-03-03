@@ -4,6 +4,7 @@ use mongodb::Database;
 use mongodb::bson::{self, doc};
 use mongodb::options::{FindOneAndUpdateOptions, FindOptions, ReturnDocument};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
@@ -14,6 +15,7 @@ use crate::models::service_approval_config::{
     COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
 };
 use crate::services::notification_service;
+use crate::services::push_service::{ApnsAuth, FcmAuth};
 
 /// Check whether a user has the global approval system enabled.
 pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<bool> {
@@ -91,6 +93,8 @@ pub async fn create_approval_request(
     db: &Database,
     config: &AppConfig,
     http_client: &reqwest::Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
     user_id: &str,
     service_id: &str,
     service_name: &str,
@@ -164,18 +168,21 @@ pub async fn create_approval_request(
         db,
         config,
         http_client,
+        fcm_auth,
+        apns_auth,
         user_id,
         &request,
     )
     .await
     {
-        Ok((channel_name, chat_id, message_id)) => {
+        Ok(result) => {
             // Update the request with notification details
+            let channel_name = result.channels.join(",");
             let update = doc! {
                 "$set": {
                     "notification_channel": &channel_name,
-                    "telegram_chat_id": chat_id,
-                    "telegram_message_id": message_id,
+                    "telegram_chat_id": result.telegram_chat_id,
+                    "telegram_message_id": result.telegram_message_id,
                 }
             };
             collection
@@ -206,6 +213,8 @@ pub async fn process_decision(
     db: &Database,
     config: &AppConfig,
     http_client: &reqwest::Client,
+    fcm_auth: Option<Arc<FcmAuth>>,
+    apns_auth: Option<Arc<ApnsAuth>>,
     request_id: &str,
     approved: bool,
     decision_channel: &str,
@@ -263,14 +272,20 @@ pub async fn process_decision(
             .await?;
     }
 
-    // Edit the Telegram message to show decision (non-blocking)
+    // Notify channels about the decision (best-effort, non-blocking).
     let request_clone = updated.clone();
     let config_clone = config.clone();
     let http_clone = http_client.clone();
+    let db_clone = db.clone();
+    let fcm_auth_clone = fcm_auth.clone();
+    let apns_auth_clone = apns_auth.clone();
     tokio::spawn(async move {
         let _ = notification_service::notify_decision(
             &config_clone,
             &http_clone,
+            fcm_auth_clone.as_deref(),
+            apns_auth_clone.as_deref(),
+            &db_clone,
             &request_clone,
             approved,
         )
@@ -286,6 +301,8 @@ pub async fn expire_pending_requests(
     db: &Database,
     config: &AppConfig,
     http_client: &reqwest::Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
 ) -> AppResult<u64> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
@@ -317,7 +334,11 @@ pub async fn expire_pending_requests(
 
     // Edit Telegram messages for expired requests (best-effort)
     for req in &expired {
-        if req.notification_channel.as_deref() == Some("telegram") {
+        if req
+            .notification_channel
+            .as_deref()
+            .map_or(false, |ch| ch.contains("telegram"))
+        {
             if let (Some(chat_id), Some(message_id)) =
                 (req.telegram_chat_id, req.telegram_message_id)
             {
@@ -339,6 +360,23 @@ pub async fn expire_pending_requests(
                 }
             }
         }
+    }
+
+    // Send silent push to update mobile app UI for expired requests (best-effort)
+    for req in &expired {
+        let mut data = std::collections::HashMap::new();
+        data.insert("type".to_string(), "approval_expired".to_string());
+        data.insert("request_id".to_string(), req.id.clone());
+        let _ = notification_service::send_silent_push_to_user(
+            db,
+            config,
+            http_client,
+            fcm_auth,
+            apns_auth,
+            &req.user_id,
+            &data,
+        )
+        .await;
     }
 
     Ok(count)

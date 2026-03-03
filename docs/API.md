@@ -38,6 +38,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Admin Groups](#admin-groups)
   - [Admin Service Accounts](#admin-service-accounts)
   - [Notification Settings](#notification-settings)
+  - [Device Token Management](#device-token-management)
   - [Approval Management](#approval-management)
   - [Webhooks](#webhooks)
 
@@ -5366,6 +5367,137 @@ Clears the linked Telegram account and disables Telegram notifications.
 ```bash
 curl -X DELETE -H "Authorization: Bearer $TOKEN" \
   http://localhost:3001/api/v1/notifications/telegram
+```
+
+---
+
+## Device Token Management
+
+Register, list, and remove mobile push notification device tokens (FCM and APNs). All endpoints require authentication (human-only, no service accounts or delegated tokens).
+
+### Register Device Token
+
+```
+POST /api/v1/notifications/devices
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications.
+
+**Request Body:**
+
+| Field         | Type   | Required | Description                                           |
+|---------------|--------|----------|-------------------------------------------------------|
+| `platform`    | string | Yes      | `"fcm"` or `"apns"`                                  |
+| `token`       | string | Yes      | Device registration token (max 4096 chars)            |
+| `device_name` | string | No       | Human-readable name (max 100 chars, e.g. "iPhone 15") |
+| `app_id`      | string | APNs: Yes, FCM: No | App bundle ID (used as APNs topic, max 256 chars) |
+
+```json
+{
+  "platform": "fcm",
+  "token": "dGVzdC1kZXZpY2UtdG9rZW4...",
+  "device_name": "iPhone 15 Pro",
+  "app_id": "dev.nyxid.app"
+}
+```
+
+**Validation:**
+- `platform`: Must be `"fcm"` or `"apns"`
+- `token`: Non-empty, max 4096 characters. APNs tokens must be hex-only; FCM tokens allow alphanumeric, `:`, `-`, `_`
+- `app_id`: Required when `platform` is `"apns"`
+- Maximum 10 devices per user
+
+**Response (200):**
+
+```json
+{
+  "device_id": "550e8400-e29b-41d4-a716-446655440000",
+  "platform": "fcm",
+  "device_name": "iPhone 15 Pro",
+  "registered_at": "2026-03-03T12:00:00+00:00"
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Maximum 10 devices exceeded
+- `1008 validation_error` -- Invalid platform, empty token, token too long, missing app_id for APNs, invalid token characters
+
+**curl:**
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"platform": "fcm", "token": "device-token-here", "device_name": "Pixel 8"}' \
+  http://localhost:3001/api/v1/notifications/devices
+```
+
+### List Registered Devices
+
+```
+GET /api/v1/notifications/devices
+Authorization: Bearer <access_token>
+```
+
+Returns all registered push notification devices for the current user. Device tokens are NOT returned (they are secret credentials).
+
+**Response (200):**
+
+```json
+{
+  "devices": [
+    {
+      "device_id": "550e8400-e29b-41d4-a716-446655440000",
+      "platform": "fcm",
+      "device_name": "iPhone 15 Pro",
+      "registered_at": "2026-03-03T12:00:00+00:00",
+      "last_used_at": "2026-03-03T14:30:00+00:00"
+    },
+    {
+      "device_id": "660e8400-e29b-41d4-a716-446655440001",
+      "platform": "apns",
+      "device_name": "iPad Air",
+      "registered_at": "2026-03-01T08:00:00+00:00",
+      "last_used_at": null
+    }
+  ],
+  "push_enabled": true
+}
+```
+
+**curl:**
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/notifications/devices
+```
+
+### Remove Device
+
+```
+DELETE /api/v1/notifications/devices/{device_id}
+Authorization: Bearer <access_token>
+```
+
+Remove a registered push notification device. If no devices remain after removal, push notifications are automatically disabled.
+
+**Response (200):**
+
+```json
+{
+  "message": "Device removed"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Device not found
+
+**curl:**
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/notifications/devices/550e8400-e29b-41d4-a716-446655440000
 ```
 
 ---

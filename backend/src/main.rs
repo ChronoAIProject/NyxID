@@ -23,6 +23,8 @@ use config::AppConfig;
 use crypto::jwt::JwtKeys;
 use models::mcp_session::McpSessionStore;
 
+use services::push_service::{ApnsAuth, FcmAuth};
+
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
 pub struct AppState {
@@ -34,6 +36,10 @@ pub struct AppState {
     pub jwk_json: serde_json::Value,
     /// Hybrid in-memory + MongoDB MCP session store
     pub mcp_sessions: Arc<McpSessionStore>,
+    /// FCM push notification auth (None if not configured)
+    pub fcm_auth: Option<Arc<FcmAuth>>,
+    /// APNs push notification auth (None if not configured)
+    pub apns_auth: Option<Arc<ApnsAuth>>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -62,7 +68,7 @@ async fn main() {
         .init();
 
     // Load configuration
-    let config = AppConfig::from_env();
+    let mut config = AppConfig::from_env();
 
     // Connect to database
     let db = db::create_connection(&config)
@@ -103,6 +109,43 @@ async fn main() {
     // Validate encryption key at startup
     config.validate_encryption_key();
 
+    // Validate and initialize push notification config (reads FCM JSON, verifies APNs key)
+    config.validate_push_config();
+
+    // Initialize push notification auth
+    let fcm_auth = if config.fcm_service_account_path.is_some() {
+        match FcmAuth::from_service_account_file(
+            config.fcm_service_account_path.as_deref().unwrap(),
+        ) {
+            Ok(auth) => Some(Arc::new(auth)),
+            Err(e) => {
+                tracing::error!("Failed to initialize FCM auth: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let apns_auth = if config.apns_key_path.is_some() {
+        match ApnsAuth::new(
+            config.apns_key_path.as_deref().unwrap(),
+            config.apns_key_id.as_deref().expect("APNS_KEY_ID required"),
+            config
+                .apns_team_id
+                .as_deref()
+                .expect("APNS_TEAM_ID required"),
+        ) {
+            Ok(auth) => Some(Arc::new(auth)),
+            Err(e) => {
+                tracing::error!("Failed to initialize APNs auth: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Load JWT signing keys
     let jwt_keys = JwtKeys::from_config(&config).expect("Failed to load JWT keys");
     tracing::info!("JWT keys loaded (kid={})", jwt_keys.kid);
@@ -137,6 +180,8 @@ async fn main() {
         http_client,
         jwk_json,
         mcp_sessions: mcp_sessions.clone(),
+        fcm_auth: fcm_auth.clone(),
+        apns_auth: apns_auth.clone(),
     };
 
     // Create rate limiters
@@ -175,6 +220,8 @@ async fn main() {
     let db_for_expiry = state.db.clone();
     let config_for_expiry = state.config.clone();
     let http_for_expiry = state.http_client.clone();
+    let fcm_for_expiry = state.fcm_auth.clone();
+    let apns_for_expiry = state.apns_auth.clone();
     let expiry_interval_secs = config.approval_expiry_interval_secs;
     tokio::spawn(async move {
         let mut interval =
@@ -185,6 +232,8 @@ async fn main() {
                 &db_for_expiry,
                 &config_for_expiry,
                 &http_for_expiry,
+                fcm_for_expiry.as_deref(),
+                apns_for_expiry.as_deref(),
             )
             .await
             {

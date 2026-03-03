@@ -12,6 +12,7 @@ pub mod connections;
 pub mod consent;
 pub mod delegation;
 pub mod developer_apps;
+pub mod device_tokens;
 pub mod endpoints;
 pub mod health;
 pub mod llm_gateway;

@@ -205,6 +205,8 @@ pub async fn decide_request(
         &state.db,
         &state.config,
         &state.http_client,
+        state.fcm_auth.clone(),
+        state.apns_auth.clone(),
         &request_id,
         body.approved,
         "web",
