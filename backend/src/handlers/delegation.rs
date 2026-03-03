@@ -1,11 +1,11 @@
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde::Serialize;
 
+use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, token_exchange_service};
-use crate::AppState;
 
 #[derive(Serialize)]
 pub struct DelegationRefreshResponse {
@@ -26,9 +26,7 @@ pub async fn refresh_delegation_token(
 ) -> AppResult<Json<DelegationRefreshResponse>> {
     // Only delegated tokens can use this endpoint
     let acting_client_id = auth_user.acting_client_id.as_deref().ok_or_else(|| {
-        AppError::Forbidden(
-            "Only delegated tokens can be refreshed via this endpoint".to_string(),
-        )
+        AppError::Forbidden("Only delegated tokens can be refreshed via this endpoint".to_string())
     })?;
 
     let user_id_str = auth_user.user_id.to_string();

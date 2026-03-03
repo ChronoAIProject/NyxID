@@ -72,7 +72,7 @@ export function ApiKeyTable() {
   async function handleRotate(key: ApiKey) {
     try {
       const result = await rotateMutation.mutateAsync(key.id);
-      setNewKeyValue(result.key);
+      setNewKeyValue(result.full_key);
       toast.success("API key rotated successfully");
     } catch {
       toast.error("Failed to rotate API key");
@@ -170,7 +170,7 @@ export function ApiKeyTable() {
                     <DropdownMenuContent align="end">
                       <DropdownMenuItem
                         onClick={() => void handleRotate(key)}
-                        disabled={key.revoked}
+                        disabled={!key.is_active}
                       >
                         <RefreshCw
                           className="mr-2 h-4 w-4"
@@ -181,7 +181,7 @@ export function ApiKeyTable() {
                       <DropdownMenuItem
                         onClick={() => setDeleteTarget(key)}
                         className="text-destructive focus:text-destructive"
-                        disabled={key.revoked}
+                        disabled={!key.is_active}
                       >
                         <Trash2 className="mr-2 h-4 w-4" aria-hidden="true" />
                         Revoke

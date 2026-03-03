@@ -4,7 +4,7 @@ use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::service_endpoint::{ServiceEndpoint, COLLECTION_NAME};
+use crate::models::service_endpoint::{COLLECTION_NAME, ServiceEndpoint};
 
 /// Input for creating or upserting a single endpoint.
 pub struct EndpointInput {
@@ -215,11 +215,8 @@ pub async fn bulk_upsert_endpoints(
                 set_doc.insert("response_description", bson::Bson::Null);
             }
 
-            coll.update_one(
-                doc! { "_id": &existing.id },
-                doc! { "$set": set_doc },
-            )
-            .await?;
+            coll.update_one(doc! { "_id": &existing.id }, doc! { "$set": set_doc })
+                .await?;
 
             // Return the updated version
             let updated = ServiceEndpoint {

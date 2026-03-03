@@ -1,17 +1,17 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::HeaderMap,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::errors::AppResult;
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
 use crate::models::role::Role;
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, group_service};
-use crate::AppState;
 
 use mongodb::bson::doc;
 
@@ -226,13 +226,10 @@ pub async fn update_group(
 ) -> AppResult<Json<GroupResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    let parent = body.parent_group_id.as_ref().map(|p| {
-        if p.is_empty() {
-            None
-        } else {
-            Some(p.as_str())
-        }
-    });
+    let parent = body
+        .parent_group_id
+        .as_ref()
+        .map(|p| if p.is_empty() { None } else { Some(p.as_str()) });
 
     let group = group_service::update_group(
         &state.db,

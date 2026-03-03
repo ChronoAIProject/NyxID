@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use chrono::Utc;
 use futures::TryStreamExt;
@@ -8,14 +8,12 @@ use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::provider_config::{ProviderConfig, COLLECTION_NAME as PROVIDER_CONFIGS};
-use crate::models::service_provider_requirement::{
-    ServiceProviderRequirement, COLLECTION_NAME,
-};
+use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::service_provider_requirement::{COLLECTION_NAME, ServiceProviderRequirement};
 use crate::mw::auth::AuthUser;
 use crate::services::audit_service;
-use crate::AppState;
 
 use super::services_helpers::{fetch_service, require_admin};
 
@@ -104,10 +102,8 @@ pub async fn list_requirements(
             .try_collect()
             .await?
     };
-    let provider_map: std::collections::HashMap<&str, &ProviderConfig> = providers
-        .iter()
-        .map(|p| (p.id.as_str(), p))
-        .collect();
+    let provider_map: std::collections::HashMap<&str, &ProviderConfig> =
+        providers.iter().map(|p| (p.id.as_str(), p)).collect();
 
     let items: Vec<RequirementResponse> = requirements
         .into_iter()
@@ -133,7 +129,9 @@ pub async fn list_requirements(
         })
         .collect();
 
-    Ok(Json(RequirementListResponse { requirements: items }))
+    Ok(Json(RequirementListResponse {
+        requirements: items,
+    }))
 }
 
 /// POST /api/v1/services/{service_id}/requirements
@@ -262,9 +260,7 @@ pub async fn remove_requirement(
         .await?;
 
     if result.deleted_count == 0 {
-        return Err(AppError::NotFound(
-            "Requirement not found".to_string(),
-        ));
+        return Err(AppError::NotFound("Requirement not found".to_string()));
     }
 
     tracing::info!(

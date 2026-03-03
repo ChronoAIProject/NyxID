@@ -1,4 +1,4 @@
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 
 use crate::AppState;
 
@@ -6,9 +6,7 @@ use crate::AppState;
 ///
 /// OpenID Connect Discovery endpoint. Returns the provider metadata
 /// so relying parties can auto-configure themselves.
-pub async fn openid_configuration(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn openid_configuration(State(state): State<AppState>) -> Json<serde_json::Value> {
     let base = &state.config.base_url;
 
     Json(serde_json::json!({
@@ -64,9 +62,7 @@ pub async fn oauth_authorization_server_metadata(
 ///
 /// RFC 9728 Protected Resource Metadata. MCP clients use this to discover
 /// where to authenticate (NyxID's OAuth endpoints) before connecting.
-pub async fn oauth_protected_resource(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn oauth_protected_resource(State(state): State<AppState>) -> Json<serde_json::Value> {
     let base = &state.config.base_url;
 
     Json(serde_json::json!({
@@ -81,9 +77,7 @@ pub async fn oauth_protected_resource(
 ///
 /// JSON Web Key Set endpoint. Returns the public key(s) used to sign JWTs
 /// so relying parties can verify token signatures.
-pub async fn jwks(
-    State(state): State<AppState>,
-) -> Json<serde_json::Value> {
+pub async fn jwks(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "keys": [state.jwk_json]
     }))

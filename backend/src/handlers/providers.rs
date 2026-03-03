@@ -1,14 +1,14 @@
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, provider_service};
-use crate::AppState;
 
 use super::services_helpers::{require_admin, validate_base_url};
 
@@ -48,7 +48,10 @@ impl std::fmt::Debug for CreateProviderRequest {
             .field("slug", &self.slug)
             .field("provider_type", &self.provider_type)
             .field("client_id", &self.client_id.as_ref().map(|_| "[REDACTED]"))
-            .field("client_secret", &self.client_secret.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -178,10 +181,7 @@ pub async fn list_providers(
 ) -> AppResult<Json<ProviderListResponse>> {
     let providers = provider_service::list_providers(&state.db).await?;
 
-    let items: Vec<ProviderResponse> = providers
-        .into_iter()
-        .map(provider_to_response)
-        .collect();
+    let items: Vec<ProviderResponse> = providers.into_iter().map(provider_to_response).collect();
 
     Ok(Json(ProviderListResponse { providers: items }))
 }
@@ -226,9 +226,7 @@ pub async fn create_provider(
             AppError::ValidationError("client_id is required for OAuth2 providers".to_string())
         })?;
         let client_secret = body.client_secret.as_ref().ok_or_else(|| {
-            AppError::ValidationError(
-                "client_secret is required for OAuth2 providers".to_string(),
-            )
+            AppError::ValidationError("client_secret is required for OAuth2 providers".to_string())
         })?;
         let authorization_url = body.authorization_url.as_ref().ok_or_else(|| {
             AppError::ValidationError(
@@ -258,9 +256,7 @@ pub async fn create_provider(
 
     let device_code_config = if body.provider_type == "device_code" {
         let client_id = body.client_id.as_ref().ok_or_else(|| {
-            AppError::ValidationError(
-                "client_id is required for device_code providers".to_string(),
-            )
+            AppError::ValidationError("client_id is required for device_code providers".to_string())
         })?;
         let authorization_url = body.authorization_url.as_ref().ok_or_else(|| {
             AppError::ValidationError(
@@ -268,9 +264,7 @@ pub async fn create_provider(
             )
         })?;
         let token_url = body.token_url.as_ref().ok_or_else(|| {
-            AppError::ValidationError(
-                "token_url is required for device_code providers".to_string(),
-            )
+            AppError::ValidationError("token_url is required for device_code providers".to_string())
         })?;
         let device_code_url = body.device_code_url.as_ref().ok_or_else(|| {
             AppError::ValidationError(
@@ -413,13 +407,9 @@ pub async fn update_provider(
         documentation_url: body.documentation_url,
     };
 
-    let updated = provider_service::update_provider(
-        &state.db,
-        &encryption_key,
-        &provider_id,
-        updates,
-    )
-    .await?;
+    let updated =
+        provider_service::update_provider(&state.db, &encryption_key, &provider_id, updates)
+            .await?;
 
     audit_service::log_async(
         state.db.clone(),

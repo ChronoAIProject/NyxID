@@ -1,14 +1,14 @@
 use axum::{
-    extract::{Path, Query, State},
     Json,
+    extract::{Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, user_token_service};
-use crate::AppState;
 
 // TODO(SEC-9): Apply stricter per-endpoint rate limiting to OAuth callback and
 // initiate endpoints (e.g. 10 requests/minute per user) instead of relying
@@ -257,10 +257,7 @@ pub async fn generic_oauth_callback(
 
     // Handle OAuth provider errors
     if let Some(ref error) = query.error {
-        let msg = query
-            .error_description
-            .as_deref()
-            .unwrap_or(error.as_str());
+        let msg = query.error_description.as_deref().unwrap_or(error.as_str());
         audit_service::log_async(
             state.db.clone(),
             Some(auth_user.user_id.to_string()),
@@ -278,21 +275,13 @@ pub async fn generic_oauth_callback(
     let code = match query.code.as_deref() {
         Some(c) if !c.is_empty() => c,
         _ => {
-            return redirect_callback(
-                frontend_url,
-                "error",
-                Some("Missing authorization code"),
-            );
+            return redirect_callback(frontend_url, "error", Some("Missing authorization code"));
         }
     };
     let state_param = match query.state.as_deref() {
         Some(s) if !s.is_empty() => s,
         _ => {
-            return redirect_callback(
-                frontend_url,
-                "error",
-                Some("Missing state parameter"),
-            );
+            return redirect_callback(frontend_url, "error", Some("Missing state parameter"));
         }
     };
 
@@ -315,7 +304,11 @@ pub async fn generic_oauth_callback(
                 None,
                 None,
             );
-            return redirect_callback(frontend_url, "error", Some("Invalid or expired OAuth state"));
+            return redirect_callback(
+                frontend_url,
+                "error",
+                Some("Invalid or expired OAuth state"),
+            );
         }
     };
 
@@ -414,8 +407,7 @@ fn redirect_to_path(
 ) -> axum::response::Redirect {
     let mut url = url::Url::parse(&format!("{frontend_url}{path}"))
         .expect("frontend_url + path should be a valid URL");
-    url.query_pairs_mut()
-        .append_pair("provider_status", status);
+    url.query_pairs_mut().append_pair("provider_status", status);
     if let Some(msg) = message {
         url.query_pairs_mut().append_pair("message", msg);
     }
@@ -457,13 +449,8 @@ pub async fn manual_refresh(
     let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     // Attempt to get active token (which triggers lazy refresh for expired OAuth tokens)
-    user_token_service::get_active_token(
-        &state.db,
-        &encryption_key,
-        &user_id_str,
-        &provider_id,
-    )
-    .await?;
+    user_token_service::get_active_token(&state.db, &encryption_key, &user_id_str, &provider_id)
+        .await?;
 
     audit_service::log_async(
         state.db.clone(),

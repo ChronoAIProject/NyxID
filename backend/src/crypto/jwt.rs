@@ -1,10 +1,10 @@
+use base64::Engine as _;
 use chrono::Utc;
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rsa::pkcs1::{DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
-use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
@@ -150,7 +150,11 @@ impl JwtKeys {
         hasher.update(&n_bytes);
         let kid = hex::encode(&hasher.finalize()[..8]);
 
-        Ok(Self { encoding, decoding, kid })
+        Ok(Self {
+            encoding,
+            decoding,
+            kid,
+        })
     }
 }
 
@@ -464,12 +468,11 @@ pub fn verify_token(keys: &JwtKeys, config: &AppConfig, token: &str) -> Result<C
     validation.set_issuer(&[&config.jwt_issuer]);
     validation.set_audience(&[&config.base_url]);
 
-    let token_data = decode::<Claims>(token, &keys.decoding, &validation).map_err(|e| {
-        match e.kind() {
+    let token_data =
+        decode::<Claims>(token, &keys.decoding, &validation).map_err(|e| match e.kind() {
             jsonwebtoken::errors::ErrorKind::ExpiredSignature => AppError::TokenExpired,
             _ => AppError::Unauthorized("Invalid token".to_string()),
-        }
-    })?;
+        })?;
 
     Ok(token_data.claims)
 }
@@ -488,9 +491,7 @@ mod tests {
         let private_pem = private_key
             .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
             .unwrap();
-        let public_pem = public_key
-            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
-            .unwrap();
+        let public_pem = public_key.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF).unwrap();
 
         let encoding = EncodingKey::from_rsa_pem(private_pem.as_bytes()).unwrap();
         let decoding = DecodingKey::from_rsa_pem(public_pem.as_bytes()).unwrap();
@@ -500,7 +501,11 @@ mod tests {
         hasher.update(&n_bytes);
         let kid = hex::encode(&hasher.finalize()[..8]);
 
-        let keys = JwtKeys { encoding, decoding, kid };
+        let keys = JwtKeys {
+            encoding,
+            decoding,
+            kid,
+        };
 
         let config = AppConfig {
             port: 3001,
@@ -528,6 +533,11 @@ mod tests {
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
             cookie_domain: None,
+            telegram_bot_token: None,
+            telegram_webhook_secret: None,
+            telegram_webhook_url: None,
+            telegram_bot_username: None,
+            approval_expiry_interval_secs: 5,
         };
 
         (keys, config)
@@ -537,7 +547,8 @@ mod tests {
     fn generate_and_verify_access_token() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_access_token(&keys, &config, &user_id, "openid profile", None).unwrap();
+        let token =
+            generate_access_token(&keys, &config, &user_id, "openid profile", None).unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.sub, user_id.to_string());
@@ -697,7 +708,12 @@ mod tests {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
         let token = generate_delegated_access_token(
-            &keys, &config, &user_id, "llm:proxy", "test-client-id", 300,
+            &keys,
+            &config,
+            &user_id,
+            "llm:proxy",
+            "test-client-id",
+            300,
         )
         .unwrap();
 
@@ -714,10 +730,9 @@ mod tests {
     fn delegated_token_respects_ttl() {
         let (keys, config) = test_keys_and_config();
         let user_id = Uuid::new_v4();
-        let token = generate_delegated_access_token(
-            &keys, &config, &user_id, "llm:proxy", "svc", 60,
-        )
-        .unwrap();
+        let token =
+            generate_delegated_access_token(&keys, &config, &user_id, "llm:proxy", "svc", 60)
+                .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         // TTL should be ~60 seconds (allow 2s tolerance for test execution time)
@@ -774,10 +789,9 @@ mod tests {
     fn generate_and_verify_service_account_token() {
         let (keys, config) = test_keys_and_config();
         let sa_id = Uuid::new_v4().to_string();
-        let (token, jti) = generate_service_account_token(
-            &keys, &config, &sa_id, "proxy:* llm:proxy", 3600,
-        )
-        .unwrap();
+        let (token, jti) =
+            generate_service_account_token(&keys, &config, &sa_id, "proxy:* llm:proxy", 3600)
+                .unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         assert_eq!(claims.sub, sa_id);
@@ -796,10 +810,8 @@ mod tests {
     fn service_account_token_respects_ttl() {
         let (keys, config) = test_keys_and_config();
         let sa_id = Uuid::new_v4().to_string();
-        let (token, _) = generate_service_account_token(
-            &keys, &config, &sa_id, "proxy:*", 120,
-        )
-        .unwrap();
+        let (token, _) =
+            generate_service_account_token(&keys, &config, &sa_id, "proxy:*", 120).unwrap();
 
         let claims = verify_token(&keys, &config, &token).unwrap();
         let ttl = claims.exp - claims.iat;

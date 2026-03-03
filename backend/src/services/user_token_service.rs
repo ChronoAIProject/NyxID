@@ -8,9 +8,9 @@ use zeroize::Zeroizing;
 
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
-use crate::models::oauth_state::{OAuthState, COLLECTION_NAME as OAUTH_STATES};
-use crate::models::provider_config::{ProviderConfig, COLLECTION_NAME as PROVIDER_CONFIGS};
-use crate::models::user_provider_token::{UserProviderToken, COLLECTION_NAME};
+use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
+use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::user_provider_token::{COLLECTION_NAME, UserProviderToken};
 use crate::services::oauth_flow;
 
 /// Decrypted token ready for injection.
@@ -164,13 +164,13 @@ pub async fn initiate_oauth_connect(
         AppError::Internal("OAuth provider missing authorization_url".to_string())
     })?;
 
-    let client_id_bytes = provider.client_id_encrypted.as_ref().ok_or_else(|| {
-        AppError::Internal("OAuth provider missing client_id".to_string())
-    })?;
+    let client_id_bytes = provider
+        .client_id_encrypted
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("OAuth provider missing client_id".to_string()))?;
     let decrypted_cid = Zeroizing::new(aes::decrypt(client_id_bytes, encryption_key)?);
-    let client_id = String::from_utf8((*decrypted_cid).clone()).map_err(|e| {
-        AppError::Internal(format!("Failed to decode client_id: {e}"))
-    })?;
+    let client_id = String::from_utf8((*decrypted_cid).clone())
+        .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))?;
 
     // Create state for CSRF protection
     let state_id = Uuid::new_v4().to_string();
@@ -294,13 +294,13 @@ pub async fn request_device_code(
         AppError::Internal("Device code provider missing device_code_url".to_string())
     })?;
 
-    let client_id_bytes = provider.client_id_encrypted.as_ref().ok_or_else(|| {
-        AppError::Internal("Device code provider missing client_id".to_string())
-    })?;
+    let client_id_bytes = provider
+        .client_id_encrypted
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Device code provider missing client_id".to_string()))?;
     let decrypted_cid = Zeroizing::new(aes::decrypt(client_id_bytes, encryption_key)?);
-    let client_id = String::from_utf8((*decrypted_cid).clone()).map_err(|e| {
-        AppError::Internal(format!("Failed to decode client_id: {e}"))
-    })?;
+    let client_id = String::from_utf8((*decrypted_cid).clone())
+        .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))?;
 
     // POST JSON with client_id to device code endpoint
     let body = serde_json::json!({ "client_id": &client_id });
@@ -373,14 +373,9 @@ pub async fn request_device_code(
     };
 
     // Encrypt device_auth_id and user_code before storing
-    let device_code_encrypted = hex::encode(aes::encrypt(
-        device_auth_id.as_bytes(),
-        encryption_key,
-    )?);
-    let user_code_encrypted = hex::encode(aes::encrypt(
-        user_code.as_bytes(),
-        encryption_key,
-    )?);
+    let device_code_encrypted =
+        hex::encode(aes::encrypt(device_auth_id.as_bytes(), encryption_key)?);
+    let user_code_encrypted = hex::encode(aes::encrypt(user_code.as_bytes(), encryption_key)?);
 
     // Create state document
     let state_id = Uuid::new_v4().to_string();
@@ -465,15 +460,13 @@ pub async fn poll_device_code(
     }
 
     // When admin-on-behalf flow, store tokens under the target SA's ID
-    let effective_user_id = oauth_state
-        .target_user_id
-        .as_deref()
-        .unwrap_or(user_id);
+    let effective_user_id = oauth_state.target_user_id.as_deref().unwrap_or(user_id);
 
     // Decrypt device_auth_id
-    let device_code_hex = oauth_state.device_code_encrypted.as_ref().ok_or_else(|| {
-        AppError::Internal("OAuth state missing device_auth_id".to_string())
-    })?;
+    let device_code_hex = oauth_state
+        .device_code_encrypted
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("OAuth state missing device_auth_id".to_string()))?;
     let dc_bytes = hex::decode(device_code_hex).map_err(|e| {
         AppError::Internal(format!("Failed to decode encrypted device_auth_id: {e}"))
     })?;
@@ -482,12 +475,12 @@ pub async fn poll_device_code(
         .map_err(|e| AppError::Internal(format!("Failed to decode device_auth_id: {e}")))?;
 
     // Decrypt user_code
-    let user_code_hex = oauth_state.user_code_encrypted.as_ref().ok_or_else(|| {
-        AppError::Internal("OAuth state missing user_code".to_string())
-    })?;
-    let uc_bytes = hex::decode(user_code_hex).map_err(|e| {
-        AppError::Internal(format!("Failed to decode encrypted user_code: {e}"))
-    })?;
+    let user_code_hex = oauth_state
+        .user_code_encrypted
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("OAuth state missing user_code".to_string()))?;
+    let uc_bytes = hex::decode(user_code_hex)
+        .map_err(|e| AppError::Internal(format!("Failed to decode encrypted user_code: {e}")))?;
     let decrypted_uc = Zeroizing::new(aes::decrypt(&uc_bytes, encryption_key)?);
     let user_code = String::from_utf8((*decrypted_uc).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode user_code: {e}")))?;
@@ -531,48 +524,49 @@ pub async fn poll_device_code(
     if !status_code.is_success() {
         // Try to parse RFC 8628 error response as fallback
         if let Ok(resp_data) = response.json::<serde_json::Value>().await
-            && let Some(error) = resp_data["error"].as_str() {
-                match error {
-                    "authorization_pending" => {
-                        return Ok(DeviceCodePollResult {
-                            status: "pending".to_string(),
-                            interval: oauth_state.poll_interval,
-                        });
-                    }
-                    "slow_down" => {
-                        let new_interval = oauth_state.poll_interval.unwrap_or(5) + 5;
-                        db.collection::<OAuthState>(OAUTH_STATES)
-                            .update_one(
-                                doc! { "_id": state },
-                                doc! { "$set": { "poll_interval": new_interval } },
-                            )
-                            .await?;
-                        return Ok(DeviceCodePollResult {
-                            status: "slow_down".to_string(),
-                            interval: Some(new_interval),
-                        });
-                    }
-                    "expired_token" => {
-                        db.collection::<OAuthState>(OAUTH_STATES)
-                            .delete_one(doc! { "_id": state })
-                            .await?;
-                        return Ok(DeviceCodePollResult {
-                            status: "expired".to_string(),
-                            interval: None,
-                        });
-                    }
-                    "access_denied" => {
-                        db.collection::<OAuthState>(OAUTH_STATES)
-                            .delete_one(doc! { "_id": state })
-                            .await?;
-                        return Ok(DeviceCodePollResult {
-                            status: "denied".to_string(),
-                            interval: None,
-                        });
-                    }
-                    _ => {}
+            && let Some(error) = resp_data["error"].as_str()
+        {
+            match error {
+                "authorization_pending" => {
+                    return Ok(DeviceCodePollResult {
+                        status: "pending".to_string(),
+                        interval: oauth_state.poll_interval,
+                    });
                 }
+                "slow_down" => {
+                    let new_interval = oauth_state.poll_interval.unwrap_or(5) + 5;
+                    db.collection::<OAuthState>(OAUTH_STATES)
+                        .update_one(
+                            doc! { "_id": state },
+                            doc! { "$set": { "poll_interval": new_interval } },
+                        )
+                        .await?;
+                    return Ok(DeviceCodePollResult {
+                        status: "slow_down".to_string(),
+                        interval: Some(new_interval),
+                    });
+                }
+                "expired_token" => {
+                    db.collection::<OAuthState>(OAUTH_STATES)
+                        .delete_one(doc! { "_id": state })
+                        .await?;
+                    return Ok(DeviceCodePollResult {
+                        status: "expired".to_string(),
+                        interval: None,
+                    });
+                }
+                "access_denied" => {
+                    db.collection::<OAuthState>(OAUTH_STATES)
+                        .delete_one(doc! { "_id": state })
+                        .await?;
+                    return Ok(DeviceCodePollResult {
+                        status: "denied".to_string(),
+                        interval: None,
+                    });
+                }
+                _ => {}
             }
+        }
         return Err(AppError::Internal(format!(
             "Device code poll returned unexpected status: {status_code}"
         )));
@@ -586,11 +580,9 @@ pub async fn poll_device_code(
 
     // OpenAI returns authorization_code + PKCE for a second exchange step
     if let Some(authorization_code) = resp_data["authorization_code"].as_str() {
-        let code_verifier = resp_data["code_verifier"]
-            .as_str()
-            .ok_or_else(|| {
-                AppError::Internal("Missing code_verifier in device poll response".to_string())
-            })?;
+        let code_verifier = resp_data["code_verifier"].as_str().ok_or_else(|| {
+            AppError::Internal("Missing code_verifier in device poll response".to_string())
+        })?;
 
         let token_url = provider.token_url.as_ref().ok_or_else(|| {
             AppError::Internal("Provider missing token_url for code exchange".to_string())
@@ -619,9 +611,7 @@ pub async fn poll_device_code(
             .form(&token_params)
             .send()
             .await
-            .map_err(|e| {
-                AppError::Internal(format!("Device code token exchange failed: {e}"))
-            })?;
+            .map_err(|e| AppError::Internal(format!("Device code token exchange failed: {e}")))?;
 
         if !token_response.status().is_success() {
             let err_status = token_response.status();
@@ -666,13 +656,11 @@ pub async fn poll_device_code(
 }
 
 /// Decrypt the client_id from a provider config.
-fn decrypt_client_id(
-    provider: &ProviderConfig,
-    encryption_key: &[u8],
-) -> AppResult<String> {
-    let cid_encrypted = provider.client_id_encrypted.as_ref().ok_or_else(|| {
-        AppError::Internal("Provider missing client_id".to_string())
-    })?;
+fn decrypt_client_id(provider: &ProviderConfig, encryption_key: &[u8]) -> AppResult<String> {
+    let cid_encrypted = provider
+        .client_id_encrypted
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Provider missing client_id".to_string()))?;
     let decrypted = Zeroizing::new(aes::decrypt(cid_encrypted, encryption_key)?);
     String::from_utf8((*decrypted).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))
@@ -753,10 +741,7 @@ async fn store_device_code_tokens(
 }
 
 /// Peek at an OAuth state without consuming it (for the generic callback handler).
-pub async fn peek_oauth_state(
-    db: &mongodb::Database,
-    state_id: &str,
-) -> AppResult<OAuthState> {
+pub async fn peek_oauth_state(db: &mongodb::Database, state_id: &str) -> AppResult<OAuthState> {
     db.collection::<OAuthState>(OAUTH_STATES)
         .find_one(doc! { "_id": state_id })
         .await?
@@ -806,14 +791,16 @@ pub async fn handle_oauth_callback(
         .await?
         .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
 
-    let token_url = provider.token_url.as_ref().ok_or_else(|| {
-        AppError::Internal("OAuth provider missing token_url".to_string())
-    })?;
+    let token_url = provider
+        .token_url
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("OAuth provider missing token_url".to_string()))?;
 
     let decrypted_cid = Zeroizing::new(aes::decrypt(
-        provider.client_id_encrypted.as_ref().ok_or_else(|| {
-            AppError::Internal("OAuth provider missing client_id".to_string())
-        })?,
+        provider
+            .client_id_encrypted
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("OAuth provider missing client_id".to_string()))?,
         encryption_key,
     )?);
     let client_id = String::from_utf8((*decrypted_cid).clone())
@@ -845,9 +832,8 @@ pub async fn handle_oauth_callback(
 
     // SEC-M2: Decrypt code_verifier from stored state
     if let Some(ref encrypted_verifier) = oauth_state.code_verifier {
-        let verifier_bytes = hex::decode(encrypted_verifier).map_err(|e| {
-            AppError::Internal(format!("Failed to decode encrypted verifier: {e}"))
-        })?;
+        let verifier_bytes = hex::decode(encrypted_verifier)
+            .map_err(|e| AppError::Internal(format!("Failed to decode encrypted verifier: {e}")))?;
         let decrypted = Zeroizing::new(aes::decrypt(&verifier_bytes, encryption_key)?);
         let verifier = String::from_utf8((*decrypted).clone())
             .map_err(|e| AppError::Internal(format!("Failed to decode verifier: {e}")))?;
@@ -955,9 +941,7 @@ pub async fn get_active_token(
             "status": { "$in": ["active", "expired"] },
         })
         .await?
-        .ok_or_else(|| {
-            AppError::NotFound("No active token found for this provider".to_string())
-        })?;
+        .ok_or_else(|| AppError::NotFound("No active token found for this provider".to_string()))?;
 
     // Update last_used_at
     let now = Utc::now();
@@ -974,9 +958,8 @@ pub async fn get_active_token(
                 AppError::Internal("API key token missing encrypted key".to_string())
             })?;
             let decrypted_bytes = Zeroizing::new(aes::decrypt(&encrypted, encryption_key)?);
-            let decrypted = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-                AppError::Internal(format!("Failed to decode API key: {e}"))
-            })?;
+            let decrypted = String::from_utf8((*decrypted_bytes).clone())
+                .map_err(|e| AppError::Internal(format!("Failed to decode API key: {e}")))?;
 
             Ok(DecryptedProviderToken {
                 token_type: "api_key".to_string(),
@@ -1015,9 +998,8 @@ pub async fn get_active_token(
                 AppError::Internal("OAuth token missing encrypted access_token".to_string())
             })?;
             let decrypted_bytes = Zeroizing::new(aes::decrypt(&encrypted, encryption_key)?);
-            let decrypted = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-                AppError::Internal(format!("Failed to decode access token: {e}"))
-            })?;
+            let decrypted = String::from_utf8((*decrypted_bytes).clone())
+                .map_err(|e| AppError::Internal(format!("Failed to decode access token: {e}")))?;
 
             Ok(DecryptedProviderToken {
                 token_type: "oauth2".to_string(),
@@ -1025,9 +1007,7 @@ pub async fn get_active_token(
                 api_key: None,
             })
         }
-        other => Err(AppError::Internal(format!(
-            "Unknown token type: {other}"
-        ))),
+        other => Err(AppError::Internal(format!("Unknown token type: {other}"))),
     }
 }
 
@@ -1101,18 +1081,17 @@ pub async fn list_user_tokens(
         .await?
         .try_collect()
         .await?;
-    let provider_map: HashMap<&str, &ProviderConfig> = providers
-        .iter()
-        .map(|p| (p.id.as_str(), p))
-        .collect();
+    let provider_map: HashMap<&str, &ProviderConfig> =
+        providers.iter().map(|p| (p.id.as_str(), p)).collect();
 
     let summaries = tokens
         .iter()
         .map(|token| {
-            let (provider_name, provider_slug) = match provider_map.get(token.provider_config_id.as_str()) {
-                Some(p) => (p.name.clone(), p.slug.clone()),
-                None => ("Unknown".to_string(), "unknown".to_string()),
-            };
+            let (provider_name, provider_slug) =
+                match provider_map.get(token.provider_config_id.as_str()) {
+                    Some(p) => (p.name.clone(), p.slug.clone()),
+                    None => ("Unknown".to_string(), "unknown".to_string()),
+                };
 
             UserProviderTokenSummary {
                 provider_config_id: token.provider_config_id.clone(),

@@ -4,7 +4,7 @@ use mongodb::bson::doc;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::consent::{Consent, COLLECTION_NAME as CONSENTS};
+use crate::models::consent::{COLLECTION_NAME as CONSENTS, Consent};
 
 /// Grant consent for a user to a client with specific scopes.
 /// Upserts: if consent exists for (user_id, client_id), replaces scopes.
@@ -44,10 +44,7 @@ pub async fn grant_consent(
             };
 
             db.collection::<Consent>(CONSENTS)
-                .replace_one(
-                    doc! { "_id": &updated.id },
-                    &updated,
-                )
+                .replace_one(doc! { "_id": &updated.id }, &updated)
                 .await?;
 
             Ok(updated)
@@ -83,16 +80,11 @@ pub async fn check_consent(
                 }
             }
 
-            let granted: std::collections::HashSet<&str> =
-                c.scopes.split_whitespace().collect();
+            let granted: std::collections::HashSet<&str> = c.scopes.split_whitespace().collect();
             let requested: Vec<&str> = requested_scopes.split_whitespace().collect();
 
             let all_covered = requested.iter().all(|s| granted.contains(s));
-            if all_covered {
-                Ok(Some(c))
-            } else {
-                Ok(None)
-            }
+            if all_covered { Ok(Some(c)) } else { Ok(None) }
         }
         None => Ok(None),
     }
@@ -117,10 +109,7 @@ pub async fn revoke_consent(
 }
 
 /// List all consents for a user.
-pub async fn list_user_consents(
-    db: &mongodb::Database,
-    user_id: &str,
-) -> AppResult<Vec<Consent>> {
+pub async fn list_user_consents(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<Consent>> {
     let consents: Vec<Consent> = db
         .collection::<Consent>(CONSENTS)
         .find(doc! { "user_id": user_id })

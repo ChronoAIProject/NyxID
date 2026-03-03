@@ -1,10 +1,10 @@
-use axum::http::{header, HeaderMap};
+use axum::http::{HeaderMap, header};
 use mongodb::bson::doc;
 
-use crate::errors::{AppError, AppResult};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
-use crate::mw::auth::AuthUser;
 use crate::AppState;
+use crate::errors::{AppError, AppResult};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::mw::auth::AuthUser;
 
 /// Check that the authenticated user has admin privileges.
 ///

@@ -1,17 +1,30 @@
 use axum::{
+    Json,
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{Method, Request, StatusCode},
     response::Response,
 };
+use futures::TryStreamExt;
 use mongodb::bson::doc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
+use crate::AppState;
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user_service_connection::{
+    COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
+};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, delegation_service, identity_service, proxy_service};
-use crate::AppState;
+use crate::services::{
+    approval_service, audit_service, delegation_service, identity_service, notification_service,
+    proxy_service,
+};
 
 /// Response headers that are safe to forward back to the client.
 /// Uses an allowlist to prevent leaking internal headers from downstream services.
@@ -43,15 +56,44 @@ pub async fn proxy_request(
     Path((service_id, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    execute_proxy(&state, &auth_user, &service_id, &path, request).await
+}
+
+/// ANY /api/v1/proxy/s/:slug/*path
+///
+/// Resolve the service by slug, then forward via the shared proxy pipeline.
+pub async fn proxy_request_by_slug(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((slug, path)): Path<(String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    let service = proxy_service::resolve_service_by_slug(&state.db, &slug).await?;
+    execute_proxy(&state, &auth_user, &service.id, &path, request).await
+}
+
+/// Core proxy execution logic shared by UUID and slug handlers.
+///
+/// Takes the resolved service_id (UUID string) and executes the full proxy
+/// pipeline: resolve target, build identity headers, inject delegation token,
+/// resolve delegated credentials, forward request, and return response.
+async fn execute_proxy(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    path: &str,
+    request: Request<Body>,
+) -> AppResult<Response> {
     let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     let user_id_str = auth_user.user_id.to_string();
+    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
 
     let target = match proxy_service::resolve_proxy_target(
         &state.db,
         &encryption_key,
         &user_id_str,
-        &service_id,
+        service_id,
     )
     .await
     {
@@ -62,7 +104,7 @@ pub async fn proxy_request(
                 Some(user_id_str.clone()),
                 "proxy_request_denied".to_string(),
                 Some(serde_json::json!({
-                    "service_id": &service_id,
+                    "service_id": service_id,
                     "reason": e.to_string(),
                 })),
                 None,
@@ -71,6 +113,60 @@ pub async fn proxy_request(
             return Err(e);
         }
     };
+
+    // Check approval if user has it enabled for this service.
+    // Only direct browser sessions bypass approval; API keys, delegated tokens,
+    // and service accounts all require approval since they represent programmatic access.
+    let requires_approval = approval_service::requires_approval_for_service(
+        &state.db,
+        &approval_owner_user_id,
+        service_id,
+    )
+    .await?;
+
+    if should_enforce_runtime_approval(requires_approval, &auth_user.auth_method) {
+        let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
+            AppError::Forbidden("Session auth does not require approval".to_string())
+        })?;
+        let requester_id = auth_user.approval_requester_id();
+
+        let has_grant = approval_service::check_approval(
+            &state.db,
+            &approval_owner_user_id,
+            service_id,
+            requester_type,
+            &requester_id,
+        )
+        .await?;
+
+        if !has_grant {
+            let channel =
+                notification_service::get_or_create_channel(&state.db, &approval_owner_user_id)
+                    .await?;
+
+            let request_method = request.method().as_str().to_string();
+            let timeout_secs = channel.approval_timeout_secs;
+            let approval_request = approval_service::create_approval_request(
+                &state.db,
+                &state.config,
+                &state.http_client,
+                &approval_owner_user_id,
+                service_id,
+                &target.service.name,
+                &target.service.slug,
+                requester_type,
+                &requester_id,
+                None,
+                &format!("proxy:{} {}", request_method, path),
+                timeout_secs,
+            )
+            .await?;
+
+            // Block until the user approves/rejects or timeout expires
+            approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
+                .await?;
+        }
+    }
 
     // Build identity headers if configured on the service
     let mut identity_headers = Vec::new();
@@ -104,10 +200,7 @@ pub async fn proxy_request(
                     &target.service,
                 ) {
                     Ok(assertion) => {
-                        identity_headers.push((
-                            "X-NyxID-Identity-Token".to_string(),
-                            assertion,
-                        ));
+                        identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -134,10 +227,7 @@ pub async fn proxy_request(
             crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
         ) {
             Ok(delegation_token) => {
-                identity_headers.push((
-                    "X-NyxID-Delegation-Token".to_string(),
-                    delegation_token,
-                ));
+                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
             }
             Err(e) => {
                 tracing::warn!(
@@ -154,7 +244,7 @@ pub async fn proxy_request(
         &state.db,
         &encryption_key,
         &user_id_str,
-        &service_id,
+        service_id,
     )
     .await
     .unwrap_or_default();
@@ -189,9 +279,10 @@ pub async fn proxy_request(
     let mut reqwest_headers = reqwest::header::HeaderMap::new();
     for (name, value) in headers.iter() {
         if let Ok(reqwest_name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            && let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
-                reqwest_headers.insert(reqwest_name, reqwest_value);
-            }
+            && let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
+        {
+            reqwest_headers.insert(reqwest_name, reqwest_value);
+        }
     }
 
     // Reuse the shared reqwest::Client from AppState for connection pooling
@@ -199,7 +290,7 @@ pub async fn proxy_request(
         &state.http_client,
         &target,
         reqwest_method,
-        &path,
+        path,
         query.as_deref(),
         reqwest_headers,
         body,
@@ -220,11 +311,10 @@ pub async fn proxy_request(
         if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
             && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-                && let Ok(header_value) =
-                    axum::http::header::HeaderValue::from_bytes(value.as_bytes())
-                {
-                    response_builder = response_builder.header(header_name, header_value);
-                }
+            && let Ok(header_value) = axum::http::header::HeaderValue::from_bytes(value.as_bytes())
+        {
+            response_builder = response_builder.header(header_name, header_value);
+        }
     }
 
     let response_body = downstream_response
@@ -242,15 +332,174 @@ pub async fn proxy_request(
         Some(user_id_str),
         "proxy_request".to_string(),
         Some(serde_json::json!({
-            "service_id": &service_id,
+            "service_id": service_id,
             "method": method.as_str(),
-            "path": &path,
+            "path": path,
             "response_status": status.as_u16(),
-            "acting_client_id": auth_user.acting_client_id,
+            "acting_client_id": &auth_user.acting_client_id,
         })),
         None,
         None,
     );
 
     Ok(response)
+}
+
+fn should_enforce_runtime_approval(
+    requires_approval: bool,
+    auth_method: &crate::mw::auth::AuthMethod,
+) -> bool {
+    requires_approval && *auth_method != crate::mw::auth::AuthMethod::Session
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_enforce_runtime_approval;
+    use crate::mw::auth::AuthMethod;
+
+    #[test]
+    fn session_auth_bypasses_even_when_required() {
+        assert!(!should_enforce_runtime_approval(true, &AuthMethod::Session));
+    }
+
+    #[test]
+    fn non_session_auth_requires_enforcement_when_required() {
+        assert!(should_enforce_runtime_approval(true, &AuthMethod::ApiKey));
+        assert!(should_enforce_runtime_approval(
+            true,
+            &AuthMethod::AccessToken
+        ));
+        assert!(should_enforce_runtime_approval(
+            true,
+            &AuthMethod::Delegated
+        ));
+        assert!(should_enforce_runtime_approval(
+            true,
+            &AuthMethod::ServiceAccount
+        ));
+    }
+
+    #[test]
+    fn no_enforcement_when_approval_not_required() {
+        assert!(!should_enforce_runtime_approval(
+            false,
+            &AuthMethod::Session
+        ));
+        assert!(!should_enforce_runtime_approval(false, &AuthMethod::ApiKey));
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProxyServiceItem {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub description: Option<String>,
+    pub service_category: String,
+    /// Whether the user has an active connection to this service
+    pub connected: bool,
+    /// Whether a connection is required before proxying
+    pub requires_connection: bool,
+    /// UUID-based proxy URL
+    pub proxy_url: String,
+    /// Slug-based proxy URL (developer-friendly)
+    pub proxy_url_slug: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProxyServicesQuery {
+    pub page: Option<u64>,
+    pub per_page: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProxyServicesResponse {
+    pub services: Vec<ProxyServiceItem>,
+    pub total: u64,
+    pub page: u64,
+    pub per_page: u64,
+}
+
+/// GET /api/v1/proxy/services
+///
+/// List downstream services available for proxying with their proxy URLs.
+/// Excludes "provider" category services (not proxyable).
+/// Supports pagination via `page` and `per_page` query parameters.
+pub async fn list_proxy_services(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<ProxyServicesQuery>,
+) -> AppResult<Json<ProxyServicesResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let base = state.config.base_url.trim_end_matches('/');
+
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(50).min(100);
+    let offset = (page - 1) * per_page;
+
+    let filter = doc! {
+        "is_active": true,
+        "service_category": { "$ne": "provider" },
+    };
+
+    // Get total count for pagination metadata
+    let total = state
+        .db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .count_documents(filter.clone())
+        .await?;
+
+    // Get paginated active, non-provider services
+    let services: Vec<DownstreamService> = state
+        .db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(filter)
+        .sort(doc! { "name": 1 })
+        .skip(offset)
+        .limit(per_page as i64)
+        .await?
+        .try_collect()
+        .await?;
+
+    // Get user's active connections in a single query
+    let service_ids: Vec<&str> = services.iter().map(|s| s.id.as_str()).collect();
+    let connections: Vec<UserServiceConnection> = if service_ids.is_empty() {
+        vec![]
+    } else {
+        state
+            .db
+            .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
+            .find(doc! {
+                "user_id": &user_id_str,
+                "service_id": { "$in": &service_ids },
+                "is_active": true,
+            })
+            .await?
+            .try_collect()
+            .await?
+    };
+
+    let connected_set: HashSet<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
+
+    let items: Vec<ProxyServiceItem> = services
+        .iter()
+        .map(|s| ProxyServiceItem {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            slug: s.slug.clone(),
+            description: s.description.clone(),
+            service_category: s.service_category.clone(),
+            connected: connected_set.contains(s.id.as_str()),
+            requires_connection: s.requires_user_credential,
+            proxy_url: format!("{base}/api/v1/proxy/{}/{{path}}", s.id),
+            proxy_url_slug: format!("{base}/api/v1/proxy/s/{}/{{path}}", s.slug),
+        })
+        .collect();
+
+    Ok(Json(ProxyServicesResponse {
+        services: items,
+        total,
+        page,
+        per_page,
+    }))
 }

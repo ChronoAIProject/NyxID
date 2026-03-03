@@ -1,14 +1,14 @@
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
-use crate::services::{openapi_parser, service_endpoint_service};
 use crate::services::service_endpoint_service::{EndpointInput, EndpointUpdate};
-use crate::AppState;
+use crate::services::{openapi_parser, service_endpoint_service};
 
 use super::services_helpers::{fetch_service, require_admin_or_creator};
 
@@ -80,16 +80,13 @@ fn validate_endpoint_name(name: &str) -> AppResult<()> {
         ));
     }
 
-    let valid = name
-        .chars()
-        .enumerate()
-        .all(|(i, c)| {
-            if i == 0 {
-                c.is_ascii_lowercase()
-            } else {
-                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'
-            }
-        });
+    let valid = name.chars().enumerate().all(|(i, c)| {
+        if i == 0 {
+            c.is_ascii_lowercase()
+        } else {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'
+        }
+    });
 
     if !valid {
         return Err(AppError::ValidationError(
@@ -125,9 +122,7 @@ fn validate_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn endpoint_to_response(
-    e: crate::models::service_endpoint::ServiceEndpoint,
-) -> EndpointResponse {
+fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> EndpointResponse {
     EndpointResponse {
         id: e.id,
         service_id: e.service_id,
@@ -158,10 +153,7 @@ pub async fn list_endpoints(
     let _service = fetch_service(&state, &service_id).await?;
 
     let endpoints = service_endpoint_service::list_endpoints(&state.db, &service_id).await?;
-    let items: Vec<EndpointResponse> = endpoints
-        .into_iter()
-        .map(endpoint_to_response)
-        .collect();
+    let items: Vec<EndpointResponse> = endpoints.into_iter().map(endpoint_to_response).collect();
 
     Ok(Json(EndpointListResponse { endpoints: items }))
 }
@@ -316,10 +308,7 @@ pub async fn discover_endpoints(
         "Endpoints discovered from OpenAPI spec"
     );
 
-    let items: Vec<EndpointResponse> = endpoints
-        .into_iter()
-        .map(endpoint_to_response)
-        .collect();
+    let items: Vec<EndpointResponse> = endpoints.into_iter().map(endpoint_to_response).collect();
 
     Ok(Json(DiscoverEndpointsResponse {
         message: format!("{count} endpoints discovered and synced"),

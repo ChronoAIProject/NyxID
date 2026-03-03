@@ -59,17 +59,30 @@ pub struct AppConfig {
     /// When set, cookies include `Domain=<value>` so they are shared across
     /// subdomains. Leave unset for single-domain / localhost development.
     pub cookie_domain: Option<String>,
+
+    /// Telegram Bot API token for sending approval notifications.
+    pub telegram_bot_token: Option<String>,
+
+    /// Secret token for verifying Telegram webhook callbacks.
+    pub telegram_webhook_secret: Option<String>,
+
+    /// Public URL where Telegram sends webhook callbacks.
+    pub telegram_webhook_url: Option<String>,
+
+    /// Telegram bot username (without @) for link instructions.
+    pub telegram_bot_username: Option<String>,
+
+    /// Interval in seconds between approval expiry sweeps (default: 5).
+    pub approval_expiry_interval_secs: u64,
 }
 
 impl AppConfig {
     /// Load configuration from environment variables.
     /// Panics on missing required variables to fail fast at startup.
     pub fn from_env() -> Self {
-        let environment = env::var("ENVIRONMENT")
-            .unwrap_or_else(|_| "development".to_string());
+        let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string());
 
-        let base_url = env::var("BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:3001".to_string());
+        let base_url = env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3001".to_string());
 
         Self {
             port: env::var("PORT")
@@ -78,8 +91,7 @@ impl AppConfig {
                 .unwrap_or(3001),
             frontend_url: env::var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
-            database_url: env::var("DATABASE_URL")
-                .expect("DATABASE_URL must be set"),
+            database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             database_max_connections: env::var("DATABASE_MAX_CONNECTIONS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -91,8 +103,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "keys/private.pem".to_string()),
             jwt_public_key_path: env::var("JWT_PUBLIC_KEY_PATH")
                 .unwrap_or_else(|_| "keys/public.pem".to_string()),
-            jwt_issuer: env::var("JWT_ISSUER")
-                .unwrap_or_else(|_| base_url.clone()),
+            jwt_issuer: env::var("JWT_ISSUER").unwrap_or_else(|_| base_url.clone()),
 
             base_url,
             jwt_access_ttl_secs: env::var("JWT_ACCESS_TTL_SECS")
@@ -133,6 +144,25 @@ impl AppConfig {
                 .unwrap_or(3600),
 
             cookie_domain: env::var("COOKIE_DOMAIN").ok().filter(|s| !s.is_empty()),
+
+            telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            telegram_webhook_secret: env::var("TELEGRAM_WEBHOOK_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            telegram_webhook_url: env::var("TELEGRAM_WEBHOOK_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
+
+            telegram_bot_username: env::var("TELEGRAM_BOT_USERNAME")
+                .ok()
+                .filter(|s| !s.is_empty()),
+
+            approval_expiry_interval_secs: env::var("APPROVAL_EXPIRY_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
         }
     }
 
@@ -156,8 +186,8 @@ impl AppConfig {
             );
         }
 
-        let key_bytes = hex::decode(&self.encryption_key)
-            .expect("ENCRYPTION_KEY is not valid hexadecimal");
+        let key_bytes =
+            hex::decode(&self.encryption_key).expect("ENCRYPTION_KEY is not valid hexadecimal");
 
         if key_bytes.len() != 32 {
             panic!("ENCRYPTION_KEY must decode to exactly 32 bytes");
@@ -231,12 +261,21 @@ mod tests {
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
             cookie_domain: None,
+            telegram_bot_token: None,
+            telegram_webhook_secret: None,
+            telegram_webhook_url: None,
+            telegram_bot_username: None,
+            approval_expiry_interval_secs: 5,
         }
     }
 
     #[test]
     fn is_development_true() {
-        let cfg = make_config("http://localhost:3001", "development", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "http://localhost:3001",
+            "development",
+            "aa".repeat(32).as_str(),
+        );
         assert!(cfg.is_development());
         let cfg2 = make_config("http://localhost:3001", "dev", "aa".repeat(32).as_str());
         assert!(cfg2.is_development());
@@ -244,37 +283,61 @@ mod tests {
 
     #[test]
     fn is_development_false_for_production() {
-        let cfg = make_config("https://auth.example.com", "production", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "https://auth.example.com",
+            "production",
+            "aa".repeat(32).as_str(),
+        );
         assert!(!cfg.is_development());
     }
 
     #[test]
     fn is_production_true() {
-        let cfg = make_config("https://auth.example.com", "production", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "https://auth.example.com",
+            "production",
+            "aa".repeat(32).as_str(),
+        );
         assert!(cfg.is_production());
     }
 
     #[test]
     fn is_production_false() {
-        let cfg = make_config("http://localhost:3001", "development", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "http://localhost:3001",
+            "development",
+            "aa".repeat(32).as_str(),
+        );
         assert!(!cfg.is_production());
     }
 
     #[test]
     fn secure_cookies_for_https() {
-        let cfg = make_config("https://auth.example.com", "production", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "https://auth.example.com",
+            "production",
+            "aa".repeat(32).as_str(),
+        );
         assert!(cfg.use_secure_cookies());
     }
 
     #[test]
     fn no_secure_cookies_for_localhost() {
-        let cfg = make_config("http://localhost:3001", "development", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "http://localhost:3001",
+            "development",
+            "aa".repeat(32).as_str(),
+        );
         assert!(!cfg.use_secure_cookies());
     }
 
     #[test]
     fn no_secure_cookies_for_127_0_0_1() {
-        let cfg = make_config("http://127.0.0.1:3001", "development", "aa".repeat(32).as_str());
+        let cfg = make_config(
+            "http://127.0.0.1:3001",
+            "development",
+            "aa".repeat(32).as_str(),
+        );
         assert!(!cfg.use_secure_cookies());
     }
 

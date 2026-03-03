@@ -1,18 +1,18 @@
 use axum::{
-    extract::{Path, Query, State},
-    http::{header, HeaderMap},
     Json,
+    extract::{Path, Query, State},
+    http::{HeaderMap, header},
 };
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{AppError, AppResult};
-use crate::mw::auth::AuthUser;
-use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
-use crate::services::{admin_user_service, audit_service, consent_service, oauth_client_service};
 use crate::AppState;
+use crate::errors::{AppError, AppResult};
+use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::mw::auth::AuthUser;
+use crate::services::{admin_user_service, audit_service, consent_service, oauth_client_service};
 
 // --- Request / Response types ---
 
@@ -173,9 +173,7 @@ async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> 
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     if !user_model.is_admin {
-        return Err(AppError::Forbidden(
-            "Admin access required".to_string(),
-        ));
+        return Err(AppError::Forbidden("Admin access required".to_string()));
     }
 
     Ok(())
@@ -230,9 +228,7 @@ pub async fn create_user(
     // Validate email format
     let email = body.email.trim().to_string();
     if email.is_empty() {
-        return Err(AppError::ValidationError(
-            "Email is required".to_string(),
-        ));
+        return Err(AppError::ValidationError("Email is required".to_string()));
     }
 
     // Validate password minimum length
@@ -407,8 +403,7 @@ pub async fn set_user_role(
 
     let admin_id = auth_user.user_id.to_string();
 
-    admin_user_service::set_admin_role(&state.db, &admin_id, &user_id, body.is_admin)
-        .await?;
+    admin_user_service::set_admin_role(&state.db, &admin_id, &user_id, body.is_admin).await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -444,8 +439,7 @@ pub async fn set_user_status(
 
     let admin_id = auth_user.user_id.to_string();
 
-    admin_user_service::set_user_active(&state.db, &admin_id, &user_id, body.is_active)
-        .await?;
+    admin_user_service::set_user_active(&state.db, &admin_id, &user_id, body.is_active).await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -619,8 +613,7 @@ pub async fn revoke_user_sessions(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    let revoked_count =
-        admin_user_service::revoke_all_user_sessions(&state.db, &user_id).await?;
+    let revoked_count = admin_user_service::revoke_all_user_sessions(&state.db, &user_id).await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -852,7 +845,9 @@ pub async fn delete_oauth_client(
         "OAuth client deactivated"
     );
 
-    Ok(Json(serde_json::json!({ "message": "OAuth client deactivated" })))
+    Ok(Json(
+        serde_json::json!({ "message": "OAuth client deactivated" }),
+    ))
 }
 
 // --- Client Consents ---

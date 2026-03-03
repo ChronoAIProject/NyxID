@@ -44,6 +44,11 @@ pub struct ServiceAccount {
     /// The admin user ID who created this service account.
     pub created_by: String,
 
+    /// The resource-owner user ID for approval and notification decisions.
+    /// Defaults to `created_by` for backward compatibility with pre-owner records.
+    #[serde(default)]
+    pub owner_user_id: Option<String>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 
@@ -52,6 +57,14 @@ pub struct ServiceAccount {
 
     #[serde(default, with = "bson_datetime::optional")]
     pub last_authenticated_at: Option<DateTime<Utc>>,
+}
+
+impl ServiceAccount {
+    /// Return the effective owner user ID for this service account.
+    /// Falls back to `created_by` for records created before `owner_user_id` existed.
+    pub fn effective_owner_user_id(&self) -> &str {
+        self.owner_user_id.as_deref().unwrap_or(&self.created_by)
+    }
 }
 
 #[cfg(test)]
@@ -76,6 +89,7 @@ mod tests {
             is_active: true,
             rate_limit_override: None,
             created_by: uuid::Uuid::new_v4().to_string(),
+            owner_user_id: Some(uuid::Uuid::new_v4().to_string()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_authenticated_at: None,
@@ -117,6 +131,7 @@ mod tests {
         assert!(keys.contains(&"allowed_scopes"));
         assert!(keys.contains(&"is_active"));
         assert!(keys.contains(&"created_by"));
+        assert!(keys.contains(&"owner_user_id"));
         assert!(keys.contains(&"created_at"));
         assert!(keys.contains(&"updated_at"));
     }

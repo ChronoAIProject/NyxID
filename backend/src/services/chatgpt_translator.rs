@@ -34,7 +34,14 @@ impl ChatgptTranslator {
         let mut translated = serde_json::Map::new();
 
         // Passthrough fields
-        for key in &["model", "temperature", "top_p", "stream", "tools", "tool_choice"] {
+        for key in &[
+            "model",
+            "temperature",
+            "top_p",
+            "stream",
+            "tools",
+            "tool_choice",
+        ] {
             if let Some(val) = body.get(*key) {
                 translated.insert(key.to_string(), val.clone());
             }
@@ -44,10 +51,7 @@ impl ChatgptTranslator {
         if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
             let (instructions, input) = convert_messages_to_input(messages);
             if let Some(instr) = instructions {
-                translated.insert(
-                    "instructions".to_string(),
-                    serde_json::Value::String(instr),
-                );
+                translated.insert("instructions".to_string(), serde_json::Value::String(instr));
             }
             translated.insert("input".to_string(), serde_json::Value::Array(input));
         }
@@ -81,10 +85,7 @@ impl ChatgptTranslator {
         path: &str,
         body: &serde_json::Value,
     ) -> AppResult<TranslatedRequest> {
-        let mut enriched = body
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let mut enriched = body.as_object().cloned().unwrap_or_default();
 
         // Ensure store=false so responses don't pollute ChatGPT history
         enriched
@@ -121,10 +122,7 @@ impl LlmTranslator for ChatgptTranslator {
         }
     }
 
-    fn translate_response(
-        &self,
-        body: serde_json::Value,
-    ) -> AppResult<serde_json::Value> {
+    fn translate_response(&self, body: serde_json::Value) -> AppResult<serde_json::Value> {
         let output = body
             .get("output")
             .and_then(|o| o.as_array())
@@ -140,12 +138,8 @@ impl LlmTranslator for ChatgptTranslator {
                 "message" => {
                     if let Some(content_arr) = item.get("content").and_then(|c| c.as_array()) {
                         for block in content_arr {
-                            if block.get("type").and_then(|t| t.as_str())
-                                == Some("output_text")
-                            {
-                                if let Some(text) =
-                                    block.get("text").and_then(|t| t.as_str())
-                                {
+                            if block.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                                     text_parts.push(text.to_string());
                                 }
                             }
@@ -153,10 +147,7 @@ impl LlmTranslator for ChatgptTranslator {
                     }
                 }
                 "function_call" => {
-                    let id = item
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
+                    let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
                     let name = item
                         .get("name")
                         .and_then(|v| v.as_str())
@@ -195,10 +186,7 @@ impl LlmTranslator for ChatgptTranslator {
             }
         };
 
-        let id = body
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+        let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
         let model = body
             .get("model")
             .and_then(|v| v.as_str())
@@ -305,10 +293,7 @@ impl LlmTranslator for ChatgptTranslator {
                         .unwrap_or(0) as usize;
                     state.tool_call_indices.push((output_index, tool_index));
 
-                    let tool_id = item
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
+                    let tool_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
                     let tool_name = item
                         .get("name")
                         .and_then(|v| v.as_str())
@@ -533,10 +518,7 @@ fn convert_messages_to_input(
                     .get("tool_call_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let output = msg
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("");
+                let output = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
                 input.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": call_id,
@@ -588,9 +570,8 @@ fn chatgpt_http_client() -> AppResult<reqwest::Client> {
         .or_else(|_| std::env::var("https_proxy"))
     {
         tracing::debug!("ChatGPT HTTP via proxy: {proxy_url}");
-        let proxy = reqwest::Proxy::https(&proxy_url).map_err(|e| {
-            AppError::Internal(format!("Invalid proxy URL: {e}"))
-        })?;
+        let proxy = reqwest::Proxy::https(&proxy_url)
+            .map_err(|e| AppError::Internal(format!("Invalid proxy URL: {e}")))?;
         builder = builder.proxy(proxy);
     }
 
@@ -619,9 +600,8 @@ pub async fn send_to_chatgpt(
 
     let api_url = "https://chatgpt.com/backend-api/codex/responses";
 
-    let request_text = serde_json::to_string(translated_body).map_err(|e| {
-        AppError::Internal(format!("Failed to serialize request: {e}"))
-    })?;
+    let request_text = serde_json::to_string(translated_body)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize request: {e}")))?;
 
     tracing::debug!(
         translate_response,
@@ -674,8 +654,7 @@ pub async fn send_to_chatgpt(
     }
 
     if is_streaming {
-        let (tx, rx) =
-            tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
 
         tokio::spawn(async move {
             let mut received_any_event = false;
@@ -726,9 +705,7 @@ pub async fn send_to_chatgpt(
                         }
 
                         let etype = event.event_type.as_deref().unwrap_or("");
-                        if etype == "response.completed"
-                            || etype == "response.incomplete"
-                        {
+                        if etype == "response.completed" || etype == "response.incomplete" {
                             return;
                         }
                     }
@@ -759,17 +736,13 @@ pub async fn send_to_chatgpt(
                             truncate_for_log(&event.data, 500),
                         );
 
-                        let sse = format!(
-                            "event: {event_type}\ndata: {}\n\n",
-                            event.data,
-                        );
+                        let sse = format!("event: {event_type}\ndata: {}\n\n", event.data,);
                         if tx.send(Ok(bytes::Bytes::from(sse))).await.is_err() {
                             tracing::debug!("ChatGPT SSE client disconnected (passthrough)");
                             return;
                         }
 
-                        if event_type == "response.completed"
-                            || event_type == "response.incomplete"
+                        if event_type == "response.completed" || event_type == "response.incomplete"
                         {
                             return;
                         }
@@ -812,9 +785,7 @@ pub async fn send_to_chatgpt(
             tracing::debug!("ChatGPT SSE stream ended");
         });
 
-        let body = Body::from_stream(
-            tokio_stream::wrappers::ReceiverStream::new(rx),
-        );
+        let body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
         axum::http::Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/event-stream")
@@ -879,16 +850,11 @@ pub async fn send_to_chatgpt(
         } else {
             tracing::debug!(
                 "ChatGPT response (passthrough): {}",
-                truncate_for_log(
-                    &serde_json::to_string(&resp_json).unwrap_or_default(),
-                    2000,
-                ),
+                truncate_for_log(&serde_json::to_string(&resp_json).unwrap_or_default(), 2000,),
             );
             serde_json::to_vec(&resp_json)
         }
-        .map_err(|e| {
-            AppError::Internal(format!("Failed to serialize response: {e}"))
-        })?;
+        .map_err(|e| AppError::Internal(format!("Failed to serialize response: {e}")))?;
 
         axum::http::Response::builder()
             .status(StatusCode::OK)
@@ -1193,9 +1159,7 @@ mod tests {
             "stream": true
         });
 
-        let result = translator
-            .translate_request("responses", &body)
-            .unwrap();
+        let result = translator.translate_request("responses", &body).unwrap();
 
         assert_eq!(result.path, "responses");
         assert_eq!(result.body["model"], "o3");
@@ -1219,9 +1183,7 @@ mod tests {
             "include": ["reasoning.encrypted_content"]
         });
 
-        let result = translator
-            .translate_request("responses", &body)
-            .unwrap();
+        let result = translator.translate_request("responses", &body).unwrap();
 
         // Should preserve client's include as-is
         assert_eq!(
@@ -1238,9 +1200,7 @@ mod tests {
             "input": "What is 2+2?"
         });
 
-        let result = translator
-            .translate_request("responses", &body)
-            .unwrap();
+        let result = translator.translate_request("responses", &body).unwrap();
 
         assert_eq!(result.body["input"], "What is 2+2?");
     }
@@ -1335,10 +1295,7 @@ mod tests {
 
         let result = translator.translate_response(resp).unwrap();
 
-        assert_eq!(
-            result["choices"][0]["message"]["content"],
-            "Let me check."
-        );
+        assert_eq!(result["choices"][0]["message"]["content"], "Let me check.");
         assert_eq!(result["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(
             result["choices"][0]["message"]["tool_calls"]
@@ -1602,17 +1559,21 @@ mod tests {
             "response.output_text.done",
             r#"{"type":"response.output_text.done","text":"full text"}"#,
         );
-        assert!(translator
-            .translate_stream_event(&event, &mut state)
-            .is_none());
+        assert!(
+            translator
+                .translate_stream_event(&event, &mut state)
+                .is_none()
+        );
 
         let event2 = make_event(
             "response.content_part.added",
             r#"{"type":"response.content_part.added"}"#,
         );
-        assert!(translator
-            .translate_stream_event(&event2, &mut state)
-            .is_none());
+        assert!(
+            translator
+                .translate_stream_event(&event2, &mut state)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1624,16 +1585,19 @@ mod tests {
             "response.output_item.added",
             r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[]}}"#,
         );
-        assert!(translator
-            .translate_stream_event(&event, &mut state)
-            .is_none());
+        assert!(
+            translator
+                .translate_stream_event(&event, &mut state)
+                .is_none()
+        );
     }
 
     // --- SSE event parser tests ---
 
     #[test]
     fn extract_sse_event_basic() {
-        let mut buf = "event: response.created\ndata: {\"type\":\"response.created\"}\n\n".to_string();
+        let mut buf =
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n".to_string();
         let event = extract_next_sse_event(&mut buf).unwrap();
         assert_eq!(event.event_type.as_deref(), Some("response.created"));
         assert_eq!(event.data, "{\"type\":\"response.created\"}");
@@ -1642,7 +1606,8 @@ mod tests {
 
     #[test]
     fn extract_sse_event_data_only() {
-        let mut buf = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n".to_string();
+        let mut buf =
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n".to_string();
         let event = extract_next_sse_event(&mut buf).unwrap();
         // Should extract type from JSON data when no event: header
         assert_eq!(
@@ -1662,7 +1627,8 @@ mod tests {
 
     #[test]
     fn extract_sse_event_multiple_events() {
-        let mut buf = "event: a\ndata: {\"type\":\"a\"}\n\nevent: b\ndata: {\"type\":\"b\"}\n\n".to_string();
+        let mut buf =
+            "event: a\ndata: {\"type\":\"a\"}\n\nevent: b\ndata: {\"type\":\"b\"}\n\n".to_string();
         let e1 = extract_next_sse_event(&mut buf).unwrap();
         assert_eq!(e1.event_type.as_deref(), Some("a"));
         let e2 = extract_next_sse_event(&mut buf).unwrap();

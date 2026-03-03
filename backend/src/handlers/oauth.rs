@@ -1,21 +1,22 @@
 use axum::{
-    extract::{Form, Query, State, rejection::QueryRejection},
-    http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
     Json,
+    extract::{Form, Query, State, rejection::QueryRejection},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
-use crate::models::service_account_token::{
-    ServiceAccountToken, COLLECTION_NAME as SA_TOKENS,
-};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
-use crate::services::{audit_service, consent_service, oauth_client_service, oauth_service, service_account_service, token_exchange_service};
-use crate::AppState;
+use crate::services::{
+    audit_service, consent_service, oauth_client_service, oauth_service, service_account_service,
+    token_exchange_service,
+};
 
 // --- Request / Response types ---
 
@@ -305,13 +306,8 @@ pub async fn authorize_decision(
     }
 
     let user_id_str = auth_user.user_id.to_string();
-    consent_service::grant_consent(
-        &state.db,
-        &user_id_str,
-        &params.client_id,
-        &validated_scope,
-    )
-    .await?;
+    consent_service::grant_consent(&state.db, &user_id_str, &params.client_id, &validated_scope)
+        .await?;
 
     let code = issue_authorization_code(&state, &auth_user, &params, &validated_scope).await?;
     let redirect_url = build_callback_url(&params, &code);
@@ -365,8 +361,7 @@ async fn authorize_inner(
                     return Ok(redirect_302(&redirect_url));
                 }
 
-                let return_to =
-                    build_authorize_url(&state.config.frontend_url, params);
+                let return_to = build_authorize_url(&state.config.frontend_url, params);
                 let login_url = format!(
                     "{}/login?return_to={}",
                     state.config.frontend_url,
@@ -413,8 +408,7 @@ async fn authorize_inner(
                 }
 
                 let code =
-                    issue_authorization_code(state, &auth_user, params, &validated_scope)
-                        .await?;
+                    issue_authorization_code(state, &auth_user, params, &validated_scope).await?;
                 let redirect_url = build_callback_url(params, &code);
 
                 if needs_success_page(&params.redirect_uri) {
@@ -425,9 +419,9 @@ async fn authorize_inner(
             }
         }
     } else {
-        let auth_user = opt_auth.0.ok_or_else(|| {
-            AppError::Unauthorized("Authentication required".to_string())
-        })?;
+        let auth_user = opt_auth
+            .0
+            .ok_or_else(|| AppError::Unauthorized("Authentication required".to_string()))?;
 
         let user_id_str = auth_user.user_id.to_string();
 
@@ -450,8 +444,7 @@ async fn authorize_inner(
             return Err(AppError::ConsentRequired { consent_url });
         }
 
-        let code =
-            issue_authorization_code(state, &auth_user, params, &validated_scope).await?;
+        let code = issue_authorization_code(state, &auth_user, params, &validated_scope).await?;
         let redirect_url = build_callback_url(params, &code);
         Ok(Json(AuthorizeResponse { redirect_url }).into_response())
     }
@@ -488,8 +481,7 @@ async fn validate_authorize_request(
     }
 
     let client =
-        oauth_service::validate_client(&state.db, &params.client_id, &params.redirect_uri)
-            .await?;
+        oauth_service::validate_client(&state.db, &params.client_id, &params.redirect_uri).await?;
     let scope = params.scope.as_deref().unwrap_or("openid profile email");
     let validated_scope = oauth_service::validate_scopes(scope, &client.allowed_scopes)?;
 
@@ -543,7 +535,8 @@ fn oauth_success_page(redirect_url: &str) -> Response {
         .replace('>', "&gt;");
     let js_escaped = redirect_url.replace('\\', "\\\\").replace('\'', "\\'");
 
-    let html = format!(r##"<!DOCTYPE html>
+    let html = format!(
+        r##"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -587,7 +580,8 @@ h1{{font-size:1.125rem;font-weight:600;margin-bottom:.375rem}}
 </div>
 <script>setTimeout(function(){{window.location.replace('{js_escaped}')}},1800)</script>
 </body>
-</html>"##);
+</html>"##
+    );
 
     Response::builder()
         .status(StatusCode::OK)
@@ -648,22 +642,14 @@ fn build_authorize_url(base_url: &str, params: &AuthorizeQuery) -> String {
 
 /// Build the callback redirect URL with code and optional state.
 fn build_callback_url(params: &AuthorizeQuery, code: &str) -> String {
-    let mut url = format!(
-        "{}?code={}",
-        params.redirect_uri,
-        urlencoding::encode(code),
-    );
+    let mut url = format!("{}?code={}", params.redirect_uri, urlencoding::encode(code),);
     if let Some(ref state_param) = params.state {
         url.push_str(&format!("&state={}", urlencoding::encode(state_param)));
     }
     url
 }
 
-fn build_callback_error_url(
-    params: &AuthorizeQuery,
-    error: &str,
-    description: &str,
-) -> String {
+fn build_callback_error_url(params: &AuthorizeQuery, error: &str, description: &str) -> String {
     let mut url = format!(
         "{}?error={}&error_description={}",
         params.redirect_uri,
@@ -781,10 +767,9 @@ async fn token_inner(
                 .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing code parameter".to_string()))?;
 
-            let redirect_uri = body
-                .redirect_uri
-                .as_deref()
-                .ok_or_else(|| AppError::BadRequest("Missing redirect_uri parameter".to_string()))?;
+            let redirect_uri = body.redirect_uri.as_deref().ok_or_else(|| {
+                AppError::BadRequest("Missing redirect_uri parameter".to_string())
+            })?;
 
             let client_id_str = body
                 .client_id
@@ -815,10 +800,9 @@ async fn token_inner(
             }))
         }
         "refresh_token" => {
-            let refresh = body
-                .refresh_token
-                .as_deref()
-                .ok_or_else(|| AppError::BadRequest("Missing refresh_token parameter".to_string()))?;
+            let refresh = body.refresh_token.as_deref().ok_or_else(|| {
+                AppError::BadRequest("Missing refresh_token parameter".to_string())
+            })?;
 
             let tokens = crate::services::token_service::refresh_tokens(
                 &state.db,
@@ -841,13 +825,21 @@ async fn token_inner(
         }
         // RFC 8693 Token Exchange
         "urn:ietf:params:oauth:grant-type:token-exchange" => {
-            let client_id = body.client_id.as_deref()
+            let client_id = body
+                .client_id
+                .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing client_id".to_string()))?;
-            let client_secret = body.client_secret.as_deref()
+            let client_secret = body
+                .client_secret
+                .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
-            let subject_token = body.subject_token.as_deref()
+            let subject_token = body
+                .subject_token
+                .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing subject_token".to_string()))?;
-            let subject_token_type = body.subject_token_type.as_deref()
+            let subject_token_type = body
+                .subject_token_type
+                .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing subject_token_type".to_string()))?;
 
             let result = token_exchange_service::exchange_token(
@@ -887,9 +879,13 @@ async fn token_inner(
 
         // OAuth2 Client Credentials Grant (service accounts)
         "client_credentials" => {
-            let client_id = body.client_id.as_deref()
+            let client_id = body
+                .client_id
+                .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing client_id".to_string()))?;
-            let client_secret = body.client_secret.as_deref()
+            let client_secret = body
+                .client_secret
+                .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
 
             let result = service_account_service::authenticate_client_credentials(
@@ -899,7 +895,8 @@ async fn token_inner(
                 client_id,
                 client_secret,
                 body.scope.as_deref(),
-            ).await;
+            )
+            .await;
 
             match result {
                 Ok(response) => {
@@ -1111,10 +1108,7 @@ pub async fn introspect(
 ///
 /// RFC 7009 Token Revocation. Authenticates the calling client before
 /// revoking the token. Always returns 200 per the spec.
-pub async fn revoke(
-    State(state): State<AppState>,
-    Form(body): Form<RevokeRequest>,
-) -> StatusCode {
+pub async fn revoke(State(state): State<AppState>, Form(body): Form<RevokeRequest>) -> StatusCode {
     // Authenticate the calling client (RFC 7009 requirement).
     // Per the spec, always return 200 even if authentication fails.
     let caller_client_id = match body.client_id.as_deref() {
@@ -1216,10 +1210,7 @@ pub async fn register_client(
 
     let redirect_uris = body.redirect_uris.unwrap_or_default();
 
-    let auth_method = body
-        .token_endpoint_auth_method
-        .as_deref()
-        .unwrap_or("none");
+    let auth_method = body.token_endpoint_auth_method.as_deref().unwrap_or("none");
 
     if auth_method != "none" {
         return Err(AppError::BadRequest(

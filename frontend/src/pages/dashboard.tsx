@@ -25,7 +25,7 @@ export function DashboardPage() {
   const stats: readonly StatItem[] = [
     {
       title: "API Keys",
-      value: apiKeys?.filter((k) => !k.revoked).length ?? 0,
+      value: apiKeys?.filter((k) => k.is_active).length ?? 0,
       description: "Active keys",
       icon: Key,
       loading: keysLoading,

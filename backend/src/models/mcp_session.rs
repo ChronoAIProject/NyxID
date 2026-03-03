@@ -128,8 +128,7 @@ impl McpSessionStore {
 
         // Collect unique user IDs and check which users still have at least
         // one active (non-revoked, non-expired) session.
-        let unique_user_ids: HashSet<&str> =
-            records.iter().map(|r| r.user_id.as_str()).collect();
+        let unique_user_ids: HashSet<&str> = records.iter().map(|r| r.user_id.as_str()).collect();
 
         let bson_now = bson::DateTime::from_chrono(Utc::now());
         let users_with_sessions_cursor = db
@@ -166,8 +165,7 @@ impl McpSessionStore {
             }
 
             let (tx, rx) = mpsc::channel(32);
-            let activated: HashSet<String> =
-                record.activated_service_ids.iter().cloned().collect();
+            let activated: HashSet<String> = record.activated_service_ids.iter().cloned().collect();
             sessions.insert(
                 record.id.clone(),
                 McpSession {
@@ -246,8 +244,7 @@ impl McpSessionStore {
                 activated_service_ids: Vec::new(),
                 created_at: now,
                 last_active_at: now,
-                expires_at: now
-                    + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64),
+                expires_at: now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64),
             };
             let db = db.clone();
             tokio::spawn(async move {
@@ -319,8 +316,7 @@ impl McpSessionStore {
 
                 let db = db.clone();
                 let sid = session_id.to_string();
-                let new_expires =
-                    now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64);
+                let new_expires = now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64);
                 tokio::spawn(async move {
                     if let Err(e) = db
                         .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
@@ -486,11 +482,7 @@ impl McpSessionStore {
 
     /// Send a JSON-RPC notification to the session's SSE stream.
     /// Returns true if sent successfully, false if no listener or channel full.
-    pub fn send_notification(
-        &self,
-        session_id: &str,
-        notification: serde_json::Value,
-    ) -> bool {
+    pub fn send_notification(&self, session_id: &str, notification: serde_json::Value) -> bool {
         let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         if let Some(session) = sessions.get(session_id) {
             if let Some(tx) = &session.notification_tx {
@@ -513,11 +505,7 @@ impl McpSessionStore {
     }
 
     /// Attach a new notification sender (e.g., when SSE reconnects).
-    pub fn set_notification_tx(
-        &self,
-        session_id: &str,
-        tx: mpsc::Sender<serde_json::Value>,
-    ) {
+    pub fn set_notification_tx(&self, session_id: &str, tx: mpsc::Sender<serde_json::Value>) {
         if let Some(session) = self
             .sessions
             .write()
@@ -792,10 +780,7 @@ mod tests {
         assert!(sent);
 
         let msg = rx.recv().await.unwrap();
-        assert_eq!(
-            msg["method"],
-            "notifications/tools/list_changed"
-        );
+        assert_eq!(msg["method"], "notifications/tools/list_changed");
     }
 
     #[test]
@@ -807,20 +792,14 @@ mod tests {
             let mut sessions = store.sessions.write().unwrap();
             sessions.get_mut(&sid).unwrap().notification_tx = None;
         }
-        let sent = store.send_notification(
-            &sid,
-            serde_json::json!({"method": "test"}),
-        );
+        let sent = store.send_notification(&sid, serde_json::json!({"method": "test"}));
         assert!(!sent);
     }
 
     #[test]
     fn send_notification_nonexistent_returns_false() {
         let store = McpSessionStore::new();
-        let sent = store.send_notification(
-            "no-such",
-            serde_json::json!({"method": "test"}),
-        );
+        let sent = store.send_notification("no-such", serde_json::json!({"method": "test"}));
         assert!(!sent);
     }
 
@@ -844,10 +823,7 @@ mod tests {
         store.set_notification_tx(&sid, new_tx);
 
         // Send via the store -- should go to new rx
-        let sent = store.send_notification(
-            &sid,
-            serde_json::json!({"method": "reconnect_test"}),
-        );
+        let sent = store.send_notification(&sid, serde_json::json!({"method": "reconnect_test"}));
         assert!(sent);
 
         let msg = new_rx.recv().await.unwrap();
@@ -861,8 +837,7 @@ mod tests {
         // Force last_active to the past
         {
             let mut sessions = store.sessions.write().unwrap();
-            sessions.get_mut(&sid).unwrap().last_active =
-                Utc::now() - chrono::Duration::hours(2);
+            sessions.get_mut(&sid).unwrap().last_active = Utc::now() - chrono::Duration::hours(2);
         }
         store.reap_expired(Duration::from_secs(3600)); // 1 hour max idle
         assert!(!store.validate(&sid, "user-1"));
@@ -900,7 +875,10 @@ mod tests {
         // Next create should fail
         assert!(store.create("user-1").is_none(), "should reject over limit");
         // Different user should still work
-        assert!(store.create("user-2").is_some(), "different user should work");
+        assert!(
+            store.create("user-2").is_some(),
+            "different user should work"
+        );
     }
 
     #[test]

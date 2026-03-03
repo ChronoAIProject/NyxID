@@ -16,6 +16,7 @@ This document details NyxID's security architecture, threat mitigations, and ope
 - [RBAC Security](#rbac-security)
 - [Token Introspection and Revocation Security](#token-introspection-and-revocation-security)
 - [Delegated Access Security](#delegated-access-security)
+- [Transaction Approval Security](#transaction-approval-security)
 - [Consent Flow Security](#consent-flow-security)
 - [Authentication Security](#authentication-security)
 - [HTTP Security Headers](#http-security-headers)
@@ -208,6 +209,12 @@ All other headers (including `Authorization`, `Cookie`) are stripped.
 
 Proxy requests are limited to 10 MB request body. The global body size limit for other endpoints is 1 MB.
 
+### Slug-Based Proxy
+
+The slug-based proxy route (`ANY /api/v1/proxy/s/{slug}/{*path}`) resolves the slug to a service UUID via a MongoDB query on the `slug` field, then delegates to the same `execute_proxy()` pipeline used by the UUID-based route. All security properties (SSRF protection, path traversal prevention, header allowlists, body size limits, credential injection, audit logging) are inherited identically.
+
+Slug resolution only matches active services (`is_active: true`). Inactive services are not resolvable by slug.
+
 ---
 
 ## Credential Broker Security
@@ -396,6 +403,84 @@ When NyxID proxies MCP tool calls, delegation tokens are only injected for servi
 
 ---
 
+## Transaction Approval Security
+
+### Webhook Verification
+
+Telegram webhooks are verified using constant-time comparison of the `X-Telegram-Bot-Api-Secret-Token` header. To prevent timing side-channels from length differences, both the received and expected values are pre-hashed with SHA-256 before the constant-time comparison:
+
+```rust
+let h1 = Sha256::digest(received.as_bytes());
+let h2 = Sha256::digest(expected.as_bytes());
+h1.ct_eq(&h2).into()
+```
+
+The `subtle` crate provides the `ConstantTimeEq` trait.
+
+### Replay Prevention
+
+Approval decisions are processed atomically using MongoDB `findOneAndUpdate` with filter `{ status: "pending" }`. Once status changes from `pending`, subsequent callbacks for the same request are no-ops. The webhook handler always returns 200 OK regardless of outcome to prevent Telegram retries.
+
+### Chat ID Binding
+
+When processing a Telegram callback, the handler verifies that `callback_query.message.chat.id` matches the `telegram_chat_id` stored on the approval request. This prevents a user from approving another user's requests by spoofing callback data.
+
+### Link Code Security
+
+| Property       | Value                                              |
+|----------------|----------------------------------------------------|
+| Format         | `NYXID-` prefix + 8 alphanumeric characters        |
+| Entropy        | ~41 bits (36^8 combinations)                       |
+| Expiry         | 5 minutes                                          |
+| Usage          | Single-use (cleared after successful linking)      |
+| Generation     | `rand::thread_rng()` with `gen_range(0..36)`       |
+
+### Idempotency
+
+Approval requests use a SHA-256 idempotency key computed from `(user_id, service_id, requester_type, requester_id)`. The `idempotency_key` field has a unique index in MongoDB. If a pending request with the same key exists, it is returned instead of creating a duplicate. Duplicate key errors from race conditions are handled gracefully.
+
+### Status Polling Endpoint Security
+
+The `GET /api/v1/approvals/requests/{request_id}/status` endpoint requires authentication and verifies the original caller binding:
+- `approval_request.user_id` matches the authenticated resource owner
+- `approval_request.requester_type` matches the caller auth method
+- `approval_request.requester_id` matches the caller identity (user ID, service account ID, or delegated client ID)
+
+This prevents cross-caller polling even if another authenticated principal obtains a `request_id`.
+
+### Approval Decision Authorization
+
+The `POST /api/v1/approvals/requests/{request_id}/decide` endpoint verifies that the authenticated user's ID matches the `user_id` on the approval request. Only the resource owner can approve or reject their own requests.
+
+### Error Message Safety
+
+- Telegram messages show service name and requester label but never show credentials or internal IDs
+- The `ApprovalRequired` error response (code 7000) includes the `request_id` but no credential information
+- Internal errors during webhook processing are logged but never returned to Telegram
+
+### Audit Trail
+
+All approval decisions are recorded in the audit log with:
+- `request_id` and `service_id`
+- Whether the request was approved or rejected
+- The decision channel (`telegram` or `web`)
+- Telegram account linking and disconnection events
+
+### Threat Mitigations
+
+| Threat                                | Mitigation                                                    |
+|---------------------------------------|---------------------------------------------------------------|
+| Webhook spoofing                      | Constant-time secret verification (pre-hashed SHA-256)        |
+| Replay of approval callbacks          | Atomic `findOneAndUpdate` with `status: "pending"` filter     |
+| Cross-user approval via spoofed chat  | Chat ID binding verification on callback processing           |
+| Duplicate approval requests           | SHA-256 idempotency key with unique index                     |
+| Link code brute force                 | 5-minute expiry, ~41 bits of entropy                          |
+| Approval request enumeration          | UUID v4 provides ~122 bits of unguessability                  |
+| Stale pending requests                | Background task auto-expires after configured timeout         |
+| Credential leakage in Telegram messages | Only service name and requester label shown; no secrets     |
+
+---
+
 ## Consent Flow Security
 
 ### IDOR Prevention
@@ -443,6 +528,10 @@ Requests are authenticated in this order:
 4. `X-API-Key` header (hashed, looked up in DB)
 
 All methods verify the user is active before granting access.
+
+### API Key Scope Population
+
+When authenticating via API key, the key's configured scopes are populated into the `AuthUser.scope` field. This makes scopes available for downstream enforcement (e.g., future per-service scope requirements). Currently, no handler enforces API key scopes -- any valid API key can access all API-key-permitted endpoints. Scope enforcement is planned as a future enhancement.
 
 ---
 
@@ -531,6 +620,9 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 | Delegated token scope escalation | Scope constrained to client's `delegation_scopes`; `reject_delegated_tokens` middleware blocks non-proxy endpoints |
 | Chained token exchange          | Delegated tokens explicitly rejected as subject tokens for exchange |
 | MCP token replay                | 5-minute TTL on MCP-injected tokens; per-call generation with unique JTI |
+| Approval webhook spoofing       | Constant-time secret verification with pre-hashed SHA-256 comparison |
+| Approval replay attack          | Atomic `findOneAndUpdate` with `status: "pending"` filter; no-op after first decision |
+| Cross-user approval             | Chat ID binding verification; web UI verifies ownership via `user_id` match |
 
 ---
 

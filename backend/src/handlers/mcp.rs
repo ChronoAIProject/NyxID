@@ -1,17 +1,19 @@
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::Serialize;
 use std::collections::HashMap;
 
+use crate::AppState;
 use crate::errors::AppResult;
-use crate::models::downstream_service::{DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES};
-use crate::models::service_endpoint::{ServiceEndpoint, COLLECTION_NAME as SERVICE_ENDPOINTS};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
+use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, ServiceEndpoint};
 use crate::models::user_service_connection::{
-    UserServiceConnection, COLLECTION_NAME as CONNECTIONS,
+    COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
 use crate::mw::auth::AuthUser;
-use crate::AppState;
 
 // --- Response types ---
 

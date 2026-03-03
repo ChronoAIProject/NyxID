@@ -19,6 +19,7 @@ This document describes the system architecture, component design, data flows, a
 - [Identity Propagation](#identity-propagation)
 - [Delegated Access](#delegated-access)
 - [Service Accounts](#service-accounts)
+- [Transaction Approval](#transaction-approval)
 - [Deployment Architecture](#deployment-architecture)
 
 ---
@@ -157,7 +158,7 @@ Handlers are thin HTTP boundary functions. They:
 | `users.rs`    | get_me, update_me                                               |
 | `api_keys.rs` | list_keys, create_key, delete_key, rotate_key                   |
 | `services.rs` | list_services, create_service, delete_service                   |
-| `proxy.rs`    | proxy_request (wildcard, all HTTP methods)                      |
+| `proxy.rs`    | proxy_request (UUID-based), proxy_request_by_slug (slug-based), list_proxy_services (discovery) |
 | `oauth.rs`    | authorize, token, userinfo                                      |
 | `admin.rs`    | list_users, get_user, update_user, set_user_role, set_user_status, force_password_reset, delete_user, verify_user_email, list_user_sessions, revoke_user_sessions, list_audit_log, oauth client CRUD |
 | `admin_roles.rs` | list_roles, create_role, get_role, update_role, delete_role, get_user_roles, assign_role, revoke_role |
@@ -182,7 +183,7 @@ The service layer contains all business logic. Services receive database connect
 | `token_service.rs`  | Session creation, JWT token pair issuance, refresh token rotation with replay detection, MFA pending session management |
 | `oauth_service.rs`  | OAuth client validation, redirect URI verification, scope validation, authorization code creation/exchange, PKCE S256 verification, ID token generation |
 | `key_service.rs`    | API key creation (prefix + SHA-256 hash), listing, deletion (soft deactivation), rotation (atomic deactivate + recreate) |
-| `proxy_service.rs`  | Downstream service resolution, credential decryption, request forwarding with credential injection (header/bearer/query/basic), header allowlist enforcement |
+| `proxy_service.rs`  | Downstream service resolution (by UUID and slug), credential decryption, request forwarding with credential injection (header/bearer/query/basic), header allowlist enforcement |
 | `mfa_service.rs`    | TOTP secret generation with QR provisioning, code verification against encrypted secrets, recovery code management |
 | `admin_user_service.rs` | Admin user CRUD (update profile, set role, set status), cascade user deletion across 8 collections, force password reset, manual email verification, session listing and bulk revocation |
 | `role_service.rs`   | Role CRUD (slug uniqueness, system role protection), user role assignment/revocation, system role seeding at startup |
@@ -487,13 +488,25 @@ Client App          User Browser         NyxID Backend        Database
 
 ### Proxy Request Flow
 
+Two proxy URL formats are supported:
+- **UUID-based:** `ANY /api/v1/proxy/{service_id}/{*path}` -- uses the service UUID directly
+- **Slug-based:** `ANY /api/v1/proxy/s/{slug}/{*path}` -- resolves the slug to a service UUID via `proxy_service::resolve_service_by_slug()`, then delegates to the same shared `execute_proxy()` pipeline
+
+Both routes share a single `execute_proxy()` function that handles the full proxy pipeline (credential resolution, identity propagation, delegation token injection, request forwarding).
+
 ```
 Client                     NyxID Backend                     Downstream
   |                          |                                Service
   |  ANY /api/v1/proxy/      |                                  |
   |  {service_id}/path       |                                  |
+  |  -- or --                |                                  |
+  |  ANY /api/v1/proxy/      |                                  |
+  |  s/{slug}/path           |                                  |
   |------------------------->|                                  |
   |                          |  Authenticate user (AuthUser)    |
+  |                          |                                  |
+  |                          |  (If slug: resolve slug ->       |
+  |                          |   service_id via DB lookup)      |
   |                          |                                  |
   |                          |  Lookup downstream_service       |
   |                          |  Check: is_active = true         |
@@ -962,6 +975,7 @@ Non-human (machine-to-machine) identities that authenticate via OAuth2 Client Cr
 | `is_active`              | boolean       | NOT NULL          | Whether the account can authenticate |
 | `rate_limit_override`    | number        | NULLABLE          | Optional per-account rate limit     |
 | `created_by`             | UUID (string) | NOT NULL          | Admin who created this account      |
+| `owner_user_id`          | UUID (string) | NULLABLE          | Resource owner for approval/notification policy (falls back to `created_by` for legacy records) |
 | `created_at`             | ISO 8601 date | NOT NULL          | Creation timestamp                  |
 | `updated_at`             | ISO 8601 date | NOT NULL          | Last update                         |
 | `last_authenticated_at`  | ISO 8601 date | NULLABLE          | Last successful authentication      |
@@ -983,6 +997,74 @@ Tracks JWT access tokens issued to service accounts for revocation support. Toke
 | `created_at`         | ISO 8601 date | NOT NULL          | Token issuance timestamp            |
 
 **Indexes:** `jti` (unique), `service_account_id`, `expires_at` (TTL: auto-delete expired records)
+
+#### approval_requests
+
+Tracks approval requests created when delegated or service account access requires user approval.
+
+| Field                | Type          | Constraints       | Description                                   |
+|----------------------|---------------|-------------------|-----------------------------------------------|
+| `_id`                | UUID (string) | PK                | Approval request identifier                   |
+| `user_id`            | UUID (string) | NOT NULL          | User who must approve                         |
+| `service_id`         | UUID (string) | NOT NULL          | Target downstream service                     |
+| `service_name`       | string        | NOT NULL          | Human-readable service name (denormalized)    |
+| `service_slug`       | string        | NOT NULL          | Service slug (denormalized)                   |
+| `requester_type`     | string        | NOT NULL          | `user`, `service_account`, or `delegated`     |
+| `requester_id`       | UUID (string) | NOT NULL          | ID of the requester                           |
+| `requester_label`    | string        |                   | Human-readable requester name                 |
+| `operation_summary`  | string        | NOT NULL          | e.g. `proxy:POST /v1/chat/completions`        |
+| `status`             | string        | NOT NULL          | `pending`, `approved`, `rejected`, `expired`  |
+| `idempotency_key`    | string        | NOT NULL, UNIQUE  | SHA-256 of (user_id, service_id, requester)   |
+| `notification_channel`| string       |                   | Channel used (e.g. `telegram`)                |
+| `telegram_message_id`| i64           |                   | Telegram message ID for editing               |
+| `telegram_chat_id`   | i64           |                   | Telegram chat ID for verification             |
+| `expires_at`         | ISO 8601 date | NOT NULL          | Auto-reject deadline                          |
+| `decided_at`         | ISO 8601 date |                   | When the decision was made                    |
+| `decision_channel`   | string        |                   | Channel of decision (`telegram`, `web`)       |
+| `created_at`         | ISO 8601 date | NOT NULL          | Request creation timestamp                    |
+
+**Indexes:** `(user_id, status)`, `idempotency_key` (unique), `created_at` (TTL: 90 days)
+
+#### approval_grants
+
+Cached approval decisions that allow subsequent requests without re-prompting.
+
+| Field                | Type          | Constraints       | Description                                   |
+|----------------------|---------------|-------------------|-----------------------------------------------|
+| `_id`                | UUID (string) | PK                | Grant identifier                              |
+| `user_id`            | UUID (string) | NOT NULL          | User who granted approval                     |
+| `service_id`         | UUID (string) | NOT NULL          | Target downstream service                     |
+| `service_name`       | string        | NOT NULL          | Human-readable service name (denormalized)    |
+| `requester_type`     | string        | NOT NULL          | `user`, `service_account`, or `delegated`     |
+| `requester_id`       | UUID (string) | NOT NULL          | ID of the requester                           |
+| `requester_label`    | string        |                   | Human-readable requester name                 |
+| `approval_request_id`| UUID (string) | NOT NULL          | The request that created this grant           |
+| `granted_at`         | ISO 8601 date | NOT NULL          | When the grant was created                    |
+| `expires_at`         | ISO 8601 date | NOT NULL          | Grant expiration (user-configurable)          |
+| `revoked`            | boolean       | NOT NULL          | Whether explicitly revoked                    |
+
+**Indexes:** `(user_id, service_id, requester_type, requester_id)`, `expires_at` (TTL: auto-delete), `(user_id, granted_at)`
+
+#### notification_channels
+
+Per-user notification preferences and connected messaging accounts.
+
+| Field                         | Type          | Constraints       | Description                                   |
+|-------------------------------|---------------|-------------------|-----------------------------------------------|
+| `_id`                         | UUID (string) | PK                | Channel config identifier                     |
+| `user_id`                     | UUID (string) | NOT NULL, UNIQUE  | Owner user ID (one config per user)           |
+| `telegram_chat_id`            | i64           |                   | Linked Telegram chat ID                       |
+| `telegram_username`           | string        |                   | Linked Telegram username                      |
+| `telegram_enabled`            | boolean       | NOT NULL          | Whether Telegram notifications are active     |
+| `telegram_link_code`          | string        |                   | One-time link code (expires in 5 minutes)     |
+| `telegram_link_code_expires_at`| ISO 8601 date|                   | Link code expiry                              |
+| `approval_timeout_secs`       | u32           | NOT NULL          | Timeout before auto-reject (default: 30)      |
+| `grant_expiry_days`           | u32           | NOT NULL          | Grant duration in days (default: 30)          |
+| `approval_required`           | boolean       | NOT NULL          | Whether approval is enabled for this user     |
+| `created_at`                  | ISO 8601 date | NOT NULL          | Record creation timestamp                     |
+| `updated_at`                  | ISO 8601 date | NOT NULL          | Last update timestamp                         |
+
+**Indexes:** `user_id` (unique), `telegram_link_code` (sparse), `telegram_chat_id` (sparse)
 
 ---
 
@@ -1306,6 +1388,8 @@ Delegated tokens are restricted to proxy and LLM gateway endpoints. All other en
 |----------------------------------|-----------------|--------------|
 | `/api/v1/llm/*`                 | Allowed         | Allowed      |
 | `/api/v1/proxy/{id}/{*path}`    | Allowed         | Allowed      |
+| `/api/v1/proxy/s/{slug}/{*path}`| Allowed         | Allowed      |
+| `/api/v1/proxy/services`        | Allowed         | Allowed      |
 | `/api/v1/delegation/refresh`    | Allowed         | Blocked (403)|
 | `/api/v1/auth/*`                | Blocked         | Allowed      |
 | `/api/v1/users/*`               | Blocked         | Allowed      |
@@ -1385,6 +1469,8 @@ The `reject_service_account_tokens` middleware restricts which endpoints service
 | Route Group                      | Service Account | Direct User Token |
 |----------------------------------|-----------------|-------------------|
 | `/api/v1/proxy/{id}/{*path}`    | Allowed         | Allowed           |
+| `/api/v1/proxy/s/{slug}/{*path}`| Allowed         | Allowed           |
+| `/api/v1/proxy/services`        | Allowed         | Allowed           |
 | `/api/v1/llm/*`                 | Allowed         | Allowed           |
 | `/api/v1/connections/*`         | Allowed         | Allowed           |
 | `/api/v1/providers/*`           | Allowed         | Allowed           |
@@ -1579,6 +1665,105 @@ The MCP proxy maintains session-based activation state in `McpSessionStore`:
 ### REST API Compatibility
 
 The REST endpoint `/api/v1/mcp/config` still returns the full list of all tools for backward compatibility with non-MCP clients.
+
+---
+
+## Transaction Approval
+
+### Overview
+
+The approval system adds push-based transaction approval to NyxID. When a downstream service is accessed through the proxy or LLM gateway using any non-session authentication method (API keys, delegated tokens, service accounts, or access tokens), NyxID can require explicit user approval before forwarding the request.
+
+**Key properties:**
+- **Blocking:** Proxy and LLM gateway requests hold the HTTP connection open until the user approves, rejects, or the timeout expires. If approved, the downstream response is returned directly -- no retry needed. If rejected or timed out, a `403 Forbidden` error is returned.
+- **Auth-method aware:** An `AuthMethod` enum (`Session`, `ApiKey`, `Delegated`, `ServiceAccount`, `AccessToken`) on `AuthUser` determines whether approval is required. Only `Session` (direct browser access) bypasses approval; all programmatic access methods trigger it when enabled.
+- **Cached grants:** Once approved, access is granted for a configurable period (default 30 days) without re-prompting
+- **Extensible:** Notification delivery is behind an abstraction layer so Telegram, mobile push, and future channels share a common interface
+- **Secure:** Idempotency keys, replay prevention, constant-time webhook verification, cryptographically bound approval context
+
+### Approval Flow
+
+```
+API Key / SA / Delegated Caller         NyxID Proxy            NyxID Backend           Telegram
+         |                                  |                       |                      |
+         |-- POST /proxy/s/openai/v1/... -->|                       |                      |
+         |                                  |-- resolve_proxy_target |                      |
+         |                                  |-- check_approval ----->|                      |
+         |                                  |   (no grant found)     |                      |
+         |                                  |                        |-- create_approval_request
+         |                                  |                        |-- sendMessage ------->|
+         |                                  |                        |   (inline keyboard)   |
+         |                                  |-- wait_for_decision -->|                      |
+         |                                  |   (polls DB every 1s) |                      |
+         |           (HTTP connection held open)                     |      User clicks     |
+         |                                  |                        |      [Approve]       |
+         |                                  |                        |<-- callback_query ----|
+         |                                  |                        |-- verify webhook secret
+         |                                  |                        |-- process_decision("approved")
+         |                                  |                        |-- create ApprovalGrant
+         |                                  |                        |-- editMessageText --->|
+         |                                  |                        |   "Approved"          |
+         |                                  |   (decision found)     |                      |
+         |                                  |-- forward_request ---> downstream service     |
+         |<-- 200 response -----------------|                       |                      |
+```
+
+The proxy holds the HTTP connection open and polls the `approval_requests` collection every 1 second until the request status changes from `"pending"` to `"approved"`, `"rejected"`, or `"expired"`, or until the user-configured timeout expires. If approved, execution continues and the downstream response is returned. If rejected, expired, or timed out, a `403 Forbidden` error is returned.
+
+A status polling endpoint (`GET /api/v1/approvals/requests/{id}/status`) is also available for callers that prefer async workflows or need to monitor approval status from a separate connection.
+
+### Components
+
+| Component                  | File                                       | Responsibility                                    |
+|----------------------------|--------------------------------------------|---------------------------------------------------|
+| `approval_service`         | `services/approval_service.rs`             | Core orchestrator: check, create, process, expire |
+| `notification_service`     | `services/notification_service.rs`         | Channel abstraction (currently Telegram only)     |
+| `telegram_service`         | `services/telegram_service.rs`             | Telegram Bot API client (raw HTTP via reqwest)    |
+| `telegram_poller`          | `services/telegram_poller.rs`              | `getUpdates` long polling loop + shared update dispatch |
+| `approvals` handler        | `handlers/approvals.rs`                   | History, grants, decide, status polling           |
+| `notifications` handler    | `handlers/notifications.rs`               | Settings CRUD, Telegram link/disconnect           |
+| `webhooks` handler         | `handlers/webhooks.rs`                    | Telegram webhook: verify secret + delegate to poller |
+
+### Telegram Integration
+
+NyxID communicates with the Telegram Bot API using raw `reqwest` HTTP calls (no teloxide dependency). The Telegram bot:
+
+1. **Sends approval messages** with Approve/Reject inline keyboard buttons
+2. **Receives callback queries** when users press buttons
+3. **Receives `/start` commands** for account linking
+4. **Edits messages** to show the decision result after approval/rejection/expiry
+
+Callback data format: `a:<uuid_no_hyphens>` (approve) or `r:<uuid_no_hyphens>` (reject), using 34 chars total (within Telegram's 64-byte limit).
+
+**Delivery modes:**
+
+| Mode | Activation | How it works |
+|------|-----------|--------------|
+| **Webhook** | `TELEGRAM_WEBHOOK_URL` + `TELEGRAM_WEBHOOK_SECRET` are set | Backend calls `setWebhook` at startup; Telegram pushes updates to `POST /api/v1/webhooks/telegram`. The handler verifies the secret and delegates to `telegram_poller::process_update()`. |
+| **Long polling** | Only `TELEGRAM_BOT_TOKEN` is set (no webhook URL) | Backend calls `deleteWebhook` at startup, then spawns a background Tokio task that calls `getUpdates` in a loop (30-second timeout, 5-second backoff on errors). Updates are dispatched to the same `process_update()` function. |
+
+Both modes share the same update processing logic in `telegram_poller.rs`. Long polling is intended for local development where a public HTTPS URL is not available.
+
+### Background Tasks
+
+A background task runs every `APPROVAL_EXPIRY_INTERVAL_SECS` (default: 5) seconds to:
+1. Find all `approval_requests` where `status == "pending"` and `expires_at < now`
+2. Batch-update their status to `"expired"`
+3. Edit Telegram messages to show "Expired" (best-effort)
+
+### Integration Points
+
+The approval check is integrated into:
+- **Proxy handler** (`handlers/proxy.rs`): Checked after resolving the proxy target, before forwarding
+- **LLM gateway** (`handlers/llm_gateway.rs`): Same pattern for both provider-specific and gateway endpoints
+
+Approval is triggered for **all non-session authentication methods** (API keys, delegated tokens, service accounts, access tokens) when the resource owner has `approval_required` enabled. Direct browser sessions bypass approval. For service account traffic, the effective resource owner is `service_accounts.owner_user_id` (or `created_by` for legacy records). The `AuthMethod` enum on `AuthUser` (`Session`, `ApiKey`, `Delegated`, `ServiceAccount`, `AccessToken`) determines the code path:
+
+- `Session` -- Direct browser access, approval skipped
+- `ApiKey` -- User's API key, approval required
+- `Delegated` -- Delegated access token (from token exchange or MCP injection), approval required
+- `ServiceAccount` -- Service account client credentials, approval required
+- `AccessToken` -- Access token cookie (non-session), approval required
 
 ---
 

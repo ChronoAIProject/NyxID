@@ -1,14 +1,14 @@
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::key_service;
-use crate::AppState;
 
 // --- Request / Response types ---
 
@@ -98,14 +98,9 @@ pub async fn create_key(
     let scopes = body.scopes.as_deref().unwrap_or("read");
 
     let user_id_str = auth_user.user_id.to_string();
-    let created = key_service::create_api_key(
-        &state.db,
-        &user_id_str,
-        &body.name,
-        scopes,
-        body.expires_at,
-    )
-    .await?;
+    let created =
+        key_service::create_api_key(&state.db, &user_id_str, &body.name, scopes, body.expires_at)
+            .await?;
 
     Ok(Json(CreateApiKeyResponse {
         id: created.id.to_string(),

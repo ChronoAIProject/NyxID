@@ -1,16 +1,16 @@
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use url::Url;
 
+use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::oauth_client::OauthClient;
 use crate::mw::auth::AuthUser;
 use crate::services::oauth_client_service;
-use crate::AppState;
 
 // ── Request / Response DTOs ──
 
@@ -162,10 +162,7 @@ pub async fn list_my_oauth_clients(
     let user_id = auth_user.user_id.to_string();
     let clients = oauth_client_service::list_clients_by_creator(&state.db, &user_id).await?;
 
-    let items = clients
-        .into_iter()
-        .map(|c| to_response(c, None))
-        .collect();
+    let items = clients.into_iter().map(|c| to_response(c, None)).collect();
 
     Ok(Json(DeveloperOAuthClientListResponse { clients: items }))
 }
@@ -223,12 +220,9 @@ pub async fn rotate_my_oauth_client_secret(
     Path(client_id): Path<String>,
 ) -> AppResult<Json<RotateDeveloperClientSecretResponse>> {
     let user_id = auth_user.user_id.to_string();
-    let (updated, new_secret) = oauth_client_service::rotate_client_secret_for_creator(
-        &state.db,
-        &client_id,
-        &user_id,
-    )
-    .await?;
+    let (updated, new_secret) =
+        oauth_client_service::rotate_client_secret_for_creator(&state.db, &client_id, &user_id)
+            .await?;
 
     Ok(Json(RotateDeveloperClientSecretResponse {
         id: updated.id,
@@ -244,5 +238,7 @@ pub async fn delete_my_oauth_client(
 ) -> AppResult<Json<serde_json::Value>> {
     let user_id = auth_user.user_id.to_string();
     oauth_client_service::delete_client_for_creator(&state.db, &client_id, &user_id).await?;
-    Ok(Json(serde_json::json!({ "message": "OAuth client deactivated" })))
+    Ok(Json(
+        serde_json::json!({ "message": "OAuth client deactivated" }),
+    ))
 }
