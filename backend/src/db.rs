@@ -509,6 +509,18 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── service_approval_configs ──
+    let sac = db.collection::<mongodb::bson::Document>("service_approval_configs");
+    sac.create_index(
+        IndexModel::builder()
+            .keys(doc! { "user_id": 1, "service_id": 1 })
+            .options(IndexOptions::builder().unique(true).build())
+            .build(),
+    )
+    .await?;
+    sac.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
+
     // ── notification_channels ──
     let notification_channels = db.collection::<mongodb::bson::Document>("notification_channels");
     notification_channels

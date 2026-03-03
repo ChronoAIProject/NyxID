@@ -63,7 +63,7 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (24 models, 22 collections)
+|-- models/              # MongoDB document structs (25 models, 23 collections)
 |-- services/            # Business logic (28 services, incl. approval_service, notification_service, telegram_service)
 |-- handlers/            # HTTP handlers (29 handler modules, incl. approvals, notifications, webhooks)
 |-- crypto/              # JWT, AES, password hashing, token generation
@@ -99,7 +99,7 @@ All API routes under `/api/v1`:
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
 - `/delegation/refresh` -- refresh delegated access tokens
 - `/notifications` -- notification settings CRUD, Telegram link/disconnect
-- `/approvals` -- approval request history, grants, decide, status polling
+- `/approvals` -- approval request history, grants, decide, status polling, per-service approval configs
 - `/webhooks/telegram` -- Telegram webhook (unauthenticated, secret-verified)
 
 - `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation, provider management (connect via API key/OAuth redirect/device-code, list, disconnect providers on behalf of SAs)

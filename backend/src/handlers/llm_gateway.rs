@@ -738,15 +738,14 @@ async fn check_llm_approval(
     method_str: &str,
 ) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
-    let requires_approval =
-        approval_service::user_requires_approval(&state.db, &approval_owner_user_id).await?;
+    let requires_approval = approval_service::requires_approval_for_service(
+        &state.db,
+        &approval_owner_user_id,
+        service_id,
+    )
+    .await?;
 
-    if !requires_approval {
-        return Ok(());
-    }
-
-    // Only direct browser sessions bypass approval
-    if auth_user.auth_method == crate::mw::auth::AuthMethod::Session {
+    if should_bypass_approval_flow(requires_approval, &auth_user.auth_method) {
         return Ok(());
     }
 
@@ -790,4 +789,39 @@ async fn check_llm_approval(
 
     // Block until the user approves/rejects or timeout expires
     approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs).await
+}
+
+fn should_bypass_approval_flow(
+    requires_approval: bool,
+    auth_method: &crate::mw::auth::AuthMethod,
+) -> bool {
+    !requires_approval || *auth_method == crate::mw::auth::AuthMethod::Session
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_bypass_approval_flow;
+    use crate::mw::auth::AuthMethod;
+
+    #[test]
+    fn bypasses_when_approval_is_disabled() {
+        assert!(should_bypass_approval_flow(false, &AuthMethod::Session));
+        assert!(should_bypass_approval_flow(false, &AuthMethod::ApiKey));
+    }
+
+    #[test]
+    fn bypasses_for_session_when_approval_is_required() {
+        assert!(should_bypass_approval_flow(true, &AuthMethod::Session));
+    }
+
+    #[test]
+    fn does_not_bypass_for_programmatic_auth_when_required() {
+        assert!(!should_bypass_approval_flow(true, &AuthMethod::ApiKey));
+        assert!(!should_bypass_approval_flow(true, &AuthMethod::AccessToken));
+        assert!(!should_bypass_approval_flow(true, &AuthMethod::Delegated));
+        assert!(!should_bypass_approval_flow(
+            true,
+            &AuthMethod::ServiceAccount
+        ));
+    }
 }

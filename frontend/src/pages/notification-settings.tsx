@@ -6,7 +6,11 @@ import {
   useUpdateNotificationSettings,
   useTelegramLink,
   useTelegramDisconnect,
+  useServiceApprovalConfigs,
+  useSetServiceApprovalConfig,
+  useDeleteServiceApprovalConfig,
 } from "@/hooks/use-approvals";
+import { useServices } from "@/hooks/use-services";
 import {
   updateNotificationSettingsSchema,
   type UpdateNotificationSettingsFormData,
@@ -42,7 +46,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Bell, MessageSquare, Unlink } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Bell, MessageSquare, RotateCcw, Shield, Unlink } from "lucide-react";
 import { toast } from "sonner";
 
 export function NotificationSettingsPage() {
@@ -51,8 +62,21 @@ export function NotificationSettingsPage() {
   const telegramLinkMutation = useTelegramLink();
   const telegramDisconnectMutation = useTelegramDisconnect();
 
+  const { data: services } = useServices();
+  const {
+    data: serviceConfigs,
+    isLoading: isServiceConfigsLoading,
+    error: serviceConfigsError,
+  } = useServiceApprovalConfigs();
+  const setConfigMutation = useSetServiceApprovalConfig();
+  const deleteConfigMutation = useDeleteServiceApprovalConfig();
+
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [disconnectDialogOpen, setDisconnectDialogOpen] = useState(false);
+  const [addServiceDialogOpen, setAddServiceDialogOpen] = useState(false);
+  const [selectedServiceId, setSelectedServiceId] = useState("");
+  const [selectedApprovalRequired, setSelectedApprovalRequired] =
+    useState(true);
 
   const linkData = telegramLinkMutation.data;
 
@@ -67,6 +91,19 @@ export function NotificationSettingsPage() {
         }
       : undefined,
   });
+
+  // Services that already have per-service configs
+  const configuredServiceIds = new Set(
+    serviceConfigs?.configs.map((c) => c.service_id) ?? [],
+  );
+
+  // Available services for adding a new per-service config
+  const availableServices =
+    isServiceConfigsLoading || serviceConfigsError
+      ? []
+      : (services ?? []).filter(
+          (s) => s.is_active && !configuredServiceIds.has(s.id),
+        );
 
   async function handleSave(data: UpdateNotificationSettingsFormData) {
     try {
@@ -104,6 +141,58 @@ export function NotificationSettingsPage() {
       );
     } finally {
       setDisconnectDialogOpen(false);
+    }
+  }
+
+  async function handleAddServiceConfig() {
+    if (!selectedServiceId) return;
+
+    try {
+      await setConfigMutation.mutateAsync({
+        serviceId: selectedServiceId,
+        approvalRequired: selectedApprovalRequired,
+      });
+      toast.success("Per-service approval override added");
+      setAddServiceDialogOpen(false);
+      setSelectedServiceId("");
+      setSelectedApprovalRequired(true);
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to add service config",
+      );
+    }
+  }
+
+  async function handleToggleServiceConfig(
+    serviceId: string,
+    approvalRequired: boolean,
+  ) {
+    try {
+      await setConfigMutation.mutateAsync({
+        serviceId,
+        approvalRequired,
+      });
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to update service config",
+      );
+    }
+  }
+
+  async function handleDeleteServiceConfig(serviceId: string) {
+    try {
+      await deleteConfigMutation.mutateAsync(serviceId);
+      toast.success("Per-service override removed");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to remove service config",
+      );
     }
   }
 
@@ -213,11 +302,13 @@ export function NotificationSettingsPage() {
                       <FormItem className="flex items-center justify-between rounded-lg border border-border p-4">
                         <div className="space-y-0.5">
                           <FormLabel className="text-base">
-                            Require Approval
+                            Require Approval (Global Default)
                           </FormLabel>
                           <FormDescription>
                             When enabled, proxy and LLM gateway requests using
                             your credentials require explicit approval.
+                            Per-service overrides below can exempt or add
+                            specific services.
                           </FormDescription>
                         </div>
                         <FormControl>
@@ -322,6 +413,94 @@ export function NotificationSettingsPage() {
               </Form>
             </CardContent>
           </Card>
+
+          {/* Per-Service Approval Overrides */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="flex items-center gap-2">
+                    <Shield className="h-5 w-5" aria-hidden="true" />
+                    Per-Service Approval Overrides
+                  </CardTitle>
+                  <CardDescription>
+                    Override the global approval setting for specific services.
+                    Services without an override use the global default above.
+                  </CardDescription>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setAddServiceDialogOpen(true)}
+                  disabled={
+                    isServiceConfigsLoading ||
+                    Boolean(serviceConfigsError) ||
+                    availableServices.length === 0
+                  }
+                >
+                  Add Override
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {isServiceConfigsLoading ? (
+                <div className="space-y-3 py-2">
+                  <Skeleton className="h-16 w-full" />
+                  <Skeleton className="h-16 w-full" />
+                </div>
+              ) : serviceConfigsError ? (
+                <p className="py-4 text-center text-sm text-muted-foreground">
+                  Failed to load per-service overrides. Try refreshing the page.
+                </p>
+              ) : serviceConfigs?.configs.length === 0 ? (
+                <p className="py-4 text-center text-sm text-muted-foreground">
+                  No per-service overrides configured. All services use the
+                  global default.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {serviceConfigs?.configs.map((config) => (
+                    <div
+                      key={config.service_id}
+                      className="flex items-center justify-between rounded-lg border border-border p-4"
+                    >
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">
+                          {config.service_name}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {config.approval_required
+                            ? "Approval required"
+                            : "Approval not required"}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <Switch
+                          checked={config.approval_required}
+                          onCheckedChange={(checked) =>
+                            void handleToggleServiceConfig(
+                              config.service_id,
+                              checked,
+                            )
+                          }
+                        />
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() =>
+                            void handleDeleteServiceConfig(config.service_id)
+                          }
+                          title="Remove override (use global default)"
+                        >
+                          <RotateCcw className="h-4 w-4 text-muted-foreground" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
       )}
 
@@ -346,7 +525,8 @@ export function NotificationSettingsPage() {
                 </code>
               </div>
               <p className="text-xs text-muted-foreground">
-                This code expires in {String(Math.floor(linkData.expires_in_secs / 60))} minutes.
+                This code expires in{" "}
+                {String(Math.floor(linkData.expires_in_secs / 60))} minutes.
               </p>
             </div>
           )}
@@ -384,6 +564,72 @@ export function NotificationSettingsPage() {
               isLoading={telegramDisconnectMutation.isPending}
             >
               Disconnect
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Per-Service Override Dialog */}
+      <Dialog
+        open={addServiceDialogOpen}
+        onOpenChange={setAddServiceDialogOpen}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add Per-Service Override</DialogTitle>
+            <DialogDescription>
+              Choose a service and set whether approval is required for it,
+              overriding the global default.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="service-select">
+                Service
+              </label>
+              <Select
+                value={selectedServiceId}
+                onValueChange={setSelectedServiceId}
+              >
+                <SelectTrigger id="service-select">
+                  <SelectValue placeholder="Select a service" />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableServices.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      {s.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-border p-4">
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">Require Approval</p>
+                <p className="text-xs text-muted-foreground">
+                  Whether this service requires approval for programmatic
+                  access.
+                </p>
+              </div>
+              <Switch
+                checked={selectedApprovalRequired}
+                onCheckedChange={setSelectedApprovalRequired}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setAddServiceDialogOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void handleAddServiceConfig()}
+              disabled={!selectedServiceId}
+              isLoading={setConfigMutation.isPending}
+            >
+              Add Override
             </Button>
           </DialogFooter>
         </DialogContent>

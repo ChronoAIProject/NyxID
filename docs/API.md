@@ -5559,6 +5559,115 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
   http://localhost:3001/api/v1/approvals/grants/550e8400-e29b-41d4-a716-446655440000
 ```
 
+### List Per-Service Approval Configs
+
+```
+GET /api/v1/approvals/service-configs
+Authorization: Bearer <access_token>
+```
+
+**Auth:** Required (human-only -- rejects delegated tokens and service account tokens).
+
+Returns all per-service approval configurations for the current user. These override the global `approval_required` setting on a per-service basis.
+
+**Response (200):**
+
+```json
+{
+  "configs": [
+    {
+      "service_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "service_name": "OpenAI API",
+      "approval_required": false,
+      "created_at": "2026-03-03T00:00:00+00:00",
+      "updated_at": "2026-03-03T00:00:00+00:00"
+    }
+  ]
+}
+```
+
+**curl:**
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/approvals/service-configs
+```
+
+### Set Per-Service Approval Config
+
+```
+PUT /api/v1/approvals/service-configs/{service_id}
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+**Auth:** Required (human-only).
+
+Creates or updates a per-service approval override. When set, this value takes precedence over the global `notification_channels.approval_required` setting for the specified service.
+
+**Request:**
+
+```json
+{
+  "approval_required": false
+}
+```
+
+| Field               | Type    | Required | Description                              |
+|---------------------|---------|----------|------------------------------------------|
+| `approval_required` | boolean | Yes      | Whether approval is required for this service |
+
+**Response (200):**
+
+```json
+{
+  "service_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "service_name": "OpenAI API",
+  "approval_required": false,
+  "created_at": "2026-03-03T00:00:00+00:00",
+  "updated_at": "2026-03-03T12:00:00+00:00"
+}
+```
+
+**Error (404):** Service not found.
+
+**curl:**
+
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"approval_required": false}' \
+  http://localhost:3001/api/v1/approvals/service-configs/a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
+### Delete Per-Service Approval Config
+
+```
+DELETE /api/v1/approvals/service-configs/{service_id}
+Authorization: Bearer <access_token>
+```
+
+**Auth:** Required (human-only).
+
+Removes the per-service approval override, reverting to the global `approval_required` setting for this service.
+
+**Response (200):**
+
+```json
+{
+  "message": "Per-service approval config removed"
+}
+```
+
+**Error (404):** Per-service approval config not found.
+
+**curl:**
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/approvals/service-configs/a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
 ---
 
 ## Webhooks

@@ -317,7 +317,68 @@ notification_channels.create_index(
 ).await?;
 ```
 
-### 1.4 Model Registration
+### 1.4 New Collection: `service_approval_configs`
+
+Per-service approval overrides that let a user customize approval behavior on a per-service basis. When a user has global `approval_required = true`, they can exempt specific services. Conversely, when global is `false`, they can require approval for specific high-risk services.
+
+**File:** `backend/src/models/service_approval_config.rs`
+
+```rust
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+pub const COLLECTION_NAME: &str = "service_approval_configs";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceApprovalConfig {
+    /// UUID v4 string
+    #[serde(rename = "_id")]
+    pub id: String,
+
+    /// Owner user ID
+    pub user_id: String,
+
+    /// Downstream service ID
+    pub service_id: String,
+
+    /// Human-readable service name (denormalized for display)
+    pub service_name: String,
+
+    /// Whether approval is required for this specific service.
+    /// Overrides the global `notification_channels.approval_required`.
+    pub approval_required: bool,
+
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
+}
+```
+
+**Indexes** (added to `db.rs` `ensure_indexes()`):
+
+```rust
+// -- service_approval_configs --
+let sac = db.collection::<Document>("service_approval_configs");
+
+// One config per (user, service) pair
+sac.create_index(
+    IndexModel::builder()
+        .keys(doc! { "user_id": 1, "service_id": 1 })
+        .options(IndexOptions::builder().unique(true).build())
+        .build(),
+).await?;
+
+// List all configs for a user
+sac.create_index(
+    IndexModel::builder()
+        .keys(doc! { "user_id": 1 })
+        .build(),
+).await?;
+```
+
+### 1.5 Model Registration
 
 Add to `backend/src/models/mod.rs`:
 
@@ -325,6 +386,7 @@ Add to `backend/src/models/mod.rs`:
 pub mod approval_grant;
 pub mod approval_request;
 pub mod notification_channel;
+pub mod service_approval_config;
 ```
 
 ---
@@ -375,12 +437,25 @@ TELEGRAM_WEBHOOK_URL=              # e.g. https://auth.nyxid.dev/api/v1/webhooks
 
 Responsibilities:
 - Check if a valid approval grant exists for a (user, service, requester) triple
+- Determine approval requirement per-service (3-tier resolution: per-service config -> global setting)
 - Create approval requests with idempotency
 - Process approval/rejection decisions
 - Create/revoke approval grants
 - Expire timed-out approval requests
+- Manage per-service approval configurations (list, set, delete)
 
 ```rust
+/// Check whether approval is required for a specific service.
+///
+/// Resolution order:
+/// 1. If a `ServiceApprovalConfig` exists for (user, service), use its value.
+/// 2. Otherwise, fall back to the global `notification_channels.approval_required`.
+pub async fn requires_approval_for_service(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<bool>
+
 /// Check whether the request has a valid (non-expired, non-revoked) approval grant.
 /// Returns Ok(true) if access is granted, Ok(false) if approval is needed.
 pub async fn check_approval(
@@ -450,6 +525,30 @@ pub async fn revoke_all_grants(
     db: &Database,
     user_id: &str,
 ) -> AppResult<u64>
+
+/// List per-service approval configs for a user.
+pub async fn list_service_approval_configs(
+    db: &Database,
+    user_id: &str,
+) -> AppResult<Vec<ServiceApprovalConfig>>
+
+/// Set a per-service approval config (upsert).
+/// If a config already exists for (user, service), it is updated.
+/// Otherwise, a new config is created.
+pub async fn set_service_approval_config(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+    service_name: &str,
+    approval_required: bool,
+) -> AppResult<ServiceApprovalConfig>
+
+/// Delete a per-service approval config (revert to global default).
+pub async fn delete_service_approval_config(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<()>
 ```
 
 **Idempotency key generation:**
@@ -821,6 +920,76 @@ POST /api/v1/approvals/requests/{request_id}/decide
 
 This allows users to approve/reject from the NyxID web dashboard (not just Telegram).
 
+#### Per-Service Approval Configs
+
+These endpoints manage per-service approval overrides. They are human-only (require session auth, reject delegated/SA tokens).
+
+##### List per-service configs
+
+```
+GET /api/v1/approvals/service-configs
+```
+
+Returns all per-service approval configs for the current user.
+
+**Response (200):**
+```json
+{
+  "configs": [
+    {
+      "id": "uuid",
+      "service_id": "uuid",
+      "service_name": "OpenAI API",
+      "approval_required": false,
+      "created_at": "2026-03-03T00:00:00Z",
+      "updated_at": "2026-03-03T00:00:00Z"
+    }
+  ]
+}
+```
+
+##### Set per-service config
+
+```
+PUT /api/v1/approvals/service-configs/{service_id}
+```
+
+**Request:**
+```json
+{
+  "approval_required": false
+}
+```
+
+Creates or updates a per-service approval config. The service name is resolved from the service ID.
+
+**Response (200):**
+```json
+{
+  "id": "uuid",
+  "service_id": "uuid",
+  "service_name": "OpenAI API",
+  "approval_required": false,
+  "created_at": "2026-03-03T00:00:00Z",
+  "updated_at": "2026-03-03T00:00:00Z"
+}
+```
+
+##### Delete per-service config
+
+```
+DELETE /api/v1/approvals/service-configs/{service_id}
+```
+
+Removes the per-service override, reverting to the global `approval_required` setting.
+
+**Response (200):**
+```json
+{
+  "message": "Per-service approval config removed"
+}
+```
+
 ---
 
 ## 5. Proxy/LLM Gateway Integration
@@ -829,16 +998,27 @@ This allows users to approve/reject from the NyxID web dashboard (not just Teleg
 
 The approval check is added to the proxy handler (`handlers/proxy.rs`) **after** resolving the proxy target but **before** forwarding the request. The approval check is skipped if the downstream service has `auth_method == "none"` or if the user has not enabled approval.
 
+**3-tier approval resolution:**
+
+The approval system uses a layered resolution to determine whether approval is required for a given (user, service) pair:
+
+1. **Per-service config** (`service_approval_configs`): If a `ServiceApprovalConfig` exists for the (user, service) pair, its `approval_required` value takes precedence.
+2. **Global setting** (`notification_channels.approval_required`): If no per-service config exists, the user's global approval setting is used.
+3. **Default**: If no notification channel exists, approval is not required (legacy behavior).
+
+This is implemented in `approval_service::requires_approval_for_service()`.
+
 **Modified flow in `execute_proxy()`:**
 
 ```rust
 // 1. Resolve proxy target (existing)
 let target = proxy_service::resolve_proxy_target(...).await?;
 
-// 2. NEW: Check approval if user has it enabled
-let requires_approval = approval_service::user_requires_approval(
+// 2. NEW: Check approval if user has it enabled (per-service or global)
+let requires_approval = approval_service::requires_approval_for_service(
     &state.db,
     &user_id_str,
+    service_id,
 ).await?;
 
 if requires_approval {
@@ -1195,8 +1375,9 @@ Add a new tab to `frontend/src/pages/settings.tsx`:
 
 **NotificationsTab** sections:
 1. **Telegram Connection** -- Show linked status, link/unlink button, link code dialog
-2. **Approval Settings** -- Toggle approval requirement, configure timeout and grant expiry
-3. **Active Grants** -- Table of current grants with revoke buttons
+2. **Approval Settings** -- Toggle global approval requirement, configure timeout and grant expiry
+3. **Per-Service Approval Configs** -- Table of per-service overrides allowing users to enable/disable approval for specific services independently of the global toggle
+4. **Active Grants** -- Table of current grants with revoke buttons
 
 ### 9.5 New Page: Approval History
 
@@ -1276,7 +1457,7 @@ Service Account / OAuth Client          NyxID Proxy            NyxID Backend    
 
 ## 12. Implementation Phases
 
-### Phase 1: Core Backend (approval_service, models, indexes)
+### Phase 1: Core Backend (approval_service, models, indexes) -- DONE
 1. Create models: `approval_request.rs`, `approval_grant.rs`, `notification_channel.rs`
 2. Register models in `mod.rs`
 3. Add indexes to `db.rs`
@@ -1286,19 +1467,31 @@ Service Account / OAuth Client          NyxID Proxy            NyxID Backend    
 7. Implement `notification_service.rs` (abstraction layer)
 8. Add `ApprovalRequired` error variant
 
-### Phase 2: Handlers and Routes
+### Phase 1.5: Per-Service Approval (model + service layer) -- DONE
+1. Create model: `service_approval_config.rs` with `ServiceApprovalConfig` struct
+2. Register model in `mod.rs`
+3. Add `service_approval_configs` indexes to `db.rs` (unique `user_id + service_id`, `user_id`)
+4. Add `requires_approval_for_service()` with 2-tier resolution (per-service -> global fallback)
+5. Add `list_service_approval_configs()`, `set_service_approval_config()`, `delete_service_approval_config()`
+
+### Phase 1.6: Per-Service Approval (handlers + routes + frontend) -- DONE
+1. Create handler functions for the 3 per-service config endpoints
+2. Register routes in `routes.rs` under `/approvals/service-configs`
+3. Add frontend types, hooks, and UI components for per-service config management
+
+### Phase 2: Handlers and Routes -- DONE
 1. Implement `handlers/webhooks.rs` (Telegram webhook)
 2. Implement `handlers/notifications.rs` (settings CRUD, Telegram link)
 3. Implement `handlers/approvals.rs` (history, grants, decide, status)
 4. Register routes in `routes.rs`
 5. Add background expiry task to `main.rs`
 
-### Phase 3: Proxy Integration
+### Phase 3: Proxy Integration -- DONE
 1. Modify `handlers/proxy.rs` to call approval check
 2. Modify `handlers/llm_gateway.rs` to call approval check
 3. Add the `request_id` field to `ErrorResponse`
 
-### Phase 4: Frontend
+### Phase 4: Frontend -- DONE
 1. Add TypeScript types and Zod schemas
 2. Create `use-approvals.ts` hooks
 3. Add Notifications tab to Settings page
@@ -1319,10 +1512,8 @@ Service Account / OAuth Client          NyxID Proxy            NyxID Backend    
 
 1. **Sync vs Async Approval:** The current design returns `403 approval_required` immediately. An alternative is holding the connection open (long-poll) for up to `timeout_secs` and returning the actual response if approved in time. This would be more convenient for CLI tools but adds complexity. For now, the async pattern with polling is simpler and more reliable.
 
-2. **Per-Service Approval Toggle:** Currently approval is user-global. A future enhancement could allow users to configure approval per-service (e.g. "require approval for OpenAI but not for internal services").
+2. **Mobile App Push:** The `notification_channels` model has commented-out fields for FCM/APNs device tokens. When a NyxID mobile app is built, add a new notification channel implementation that sends push notifications alongside or instead of Telegram.
 
-3. **Mobile App Push:** The `notification_channels` model has commented-out fields for FCM/APNs device tokens. When a NyxID mobile app is built, add a new notification channel implementation that sends push notifications alongside or instead of Telegram.
+3. **Admin Override:** Admins might want to force approval requirements for all users or specific service accounts. This is deferred to a future iteration.
 
-4. **Admin Override:** Admins might want to force approval requirements for all users or specific service accounts. This is deferred to a future iteration.
-
-5. **Webhook Registration UI:** The initial implementation requires manual webhook setup via the Telegram Bot API. A future admin UI button could automate `setWebhook` registration.
+4. **Webhook Registration UI:** The initial implementation requires manual webhook setup via the Telegram Bot API. A future admin UI button could automate `setWebhook` registration.

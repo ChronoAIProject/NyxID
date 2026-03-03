@@ -9,6 +9,9 @@ import type {
   ApprovalGrantListResponse,
   ApprovalDecideResponse,
   RevokeGrantResponse,
+  ServiceApprovalConfigsResponse,
+  SetServiceApprovalConfigResponse,
+  DeleteServiceApprovalConfigResponse,
 } from "@/types/approvals";
 
 // --- Notification Settings ---
@@ -151,6 +154,62 @@ export function useRevokeGrant() {
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: ["approvals", "grants"],
+      });
+    },
+  });
+}
+
+// --- Per-Service Approval Configs ---
+
+export function useServiceApprovalConfigs() {
+  return useQuery({
+    queryKey: ["approvals", "service-configs"],
+    queryFn: async (): Promise<ServiceApprovalConfigsResponse> => {
+      return api.get<ServiceApprovalConfigsResponse>(
+        "/approvals/service-configs",
+      );
+    },
+  });
+}
+
+export function useSetServiceApprovalConfig() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      serviceId,
+      approvalRequired,
+    }: {
+      readonly serviceId: string;
+      readonly approvalRequired: boolean;
+    }): Promise<SetServiceApprovalConfigResponse> => {
+      return api.put<SetServiceApprovalConfigResponse>(
+        `/approvals/service-configs/${serviceId}`,
+        { approval_required: approvalRequired },
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["approvals", "service-configs"],
+      });
+    },
+  });
+}
+
+export function useDeleteServiceApprovalConfig() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (
+      serviceId: string,
+    ): Promise<DeleteServiceApprovalConfigResponse> => {
+      return api.delete<DeleteServiceApprovalConfigResponse>(
+        `/approvals/service-configs/${serviceId}`,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["approvals", "service-configs"],
       });
     },
   });

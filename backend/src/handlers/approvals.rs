@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
 use crate::mw::auth::AuthUser;
 use crate::services::{approval_service, audit_service};
 
@@ -285,5 +288,129 @@ pub async fn revoke_grant(
 
     Ok(Json(MessageResponse {
         message: "Grant revoked".to_string(),
+    }))
+}
+
+// --- Per-service approval config types ---
+
+#[derive(Debug, Serialize)]
+pub struct ServiceApprovalConfigItem {
+    pub service_id: String,
+    pub service_name: String,
+    pub approval_required: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServiceApprovalConfigsResponse {
+    pub configs: Vec<ServiceApprovalConfigItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetServiceApprovalConfigRequest {
+    pub approval_required: bool,
+}
+
+// --- Per-service approval config handlers ---
+
+/// GET /api/v1/approvals/service-configs
+///
+/// List all per-service approval overrides for the current user.
+pub async fn list_service_configs(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<ServiceApprovalConfigsResponse>> {
+    let user_id = auth_user.user_id.to_string();
+
+    let configs = approval_service::list_service_approval_configs(&state.db, &user_id).await?;
+
+    let items: Vec<ServiceApprovalConfigItem> = configs
+        .into_iter()
+        .map(|c| ServiceApprovalConfigItem {
+            service_id: c.service_id,
+            service_name: c.service_name,
+            approval_required: c.approval_required,
+            created_at: c.created_at.to_rfc3339(),
+            updated_at: c.updated_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(ServiceApprovalConfigsResponse { configs: items }))
+}
+
+/// PUT /api/v1/approvals/service-configs/{service_id}
+///
+/// Set a per-service approval override. Creates or updates.
+pub async fn set_service_config(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(service_id): Path<String>,
+    Json(body): Json<SetServiceApprovalConfigRequest>,
+) -> AppResult<Json<ServiceApprovalConfigItem>> {
+    let user_id = auth_user.user_id.to_string();
+
+    // Verify the service exists
+    let service = state
+        .db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(mongodb::bson::doc! { "_id": &service_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+
+    let config = approval_service::set_service_approval_config(
+        &state.db,
+        &user_id,
+        &service_id,
+        &service.name,
+        body.approval_required,
+    )
+    .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "service_approval_config_set".to_string(),
+        Some(serde_json::json!({
+            "service_id": service_id,
+            "service_name": service.name,
+            "approval_required": body.approval_required,
+        })),
+        None,
+        None,
+    );
+
+    Ok(Json(ServiceApprovalConfigItem {
+        service_id: config.service_id,
+        service_name: config.service_name,
+        approval_required: config.approval_required,
+        created_at: config.created_at.to_rfc3339(),
+        updated_at: config.updated_at.to_rfc3339(),
+    }))
+}
+
+/// DELETE /api/v1/approvals/service-configs/{service_id}
+///
+/// Remove a per-service approval override (revert to global default).
+pub async fn delete_service_config(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(service_id): Path<String>,
+) -> AppResult<Json<MessageResponse>> {
+    let user_id = auth_user.user_id.to_string();
+
+    approval_service::delete_service_approval_config(&state.db, &user_id, &service_id).await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "service_approval_config_deleted".to_string(),
+        Some(serde_json::json!({ "service_id": service_id })),
+        None,
+        None,
+    );
+
+    Ok(Json(MessageResponse {
+        message: "Per-service approval config removed".to_string(),
     }))
 }

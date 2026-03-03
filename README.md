@@ -165,6 +165,7 @@ It provides a complete identity layer: user registration, session management, Op
 - Push-based approval for service access via Telegram (with architecture designed for future mobile app notifications)
 - **Blocking flow:** Proxy and LLM gateway requests hold the HTTP connection open until the user approves/rejects or the timeout expires, then return the downstream response or a 403 error -- no retry needed
 - Triggered for **all non-session auth methods** (API keys, delegated tokens, service accounts, access tokens) when the resource owner has approval enabled
+- **Per-service approval configuration:** Override the global approval toggle on a per-service basis (e.g., require approval for OpenAI but auto-approve internal services). 3-tier resolution: per-service config -> global setting -> default (no approval)
 - Configurable approval timeout (10--300 seconds) and grant expiry (1--365 days)
 - Approval grants: once approved, access is granted for a configurable period without re-prompting
 - Web UI and Telegram approval: approve or reject from the NyxID dashboard or directly in Telegram
@@ -232,7 +233,7 @@ It provides a complete identity layer: user registration, session management, Op
                                   |
                          +--------v---------+
                          |  MongoDB 8.0     |
-                         |  (22 collections)|
+                         |  (23 collections)|
                          +------------------+
 ```
 
@@ -436,6 +437,9 @@ For the full API reference with request/response schemas and example curl comman
 | POST   | `/api/v1/approvals/requests/{id}/decide`    | Required | Approve/reject via web UI             |
 | GET    | `/api/v1/approvals/grants`                  | Required | List active approval grants           |
 | DELETE | `/api/v1/approvals/grants/{grant_id}`       | Required | Revoke an approval grant              |
+| GET    | `/api/v1/approvals/service-configs`         | Required | List per-service approval configs     |
+| PUT    | `/api/v1/approvals/service-configs/{service_id}` | Required | Set per-service approval config       |
+| DELETE | `/api/v1/approvals/service-configs/{service_id}` | Required | Remove per-service approval config    |
 | POST   | `/api/v1/webhooks/telegram`                 | None*    | Telegram webhook (secret-verified)    |
 
 `POST /oauth/token` also supports `grant_type=client_credentials` for service account authentication.
@@ -539,7 +543,7 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 
 ## Database Schema
 
-NyxID uses 22 MongoDB collections:
+NyxID uses 23 MongoDB collections:
 
 | Collection                 | Description                                          |
 |----------------------------|------------------------------------------------------|
@@ -564,6 +568,7 @@ NyxID uses 22 MongoDB collections:
 | `service_account_tokens`   | Issued service account JWT records for revocation    |
 | `approval_requests`        | Pending/resolved approval requests for proxy access  |
 | `approval_grants`          | Cached approval grants (time-limited, revocable)     |
+| `service_approval_configs` | Per-service approval overrides (per user)            |
 | `notification_channels`    | Per-user notification preferences and Telegram links |
 | `audit_log`                | Immutable audit trail of security events             |
 
@@ -721,7 +726,7 @@ NyxID/
 |       |   |-- jwt.rs          RS256 JWT signing, verification, key management
 |       |   |-- aes.rs          AES-256-GCM encryption and decryption
 |       |   `-- token.rs        Random token generation, SHA-256 hashing
-|       |-- models/             MongoDB document definitions (25 modules, incl. role, group, consent, service_account, approval)
+|       |-- models/             MongoDB document definitions (26 modules, incl. role, group, consent, service_account, approval, service_approval_config)
 |       |-- handlers/           HTTP handler functions by domain
 |       |   |-- auth.rs         Register, login, logout, refresh, verify-email, forgot/reset-password
 |       |   |-- social_auth.rs  Social login: authorize redirect + OAuth callback

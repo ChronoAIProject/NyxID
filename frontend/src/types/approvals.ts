@@ -76,3 +76,31 @@ export interface ApprovalDecideResponse {
 export interface RevokeGrantResponse {
   readonly message: string;
 }
+
+export interface ServiceApprovalConfigItem {
+  readonly service_id: string;
+  readonly service_name: string;
+  readonly approval_required: boolean;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface ServiceApprovalConfigsResponse {
+  readonly configs: readonly ServiceApprovalConfigItem[];
+}
+
+export interface SetServiceApprovalConfigRequest {
+  readonly approval_required: boolean;
+}
+
+export interface SetServiceApprovalConfigResponse {
+  readonly service_id: string;
+  readonly service_name: string;
+  readonly approval_required: boolean;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface DeleteServiceApprovalConfigResponse {
+  readonly message: string;
+}

@@ -18,6 +18,7 @@ pub mod refresh_token;
 pub mod role;
 pub mod service_account;
 pub mod service_account_token;
+pub mod service_approval_config;
 pub mod service_endpoint;
 pub mod service_provider_requirement;
 pub mod session;

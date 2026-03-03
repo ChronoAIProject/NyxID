@@ -114,13 +114,17 @@ async fn execute_proxy(
         }
     };
 
-    // Check approval if user has it enabled.
+    // Check approval if user has it enabled for this service.
     // Only direct browser sessions bypass approval; API keys, delegated tokens,
     // and service accounts all require approval since they represent programmatic access.
-    let requires_approval =
-        approval_service::user_requires_approval(&state.db, &approval_owner_user_id).await?;
+    let requires_approval = approval_service::requires_approval_for_service(
+        &state.db,
+        &approval_owner_user_id,
+        service_id,
+    )
+    .await?;
 
-    if requires_approval && auth_user.auth_method != crate::mw::auth::AuthMethod::Session {
+    if should_enforce_runtime_approval(requires_approval, &auth_user.auth_method) {
         let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
             AppError::Forbidden("Session auth does not require approval".to_string())
         })?;
@@ -339,6 +343,50 @@ async fn execute_proxy(
     );
 
     Ok(response)
+}
+
+fn should_enforce_runtime_approval(
+    requires_approval: bool,
+    auth_method: &crate::mw::auth::AuthMethod,
+) -> bool {
+    requires_approval && *auth_method != crate::mw::auth::AuthMethod::Session
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_enforce_runtime_approval;
+    use crate::mw::auth::AuthMethod;
+
+    #[test]
+    fn session_auth_bypasses_even_when_required() {
+        assert!(!should_enforce_runtime_approval(true, &AuthMethod::Session));
+    }
+
+    #[test]
+    fn non_session_auth_requires_enforcement_when_required() {
+        assert!(should_enforce_runtime_approval(true, &AuthMethod::ApiKey));
+        assert!(should_enforce_runtime_approval(
+            true,
+            &AuthMethod::AccessToken
+        ));
+        assert!(should_enforce_runtime_approval(
+            true,
+            &AuthMethod::Delegated
+        ));
+        assert!(should_enforce_runtime_approval(
+            true,
+            &AuthMethod::ServiceAccount
+        ));
+    }
+
+    #[test]
+    fn no_enforcement_when_approval_not_required() {
+        assert!(!should_enforce_runtime_approval(
+            false,
+            &AuthMethod::Session
+        ));
+        assert!(!should_enforce_runtime_approval(false, &AuthMethod::ApiKey));
+    }
 }
 
 #[derive(Debug, Serialize)]

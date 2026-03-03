@@ -388,6 +388,15 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route(
             "/grants/{grant_id}",
             delete(handlers::approvals::revoke_grant),
+        )
+        .route(
+            "/service-configs",
+            get(handlers::approvals::list_service_configs),
+        )
+        .route(
+            "/service-configs/{service_id}",
+            put(handlers::approvals::set_service_config)
+                .delete(handlers::approvals::delete_service_config),
         );
 
     let developer_routes = Router::new()

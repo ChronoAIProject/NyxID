@@ -10,16 +10,51 @@ use crate::errors::{AppError, AppResult};
 use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as GRANTS};
 use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as REQUESTS};
 use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
+use crate::models::service_approval_config::{
+    COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
+};
 use crate::services::notification_service;
 
-/// Check whether a user has the approval system enabled.
+/// Check whether a user has the global approval system enabled.
 pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<bool> {
+    Ok(user_global_approval_setting(db, user_id)
+        .await?
+        .unwrap_or(false))
+}
+
+/// Check whether approval is required for a specific service.
+///
+/// Resolution order:
+/// 1. If a `ServiceApprovalConfig` exists for (user, service), use its value.
+/// 2. Otherwise, fall back to the global `notification_channels.approval_required`.
+pub async fn requires_approval_for_service(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<bool> {
+    // Check per-service override first
+    let per_service = db
+        .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+        .find_one(doc! { "user_id": user_id, "service_id": service_id })
+        .await?;
+
+    let global = user_requires_approval(db, user_id).await?;
+    Ok(resolve_approval_requirement(
+        per_service.map(|c| c.approval_required),
+        Some(global),
+    ))
+}
+
+async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult<Option<bool>> {
     let channel = db
         .collection::<NotificationChannel>(CHANNELS)
         .find_one(doc! { "user_id": user_id })
         .await?;
+    Ok(channel.map(|c| c.approval_required))
+}
 
-    Ok(channel.map_or(false, |c| c.approval_required))
+fn resolve_approval_requirement(per_service: Option<bool>, global: Option<bool>) -> bool {
+    per_service.or(global).unwrap_or(false)
 }
 
 /// Check whether the request has a valid (non-expired, non-revoked) approval grant.
@@ -465,6 +500,106 @@ pub async fn revoke_all_grants(db: &Database, user_id: &str) -> AppResult<u64> {
     Ok(result.modified_count)
 }
 
+/// List per-service approval configs for a user.
+pub async fn list_service_approval_configs(
+    db: &Database,
+    user_id: &str,
+) -> AppResult<Vec<ServiceApprovalConfig>> {
+    let configs: Vec<ServiceApprovalConfig> = db
+        .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+        .find(doc! { "user_id": user_id })
+        .await?
+        .try_collect()
+        .await?;
+
+    Ok(configs)
+}
+
+/// Set a per-service approval config (atomic upsert).
+/// If a config already exists for (user, service), it is updated.
+/// Otherwise, a new config is created. Uses `findOneAndUpdate` with
+/// `upsert: true` to avoid race conditions from concurrent requests.
+pub async fn set_service_approval_config(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+    service_name: &str,
+    approval_required: bool,
+) -> AppResult<ServiceApprovalConfig> {
+    let now = bson::DateTime::from_chrono(Utc::now());
+    let collection = db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS);
+    let filter = doc! { "user_id": user_id, "service_id": service_id };
+
+    for _attempt in 0..2 {
+        let config = collection
+            .find_one_and_update(
+                filter.clone(),
+                doc! {
+                    "$set": {
+                        "approval_required": approval_required,
+                        "service_name": service_name,
+                        "updated_at": now,
+                    },
+                    "$setOnInsert": {
+                        "_id": uuid::Uuid::new_v4().to_string(),
+                        "user_id": user_id,
+                        "service_id": service_id,
+                        "created_at": now,
+                    }
+                },
+            )
+            .with_options(
+                FindOneAndUpdateOptions::builder()
+                    .upsert(true)
+                    .return_document(ReturnDocument::After)
+                    .build(),
+            )
+            .await;
+
+        match config {
+            Ok(Some(cfg)) => return Ok(cfg),
+            Ok(None) => {
+                return Err(AppError::Internal(
+                    "Upsert returned no document".to_string(),
+                ));
+            }
+            Err(e) if is_duplicate_key_error(&e) => {
+                // Concurrent upserts can race on the unique (user_id, service_id) index.
+                // Read-after-write resolves to the winning document.
+                if let Some(existing) = collection.find_one(filter.clone()).await? {
+                    return Ok(existing);
+                }
+                continue;
+            }
+            Err(e) => return Err(AppError::DatabaseError(e)),
+        }
+    }
+
+    Err(AppError::Conflict(
+        "Per-service approval config update conflicted, please retry".to_string(),
+    ))
+}
+
+/// Delete a per-service approval config (revert to global default).
+pub async fn delete_service_approval_config(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<()> {
+    let result = db
+        .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+        .delete_one(doc! { "user_id": user_id, "service_id": service_id })
+        .await?;
+
+    if result.deleted_count == 0 {
+        return Err(AppError::NotFound(
+            "Per-service approval config not found".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn compute_idempotency_key(
     user_id: &str,
     service_id: &str,
@@ -494,6 +629,27 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_approval_requirement_prefers_per_service_true_over_global_false() {
+        assert!(resolve_approval_requirement(Some(true), Some(false)));
+    }
+
+    #[test]
+    fn resolve_approval_requirement_prefers_per_service_false_over_global_true() {
+        assert!(!resolve_approval_requirement(Some(false), Some(true)));
+    }
+
+    #[test]
+    fn resolve_approval_requirement_falls_back_to_global_when_no_per_service() {
+        assert!(resolve_approval_requirement(None, Some(true)));
+        assert!(!resolve_approval_requirement(None, Some(false)));
+    }
+
+    #[test]
+    fn resolve_approval_requirement_defaults_to_false_when_no_settings() {
+        assert!(!resolve_approval_requirement(None, None));
+    }
 
     #[test]
     fn idempotency_key_deterministic() {
