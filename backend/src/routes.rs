@@ -49,6 +49,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/setup", post(handlers::auth::setup))
         .route("/social/{provider}", get(handlers::social_auth::authorize))
         .route(
+            "/social/apple/callback",
+            post(handlers::social_auth::apple_callback),
+        )
+        .route(
             "/social/{provider}/callback",
             get(handlers::social_auth::callback),
         )

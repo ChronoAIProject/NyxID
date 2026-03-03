@@ -13,6 +13,10 @@ const JWKS_DEFAULT_TTL_SECS: u64 = 3600;
 const JWKS_MIN_TTL_SECS: u64 = 300;
 const JWKS_MAX_TTL_SECS: u64 = 86400;
 const GOOGLE_ID_TOKEN_MAX_AGE_SECS: i64 = 600;
+const APPLE_JWKS_URI: &str = "https://appleid.apple.com/auth/keys";
+const APPLE_ISSUER: &str = "https://appleid.apple.com";
+const APPLE_ID_TOKEN_MAX_AGE_SECS: i64 = 600;
+const APPLE_ID_TOKEN_ALGORITHM: Algorithm = Algorithm::RS256;
 const CLOCK_SKEW_TOLERANCE_SECS: i64 = 30;
 
 /// Cached JWKS entry for a single provider endpoint.
@@ -43,6 +47,39 @@ pub struct GoogleIdTokenClaims {
     pub picture: Option<String>,
 }
 
+/// Apple ID token claims extracted after verification.
+#[derive(Debug, Deserialize)]
+pub struct AppleIdTokenClaims {
+    pub sub: String,
+    pub iss: String,
+    pub aud: String,
+    pub exp: i64,
+    pub iat: i64,
+    pub email: Option<String>,
+    /// Apple sends as string "true"/"false" or bool
+    pub email_verified: Option<serde_json::Value>,
+    /// Apple sends as string "true"/"false" or bool
+    pub is_private_email: Option<serde_json::Value>,
+    /// 0=unsupported, 1=unknown, 2=likely_real
+    pub real_user_status: Option<i64>,
+    pub nonce: Option<String>,
+}
+
+impl AppleIdTokenClaims {
+    /// Parse email_verified which Apple may send as bool or string.
+    pub fn is_email_verified(&self) -> Option<bool> {
+        match &self.email_verified {
+            Some(serde_json::Value::Bool(b)) => Some(*b),
+            Some(serde_json::Value::String(s)) => match s.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
 /// Thread-safe JWKS cache that fetches and caches remote JWKS endpoints.
 pub struct JwksCache {
     inner: RwLock<HashMap<String, CachedJwks>>,
@@ -61,8 +98,13 @@ struct JwkKey {
     kty: String,
     kid: Option<String>,
     alg: Option<String>,
+    // RSA components
     n: Option<String>,
     e: Option<String>,
+    // EC components
+    x: Option<String>,
+    y: Option<String>,
+    crv: Option<String>,
     #[serde(rename = "use")]
     key_use: Option<String>,
 }
@@ -262,16 +304,69 @@ impl JwksCache {
         })?;
         validate_google_claims(claims)
     }
+
+    /// Verify an Apple ID token and return the parsed claims.
+    ///
+    /// Performs full JWT verification: RS256 signature via JWKS, issuer, audience,
+    /// expiry, and iat freshness check.
+    pub async fn verify_apple_id_token(
+        &self,
+        token: &str,
+        expected_audience: &str,
+    ) -> AppResult<AppleIdTokenClaims> {
+        let header = jsonwebtoken::decode_header(token)
+            .map_err(|e| AppError::ExternalTokenInvalid(format!("Invalid JWT header: {e}")))?;
+
+        if header.alg != APPLE_ID_TOKEN_ALGORITHM {
+            return Err(AppError::ExternalTokenInvalid(format!(
+                "Unsupported algorithm: {:?} (expected {:?})",
+                header.alg, APPLE_ID_TOKEN_ALGORITHM
+            )));
+        }
+
+        let kid = header.kid.as_deref();
+
+        // Try cached keys first
+        let keys = self.get_keys(APPLE_JWKS_URI).await?;
+        match verify_with_keys_generic::<AppleIdTokenClaims>(
+            token,
+            kid,
+            &keys,
+            expected_audience,
+            &[APPLE_ISSUER],
+        ) {
+            Ok(claims) => return validate_apple_claims(claims),
+            Err(err) if err.should_refresh_keys() => {
+                tracing::debug!(kid = ?kid, error = ?err, "Apple JWKS refresh candidate");
+            }
+            Err(err) => return Err(err.into_app_error()),
+        }
+
+        // Force refresh and retry once
+        let keys = self.force_refresh(APPLE_JWKS_URI).await?;
+        let claims = verify_with_keys_generic::<AppleIdTokenClaims>(
+            token,
+            kid,
+            &keys,
+            expected_audience,
+            &[APPLE_ISSUER],
+        )
+        .map_err(|err| {
+            tracing::debug!(kid = ?kid, error = ?err, "Apple JWKS refresh did not resolve");
+            err.into_app_error()
+        })?;
+        validate_apple_claims(claims)
+    }
 }
 
-/// Attempt to verify the token against the cached keys.
-fn verify_with_keys(
+/// Attempt to verify a JWT and decode claims against the cached keys.
+fn verify_with_keys_generic<T: serde::de::DeserializeOwned>(
     token: &str,
     kid: Option<&str>,
     keys: &[CachedKey],
     expected_audience: &str,
-) -> Result<GoogleIdTokenClaims, VerifyError> {
-    // Find matching key by kid, or try all keys if no kid
+    expected_issuers: &[&str],
+) -> Result<T, VerifyError> {
     let matching_keys: Vec<&CachedKey> = if let Some(kid) = kid {
         keys.iter()
             .filter(|k| k.kid.as_deref() == Some(kid))
@@ -287,10 +382,10 @@ fn verify_with_keys(
     let mut last_err = None;
     for key in matching_keys {
         let mut validation = Validation::new(key.algorithm);
-        validation.set_issuer(&[GOOGLE_ISSUER]);
+        validation.set_issuer(expected_issuers);
         validation.set_audience(&[expected_audience]);
 
-        match decode::<GoogleIdTokenClaims>(token, &key.decoding_key, &validation) {
+        match decode::<T>(token, &key.decoding_key, &validation) {
             Ok(token_data) => return Ok(token_data.claims),
             Err(e) => {
                 last_err = Some(e);
@@ -308,6 +403,16 @@ fn verify_with_keys(
         jsonwebtoken::errors::ErrorKind::InvalidSignature => VerifyError::InvalidSignature,
         _ => VerifyError::Other(err.to_string()),
     })
+}
+
+/// Attempt to verify the token against the cached keys (Google-specific wrapper).
+fn verify_with_keys(
+    token: &str,
+    kid: Option<&str>,
+    keys: &[CachedKey],
+    expected_audience: &str,
+) -> Result<GoogleIdTokenClaims, VerifyError> {
+    verify_with_keys_generic(token, kid, keys, expected_audience, &[GOOGLE_ISSUER])
 }
 
 /// Validate Google-specific claims beyond basic JWT verification.
@@ -338,33 +443,73 @@ fn validate_google_claims(claims: GoogleIdTokenClaims) -> AppResult<GoogleIdToke
     Ok(claims)
 }
 
-/// Parse a single JWK into a CachedKey. Returns None for unsupported key types.
-fn parse_jwk(jwk: &JwkKey) -> Option<CachedKey> {
-    // Only RSA signing keys
-    if jwk.kty != "RSA" {
-        return None;
+/// Validate Apple-specific claims beyond basic JWT verification.
+fn validate_apple_claims(claims: AppleIdTokenClaims) -> AppResult<AppleIdTokenClaims> {
+    let now = chrono::Utc::now().timestamp();
+
+    if claims.iat > now + CLOCK_SKEW_TOLERANCE_SECS {
+        return Err(AppError::ExternalTokenInvalid(
+            "Token issued_at is in the future".to_string(),
+        ));
     }
 
+    if now - claims.iat > APPLE_ID_TOKEN_MAX_AGE_SECS + CLOCK_SKEW_TOLERANCE_SECS {
+        return Err(AppError::ExternalTokenInvalid(
+            "Token is too old (iat exceeds maximum age)".to_string(),
+        ));
+    }
+
+    if claims.sub.is_empty() {
+        return Err(AppError::ExternalTokenInvalid(
+            "Missing subject claim".to_string(),
+        ));
+    }
+
+    Ok(claims)
+}
+
+/// Parse a single JWK into a CachedKey. Returns None for unsupported key types.
+fn parse_jwk(jwk: &JwkKey) -> Option<CachedKey> {
     // Only signature keys (not encryption)
     if jwk.key_use.as_deref() == Some("enc") {
         return None;
     }
 
-    let alg = match jwk.alg.as_deref() {
-        Some("RS256") => Algorithm::RS256,
-        _ => return None,
-    };
-
-    let n = jwk.n.as_deref()?;
-    let e = jwk.e.as_deref()?;
-
-    let decoding_key = DecodingKey::from_rsa_components(n, e).ok()?;
-
-    Some(CachedKey {
-        kid: jwk.kid.clone(),
-        decoding_key,
-        algorithm: alg,
-    })
+    match jwk.kty.as_str() {
+        "RSA" => {
+            let alg = match jwk.alg.as_deref() {
+                Some("RS256") => Algorithm::RS256,
+                _ => return None,
+            };
+            let n = jwk.n.as_deref()?;
+            let e = jwk.e.as_deref()?;
+            let decoding_key = DecodingKey::from_rsa_components(n, e).ok()?;
+            Some(CachedKey {
+                kid: jwk.kid.clone(),
+                decoding_key,
+                algorithm: alg,
+            })
+        }
+        "EC" => {
+            let alg = match jwk.alg.as_deref() {
+                Some("ES256") => Algorithm::ES256,
+                _ => return None,
+            };
+            // Require P-256 curve for ES256
+            if jwk.crv.as_deref() != Some("P-256") {
+                return None;
+            }
+            let x = jwk.x.as_deref()?;
+            let y = jwk.y.as_deref()?;
+            let decoding_key = DecodingKey::from_ec_components(x, y).ok()?;
+            Some(CachedKey {
+                kid: jwk.kid.clone(),
+                decoding_key,
+                algorithm: alg,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Parse Cache-Control header for max-age value, clamped to [min, max] TTL.
@@ -425,6 +570,9 @@ mod tests {
             alg: Some("RS256".to_string()),
             n: Some("0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw".to_string()),
             e: Some("AQAB".to_string()),
+            x: None,
+            y: None,
+            crv: None,
             key_use: Some("sig".to_string()),
         };
 
@@ -436,13 +584,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_jwk_rejects_non_rsa() {
+    fn parse_jwk_rejects_unsupported_kty() {
         let jwk = JwkKey {
-            kty: "EC".to_string(),
-            kid: Some("ec-kid".to_string()),
-            alg: Some("ES256".to_string()),
+            kty: "OKP".to_string(),
+            kid: Some("okp-kid".to_string()),
+            alg: Some("EdDSA".to_string()),
             n: None,
             e: None,
+            x: None,
+            y: None,
+            crv: None,
             key_use: Some("sig".to_string()),
         };
 
@@ -457,6 +608,9 @@ mod tests {
             alg: Some("RS256".to_string()),
             n: Some("AQAB".to_string()),
             e: Some("AQAB".to_string()),
+            x: None,
+            y: None,
+            crv: None,
             key_use: Some("enc".to_string()),
         };
 
@@ -471,10 +625,74 @@ mod tests {
             alg: Some("RS384".to_string()),
             n: Some("AQAB".to_string()),
             e: Some("AQAB".to_string()),
+            x: None,
+            y: None,
+            crv: None,
             key_use: Some("sig".to_string()),
         };
 
         assert!(parse_jwk(&jwk).is_none());
+    }
+
+    #[test]
+    fn apple_id_token_algorithm_is_rs256() {
+        assert_eq!(APPLE_ID_TOKEN_ALGORITHM, Algorithm::RS256);
+    }
+
+    #[test]
+    fn apple_email_verified_parses_bool_and_string() {
+        let mut claims = AppleIdTokenClaims {
+            sub: "apple-user".to_string(),
+            iss: APPLE_ISSUER.to_string(),
+            aud: "aud".to_string(),
+            exp: chrono::Utc::now().timestamp() + 3600,
+            iat: chrono::Utc::now().timestamp(),
+            email: Some("user@example.com".to_string()),
+            email_verified: Some(serde_json::Value::Bool(true)),
+            is_private_email: None,
+            real_user_status: None,
+            nonce: None,
+        };
+        assert_eq!(claims.is_email_verified(), Some(true));
+
+        claims.email_verified = Some(serde_json::Value::String("false".to_string()));
+        assert_eq!(claims.is_email_verified(), Some(false));
+    }
+
+    #[test]
+    fn validate_apple_claims_rejects_old_iat() {
+        let old_iat = chrono::Utc::now().timestamp() - 700;
+        let claims = AppleIdTokenClaims {
+            sub: "apple-user".to_string(),
+            iss: APPLE_ISSUER.to_string(),
+            aud: "aud".to_string(),
+            exp: chrono::Utc::now().timestamp() + 3600,
+            iat: old_iat,
+            email: Some("user@example.com".to_string()),
+            email_verified: Some(serde_json::Value::Bool(true)),
+            is_private_email: None,
+            real_user_status: None,
+            nonce: None,
+        };
+        assert!(validate_apple_claims(claims).is_err());
+    }
+
+    #[test]
+    fn validate_apple_claims_accepts_valid() {
+        let now = chrono::Utc::now().timestamp();
+        let claims = AppleIdTokenClaims {
+            sub: "apple-user".to_string(),
+            iss: APPLE_ISSUER.to_string(),
+            aud: "aud".to_string(),
+            exp: now + 3600,
+            iat: now - 30,
+            email: Some("user@example.com".to_string()),
+            email_verified: Some(serde_json::Value::String("true".to_string())),
+            is_private_email: None,
+            real_user_status: Some(2),
+            nonce: Some("nonce-value".to_string()),
+        };
+        assert!(validate_apple_claims(claims).is_ok());
     }
 
     #[test]
@@ -542,6 +760,9 @@ mod tests {
             alg: None,
             n: Some("0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw".to_string()),
             e: Some("AQAB".to_string()),
+            x: None,
+            y: None,
+            crv: None,
             key_use: Some("sig".to_string()),
         };
 

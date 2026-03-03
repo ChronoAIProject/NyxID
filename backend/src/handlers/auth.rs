@@ -102,6 +102,26 @@ pub(crate) fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
         .map(String::from)
 }
 
+/// Build a Set-Cookie header value for an HttpOnly cookie with explicit SameSite policy.
+/// The Secure flag is set based on the deployment environment.
+/// When `domain` is provided, includes `Domain=<value>` for cross-subdomain sharing.
+pub(crate) fn build_cookie_with_same_site(
+    name: &str,
+    value: &str,
+    max_age_secs: i64,
+    path: &str,
+    secure: bool,
+    domain: Option<&str>,
+    same_site: &str,
+) -> String {
+    let secure_flag = if secure { "; Secure" } else { "" };
+    let domain_attr = domain.map(|d| format!("; Domain={d}")).unwrap_or_default();
+    format!(
+        "{}={}; HttpOnly; SameSite={}; Path={}; Max-Age={}{}{}",
+        name, value, same_site, path, max_age_secs, secure_flag, domain_attr
+    )
+}
+
 /// Build a Set-Cookie header value for an HttpOnly, SameSite=Lax cookie.
 /// The Secure flag is set based on the deployment environment.
 /// When `domain` is provided, includes `Domain=<value>` for cross-subdomain sharing.
@@ -113,24 +133,30 @@ pub(crate) fn build_cookie(
     secure: bool,
     domain: Option<&str>,
 ) -> String {
+    build_cookie_with_same_site(name, value, max_age_secs, path, secure, domain, "Lax")
+}
+
+/// Build a cookie-clearing header value with explicit SameSite policy.
+/// When `domain` is provided, includes `Domain=<value>` so the browser clears
+/// the correct cross-subdomain cookie.
+pub(crate) fn clear_cookie_with_same_site(
+    name: &str,
+    path: &str,
+    secure: bool,
+    domain: Option<&str>,
+    same_site: &str,
+) -> String {
     let secure_flag = if secure { "; Secure" } else { "" };
     let domain_attr = domain.map(|d| format!("; Domain={d}")).unwrap_or_default();
     format!(
-        "{}={}; HttpOnly; SameSite=Lax; Path={}; Max-Age={}{}{}",
-        name, value, path, max_age_secs, secure_flag, domain_attr
+        "{}=; HttpOnly; SameSite={}; Path={}; Max-Age=0{}{}",
+        name, same_site, path, secure_flag, domain_attr
     )
 }
 
-/// Build a cookie-clearing header value.
-/// When `domain` is provided, includes `Domain=<value>` so the browser clears
-/// the correct cross-subdomain cookie.
+/// Build a SameSite=Lax cookie-clearing header value.
 pub(crate) fn clear_cookie(name: &str, path: &str, secure: bool, domain: Option<&str>) -> String {
-    let secure_flag = if secure { "; Secure" } else { "" };
-    let domain_attr = domain.map(|d| format!("; Domain={d}")).unwrap_or_default();
-    format!(
-        "{}=; HttpOnly; SameSite=Lax; Path={}; Max-Age=0{}{}",
-        name, path, secure_flag, domain_attr
-    )
+    clear_cookie_with_same_site(name, path, secure, domain, "Lax")
 }
 
 // --- Handlers ---
