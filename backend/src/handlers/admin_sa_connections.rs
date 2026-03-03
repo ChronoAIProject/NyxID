@@ -1,24 +1,24 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::HeaderMap,
-    Json,
 };
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
 use crate::models::downstream_service::{
-    DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::user_service_connection::{
-    UserServiceConnection, COLLECTION_NAME as CONNECTIONS,
+    COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, connection_service, service_account_service};
-use crate::AppState;
 
 // --- Request types ---
 
@@ -33,7 +33,10 @@ pub struct AdminSaConnectRequest {
 impl std::fmt::Debug for AdminSaConnectRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AdminSaConnectRequest")
-            .field("credential", &self.credential.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("credential_label", &self.credential_label)
             .finish()
     }
@@ -122,10 +125,8 @@ pub async fn list_sa_connections(
             .await?
     };
 
-    let service_map: std::collections::HashMap<&str, &DownstreamService> = services
-        .iter()
-        .map(|s| (s.id.as_str(), s))
-        .collect();
+    let service_map: std::collections::HashMap<&str, &DownstreamService> =
+        services.iter().map(|s| (s.id.as_str(), s)).collect();
 
     let items: Vec<AdminSaConnectionItem> = conns
         .iter()
@@ -134,9 +135,8 @@ pub async fn list_sa_connections(
             AdminSaConnectionItem {
                 service_id: c.service_id.clone(),
                 service_name: svc.map_or("Unknown".to_string(), |s| s.name.clone()),
-                service_category: svc.map_or("connection".to_string(), |s| {
-                    s.service_category.clone()
-                }),
+                service_category: svc
+                    .map_or("connection".to_string(), |s| s.service_category.clone()),
                 auth_type: svc.and_then(|s| s.auth_type.clone()),
                 has_credential: c.credential_encrypted.is_some(),
                 credential_label: c.credential_label.clone(),

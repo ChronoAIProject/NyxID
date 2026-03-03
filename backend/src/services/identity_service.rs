@@ -1,5 +1,5 @@
 use chrono::Utc;
-use jsonwebtoken::{encode, Algorithm, Header};
+use jsonwebtoken::{Algorithm, Header, encode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -34,10 +34,7 @@ fn sanitize_header_value(val: &str) -> String {
 }
 
 /// Build identity headers for a proxied request based on service configuration.
-pub fn build_identity_headers(
-    user: &User,
-    service: &DownstreamService,
-) -> Vec<(String, String)> {
+pub fn build_identity_headers(user: &User, service: &DownstreamService) -> Vec<(String, String)> {
     let mode = service.identity_propagation_mode.as_str();
 
     if mode == "none" {
@@ -61,12 +58,10 @@ pub fn build_identity_headers(
     }
 
     if service.identity_include_name
-        && let Some(ref name) = user.display_name {
-            headers.push((
-                "X-NyxID-User-Name".to_string(),
-                sanitize_header_value(name),
-            ));
-        }
+        && let Some(ref name) = user.display_name
+    {
+        headers.push(("X-NyxID-User-Name".to_string(), sanitize_header_value(name)));
+    }
 
     headers
 }

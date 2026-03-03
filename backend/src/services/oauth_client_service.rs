@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
-use crate::models::oauth_client::{OauthClient, COLLECTION_NAME as OAUTH_CLIENTS};
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 
 /// Well-known client ID for native MCP clients (Cursor, Claude Code, etc.).
 const MCP_CLIENT_ID: &str = "nyx-mcp";

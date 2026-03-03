@@ -5,8 +5,8 @@ use zeroize::Zeroizing;
 
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
-use crate::models::provider_config::{ProviderConfig, COLLECTION_NAME as PROVIDER_CONFIGS};
-use crate::models::user_provider_token::{UserProviderToken, COLLECTION_NAME};
+use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::user_provider_token::{COLLECTION_NAME, UserProviderToken};
 
 /// A reqwest client that does NOT follow redirects, preventing `client_secret`
 /// from being forwarded to redirect targets (SEC-H2).
@@ -28,10 +28,7 @@ pub fn generate_code_verifier() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
-    base64::Engine::encode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        bytes,
-    )
+    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
 }
 
 /// Generate a PKCE S256 code challenge from a verifier.
@@ -40,10 +37,7 @@ pub fn generate_code_challenge(verifier: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
     let hash = hasher.finalize();
-    base64::Engine::encode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        hash,
-    )
+    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, hash)
 }
 
 /// Refresh an OAuth2 access token using the stored refresh token.
@@ -66,27 +60,30 @@ pub async fn refresh_oauth_token(
     })?;
 
     let decrypted_cid = Zeroizing::new(aes::decrypt(
-        provider.client_id_encrypted.as_ref().ok_or_else(|| {
-            AppError::Internal("Provider missing client_id".to_string())
-        })?,
+        provider
+            .client_id_encrypted
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("Provider missing client_id".to_string()))?,
         encryption_key,
     )?);
     let client_id = String::from_utf8((*decrypted_cid).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))?;
 
     let decrypted_csec = Zeroizing::new(aes::decrypt(
-        provider.client_secret_encrypted.as_ref().ok_or_else(|| {
-            AppError::Internal("Provider missing client_secret".to_string())
-        })?,
+        provider
+            .client_secret_encrypted
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("Provider missing client_secret".to_string()))?,
         encryption_key,
     )?);
     let client_secret = String::from_utf8((*decrypted_csec).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode client_secret: {e}")))?;
 
     let decrypted_rt = Zeroizing::new(aes::decrypt(
-        token.refresh_token_encrypted.as_ref().ok_or_else(|| {
-            AppError::Internal("Token missing refresh_token".to_string())
-        })?,
+        token
+            .refresh_token_encrypted
+            .as_ref()
+            .ok_or_else(|| AppError::Internal("Token missing refresh_token".to_string()))?,
         encryption_key,
     )?);
     let refresh_token = String::from_utf8((*decrypted_rt).clone())
@@ -135,11 +132,9 @@ pub async fn refresh_oauth_token(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to parse refresh response: {e}")))?;
 
-    let new_access_token = token_data["access_token"]
-        .as_str()
-        .ok_or_else(|| {
-            AppError::Internal("Missing access_token in refresh response".to_string())
-        })?;
+    let new_access_token = token_data["access_token"].as_str().ok_or_else(|| {
+        AppError::Internal("Missing access_token in refresh response".to_string())
+    })?;
 
     let new_refresh_token = token_data["refresh_token"].as_str();
     let expires_in = token_data["expires_in"].as_i64();

@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Path, Query, State},
     Json,
+    extract::{Path, Query, State},
 };
 use chrono::Utc;
 use futures::TryStreamExt;
@@ -8,18 +8,20 @@ use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::crypto::aes;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::mw::auth::AuthUser;
-use crate::models::downstream_service::{DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES};
-use crate::models::oauth_client::{OauthClient, COLLECTION_NAME as OAUTH_CLIENTS};
 use crate::services::{audit_service, oauth_client_service};
-use crate::AppState;
 
 use super::services_helpers::{
-    fetch_service, require_admin, require_admin_or_creator, service_to_response,
-    validate_base_url, DeleteServiceResponse,
+    DeleteServiceResponse, fetch_service, require_admin, require_admin_or_creator,
+    service_to_response, validate_base_url,
 };
 
 // --- Request / Response types ---
@@ -48,7 +50,10 @@ impl std::fmt::Debug for CreateServiceRequest {
             .field("base_url", &self.base_url)
             .field("auth_method", &self.auth_method)
             .field("auth_key_name", &self.auth_key_name)
-            .field("credential", &self.credential.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("service_category", &self.service_category)
             .finish()
     }
@@ -172,10 +177,7 @@ pub async fn list_services(
         .try_collect()
         .await?;
 
-    let items: Vec<ServiceResponse> = services
-        .into_iter()
-        .map(service_to_response)
-        .collect();
+    let items: Vec<ServiceResponse> = services.into_iter().map(service_to_response).collect();
 
     Ok(Json(ServiceListResponse { services: items }))
 }
@@ -242,15 +244,16 @@ pub async fn create_service(
         None => "header".to_string(),
     };
 
-    let auth_key_name = body.auth_key_name.clone().unwrap_or_else(|| {
-        match auth_method.as_str() {
+    let auth_key_name = body
+        .auth_key_name
+        .clone()
+        .unwrap_or_else(|| match auth_method.as_str() {
             "bearer" => "Authorization".to_string(),
             "basic" => "Authorization".to_string(),
             "query" => "api_key".to_string(),
             "none" => String::new(),
             _ => "X-API-Key".to_string(),
-        }
-    });
+        });
 
     let credential = body.credential.clone().unwrap_or_default();
 
@@ -410,7 +413,7 @@ pub async fn delete_service(
 
     // SEC-M2: Cascade deactivation - wipe all user credentials for this service
     use crate::models::user_service_connection::{
-        UserServiceConnection, COLLECTION_NAME as CONNECTIONS,
+        COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
     };
     state
         .db
@@ -545,7 +548,11 @@ pub async fn update_service(
     }
     if let Some(ref scope) = body.delegation_token_scope {
         // H3: Default empty scope to "llm:proxy" so tokens always have permissions
-        let scope = if scope.is_empty() { "llm:proxy" } else { scope.as_str() };
+        let scope = if scope.is_empty() {
+            "llm:proxy"
+        } else {
+            scope.as_str()
+        };
 
         // H2: Validate against known delegation scopes
         let valid_scopes = ["llm:proxy", "proxy:*", "llm:status"];
@@ -574,21 +581,15 @@ pub async fn update_service(
     state
         .db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .update_one(
-            doc! { "_id": &service_id },
-            doc! { "$set": &set_doc },
-        )
+        .update_one(doc! { "_id": &service_id }, doc! { "$set": &set_doc })
         .await?;
 
     // If base_url changed and service has an OIDC client, update default redirect URI
-    if let (Some(new_base_url), Some(oauth_client_id)) = (&body.base_url, &service.oauth_client_id) {
+    if let (Some(new_base_url), Some(oauth_client_id)) = (&body.base_url, &service.oauth_client_id)
+    {
         let new_callback = format!("{}/callback", new_base_url.trim_end_matches('/'));
-        oauth_client_service::update_redirect_uris(
-            &state.db,
-            oauth_client_id,
-            &[new_callback],
-        )
-        .await?;
+        oauth_client_service::update_redirect_uris(&state.db, oauth_client_id, &[new_callback])
+            .await?;
     }
 
     tracing::info!(service_id = %service_id, updated_by = %auth_user.user_id, "Service updated");
@@ -626,16 +627,15 @@ pub async fn get_oidc_credentials(
         ));
     }
 
-    let oauth_client_id = service.oauth_client_id.ok_or_else(|| {
-        AppError::Internal("OIDC service missing oauth_client_id".to_string())
-    })?;
+    let oauth_client_id = service
+        .oauth_client_id
+        .ok_or_else(|| AppError::Internal("OIDC service missing oauth_client_id".to_string()))?;
 
     // Decrypt the client secret from credential_encrypted
     let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
     let decrypted_bytes = aes::decrypt(&service.credential_encrypted, &encryption_key)?;
-    let client_secret = String::from_utf8(decrypted_bytes).map_err(|e| {
-        AppError::Internal(format!("Failed to decode decrypted secret: {e}"))
-    })?;
+    let client_secret = String::from_utf8(decrypted_bytes)
+        .map_err(|e| AppError::Internal(format!("Failed to decode decrypted secret: {e}")))?;
 
     // Fetch the OAuth client for redirect URIs and scopes
     let oauth_client = oauth_client_service::get_client(&state.db, &oauth_client_id).await?;
@@ -695,9 +695,9 @@ pub async fn update_redirect_uris(
         ));
     }
 
-    let oauth_client_id = service.oauth_client_id.ok_or_else(|| {
-        AppError::Internal("OIDC service missing oauth_client_id".to_string())
-    })?;
+    let oauth_client_id = service
+        .oauth_client_id
+        .ok_or_else(|| AppError::Internal("OIDC service missing oauth_client_id".to_string()))?;
 
     if body.redirect_uris.is_empty() {
         return Err(AppError::ValidationError(
@@ -719,9 +719,8 @@ pub async fn update_redirect_uris(
                 "Redirect URI exceeds max length of 2048 characters".to_string(),
             ));
         }
-        let parsed = url::Url::parse(uri).map_err(|_| {
-            AppError::ValidationError(format!("Invalid redirect URI: {uri}"))
-        })?;
+        let parsed = url::Url::parse(uri)
+            .map_err(|_| AppError::ValidationError(format!("Invalid redirect URI: {uri}")))?;
         let scheme = parsed.scheme();
         if scheme != "https" && scheme != "http" {
             return Err(AppError::ValidationError(format!(
@@ -730,12 +729,8 @@ pub async fn update_redirect_uris(
         }
     }
 
-    oauth_client_service::update_redirect_uris(
-        &state.db,
-        &oauth_client_id,
-        &body.redirect_uris,
-    )
-    .await?;
+    oauth_client_service::update_redirect_uris(&state.db, &oauth_client_id, &body.redirect_uris)
+        .await?;
 
     // Touch updated_at on the service
     let now = Utc::now();
@@ -787,9 +782,9 @@ pub async fn regenerate_oidc_secret(
         ));
     }
 
-    let oauth_client_id = service.oauth_client_id.ok_or_else(|| {
-        AppError::Internal("OIDC service missing oauth_client_id".to_string())
-    })?;
+    let oauth_client_id = service
+        .oauth_client_id
+        .ok_or_else(|| AppError::Internal("OIDC service missing oauth_client_id".to_string()))?;
 
     // Generate a new secret
     let new_secret = generate_random_token();

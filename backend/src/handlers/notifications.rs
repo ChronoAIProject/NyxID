@@ -1,14 +1,14 @@
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use chrono::Utc;
 use mongodb::bson::{self, doc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::notification_channel::{NotificationChannel, COLLECTION_NAME};
+use crate::models::notification_channel::{COLLECTION_NAME, NotificationChannel};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, notification_service};
-use crate::AppState;
 
 // --- Response types ---
 
@@ -99,7 +99,10 @@ pub async fn update_settings(
         update_doc.insert("approval_required", v);
     }
     if let Some(v) = body.approval_timeout_secs {
-        debug_assert!(v <= i32::MAX as u32, "approval_timeout_secs exceeds i32::MAX");
+        debug_assert!(
+            v <= i32::MAX as u32,
+            "approval_timeout_secs exceeds i32::MAX"
+        );
         update_doc.insert("approval_timeout_secs", v as i32);
     }
     if let Some(v) = body.grant_expiry_days {
@@ -110,10 +113,7 @@ pub async fn update_settings(
     state
         .db
         .collection::<NotificationChannel>(COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": &channel.id },
-            doc! { "$set": update_doc },
-        )
+        .update_one(doc! { "_id": &channel.id }, doc! { "$set": update_doc })
         .await?;
 
     let updated = notification_service::get_or_create_channel(&state.db, &user_id).await?;

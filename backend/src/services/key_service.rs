@@ -101,10 +101,7 @@ pub async fn create_api_key(
 }
 
 /// List all API keys for a user (without exposing the full key).
-pub async fn list_api_keys(
-    db: &mongodb::Database,
-    user_id: &str,
-) -> AppResult<Vec<ApiKey>> {
+pub async fn list_api_keys(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<ApiKey>> {
     let keys: Vec<ApiKey> = db
         .collection::<ApiKey>(API_KEYS)
         .find(doc! { "user_id": user_id, "is_active": true })
@@ -117,11 +114,7 @@ pub async fn list_api_keys(
 }
 
 /// Delete (deactivate) an API key.
-pub async fn delete_api_key(
-    db: &mongodb::Database,
-    user_id: &str,
-    key_id: &str,
-) -> AppResult<()> {
+pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) -> AppResult<()> {
     let key = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": key_id, "user_id": user_id })
@@ -192,9 +185,10 @@ pub async fn validate_api_key(
 
     // Check expiration
     if let Some(expires_at) = key.expires_at
-        && expires_at < Utc::now() {
-            return Err(AppError::Unauthorized("API key has expired".to_string()));
-        }
+        && expires_at < Utc::now()
+    {
+        return Err(AppError::Unauthorized("API key has expired".to_string()));
+    }
 
     // Update last_used_at
     let user_id = key.user_id.clone();

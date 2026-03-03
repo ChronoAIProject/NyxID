@@ -5,11 +5,11 @@ use mongodb::bson::doc;
 
 use crate::errors::AppResult;
 use crate::models::downstream_service::{
-    DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
-use crate::models::service_endpoint::{ServiceEndpoint, COLLECTION_NAME as SERVICE_ENDPOINTS};
+use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, ServiceEndpoint};
 use crate::models::user_service_connection::{
-    UserServiceConnection, COLLECTION_NAME as CONNECTIONS,
+    COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
 use crate::services::{connection_service, proxy_service};
 
@@ -334,59 +334,53 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
 
     // -- URL / query / header parameters --
     if let Some(params_value) = &endpoint.parameters
-        && let Some(params) = params_value.as_array() {
-            for param in params {
-                let name = match param.get("name").and_then(|v| v.as_str()) {
-                    Some(n) if !n.is_empty() => n,
-                    _ => continue,
-                };
+        && let Some(params) = params_value.as_array()
+    {
+        for param in params {
+            let name = match param.get("name").and_then(|v| v.as_str()) {
+                Some(n) if !n.is_empty() => n,
+                _ => continue,
+            };
 
-                let mut schema = serde_json::Map::new();
+            let mut schema = serde_json::Map::new();
 
-                if let Some(param_schema) = param.get("schema") {
-                    let typ = param_schema
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("string");
-                    schema.insert("type".into(), serde_json::Value::String(typ.into()));
+            if let Some(param_schema) = param.get("schema") {
+                let typ = param_schema
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("string");
+                schema.insert("type".into(), serde_json::Value::String(typ.into()));
 
-                    if let Some(desc) = param_schema.get("description").and_then(|v| v.as_str()) {
-                        schema.insert(
-                            "description".into(),
-                            serde_json::Value::String(desc.into()),
-                        );
-                    }
-                    if let Some(fmt) = param_schema.get("format").and_then(|v| v.as_str()) {
-                        schema
-                            .insert("format".into(), serde_json::Value::String(fmt.into()));
-                    }
-                    if let Some(enums) = param_schema.get("enum") {
-                        schema.insert("enum".into(), enums.clone());
-                    }
-                    if let Some(default) = param_schema.get("default") {
-                        schema.insert("default".into(), default.clone());
-                    }
+                if let Some(desc) = param_schema.get("description").and_then(|v| v.as_str()) {
+                    schema.insert("description".into(), serde_json::Value::String(desc.into()));
                 }
-
-                // Param-level description overrides schema-level
-                if let Some(desc) = param.get("description").and_then(|v| v.as_str()) {
-                    schema.insert(
-                        "description".into(),
-                        serde_json::Value::String(desc.into()),
-                    );
+                if let Some(fmt) = param_schema.get("format").and_then(|v| v.as_str()) {
+                    schema.insert("format".into(), serde_json::Value::String(fmt.into()));
                 }
-
-                properties.insert(name.to_string(), serde_json::Value::Object(schema));
-
-                if param
-                    .get("required")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    required.push(serde_json::Value::String(name.to_string()));
+                if let Some(enums) = param_schema.get("enum") {
+                    schema.insert("enum".into(), enums.clone());
+                }
+                if let Some(default) = param_schema.get("default") {
+                    schema.insert("default".into(), default.clone());
                 }
             }
+
+            // Param-level description overrides schema-level
+            if let Some(desc) = param.get("description").and_then(|v| v.as_str()) {
+                schema.insert("description".into(), serde_json::Value::String(desc.into()));
+            }
+
+            properties.insert(name.to_string(), serde_json::Value::Object(schema));
+
+            if param
+                .get("required")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                required.push(serde_json::Value::String(name.to_string()));
+            }
         }
+    }
 
     // -- Request body schema --
     if let Some(body_schema) = &endpoint.request_body_schema {
@@ -468,7 +462,12 @@ pub fn resolve_tool_call<'a>(
 pub fn build_proxy_args(
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
-) -> (reqwest::Method, String, Option<String>, Option<bytes::Bytes>) {
+) -> (
+    reqwest::Method,
+    String,
+    Option<String>,
+    Option<bytes::Bytes>,
+) {
     let mut path = endpoint.path.trim_start_matches('/').to_string();
     let mut query_params: Vec<(String, String)> = Vec::new();
     let mut body_fields: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
@@ -478,23 +477,21 @@ pub fn build_proxy_args(
     let mut query_param_names = HashSet::new();
 
     if let Some(params_value) = &endpoint.parameters
-        && let Some(params) = params_value.as_array() {
-            for param in params {
-                let name = param
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                match param.get("in").and_then(|v| v.as_str()).unwrap_or("") {
-                    "path" => {
-                        path_params.insert(name.to_string());
-                    }
-                    "query" => {
-                        query_param_names.insert(name.to_string());
-                    }
-                    _ => {}
+        && let Some(params) = params_value.as_array()
+    {
+        for param in params {
+            let name = param.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            match param.get("in").and_then(|v| v.as_str()).unwrap_or("") {
+                "path" => {
+                    path_params.insert(name.to_string());
                 }
+                "query" => {
+                    query_param_names.insert(name.to_string());
+                }
+                _ => {}
             }
         }
+    }
 
     if let Some(args_obj) = args.as_object() {
         for (key, value) in args_obj {
@@ -504,10 +501,7 @@ pub fn build_proxy_args(
             };
 
             if path_params.contains(key.as_str()) {
-                path = path.replace(
-                    &format!("{{{key}}}"),
-                    &urlencoding::encode(&str_value),
-                );
+                path = path.replace(&format!("{{{key}}}"), &urlencoding::encode(&str_value));
             } else if query_param_names.contains(key.as_str()) {
                 query_params.push((key.clone(), str_value));
             } else {
@@ -521,13 +515,7 @@ pub fn build_proxy_args(
     } else {
         let qs: Vec<String> = query_params
             .iter()
-            .map(|(k, v)| {
-                format!(
-                    "{}={}",
-                    urlencoding::encode(k),
-                    urlencoding::encode(v)
-                )
-            })
+            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
             .collect();
         Some(qs.join("&"))
     };
@@ -581,19 +569,15 @@ pub async fn execute_tool(
     jwt_keys: &crate::crypto::jwt::JwtKeys,
     config: &crate::config::AppConfig,
 ) -> AppResult<(u16, String)> {
-    use crate::models::user::{User, COLLECTION_NAME as USERS};
+    use crate::models::user::{COLLECTION_NAME as USERS, User};
     use crate::services::{delegation_service, identity_service};
     use mongodb::bson::doc;
 
     let (method, path, query, body) = build_proxy_args(endpoint, arguments);
 
-    let target = proxy_service::resolve_proxy_target(
-        db,
-        encryption_key,
-        user_id,
-        &service.service_id,
-    )
-    .await?;
+    let target =
+        proxy_service::resolve_proxy_target(db, encryption_key, user_id, &service.service_id)
+            .await?;
 
     // Build identity headers if configured on the service (CR-8)
     let mut identity_headers = Vec::new();
@@ -608,8 +592,7 @@ pub async fn execute_tool(
                 target.service.identity_propagation_mode.as_str(),
                 "headers" | "both"
             ) {
-                identity_headers =
-                    identity_service::build_identity_headers(user, &target.service);
+                identity_headers = identity_service::build_identity_headers(user, &target.service);
             }
 
             if matches!(
@@ -623,10 +606,7 @@ pub async fn execute_tool(
                     &target.service,
                 ) {
                     Ok(assertion) => {
-                        identity_headers.push((
-                            "X-NyxID-Identity-Token".to_string(),
-                            assertion,
-                        ));
+                        identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -654,10 +634,7 @@ pub async fn execute_tool(
             crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
         ) {
             Ok(delegation_token) => {
-                identity_headers.push((
-                    "X-NyxID-Delegation-Token".to_string(),
-                    delegation_token,
-                ));
+                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
 
                 // M1: Audit log for MCP delegation token generation
                 crate::services::audit_service::log_async(
@@ -708,10 +685,7 @@ pub async fn execute_tool(
             "application/json".parse().unwrap(),
         );
     }
-    headers.insert(
-        reqwest::header::ACCEPT,
-        "application/json".parse().unwrap(),
-    );
+    headers.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
 
     let response = proxy_service::forward_request(
         http_client,
@@ -807,10 +781,7 @@ pub async fn discover_services(
         .try_collect()
         .await?;
 
-    let connected_ids: HashSet<&str> = connections
-        .iter()
-        .map(|c| c.service_id.as_str())
-        .collect();
+    let connected_ids: HashSet<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
 
     let mut filter = doc! { "is_active": true, "service_category": { "$ne": "provider" } };
     if let Some(cat) = category {
@@ -911,7 +882,12 @@ mod tests {
         }
     }
 
-    fn make_service(id: &str, name: &str, slug: &str, endpoints: Vec<McpToolEndpoint>) -> McpToolService {
+    fn make_service(
+        id: &str,
+        name: &str,
+        slug: &str,
+        endpoints: Vec<McpToolEndpoint>,
+    ) -> McpToolService {
         McpToolService {
             service_id: id.to_string(),
             service_name: name.to_string(),
@@ -961,7 +937,10 @@ mod tests {
                 "svc-2",
                 "News",
                 "news",
-                vec![make_endpoint("get_weather_news", "Get weather-related news")],
+                vec![make_endpoint(
+                    "get_weather_news",
+                    "Get weather-related news",
+                )],
             ),
         ];
 

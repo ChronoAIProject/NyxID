@@ -4,8 +4,12 @@ use zeroize::Zeroizing;
 
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
-use crate::models::downstream_service::{DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES};
-use crate::models::user_service_connection::{UserServiceConnection, COLLECTION_NAME as USER_SERVICE_CONNECTIONS};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
+use crate::models::user_service_connection::{
+    COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
+};
 use crate::services::delegation_service::DelegatedCredential;
 
 /// Result of resolving a proxy target.
@@ -127,11 +131,10 @@ pub async fn resolve_proxy_target(
 
     // SEC-M3: Wrap raw decrypted bytes in Zeroizing so they are zeroed on drop
     let decrypted_bytes = Zeroizing::new(aes::decrypt(&credential_encrypted, encryption_key)?);
-    let credential = String::from_utf8((*decrypted_bytes).clone())
-        .map_err(|e| {
-            tracing::error!("Credential UTF-8 decode failed: {e}");
-            AppError::Internal("Failed to decode credential".to_string())
-        })?;
+    let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+        tracing::error!("Credential UTF-8 decode failed: {e}");
+        AppError::Internal("Failed to decode credential".to_string())
+    })?;
 
     Ok(ProxyTarget {
         base_url: service.base_url.clone(),
@@ -170,9 +173,18 @@ pub async fn forward_request(
     // DNS resolver or reqwest's `resolve` feature to check the resolved IP before connecting.
 
     let url = if let Some(q) = query {
-        format!("{}/{}?{}", target.base_url.trim_end_matches('/'), path.trim_start_matches('/'), q)
+        format!(
+            "{}/{}?{}",
+            target.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/'),
+            q
+        )
     } else {
-        format!("{}/{}", target.base_url.trim_end_matches('/'), path.trim_start_matches('/'))
+        format!(
+            "{}/{}",
+            target.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        )
     };
 
     let mut request = client.request(method.clone(), &url);
@@ -229,10 +241,8 @@ pub async fn forward_request(
     for cred in &delegated_credentials {
         match cred.injection_method.as_str() {
             "bearer" => {
-                request = request.header(
-                    &cred.injection_key,
-                    format!("Bearer {}", cred.credential),
-                );
+                request =
+                    request.header(&cred.injection_key, format!("Bearer {}", cred.credential));
             }
             "header" => {
                 request = request.header(&cred.injection_key, &cred.credential);
@@ -248,13 +258,10 @@ pub async fn forward_request(
         request = request.body(body_bytes);
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("Proxy request to {} failed: {e}", target.base_url);
-            AppError::Internal("Proxy request failed".to_string())
-        })?;
+    let response = request.send().await.map_err(|e| {
+        tracing::error!("Proxy request to {} failed: {e}", target.base_url);
+        AppError::Internal("Proxy request failed".to_string())
+    })?;
 
     Ok(response)
 }

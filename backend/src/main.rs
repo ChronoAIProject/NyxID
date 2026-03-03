@@ -1,10 +1,10 @@
-use std::net::SocketAddr;
 use axum::{extract::DefaultBodyLimit, extract::Extension, middleware as axum_mw};
 use clap::Parser;
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
 mod crypto;
@@ -54,9 +54,10 @@ async fn main() {
 
     // Initialize structured logging
     tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("nyxid=info,tower_http=info")
-        }))
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("nyxid=info,tower_http=info")),
+        )
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
@@ -109,8 +110,8 @@ async fn main() {
     // Compute JWK from the public key for the JWKS endpoint
     let public_pem = std::fs::read_to_string(&config.jwt_public_key_path)
         .expect("Failed to read public key for JWK");
-    let jwk_json = crypto::jwt::public_key_jwk(&public_pem)
-        .expect("Failed to compute JWK from public key");
+    let jwk_json =
+        crypto::jwt::public_key_jwk(&public_pem).expect("Failed to compute JWK from public key");
 
     // Create a shared reqwest client for connection reuse
     let http_client = reqwest::Client::builder()
@@ -139,10 +140,8 @@ async fn main() {
     };
 
     // Create rate limiters
-    let global_rate_limiter = mw::rate_limit::create_rate_limiter(
-        config.rate_limit_per_second,
-        config.rate_limit_burst,
-    );
+    let global_rate_limiter =
+        mw::rate_limit::create_rate_limiter(config.rate_limit_per_second, config.rate_limit_burst);
     let per_ip_rate_limiter = mw::rate_limit::create_per_ip_rate_limiter(
         config.rate_limit_burst, // per-IP max requests per window
         1,                       // 1-second window
@@ -178,7 +177,8 @@ async fn main() {
     let http_for_expiry = state.http_client.clone();
     let expiry_interval_secs = config.approval_expiry_interval_secs;
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(expiry_interval_secs));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(expiry_interval_secs));
         loop {
             interval.tick().await;
             if let Err(e) = services::approval_service::expire_pending_requests(
@@ -251,9 +251,7 @@ async fn main() {
         .layer(axum_mw::from_fn(
             mw::security_headers::security_headers_middleware,
         ))
-        .layer(axum_mw::from_fn(
-            mw::rate_limit::rate_limit_middleware,
-        ))
+        .layer(axum_mw::from_fn(mw::rate_limit::rate_limit_middleware))
         .layer(Extension(per_ip_rate_limiter))
         .layer(Extension(global_rate_limiter))
         .layer(TraceLayer::new_for_http());
@@ -266,9 +264,12 @@ async fn main() {
 
     tracing::info!("Listening on {addr}");
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .expect("Server error");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("Server error");
 }
 
 /// Run the --promote-admin CLI command, then return.

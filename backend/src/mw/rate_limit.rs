@@ -1,14 +1,8 @@
-use axum::{
-    body::Body,
-    extract::Extension,
-    http::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{body::Body, extract::Extension, http::Request, middleware::Next, response::Response};
 use governor::{
+    Quota, RateLimiter,
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
-    Quota, RateLimiter,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -106,17 +100,19 @@ fn extract_client_ip(request: &Request<Body>) -> IpAddr {
     // Try X-Forwarded-For first
     if let Some(forwarded_for) = request.headers().get("x-forwarded-for")
         && let Ok(value) = forwarded_for.to_str()
-            && let Some(first_ip) = value.split(',').next()
-                && let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
-                    return ip;
-                }
+        && let Some(first_ip) = value.split(',').next()
+        && let Ok(ip) = first_ip.trim().parse::<IpAddr>()
+    {
+        return ip;
+    }
 
     // Try X-Real-IP
     if let Some(real_ip) = request.headers().get("x-real-ip")
         && let Ok(value) = real_ip.to_str()
-            && let Ok(ip) = value.trim().parse::<IpAddr>() {
-                return ip;
-            }
+        && let Ok(ip) = value.trim().parse::<IpAddr>()
+    {
+        return ip;
+    }
 
     // Fallback to loopback (in production, the reverse proxy should always set headers)
     IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
@@ -127,11 +123,7 @@ fn extract_client_ip(request: &Request<Body>) -> IpAddr {
 /// Expects both `SharedPerIpRateLimiter` and `SharedRateLimiter` as layer Extensions.
 /// Returns 429 Too Many Requests when the limit is exceeded.
 /// Paths exempt from rate limiting (authenticated via other means).
-const RATE_LIMIT_EXEMPT_PATHS: &[&str] = &[
-    "/mcp",
-    "/.well-known/",
-    "/health",
-];
+const RATE_LIMIT_EXEMPT_PATHS: &[&str] = &["/mcp", "/.well-known/", "/health"];
 
 pub async fn rate_limit_middleware(
     Extension(per_ip_limiter): Extension<SharedPerIpRateLimiter>,

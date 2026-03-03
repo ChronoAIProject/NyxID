@@ -4,9 +4,11 @@ use uuid::Uuid;
 
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
-use crate::models::downstream_service::{DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
 use crate::models::user_service_connection::{
-    UserServiceConnection, COLLECTION_NAME as CONNECTIONS,
+    COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
 
 /// Maximum credential length in bytes to prevent abuse.
@@ -135,10 +137,13 @@ pub async fn connect_user(
             "updated_at": mongodb::bson::DateTime::from_chrono(now),
         };
         if let Some(enc) = &credential_encrypted {
-            set_doc.insert("credential_encrypted", mongodb::bson::Binary {
-                subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                bytes: enc.clone(),
-            });
+            set_doc.insert(
+                "credential_encrypted",
+                mongodb::bson::Binary {
+                    subtype: mongodb::bson::spec::BinarySubtype::Generic,
+                    bytes: enc.clone(),
+                },
+            );
         }
         if let Some(ct) = &credential_type {
             set_doc.insert("credential_type", ct.as_str());
@@ -300,4 +305,3 @@ pub async fn disconnect_user(
 
     Ok(())
 }
-

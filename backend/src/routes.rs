@@ -1,13 +1,12 @@
 use axum::{
-    middleware,
+    Router, middleware,
     routing::{delete, get, patch, post, put},
-    Router,
 };
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
+use crate::AppState;
 use crate::handlers;
 use crate::mw::auth::{reject_delegated_tokens, reject_service_account_tokens};
-use crate::AppState;
 
 /// Per RFC 9207 / OAuth 2.0 for Browser-Based Apps, the token endpoint,
 /// userinfo endpoint, and discovery documents MUST be accessible from any
@@ -49,14 +48,20 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/reset-password", post(handlers::auth::reset_password))
         .route("/setup", post(handlers::auth::setup))
         .route("/social/{provider}", get(handlers::social_auth::authorize))
-        .route("/social/{provider}/callback", get(handlers::social_auth::callback))
+        .route(
+            "/social/{provider}/callback",
+            get(handlers::social_auth::callback),
+        )
         .nest("/mfa", mfa_routes);
 
     let user_routes = Router::new()
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
         .route("/me/consents", get(handlers::consent::list_my_consents))
-        .route("/me/consents/{client_id}", delete(handlers::consent::revoke_my_consent));
+        .route(
+            "/me/consents/{client_id}",
+            delete(handlers::consent::revoke_my_consent),
+        );
 
     let api_key_routes = Router::new()
         .route("/", get(handlers::api_keys::list_keys))
@@ -70,27 +75,61 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/{service_id}", get(handlers::services::get_service))
         .route("/{service_id}", put(handlers::services::update_service))
         .route("/{service_id}", delete(handlers::services::delete_service))
-        .route("/{service_id}/oidc-credentials", get(handlers::services::get_oidc_credentials))
-        .route("/{service_id}/redirect-uris", put(handlers::services::update_redirect_uris))
-        .route("/{service_id}/regenerate-secret", post(handlers::services::regenerate_oidc_secret))
-        .route("/{service_id}/endpoints", get(handlers::endpoints::list_endpoints))
-        .route("/{service_id}/endpoints", post(handlers::endpoints::create_endpoint))
-        .route("/{service_id}/endpoints/{endpoint_id}", put(handlers::endpoints::update_endpoint))
-        .route("/{service_id}/endpoints/{endpoint_id}", delete(handlers::endpoints::delete_endpoint))
-        .route("/{service_id}/discover-endpoints", post(handlers::endpoints::discover_endpoints))
-        .route("/{service_id}/requirements", get(handlers::service_requirements::list_requirements))
-        .route("/{service_id}/requirements", post(handlers::service_requirements::add_requirement))
-        .route("/{service_id}/requirements/{requirement_id}", delete(handlers::service_requirements::remove_requirement));
+        .route(
+            "/{service_id}/oidc-credentials",
+            get(handlers::services::get_oidc_credentials),
+        )
+        .route(
+            "/{service_id}/redirect-uris",
+            put(handlers::services::update_redirect_uris),
+        )
+        .route(
+            "/{service_id}/regenerate-secret",
+            post(handlers::services::regenerate_oidc_secret),
+        )
+        .route(
+            "/{service_id}/endpoints",
+            get(handlers::endpoints::list_endpoints),
+        )
+        .route(
+            "/{service_id}/endpoints",
+            post(handlers::endpoints::create_endpoint),
+        )
+        .route(
+            "/{service_id}/endpoints/{endpoint_id}",
+            put(handlers::endpoints::update_endpoint),
+        )
+        .route(
+            "/{service_id}/endpoints/{endpoint_id}",
+            delete(handlers::endpoints::delete_endpoint),
+        )
+        .route(
+            "/{service_id}/discover-endpoints",
+            post(handlers::endpoints::discover_endpoints),
+        )
+        .route(
+            "/{service_id}/requirements",
+            get(handlers::service_requirements::list_requirements),
+        )
+        .route(
+            "/{service_id}/requirements",
+            post(handlers::service_requirements::add_requirement),
+        )
+        .route(
+            "/{service_id}/requirements/{requirement_id}",
+            delete(handlers::service_requirements::remove_requirement),
+        );
 
-    let session_routes = Router::new()
-        .route("/", get(handlers::sessions::list_sessions));
+    let session_routes = Router::new().route("/", get(handlers::sessions::list_sessions));
 
-    let mcp_routes = Router::new()
-        .route("/config", get(handlers::mcp::get_mcp_config));
+    let mcp_routes = Router::new().route("/config", get(handlers::mcp::get_mcp_config));
 
     let connection_routes = Router::new()
         .route("/", get(handlers::connections::list_connections))
-        .route("/{service_id}", post(handlers::connections::connect_service))
+        .route(
+            "/{service_id}",
+            post(handlers::connections::connect_service),
+        )
         .route(
             "/{service_id}",
             delete(handlers::connections::disconnect_service),
@@ -110,7 +149,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         )
         .route("/{provider_id}", get(handlers::providers::get_provider))
         .route("/{provider_id}", put(handlers::providers::update_provider))
-        .route("/{provider_id}", delete(handlers::providers::delete_provider))
+        .route(
+            "/{provider_id}",
+            delete(handlers::providers::delete_provider),
+        )
         .route(
             "/{provider_id}/connect/api-key",
             post(handlers::user_tokens::connect_api_key),
@@ -156,71 +198,147 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         );
 
     let sa_admin_routes = Router::new()
-        .route("/", get(handlers::admin_service_accounts::list_service_accounts)
-            .post(handlers::admin_service_accounts::create_service_account))
-        .route("/{sa_id}", get(handlers::admin_service_accounts::get_service_account)
-            .put(handlers::admin_service_accounts::update_service_account)
-            .delete(handlers::admin_service_accounts::delete_service_account))
-        .route("/{sa_id}/rotate-secret",
-            post(handlers::admin_service_accounts::rotate_secret))
-        .route("/{sa_id}/revoke-tokens",
-            post(handlers::admin_service_accounts::revoke_tokens))
-        .route("/{sa_id}/providers",
-            get(handlers::admin_sa_providers::list_sa_providers))
-        .route("/{sa_id}/providers/{provider_id}/connect/api-key",
-            post(handlers::admin_sa_providers::connect_api_key_for_sa))
-        .route("/{sa_id}/providers/{provider_id}/connect/oauth",
-            get(handlers::admin_sa_providers::initiate_oauth_for_sa))
-        .route("/{sa_id}/providers/{provider_id}/connect/device-code/initiate",
-            post(handlers::admin_sa_providers::initiate_device_code_for_sa))
-        .route("/{sa_id}/providers/{provider_id}/connect/device-code/poll",
-            post(handlers::admin_sa_providers::poll_device_code_for_sa))
-        .route("/{sa_id}/providers/{provider_id}/disconnect",
-            delete(handlers::admin_sa_providers::disconnect_sa_provider))
-        .route("/{sa_id}/connections",
-            get(handlers::admin_sa_connections::list_sa_connections))
-        .route("/{sa_id}/connections/{service_id}",
+        .route(
+            "/",
+            get(handlers::admin_service_accounts::list_service_accounts)
+                .post(handlers::admin_service_accounts::create_service_account),
+        )
+        .route(
+            "/{sa_id}",
+            get(handlers::admin_service_accounts::get_service_account)
+                .put(handlers::admin_service_accounts::update_service_account)
+                .delete(handlers::admin_service_accounts::delete_service_account),
+        )
+        .route(
+            "/{sa_id}/rotate-secret",
+            post(handlers::admin_service_accounts::rotate_secret),
+        )
+        .route(
+            "/{sa_id}/revoke-tokens",
+            post(handlers::admin_service_accounts::revoke_tokens),
+        )
+        .route(
+            "/{sa_id}/providers",
+            get(handlers::admin_sa_providers::list_sa_providers),
+        )
+        .route(
+            "/{sa_id}/providers/{provider_id}/connect/api-key",
+            post(handlers::admin_sa_providers::connect_api_key_for_sa),
+        )
+        .route(
+            "/{sa_id}/providers/{provider_id}/connect/oauth",
+            get(handlers::admin_sa_providers::initiate_oauth_for_sa),
+        )
+        .route(
+            "/{sa_id}/providers/{provider_id}/connect/device-code/initiate",
+            post(handlers::admin_sa_providers::initiate_device_code_for_sa),
+        )
+        .route(
+            "/{sa_id}/providers/{provider_id}/connect/device-code/poll",
+            post(handlers::admin_sa_providers::poll_device_code_for_sa),
+        )
+        .route(
+            "/{sa_id}/providers/{provider_id}/disconnect",
+            delete(handlers::admin_sa_providers::disconnect_sa_provider),
+        )
+        .route(
+            "/{sa_id}/connections",
+            get(handlers::admin_sa_connections::list_sa_connections),
+        )
+        .route(
+            "/{sa_id}/connections/{service_id}",
             post(handlers::admin_sa_connections::connect_sa_service)
-            .delete(handlers::admin_sa_connections::disconnect_sa_service))
-        .route("/{sa_id}/connections/{service_id}/credential",
-            put(handlers::admin_sa_connections::update_sa_connection_credential));
+                .delete(handlers::admin_sa_connections::disconnect_sa_service),
+        )
+        .route(
+            "/{sa_id}/connections/{service_id}/credential",
+            put(handlers::admin_sa_connections::update_sa_connection_credential),
+        );
 
     let admin_routes = Router::new()
-        .route("/users", get(handlers::admin::list_users)
-            .post(handlers::admin::create_user))
-        .route("/users/{user_id}", get(handlers::admin::get_user)
-            .put(handlers::admin::update_user)
-            .delete(handlers::admin::delete_user))
-        .route("/users/{user_id}/role", patch(handlers::admin::set_user_role))
-        .route("/users/{user_id}/status", patch(handlers::admin::set_user_status))
-        .route("/users/{user_id}/reset-password", post(handlers::admin::force_password_reset))
-        .route("/users/{user_id}/verify-email", patch(handlers::admin::verify_user_email))
-        .route("/users/{user_id}/sessions", get(handlers::admin::list_user_sessions)
-            .delete(handlers::admin::revoke_user_sessions))
-        .route("/users/{user_id}/roles", get(handlers::admin_roles::get_user_roles))
-        .route("/users/{user_id}/roles/{role_id}",
-            post(handlers::admin_roles::assign_role)
-            .delete(handlers::admin_roles::revoke_role))
-        .route("/users/{user_id}/groups", get(handlers::admin_groups::get_user_groups))
-        .route("/roles", get(handlers::admin_roles::list_roles)
-            .post(handlers::admin_roles::create_role))
-        .route("/roles/{role_id}", get(handlers::admin_roles::get_role)
-            .put(handlers::admin_roles::update_role)
-            .delete(handlers::admin_roles::delete_role))
-        .route("/groups", get(handlers::admin_groups::list_groups)
-            .post(handlers::admin_groups::create_group))
-        .route("/groups/{group_id}", get(handlers::admin_groups::get_group)
-            .put(handlers::admin_groups::update_group)
-            .delete(handlers::admin_groups::delete_group))
-        .route("/groups/{group_id}/members", get(handlers::admin_groups::get_members))
-        .route("/groups/{group_id}/members/{user_id}",
-            post(handlers::admin_groups::add_member)
-            .delete(handlers::admin_groups::remove_member))
+        .route(
+            "/users",
+            get(handlers::admin::list_users).post(handlers::admin::create_user),
+        )
+        .route(
+            "/users/{user_id}",
+            get(handlers::admin::get_user)
+                .put(handlers::admin::update_user)
+                .delete(handlers::admin::delete_user),
+        )
+        .route(
+            "/users/{user_id}/role",
+            patch(handlers::admin::set_user_role),
+        )
+        .route(
+            "/users/{user_id}/status",
+            patch(handlers::admin::set_user_status),
+        )
+        .route(
+            "/users/{user_id}/reset-password",
+            post(handlers::admin::force_password_reset),
+        )
+        .route(
+            "/users/{user_id}/verify-email",
+            patch(handlers::admin::verify_user_email),
+        )
+        .route(
+            "/users/{user_id}/sessions",
+            get(handlers::admin::list_user_sessions).delete(handlers::admin::revoke_user_sessions),
+        )
+        .route(
+            "/users/{user_id}/roles",
+            get(handlers::admin_roles::get_user_roles),
+        )
+        .route(
+            "/users/{user_id}/roles/{role_id}",
+            post(handlers::admin_roles::assign_role).delete(handlers::admin_roles::revoke_role),
+        )
+        .route(
+            "/users/{user_id}/groups",
+            get(handlers::admin_groups::get_user_groups),
+        )
+        .route(
+            "/roles",
+            get(handlers::admin_roles::list_roles).post(handlers::admin_roles::create_role),
+        )
+        .route(
+            "/roles/{role_id}",
+            get(handlers::admin_roles::get_role)
+                .put(handlers::admin_roles::update_role)
+                .delete(handlers::admin_roles::delete_role),
+        )
+        .route(
+            "/groups",
+            get(handlers::admin_groups::list_groups).post(handlers::admin_groups::create_group),
+        )
+        .route(
+            "/groups/{group_id}",
+            get(handlers::admin_groups::get_group)
+                .put(handlers::admin_groups::update_group)
+                .delete(handlers::admin_groups::delete_group),
+        )
+        .route(
+            "/groups/{group_id}/members",
+            get(handlers::admin_groups::get_members),
+        )
+        .route(
+            "/groups/{group_id}/members/{user_id}",
+            post(handlers::admin_groups::add_member).delete(handlers::admin_groups::remove_member),
+        )
         .route("/audit-log", get(handlers::admin::list_audit_log))
-        .route("/oauth-clients", get(handlers::admin::list_oauth_clients)
-            .post(handlers::admin::create_oauth_client))
-        .route("/oauth-clients/{client_id}", delete(handlers::admin::delete_oauth_client))
-        .route("/oauth-clients/{client_id}/consents", get(handlers::admin::list_client_consents))
+        .route(
+            "/oauth-clients",
+            get(handlers::admin::list_oauth_clients).post(handlers::admin::create_oauth_client),
+        )
+        .route(
+            "/oauth-clients/{client_id}",
+            delete(handlers::admin::delete_oauth_client),
+        )
+        .route(
+            "/oauth-clients/{client_id}/consents",
+            get(handlers::admin::list_client_consents),
+        )
         .nest("/service-accounts", sa_admin_routes);
 
     let oauth_routes = Router::new()
@@ -230,28 +348,47 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             post(handlers::oauth::authorize_decision),
         )
         .route("/token", post(handlers::oauth::token))
-        .route("/userinfo", get(handlers::oauth::userinfo).post(handlers::oauth::userinfo))
+        .route(
+            "/userinfo",
+            get(handlers::oauth::userinfo).post(handlers::oauth::userinfo),
+        )
         .route("/register", post(handlers::oauth::register_client))
         .route("/introspect", post(handlers::oauth::introspect))
         .route("/revoke", post(handlers::oauth::revoke));
 
-    let delegation_routes = Router::new()
-        .route("/refresh", post(handlers::delegation::refresh_delegation_token));
+    let delegation_routes = Router::new().route(
+        "/refresh",
+        post(handlers::delegation::refresh_delegation_token),
+    );
 
     // Notification settings (human-only)
     let notification_routes = Router::new()
-        .route("/settings", get(handlers::notifications::get_settings)
-            .put(handlers::notifications::update_settings))
-        .route("/telegram/link", post(handlers::notifications::telegram_link))
-        .route("/telegram", delete(handlers::notifications::telegram_disconnect));
+        .route(
+            "/settings",
+            get(handlers::notifications::get_settings)
+                .put(handlers::notifications::update_settings),
+        )
+        .route(
+            "/telegram/link",
+            post(handlers::notifications::telegram_link),
+        )
+        .route(
+            "/telegram",
+            delete(handlers::notifications::telegram_disconnect),
+        );
 
     // Approval management (human-only; status polling is in api_v1_delegated)
     let approval_routes = Router::new()
         .route("/requests", get(handlers::approvals::list_requests))
-        .route("/requests/{request_id}/decide",
-            post(handlers::approvals::decide_request))
+        .route(
+            "/requests/{request_id}/decide",
+            post(handlers::approvals::decide_request),
+        )
         .route("/grants", get(handlers::approvals::list_grants))
-        .route("/grants/{grant_id}", delete(handlers::approvals::revoke_grant));
+        .route(
+            "/grants/{grant_id}",
+            delete(handlers::approvals::revoke_grant),
+        );
 
     let developer_routes = Router::new()
         .route(
@@ -275,11 +412,19 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let api_v1_delegated = Router::new()
         .nest("/llm", llm_routes)
         .nest("/delegation", delegation_routes)
-        .route("/approvals/requests/{request_id}/status",
-            get(handlers::approvals::get_request_status))
+        .route(
+            "/approvals/requests/{request_id}/status",
+            get(handlers::approvals::get_request_status),
+        )
         .route("/proxy/services", get(handlers::proxy::list_proxy_services))
-        .route("/proxy/s/{slug}/{*path}", axum::routing::any(handlers::proxy::proxy_request_by_slug))
-        .route("/proxy/{service_id}/{*path}", axum::routing::any(handlers::proxy::proxy_request));
+        .route(
+            "/proxy/s/{slug}/{*path}",
+            axum::routing::any(handlers::proxy::proxy_request_by_slug),
+        )
+        .route(
+            "/proxy/{service_id}/{*path}",
+            axum::routing::any(handlers::proxy::proxy_request),
+        );
 
     // Routes accessible by both users and service accounts (block delegated tokens)
     let api_v1_shared = Router::new()
@@ -308,10 +453,19 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .merge(api_v1_human_only);
 
     let well_known_routes = Router::new()
-        .route("/openid-configuration", get(handlers::oidc_discovery::openid_configuration))
-        .route("/oauth-authorization-server", get(handlers::oidc_discovery::oauth_authorization_server_metadata))
+        .route(
+            "/openid-configuration",
+            get(handlers::oidc_discovery::openid_configuration),
+        )
+        .route(
+            "/oauth-authorization-server",
+            get(handlers::oidc_discovery::oauth_authorization_server_metadata),
+        )
         .route("/jwks.json", get(handlers::oidc_discovery::jwks))
-        .route("/oauth-protected-resource", get(handlers::oidc_discovery::oauth_protected_resource));
+        .route(
+            "/oauth-protected-resource",
+            get(handlers::oidc_discovery::oauth_protected_resource),
+        );
 
     let public_oauth = Router::new()
         .nest("/.well-known", well_known_routes)
@@ -319,8 +473,8 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .layer(oauth_public_cors());
 
     // Webhook routes -- unauthenticated (verified by secret token)
-    let webhook_routes = Router::new()
-        .route("/telegram", post(handlers::webhooks::telegram_webhook));
+    let webhook_routes =
+        Router::new().route("/telegram", post(handlers::webhooks::telegram_webhook));
 
     let private = Router::new()
         .route("/health", get(handlers::health::health_check))

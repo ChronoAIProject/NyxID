@@ -1,11 +1,11 @@
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{AppError, AppResult};
-use crate::mw::auth::AuthUser;
-use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::AppState;
+use crate::errors::{AppError, AppResult};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::mw::auth::AuthUser;
 
 // --- Request / Response types ---
 
@@ -120,10 +120,7 @@ pub async fn update_me(
     state
         .db
         .collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": &user_id },
-            doc! { "$set": set_doc },
-        )
+        .update_one(doc! { "_id": &user_id }, doc! { "$set": set_doc })
         .await?;
 
     // Re-fetch the updated user

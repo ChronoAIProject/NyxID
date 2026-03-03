@@ -3,10 +3,12 @@ use mongodb::bson::doc;
 use serde::Serialize;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::downstream_service::{DownstreamService, COLLECTION_NAME as DOWNSTREAM_SERVICES};
-use crate::models::provider_config::{ProviderConfig, COLLECTION_NAME as PROVIDER_CONFIGS};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
+use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::user_provider_token::{
-    UserProviderToken, COLLECTION_NAME as USER_PROVIDER_TOKENS,
+    COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
 };
 
 // ---------------------------------------------------------------------------
@@ -42,9 +44,7 @@ pub async fn resolve_llm_service_by_slug(
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
         .find_one(doc! { "slug": provider_slug, "is_active": true })
         .await?
-        .ok_or_else(|| {
-            AppError::NotFound(format!("LLM provider '{provider_slug}' not found"))
-        })?;
+        .ok_or_else(|| AppError::NotFound(format!("LLM provider '{provider_slug}' not found")))?;
 
     let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -250,10 +250,7 @@ pub trait LlmTranslator: Send + Sync {
         body: &serde_json::Value,
     ) -> AppResult<TranslatedRequest>;
 
-    fn translate_response(
-        &self,
-        body: serde_json::Value,
-    ) -> AppResult<serde_json::Value>;
+    fn translate_response(&self, body: serde_json::Value) -> AppResult<serde_json::Value>;
 
     fn needs_translation(&self) -> bool;
 
@@ -277,9 +274,7 @@ pub fn get_translator(provider_slug: &str) -> Box<dyn LlmTranslator> {
     match provider_slug {
         "anthropic" => Box::new(AnthropicTranslator),
         "google-ai" => Box::new(GoogleAiTranslator),
-        "openai-codex" => {
-            Box::new(super::chatgpt_translator::ChatgptTranslator)
-        }
+        "openai-codex" => Box::new(super::chatgpt_translator::ChatgptTranslator),
         _ => Box::new(PassthroughTranslator),
     }
 }
@@ -303,10 +298,7 @@ impl LlmTranslator for PassthroughTranslator {
         })
     }
 
-    fn translate_response(
-        &self,
-        body: serde_json::Value,
-    ) -> AppResult<serde_json::Value> {
+    fn translate_response(&self, body: serde_json::Value) -> AppResult<serde_json::Value> {
         Ok(body)
     }
 
@@ -349,8 +341,7 @@ impl LlmTranslator for AnthropicTranslator {
             }
 
             if !system_parts.is_empty() {
-                translated["system"] =
-                    serde_json::Value::String(system_parts.join("\n"));
+                translated["system"] = serde_json::Value::String(system_parts.join("\n"));
             }
             translated["messages"] = serde_json::Value::Array(non_system);
         }
@@ -372,17 +363,11 @@ impl LlmTranslator for AnthropicTranslator {
         Ok(TranslatedRequest {
             path: translated_path,
             body: translated,
-            extra_headers: vec![(
-                "anthropic-version".to_string(),
-                "2023-06-01".to_string(),
-            )],
+            extra_headers: vec![("anthropic-version".to_string(), "2023-06-01".to_string())],
         })
     }
 
-    fn translate_response(
-        &self,
-        body: serde_json::Value,
-    ) -> AppResult<serde_json::Value> {
+    fn translate_response(&self, body: serde_json::Value) -> AppResult<serde_json::Value> {
         let content_blocks = body
             .get("content")
             .and_then(|c| c.as_array())
@@ -407,8 +392,14 @@ impl LlmTranslator for AnthropicTranslator {
             .iter()
             .filter_map(|block| {
                 if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                    let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let id = block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let name = block
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
                     let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
                     let arguments = serde_json::to_string(&input).unwrap_or_default();
                     Some(serde_json::json!({
@@ -426,10 +417,7 @@ impl LlmTranslator for AnthropicTranslator {
             .collect();
 
         // Map stop_reason
-        let finish_reason = match body
-            .get("stop_reason")
-            .and_then(|r| r.as_str())
-        {
+        let finish_reason = match body.get("stop_reason").and_then(|r| r.as_str()) {
             Some("end_turn") => "stop",
             Some("max_tokens") => "length",
             Some("stop_sequence") => "stop",
@@ -447,10 +435,7 @@ impl LlmTranslator for AnthropicTranslator {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        let id = body
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+        let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
 
         let model = body
             .get("model")
@@ -525,21 +510,15 @@ impl LlmTranslator for AnthropicTranslator {
             }
 
             Some("content_block_start") => {
-                let block_type = data
-                    .pointer("/content_block/type")
-                    .and_then(|v| v.as_str());
+                let block_type = data.pointer("/content_block/type").and_then(|v| v.as_str());
 
                 if block_type == Some("tool_use") {
                     let tool_index = state.next_tool_index;
                     state.next_tool_index += 1;
 
-                    let block_index = data
-                        .get("index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
-                    state
-                        .tool_call_indices
-                        .push((block_index, tool_index));
+                    let block_index =
+                        data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    state.tool_call_indices.push((block_index, tool_index));
 
                     let tool_id = data
                         .pointer("/content_block/id")
@@ -606,10 +585,8 @@ impl LlmTranslator for AnthropicTranslator {
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
 
-                        let block_index = data
-                            .get("index")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as usize;
+                        let block_index =
+                            data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
                         let tool_index = state
                             .tool_call_indices
@@ -717,10 +694,7 @@ impl LlmTranslator for GoogleAiTranslator {
         })
     }
 
-    fn translate_response(
-        &self,
-        body: serde_json::Value,
-    ) -> AppResult<serde_json::Value> {
+    fn translate_response(&self, body: serde_json::Value) -> AppResult<serde_json::Value> {
         Ok(body)
     }
 }
@@ -743,7 +717,10 @@ mod tests {
         assert_eq!(resolve_provider_for_model("o1-preview"), Some("openai"));
         assert_eq!(resolve_provider_for_model("o3-mini"), Some("openai"));
         assert_eq!(resolve_provider_for_model("o4-mini"), Some("openai"));
-        assert_eq!(resolve_provider_for_model("chatgpt-4o-latest"), Some("openai"));
+        assert_eq!(
+            resolve_provider_for_model("chatgpt-4o-latest"),
+            Some("openai")
+        );
     }
 
     #[test]
@@ -752,39 +729,75 @@ mod tests {
             resolve_provider_for_model("claude-sonnet-4-5-20250929"),
             Some("anthropic")
         );
-        assert_eq!(resolve_provider_for_model("claude-3-haiku"), Some("anthropic"));
+        assert_eq!(
+            resolve_provider_for_model("claude-3-haiku"),
+            Some("anthropic")
+        );
         assert_eq!(resolve_provider_for_model("CLAUDE-opus"), Some("anthropic"));
     }
 
     #[test]
     fn resolve_google_models() {
-        assert_eq!(resolve_provider_for_model("gemini-1.5-pro"), Some("google-ai"));
-        assert_eq!(resolve_provider_for_model("gemini-2.0-flash"), Some("google-ai"));
+        assert_eq!(
+            resolve_provider_for_model("gemini-1.5-pro"),
+            Some("google-ai")
+        );
+        assert_eq!(
+            resolve_provider_for_model("gemini-2.0-flash"),
+            Some("google-ai")
+        );
     }
 
     #[test]
     fn resolve_mistral_models() {
         assert_eq!(resolve_provider_for_model("mistral-large"), Some("mistral"));
-        assert_eq!(resolve_provider_for_model("codestral-latest"), Some("mistral"));
+        assert_eq!(
+            resolve_provider_for_model("codestral-latest"),
+            Some("mistral")
+        );
         assert_eq!(resolve_provider_for_model("pixtral-large"), Some("mistral"));
         assert_eq!(resolve_provider_for_model("ministral-8b"), Some("mistral"));
-        assert_eq!(resolve_provider_for_model("open-mistral-nemo"), Some("mistral"));
-        assert_eq!(resolve_provider_for_model("devstral-2-25-12"), Some("mistral"));
-        assert_eq!(resolve_provider_for_model("magistral-medium-1-2-25-09"), Some("mistral"));
+        assert_eq!(
+            resolve_provider_for_model("open-mistral-nemo"),
+            Some("mistral")
+        );
+        assert_eq!(
+            resolve_provider_for_model("devstral-2-25-12"),
+            Some("mistral")
+        );
+        assert_eq!(
+            resolve_provider_for_model("magistral-medium-1-2-25-09"),
+            Some("mistral")
+        );
     }
 
     #[test]
     fn resolve_cohere_models() {
         assert_eq!(resolve_provider_for_model("command-r-plus"), Some("cohere"));
-        assert_eq!(resolve_provider_for_model("embed-english-v3.0"), Some("cohere"));
-        assert_eq!(resolve_provider_for_model("rerank-english-v3.0"), Some("cohere"));
+        assert_eq!(
+            resolve_provider_for_model("embed-english-v3.0"),
+            Some("cohere")
+        );
+        assert_eq!(
+            resolve_provider_for_model("rerank-english-v3.0"),
+            Some("cohere")
+        );
     }
 
     #[test]
     fn resolve_deepseek_models() {
-        assert_eq!(resolve_provider_for_model("deepseek-chat"), Some("deepseek"));
-        assert_eq!(resolve_provider_for_model("deepseek-reasoner"), Some("deepseek"));
-        assert_eq!(resolve_provider_for_model("DEEPSEEK-chat"), Some("deepseek"));
+        assert_eq!(
+            resolve_provider_for_model("deepseek-chat"),
+            Some("deepseek")
+        );
+        assert_eq!(
+            resolve_provider_for_model("deepseek-reasoner"),
+            Some("deepseek")
+        );
+        assert_eq!(
+            resolve_provider_for_model("DEEPSEEK-chat"),
+            Some("deepseek")
+        );
     }
 
     #[test]
@@ -876,10 +889,7 @@ mod tests {
         let result = translator.translate_response(anthropic_resp).unwrap();
 
         assert_eq!(result["object"], "chat.completion");
-        assert_eq!(
-            result["id"],
-            "chatcmpl-msg_01XFDUDYJgAACzvnptvVoYEL"
-        );
+        assert_eq!(result["id"], "chatcmpl-msg_01XFDUDYJgAACzvnptvVoYEL");
         assert_eq!(
             result["choices"][0]["message"]["content"],
             "Hello! How can I help?"
@@ -920,10 +930,7 @@ mod tests {
         });
 
         let result = translator.translate_response(anthropic_resp).unwrap();
-        assert_eq!(
-            result["choices"][0]["message"]["content"],
-            "Hello World!"
-        );
+        assert_eq!(result["choices"][0]["message"]["content"], "Hello World!");
     }
 
     #[test]
@@ -946,10 +953,7 @@ mod tests {
         });
 
         let result = translator.translate_response(anthropic_resp).unwrap();
-        assert_eq!(
-            result["choices"][0]["message"]["content"],
-            "Let me check."
-        );
+        assert_eq!(result["choices"][0]["message"]["content"], "Let me check.");
         assert_eq!(result["choices"][0]["finish_reason"], "tool_calls");
 
         let tool_calls = result["choices"][0]["message"]["tool_calls"]
@@ -960,8 +964,7 @@ mod tests {
         assert_eq!(tool_calls[0]["type"], "function");
         assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
         let args: serde_json::Value =
-            serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().unwrap())
-                .unwrap();
+            serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(args["location"], "London");
     }
 
@@ -1035,10 +1038,7 @@ mod tests {
     }
 
     fn parse_chunk_json(sse_line: &str) -> serde_json::Value {
-        let json_str = sse_line
-            .strip_prefix("data: ")
-            .unwrap()
-            .trim();
+        let json_str = sse_line.strip_prefix("data: ").unwrap().trim();
         serde_json::from_str(json_str).unwrap()
     }
 
@@ -1134,9 +1134,11 @@ mod tests {
         let mut state = StreamTranslationState::default();
 
         let event = make_event("ping", r#"{"type":"ping"}"#);
-        assert!(translator
-            .translate_stream_event(&event, &mut state)
-            .is_none());
+        assert!(
+            translator
+                .translate_stream_event(&event, &mut state)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1160,7 +1162,10 @@ mod tests {
         let chunk = parse_chunk_json(&result);
 
         assert_eq!(chunk["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
-        assert_eq!(chunk["choices"][0]["delta"]["tool_calls"][0]["id"], "toolu_123");
+        assert_eq!(
+            chunk["choices"][0]["delta"]["tool_calls"][0]["id"],
+            "toolu_123"
+        );
         assert_eq!(
             chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
             "get_weather"
@@ -1195,9 +1200,11 @@ mod tests {
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
         );
 
-        assert!(translator
-            .translate_stream_event(&event, &mut state)
-            .is_none());
+        assert!(
+            translator
+                .translate_stream_event(&event, &mut state)
+                .is_none()
+        );
     }
 
     #[test]

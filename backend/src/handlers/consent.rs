@@ -1,15 +1,15 @@
 use axum::{
-    extract::{Path, State},
     Json,
+    extract::{Path, State},
 };
 use mongodb::bson::doc;
 use serde::Serialize;
 
+use crate::AppState;
 use crate::errors::AppResult;
-use crate::models::oauth_client::{OauthClient, COLLECTION_NAME as OAUTH_CLIENTS};
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::mw::auth::AuthUser;
 use crate::services::consent_service;
-use crate::AppState;
 
 // --- Response types ---
 

@@ -1,8 +1,8 @@
 use mongodb::bson::{self, doc};
 
-use crate::models::notification_channel::{NotificationChannel, COLLECTION_NAME as CHANNELS};
-use crate::services::{approval_service, audit_service, telegram_service};
 use crate::AppState;
+use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
+use crate::services::{approval_service, audit_service, telegram_service};
 
 /// Run the Telegram long polling loop (development mode fallback).
 ///
@@ -56,7 +56,10 @@ pub async fn process_update(state: &AppState, update: telegram_service::Telegram
 }
 
 /// Handle a Telegram callback query (user pressed Approve/Reject).
-async fn handle_callback_query(state: &AppState, callback: telegram_service::TelegramCallbackQuery) {
+async fn handle_callback_query(
+    state: &AppState,
+    callback: telegram_service::TelegramCallbackQuery,
+) {
     let data = match callback.data.as_deref() {
         Some(d) => d,
         None => return,
@@ -71,11 +74,7 @@ async fn handle_callback_query(state: &AppState, callback: telegram_service::Tel
     };
 
     // Verify the chat_id matches the request's telegram_chat_id
-    let chat_id = callback
-        .message
-        .as_ref()
-        .map(|m| m.chat.id)
-        .unwrap_or(0);
+    let chat_id = callback.message.as_ref().map(|m| m.chat.id).unwrap_or(0);
 
     let request = match approval_service::get_request(&state.db, &request_id).await {
         Ok(r) => r,
@@ -163,9 +162,7 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
     };
 
     // Find the notification channel with this link code
-    let collection = state
-        .db
-        .collection::<NotificationChannel>(CHANNELS);
+    let collection = state.db.collection::<NotificationChannel>(CHANNELS);
 
     let channel = match collection
         .find_one(doc! { "telegram_link_code": link_code })

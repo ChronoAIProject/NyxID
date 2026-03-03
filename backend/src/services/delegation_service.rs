@@ -4,9 +4,9 @@ use futures::TryStreamExt;
 use mongodb::bson::doc;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::provider_config::{ProviderConfig, COLLECTION_NAME as PROVIDER_CONFIGS};
+use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::service_provider_requirement::{
-    ServiceProviderRequirement, COLLECTION_NAME as REQUIREMENTS,
+    COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
 };
 use crate::services::user_token_service;
 
@@ -53,10 +53,8 @@ pub async fn resolve_delegated_credentials(
         .await?
         .try_collect()
         .await?;
-    let provider_map: HashMap<&str, &ProviderConfig> = providers
-        .iter()
-        .map(|p| (p.id.as_str(), p))
-        .collect();
+    let provider_map: HashMap<&str, &ProviderConfig> =
+        providers.iter().map(|p| (p.id.as_str(), p)).collect();
 
     let mut credentials = Vec::new();
 
@@ -115,14 +113,14 @@ pub async fn resolve_delegated_credentials(
             None => continue,
         };
 
-        let injection_key = req
-            .injection_key
-            .clone()
-            .unwrap_or_else(|| match req.injection_method.as_str() {
-                "bearer" => "Authorization".to_string(),
-                "query" => "api_key".to_string(),
-                _ => "X-API-Key".to_string(),
-            });
+        let injection_key =
+            req.injection_key
+                .clone()
+                .unwrap_or_else(|| match req.injection_method.as_str() {
+                    "bearer" => "Authorization".to_string(),
+                    "query" => "api_key".to_string(),
+                    _ => "X-API-Key".to_string(),
+                });
 
         credentials.push(DelegatedCredential {
             provider_slug: provider.slug.clone(),

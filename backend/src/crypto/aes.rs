@@ -1,6 +1,6 @@
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
 use rand::RngCore;
 
@@ -70,11 +70,8 @@ pub fn decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, AppError> {
 
 /// Parse a hex-encoded encryption key into raw bytes.
 pub fn parse_hex_key(hex_key: &str) -> Result<Vec<u8>, AppError> {
-    hex::decode(hex_key).map_err(|e| {
-        AppError::Internal(format!(
-            "ENCRYPTION_KEY is not valid hex: {e}"
-        ))
-    })
+    hex::decode(hex_key)
+        .map_err(|e| AppError::Internal(format!("ENCRYPTION_KEY is not valid hex: {e}")))
 }
 
 #[cfg(test)]

@@ -1,12 +1,12 @@
 use axum::{
+    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
-    Json,
 };
 use subtle::ConstantTimeEq;
 
-use crate::services::{telegram_poller, telegram_service};
 use crate::AppState;
+use crate::services::{telegram_poller, telegram_service};
 
 /// POST /api/v1/webhooks/telegram
 ///

@@ -7,7 +7,7 @@ use crate::crypto::aes;
 use crate::crypto::password;
 use crate::crypto::token::generate_random_token;
 use crate::errors::{AppError, AppResult};
-use crate::models::mfa_factor::{MfaFactor, COLLECTION_NAME as MFA_FACTORS};
+use crate::models::mfa_factor::{COLLECTION_NAME as MFA_FACTORS, MfaFactor};
 
 /// Result from initiating TOTP setup.
 pub struct TotpSetupResult {
@@ -17,11 +17,7 @@ pub struct TotpSetupResult {
 }
 
 /// Helper to create a TOTP instance with common parameters.
-fn create_totp(
-    secret_bytes: Vec<u8>,
-    issuer: &str,
-    account_name: &str,
-) -> Result<TOTP, AppError> {
+fn create_totp(secret_bytes: Vec<u8>, issuer: &str, account_name: &str) -> Result<TOTP, AppError> {
     TOTP::new(
         Algorithm::SHA1,
         6,
@@ -64,9 +60,9 @@ pub async fn setup_totp(
     let secret_base32 = secret.to_encoded().to_string();
 
     let totp = create_totp(
-        secret.to_bytes().map_err(|e| {
-            AppError::Internal(format!("Failed to convert secret to bytes: {e}"))
-        })?,
+        secret
+            .to_bytes()
+            .map_err(|e| AppError::Internal(format!("Failed to convert secret to bytes: {e}")))?,
         "NyxID",
         user_email,
     )?;
@@ -135,16 +131,17 @@ pub async fn verify_totp_setup(
 
     let secret = Secret::Encoded(secret_str);
     let totp = create_totp(
-        secret.to_bytes().map_err(|e| {
-            AppError::Internal(format!("Failed to convert secret: {e}"))
-        })?,
+        secret
+            .to_bytes()
+            .map_err(|e| AppError::Internal(format!("Failed to convert secret: {e}")))?,
         "NyxID",
         user_id,
     )?;
 
-    if !totp.check_current(code).map_err(|e| {
-        AppError::Internal(format!("TOTP verification error: {e}"))
-    })? {
+    if !totp
+        .check_current(code)
+        .map_err(|e| AppError::Internal(format!("TOTP verification error: {e}")))?
+    {
         return Err(AppError::AuthenticationFailed(
             "Invalid TOTP code".to_string(),
         ));
@@ -167,8 +164,9 @@ pub async fn verify_totp_setup(
     let codes_json = serde_json::to_value(&hashed_codes)
         .map_err(|e| AppError::Internal(format!("Failed to serialize recovery codes: {e}")))?;
 
-    let codes_bson = bson::to_bson(&codes_json)
-        .map_err(|e| AppError::Internal(format!("Failed to convert recovery codes to BSON: {e}")))?;
+    let codes_bson = bson::to_bson(&codes_json).map_err(|e| {
+        AppError::Internal(format!("Failed to convert recovery codes to BSON: {e}"))
+    })?;
 
     // Mark factor as verified
     let now = Utc::now();
@@ -215,16 +213,16 @@ pub async fn verify_totp(
 
     let secret = Secret::Encoded(secret_str);
     let totp = create_totp(
-        secret.to_bytes().map_err(|e| {
-            AppError::Internal(format!("Failed to convert secret: {e}"))
-        })?,
+        secret
+            .to_bytes()
+            .map_err(|e| AppError::Internal(format!("Failed to convert secret: {e}")))?,
         "NyxID",
         user_id,
     )?;
 
-    let valid = totp.check_current(code).map_err(|e| {
-        AppError::Internal(format!("TOTP verification error: {e}"))
-    })?;
+    let valid = totp
+        .check_current(code)
+        .map_err(|e| AppError::Internal(format!("TOTP verification error: {e}")))?;
 
     Ok(valid)
 }

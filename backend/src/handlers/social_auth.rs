@@ -2,16 +2,16 @@ use std::net::SocketAddr;
 
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
 };
 use serde::Deserialize;
 
+use crate::AppState;
 use crate::crypto::token::{constant_time_eq, generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{build_cookie, clear_cookie, extract_ip, extract_user_agent};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, SESSION_COOKIE_NAME};
 use crate::services::{audit_service, social_auth_service, token_service};
-use crate::AppState;
 
 const SOCIAL_STATE_COOKIE: &str = "nyx_social_state";
 const SOCIAL_STATE_MAX_AGE: i64 = 600; // 10 minutes
@@ -88,7 +88,14 @@ pub async fn callback(
     // Parse provider
     let provider = match social_auth_service::SocialProvider::parse(&provider_name) {
         Some(p) => p,
-        None => return Err(redirect_with_error(frontend_url, "social_auth_unsupported", secure, domain)),
+        None => {
+            return Err(redirect_with_error(
+                frontend_url,
+                "social_auth_unsupported",
+                secure,
+                domain,
+            ));
+        }
     };
 
     // Check for provider error response
@@ -98,17 +105,36 @@ pub async fn callback(
             desc = ?params.error_description,
             "Provider returned error"
         );
-        return Err(redirect_with_error(frontend_url, "social_auth_denied", secure, domain));
+        return Err(redirect_with_error(
+            frontend_url,
+            "social_auth_denied",
+            secure,
+            domain,
+        ));
     }
 
     // Extract code and state
     let code = match params.code {
         Some(ref c) if !c.is_empty() => c.as_str(),
-        _ => return Err(redirect_with_error(frontend_url, "social_auth_invalid", secure, domain)),
+        _ => {
+            return Err(redirect_with_error(
+                frontend_url,
+                "social_auth_invalid",
+                secure,
+                domain,
+            ));
+        }
     };
     let state_param = match params.state {
         Some(ref s) if !s.is_empty() => s.as_str(),
-        _ => return Err(redirect_with_error(frontend_url, "social_auth_invalid", secure, domain)),
+        _ => {
+            return Err(redirect_with_error(
+                frontend_url,
+                "social_auth_invalid",
+                secure,
+                domain,
+            ));
+        }
     };
 
     // Validate CSRF state (constant-time comparison to prevent timing attacks)
@@ -116,33 +142,33 @@ pub async fn callback(
     let cookie_hash = extract_cookie_value(&headers, SOCIAL_STATE_COOKIE);
     match cookie_hash {
         Some(ref h) if constant_time_eq(h.as_bytes(), computed_hash.as_bytes()) => {}
-        _ => return Err(redirect_with_error(frontend_url, "social_auth_csrf", secure, domain)),
+        _ => {
+            return Err(redirect_with_error(
+                frontend_url,
+                "social_auth_csrf",
+                secure,
+                domain,
+            ));
+        }
     }
 
     // Exchange code for access token
-    let access_token = social_auth_service::exchange_code(
-        provider,
-        code,
-        &state.config,
-        &state.http_client,
-    )
-    .await
-    .map_err(|e| {
-        tracing::warn!(error = %e, "Social auth code exchange failed");
-        redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
-    })?;
+    let access_token =
+        social_auth_service::exchange_code(provider, code, &state.config, &state.http_client)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "Social auth code exchange failed");
+                redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
+            })?;
 
     // Fetch user profile
-    let profile = social_auth_service::fetch_user_profile(
-        provider,
-        &access_token,
-        &state.http_client,
-    )
-    .await
-    .map_err(|e| {
-        tracing::warn!(error = %e, "Social auth profile fetch failed");
-        redirect_with_error(frontend_url, "social_auth_profile", secure, domain)
-    })?;
+    let profile =
+        social_auth_service::fetch_user_profile(provider, &access_token, &state.http_client)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "Social auth profile fetch failed");
+                redirect_with_error(frontend_url, "social_auth_profile", secure, domain)
+            })?;
 
     // Find or create user
     let user = social_auth_service::find_or_create_user(&state.db, &profile)
@@ -242,16 +268,18 @@ pub async fn callback(
         header::SET_COOKIE,
         clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure, domain)
             .parse()
-            .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
+            .map_err(|_| {
+                redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
+            })?,
     );
 
     // Redirect to frontend root (dashboard lives at /)
     let redirect_url = state.config.frontend_url.trim_end_matches('/').to_string() + "/";
     response_headers.insert(
         header::LOCATION,
-        redirect_url
-            .parse()
-            .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
+        redirect_url.parse().map_err(|_| {
+            redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
+        })?,
     );
 
     Ok((StatusCode::FOUND, response_headers, ()))
@@ -270,7 +298,9 @@ fn redirect_with_error(
     if let Ok(location) = url.parse() {
         headers.insert(header::LOCATION, location);
     }
-    if let Ok(cookie) = clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure, domain).parse() {
+    if let Ok(cookie) =
+        clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure, domain).parse()
+    {
         headers.append(header::SET_COOKIE, cookie);
     }
     (StatusCode::FOUND, headers, ())

@@ -1,12 +1,12 @@
 use chrono::Utc;
-use mongodb::bson::doc;
 use mongodb::Database;
+use mongodb::bson::doc;
 use reqwest::Client;
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
 use crate::models::approval_request::ApprovalRequest;
-use crate::models::notification_channel::{NotificationChannel, COLLECTION_NAME};
+use crate::models::notification_channel::{COLLECTION_NAME, NotificationChannel};
 use crate::services::telegram_service;
 
 /// Send an approval notification to the user via their configured channel.
@@ -29,9 +29,10 @@ pub async fn send_approval_notification(
             )
         })?;
 
-        let bot_token = config.telegram_bot_token.as_deref().ok_or_else(|| {
-            AppError::Internal("Telegram bot token not configured".to_string())
-        })?;
+        let bot_token = config
+            .telegram_bot_token
+            .as_deref()
+            .ok_or_else(|| AppError::Internal("Telegram bot token not configured".to_string()))?;
 
         let requester_label = request
             .requester_label
@@ -90,10 +91,7 @@ pub async fn notify_decision(
 }
 
 /// Get the user's notification channel settings, creating defaults if none exist.
-pub async fn get_or_create_channel(
-    db: &Database,
-    user_id: &str,
-) -> AppResult<NotificationChannel> {
+pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<NotificationChannel> {
     let collection = db.collection::<NotificationChannel>(COLLECTION_NAME);
 
     if let Some(channel) = collection.find_one(doc! { "user_id": user_id }).await? {

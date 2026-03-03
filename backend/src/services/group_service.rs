@@ -4,9 +4,9 @@ use mongodb::bson::doc;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::group::{Group, COLLECTION_NAME as GROUPS};
-use crate::models::role::{Role, COLLECTION_NAME as ROLES};
-use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
+use crate::models::role::{COLLECTION_NAME as ROLES, Role};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 /// Create a new group.
 pub async fn create_group(
@@ -198,11 +198,7 @@ pub async fn delete_group(db: &mongodb::Database, group_id: &str) -> AppResult<(
 }
 
 /// Add a user to a group.
-pub async fn add_member(
-    db: &mongodb::Database,
-    group_id: &str,
-    user_id: &str,
-) -> AppResult<()> {
+pub async fn add_member(db: &mongodb::Database, group_id: &str, user_id: &str) -> AppResult<()> {
     // Verify group exists
     let _group = get_group(db, group_id).await?;
 
@@ -228,11 +224,7 @@ pub async fn add_member(
 }
 
 /// Remove a user from a group.
-pub async fn remove_member(
-    db: &mongodb::Database,
-    group_id: &str,
-    user_id: &str,
-) -> AppResult<()> {
+pub async fn remove_member(db: &mongodb::Database, group_id: &str, user_id: &str) -> AppResult<()> {
     db.collection::<User>(USERS)
         .update_one(
             doc! { "_id": user_id },
@@ -244,10 +236,7 @@ pub async fn remove_member(
 }
 
 /// Get all members of a group.
-pub async fn get_members(
-    db: &mongodb::Database,
-    group_id: &str,
-) -> AppResult<Vec<User>> {
+pub async fn get_members(db: &mongodb::Database, group_id: &str) -> AppResult<Vec<User>> {
     // Verify group exists
     let _group = get_group(db, group_id).await?;
 
@@ -263,10 +252,7 @@ pub async fn get_members(
 }
 
 /// Get all groups a user belongs to.
-pub async fn get_user_groups(
-    db: &mongodb::Database,
-    user_id: &str,
-) -> AppResult<Vec<Group>> {
+pub async fn get_user_groups(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<Group>> {
     let user = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": user_id })
