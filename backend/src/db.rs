@@ -501,11 +501,21 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Migration: drop the old non-partial unique index on idempotency_key if it exists,
+    // so we can replace it with a partial unique index (only pending requests).
+    let _ = approval_requests
+        .drop_index("idempotency_key_1")
+        .await;
     approval_requests
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "idempotency_key": 1 })
-                .options(IndexOptions::builder().unique(true).build())
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! { "status": "pending" })
+                        .build(),
+                )
                 .build(),
         )
         .await?;

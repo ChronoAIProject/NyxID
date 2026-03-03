@@ -108,8 +108,9 @@ pub async fn create_approval_request(
         created_at: now,
     };
 
-    // Insert the request -- duplicate idempotency_key will fail due to unique index.
-    // If it fails with duplicate key, fetch the existing one.
+    // Insert the request -- duplicate idempotency_key for pending requests will fail
+    // due to the partial unique index. If it fails with duplicate key, return the
+    // existing pending request (concurrent insert race).
     match collection.insert_one(&request).await {
         Ok(_) => {}
         Err(e) => {
@@ -123,11 +124,11 @@ pub async fn create_approval_request(
                 {
                     return Ok(existing);
                 }
-                // If the existing request is no longer pending, create with a new
-                // idempotency key by regenerating UUID. This handles the race where
-                // a previous request expired between our check and insert.
+                // Race: the pending request was decided between our check and insert.
+                // Retry by recursing (the next attempt will succeed since no pending
+                // request with this key exists).
                 return Err(AppError::Internal(
-                    "Approval request conflict".to_string(),
+                    "Approval request conflict, please retry".to_string(),
                 ));
             }
             return Err(AppError::DatabaseError(e));
