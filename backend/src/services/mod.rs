@@ -19,6 +19,7 @@ pub mod oauth_service;
 pub mod openapi_parser;
 pub mod provider_service;
 pub mod proxy_service;
+pub mod push_service;
 pub mod rbac_helpers;
 pub mod role_service;
 pub mod service_account_service;

@@ -150,6 +150,8 @@ async fn execute_proxy(
                 &state.db,
                 &state.config,
                 &state.http_client,
+                state.fcm_auth.as_deref(),
+                state.apns_auth.as_deref(),
                 &approval_owner_user_id,
                 service_id,
                 &target.service.name,

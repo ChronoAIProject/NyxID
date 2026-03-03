@@ -100,6 +100,8 @@ async fn handle_callback_query(
         &state.db,
         &state.config,
         &state.http_client,
+        state.fcm_auth.clone(),
+        state.apns_auth.clone(),
         &request_id,
         approved,
         "telegram",

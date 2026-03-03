@@ -538,6 +538,13 @@ mod tests {
             telegram_webhook_url: None,
             telegram_bot_username: None,
             approval_expiry_interval_secs: 5,
+            fcm_service_account_path: None,
+            fcm_project_id: None,
+            apns_key_path: None,
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
+            apns_sandbox: true,
         };
 
         (keys, config)

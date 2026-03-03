@@ -775,6 +775,8 @@ async fn check_llm_approval(
         &state.db,
         &state.config,
         &state.http_client,
+        state.fcm_auth.as_deref(),
+        state.apns_auth.as_deref(),
         &approval_owner_user_id,
         service_id,
         &service.name,
