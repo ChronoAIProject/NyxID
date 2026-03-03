@@ -42,6 +42,16 @@ It provides a complete identity layer: user registration, session management, Op
 - Automatic account linking by verified email
 - Session creation on successful social login (same cookies as email/password login)
 
+### Social Token Exchange (Native Mobile)
+- Exchange external provider tokens (Google ID tokens, GitHub access tokens) for NyxID token sets via RFC 8693 Token Exchange
+- Enables native mobile apps (Google Sign-In SDK, GitHub OAuth) to authenticate without browser redirects
+- Google ID tokens verified cryptographically via JWKS (RS256 signature, audience, expiry, email verification)
+- GitHub access tokens verified as app-bound to NyxID's configured GitHub OAuth app, then validated via GitHub API
+- Same account linking rules as web social login: returning user, email linking, or new user creation
+- Reuses the existing `POST /oauth/token` endpoint -- no new routes or environment variables required
+- JWKS keys cached with TTL to minimize external network calls
+- Supports both confidential and public OAuth clients (mobile apps can omit `client_secret`)
+
 ### Multi-Factor Authentication (MFA)
 - TOTP-based second factor (compatible with Google Authenticator, Authy, 1Password)
 - QR code provisioning
@@ -442,7 +452,7 @@ For the full API reference with request/response schemas and example curl comman
 | DELETE | `/api/v1/approvals/service-configs/{service_id}` | Required | Remove per-service approval config    |
 | POST   | `/api/v1/webhooks/telegram`                 | None*    | Telegram webhook (secret-verified)    |
 
-`POST /oauth/token` also supports `grant_type=client_credentials` for service account authentication.
+`POST /oauth/token` also supports `grant_type=client_credentials` for service account authentication and `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` for social token exchange (Google: `subject_token_type=id_token`; GitHub: `subject_token_type=access_token`) and delegated access.
 
 ---
 

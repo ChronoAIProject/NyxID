@@ -64,9 +64,9 @@ backend/src/
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
 |-- models/              # MongoDB document structs (25 models, 23 collections)
-|-- services/            # Business logic (28 services, incl. approval_service, notification_service, telegram_service)
+|-- services/            # Business logic (29 services, incl. approval_service, notification_service, telegram_service, social_token_exchange_service)
 |-- handlers/            # HTTP handlers (29 handler modules, incl. approvals, notifications, webhooks)
-|-- crypto/              # JWT, AES, password hashing, token generation
+|-- crypto/              # JWT, AES, password hashing, token generation, JWKS cache (jwks.rs)
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
@@ -104,7 +104,7 @@ All API routes under `/api/v1`:
 
 - `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation, provider management (connect via API key/OAuth redirect/device-code, list, disconnect providers on behalf of SAs)
 
-- `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts) and `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access)
+- `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts), `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access and social token exchange via `subject_token_type=id_token` for native mobile Google/GitHub login)
 
 Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`
 
