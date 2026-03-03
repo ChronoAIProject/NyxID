@@ -37,15 +37,12 @@ pub struct AppState {
     pub jwk_json: serde_json::Value,
     /// Hybrid in-memory + MongoDB MCP session store
     pub mcp_sessions: Arc<McpSessionStore>,
-<<<<<<< HEAD
     /// JWKS cache for verifying external provider ID tokens (Google)
     pub jwks_cache: Arc<JwksCache>,
-=======
     /// FCM push notification auth (None if not configured)
     pub fcm_auth: Option<Arc<FcmAuth>>,
     /// APNs push notification auth (None if not configured)
     pub apns_auth: Option<Arc<ApnsAuth>>,
->>>>>>> b7daf2c (feat: add mobile push notifications (FCM + APNs) for approval system)
 }
 
 /// NyxID authentication and SSO platform.
@@ -189,12 +186,9 @@ async fn main() {
         http_client,
         jwk_json,
         mcp_sessions: mcp_sessions.clone(),
-<<<<<<< HEAD
         jwks_cache,
-=======
         fcm_auth: fcm_auth.clone(),
         apns_auth: apns_auth.clone(),
->>>>>>> b7daf2c (feat: add mobile push notifications (FCM + APNs) for approval system)
     };
 
     // Create rate limiters

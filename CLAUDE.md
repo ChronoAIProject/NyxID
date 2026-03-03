@@ -64,15 +64,9 @@ backend/src/
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
 |-- models/              # MongoDB document structs (25 models, 23 collections)
-<<<<<<< HEAD
-|-- services/            # Business logic (29 services, incl. approval_service, notification_service, telegram_service, social_token_exchange_service)
-|-- handlers/            # HTTP handlers (29 handler modules, incl. approvals, notifications, webhooks)
-|-- crypto/              # JWT, AES, password hashing, token generation, JWKS cache (jwks.rs)
-=======
 |-- services/            # Business logic (29 services, incl. approval_service, notification_service, push_service, telegram_service)
 |-- handlers/            # HTTP handlers (30 handler modules, incl. approvals, notifications, device_tokens, webhooks)
 |-- crypto/              # JWT, AES, password hashing, token generation
->>>>>>> b7daf2c (feat: add mobile push notifications (FCM + APNs) for approval system)
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
