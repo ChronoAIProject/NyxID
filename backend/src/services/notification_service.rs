@@ -84,6 +84,11 @@ pub async fn send_approval_notification(
         let mut data = HashMap::new();
         data.insert("type".to_string(), "approval_request".to_string());
         data.insert("request_id".to_string(), request.id.clone());
+        data.insert("challenge_id".to_string(), request.id.clone());
+        data.insert(
+            "deeplink".to_string(),
+            format!("nyxid://challenge/{}", request.id),
+        );
 
         let push_futures: Vec<_> = channel
             .push_devices

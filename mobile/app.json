@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "NyxID Mobile",
+    "slug": "nyxid-mobile",
+    "scheme": "nyxid",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.nyxid.mobile"
+    },
+    "android": {
+      "package": "com.nyxid.mobile"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-notifications"
+    ],
+    "extra": {
+      "apiBaseUrl": "http://localhost:3001/api/v1",
+      "useMock": true
+    }
+  }
+}

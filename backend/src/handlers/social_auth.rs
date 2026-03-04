@@ -14,7 +14,16 @@ use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, SESSION_COOKIE_NAME};
 use crate::services::{audit_service, social_auth_service, token_service};
 
 const SOCIAL_STATE_COOKIE: &str = "nyx_social_state";
+const SOCIAL_CLIENT_COOKIE: &str = "nyx_social_client";
+const SOCIAL_REDIRECT_COOKIE: &str = "nyx_social_redirect";
+const SOCIAL_CLIENT_MOBILE: &str = "mobile";
 const SOCIAL_STATE_MAX_AGE: i64 = 600; // 10 minutes
+
+#[derive(Debug, Deserialize)]
+pub struct AuthorizeQuery {
+    pub client: Option<String>,
+    pub redirect_uri: Option<String>,
+}
 
 /// GET /api/v1/auth/social/{provider}
 ///
@@ -23,6 +32,7 @@ const SOCIAL_STATE_MAX_AGE: i64 = 600; // 10 minutes
 pub async fn authorize(
     State(state): State<AppState>,
     Path(provider_name): Path<String>,
+    Query(query): Query<AuthorizeQuery>,
 ) -> AppResult<(StatusCode, HeaderMap, ())> {
     let provider = social_auth_service::SocialProvider::parse(&provider_name).ok_or_else(|| {
         AppError::SocialAuthFailed(format!("Unsupported provider: {provider_name}"))
@@ -36,6 +46,7 @@ pub async fn authorize(
 
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
+    let is_mobile_client = query.client.as_deref() == Some(SOCIAL_CLIENT_MOBILE);
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -51,6 +62,57 @@ pub async fn authorize(
         .parse()
         .map_err(|_| AppError::Internal("Cookie error".to_string()))?,
     );
+
+    if is_mobile_client {
+        let redirect_uri = query
+            .redirect_uri
+            .as_deref()
+            .ok_or_else(|| AppError::ValidationError("redirect_uri is required".to_string()))?;
+        if !is_supported_mobile_redirect_uri(redirect_uri) {
+            return Err(AppError::ValidationError(
+                "redirect_uri is not allowed for mobile auth".to_string(),
+            ));
+        }
+
+        headers.append(
+            header::SET_COOKIE,
+            build_cookie(
+                SOCIAL_CLIENT_COOKIE,
+                SOCIAL_CLIENT_MOBILE,
+                SOCIAL_STATE_MAX_AGE,
+                "/api/v1/auth/social",
+                secure,
+                domain,
+            )
+            .parse()
+            .map_err(|_| AppError::Internal("Cookie error".to_string()))?,
+        );
+        headers.append(
+            header::SET_COOKIE,
+            build_cookie(
+                SOCIAL_REDIRECT_COOKIE,
+                &urlencoding::encode(redirect_uri),
+                SOCIAL_STATE_MAX_AGE,
+                "/api/v1/auth/social",
+                secure,
+                domain,
+            )
+            .parse()
+            .map_err(|_| AppError::Internal("Cookie error".to_string()))?,
+        );
+    } else {
+        if let Ok(cookie) =
+            clear_cookie(SOCIAL_CLIENT_COOKIE, "/api/v1/auth/social", secure, domain).parse()
+        {
+            headers.append(header::SET_COOKIE, cookie);
+        }
+        if let Ok(cookie) =
+            clear_cookie(SOCIAL_REDIRECT_COOKIE, "/api/v1/auth/social", secure, domain).parse()
+        {
+            headers.append(header::SET_COOKIE, cookie);
+        }
+    }
+
     headers.insert(
         header::LOCATION,
         authorization_url
@@ -84,13 +146,14 @@ pub async fn callback(
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
     let frontend_url = &state.config.frontend_url;
+    let redirect_target = resolve_redirect_target(frontend_url, &headers);
 
     // Parse provider
     let provider = match social_auth_service::SocialProvider::parse(&provider_name) {
         Some(p) => p,
         None => {
             return Err(redirect_with_error(
-                frontend_url,
+                &redirect_target,
                 "social_auth_unsupported",
                 secure,
                 domain,
@@ -106,7 +169,7 @@ pub async fn callback(
             "Provider returned error"
         );
         return Err(redirect_with_error(
-            frontend_url,
+            &redirect_target,
             "social_auth_denied",
             secure,
             domain,
@@ -118,7 +181,7 @@ pub async fn callback(
         Some(ref c) if !c.is_empty() => c.as_str(),
         _ => {
             return Err(redirect_with_error(
-                frontend_url,
+                &redirect_target,
                 "social_auth_invalid",
                 secure,
                 domain,
@@ -129,7 +192,7 @@ pub async fn callback(
         Some(ref s) if !s.is_empty() => s.as_str(),
         _ => {
             return Err(redirect_with_error(
-                frontend_url,
+                &redirect_target,
                 "social_auth_invalid",
                 secure,
                 domain,
@@ -144,7 +207,7 @@ pub async fn callback(
         Some(ref h) if constant_time_eq(h.as_bytes(), computed_hash.as_bytes()) => {}
         _ => {
             return Err(redirect_with_error(
-                frontend_url,
+                &redirect_target,
                 "social_auth_csrf",
                 secure,
                 domain,
@@ -158,7 +221,7 @@ pub async fn callback(
             .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "Social auth code exchange failed");
-                redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
+                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
             })?;
 
     // Fetch user profile
@@ -167,7 +230,7 @@ pub async fn callback(
             .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "Social auth profile fetch failed");
-                redirect_with_error(frontend_url, "social_auth_profile", secure, domain)
+                redirect_with_error(&redirect_target, "social_auth_profile", secure, domain)
             })?;
 
     // Find or create user
@@ -181,7 +244,7 @@ pub async fn callback(
                 AppError::SocialAuthDeactivated => "social_auth_deactivated",
                 _ => "social_auth_exchange",
             };
-            redirect_with_error(frontend_url, error_key, secure, domain)
+            redirect_with_error(&redirect_target, error_key, secure, domain)
         })?;
 
     // Issue session and tokens
@@ -199,7 +262,7 @@ pub async fn callback(
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "Social auth session creation failed");
-        redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
+        redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
     })?;
 
     // Audit log
@@ -230,7 +293,7 @@ pub async fn callback(
             domain,
         )
         .parse()
-        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
+        .map_err(|_| redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain))?,
     );
 
     // Access token cookie
@@ -245,7 +308,7 @@ pub async fn callback(
             domain,
         )
         .parse()
-        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
+        .map_err(|_| redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain))?,
     );
 
     // Refresh token cookie
@@ -260,7 +323,7 @@ pub async fn callback(
             domain,
         )
         .parse()
-        .map_err(|_| redirect_with_error(frontend_url, "social_auth_exchange", secure, domain))?,
+        .map_err(|_| redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain))?,
     );
 
     // Clear state cookie
@@ -269,37 +332,138 @@ pub async fn callback(
         clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure, domain)
             .parse()
             .map_err(|_| {
-                redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
+                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+            })?,
+    );
+    response_headers.append(
+        header::SET_COOKIE,
+        clear_cookie(SOCIAL_CLIENT_COOKIE, "/api/v1/auth/social", secure, domain)
+            .parse()
+            .map_err(|_| {
+                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+            })?,
+    );
+    response_headers.append(
+        header::SET_COOKIE,
+        clear_cookie(SOCIAL_REDIRECT_COOKIE, "/api/v1/auth/social", secure, domain)
+            .parse()
+            .map_err(|_| {
+                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
             })?,
     );
 
-    // Redirect to frontend root (dashboard lives at /)
-    let redirect_url = state.config.frontend_url.trim_end_matches('/').to_string() + "/";
+    let redirect_url = build_success_redirect_url(
+        &redirect_target,
+        provider.as_str(),
+        &user.id,
+        &tokens.access_token,
+        tokens.access_expires_in,
+        &tokens.refresh_token,
+    );
     response_headers.insert(
         header::LOCATION,
         redirect_url.parse().map_err(|_| {
-            redirect_with_error(frontend_url, "social_auth_exchange", secure, domain)
+            redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
         })?,
     );
 
     Ok((StatusCode::FOUND, response_headers, ()))
 }
 
+#[derive(Debug, Clone)]
+enum SocialRedirectTarget {
+    Web { frontend_url: String },
+    Mobile { redirect_uri: String },
+}
+
+fn resolve_redirect_target(frontend_url: &str, headers: &HeaderMap) -> SocialRedirectTarget {
+    let client_cookie = extract_cookie_value(headers, SOCIAL_CLIENT_COOKIE);
+    let redirect_cookie = extract_cookie_value(headers, SOCIAL_REDIRECT_COOKIE);
+    let mobile_redirect = redirect_cookie
+        .and_then(|encoded| urlencoding::decode(&encoded).ok().map(|v| v.to_string()))
+        .filter(|uri| is_supported_mobile_redirect_uri(uri));
+
+    if client_cookie.as_deref() == Some(SOCIAL_CLIENT_MOBILE)
+        && let Some(redirect_uri) = mobile_redirect
+    {
+        return SocialRedirectTarget::Mobile { redirect_uri };
+    }
+
+    SocialRedirectTarget::Web {
+        frontend_url: frontend_url.to_string(),
+    }
+}
+
+fn is_supported_mobile_redirect_uri(uri: &str) -> bool {
+    uri.starts_with("nyxid://") || uri.starts_with("exp://")
+}
+
+fn build_success_redirect_url(
+    target: &SocialRedirectTarget,
+    provider: &str,
+    user_id: &str,
+    access_token: &str,
+    expires_in: i64,
+    refresh_token: &str,
+) -> String {
+    match target {
+        SocialRedirectTarget::Web { frontend_url } => {
+            frontend_url.trim_end_matches('/').to_string() + "/"
+        }
+        SocialRedirectTarget::Mobile { redirect_uri } => {
+            let joiner = if redirect_uri.contains('?') { "&" } else { "?" };
+            format!(
+                "{}{}status=success&provider={}&user_id={}&access_token={}&refresh_token={}&expires_in={}",
+                redirect_uri,
+                joiner,
+                urlencoding::encode(provider),
+                urlencoding::encode(user_id),
+                urlencoding::encode(access_token),
+                urlencoding::encode(refresh_token),
+                expires_in
+            )
+        }
+    }
+}
+
 /// Build an error redirect response that clears the state cookie.
 fn redirect_with_error(
-    frontend_url: &str,
+    target: &SocialRedirectTarget,
     error: &str,
     secure: bool,
     domain: Option<&str>,
 ) -> (StatusCode, HeaderMap, ()) {
     let mut headers = HeaderMap::new();
-    let base = frontend_url.trim_end_matches('/');
-    let url = format!("{}/login?error={}", base, error);
+    let url = match target {
+        SocialRedirectTarget::Web { frontend_url } => {
+            let base = frontend_url.trim_end_matches('/');
+            format!("{}/login?error={}", base, error)
+        }
+        SocialRedirectTarget::Mobile { redirect_uri } => {
+            let joiner = if redirect_uri.contains('?') { "&" } else { "?" };
+            format!(
+                "{}{}status=error&error={}",
+                redirect_uri,
+                joiner,
+                urlencoding::encode(error)
+            )
+        }
+    };
     if let Ok(location) = url.parse() {
         headers.insert(header::LOCATION, location);
     }
     if let Ok(cookie) =
         clear_cookie(SOCIAL_STATE_COOKIE, "/api/v1/auth/social", secure, domain).parse()
+    {
+        headers.append(header::SET_COOKIE, cookie);
+    }
+    if let Ok(cookie) =
+        clear_cookie(SOCIAL_CLIENT_COOKIE, "/api/v1/auth/social", secure, domain).parse()
+    {
+        headers.append(header::SET_COOKIE, cookie);
+    }
+    if let Ok(cookie) =
+        clear_cookie(SOCIAL_REDIRECT_COOKIE, "/api/v1/auth/social", secure, domain).parse()
     {
         headers.append(header::SET_COOKIE, cookie);
     }

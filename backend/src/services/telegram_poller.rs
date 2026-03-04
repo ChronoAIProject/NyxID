@@ -104,6 +104,8 @@ async fn handle_callback_query(
         state.apns_auth.clone(),
         &request_id,
         approved,
+        None,
+        None,
         "telegram",
     )
     .await

@@ -57,6 +57,7 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let user_routes = Router::new()
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
+        .route("/me", delete(handlers::users::delete_me))
         .route("/me/consents", get(handlers::consent::list_my_consents))
         .route(
             "/me/consents/{client_id}",
@@ -390,6 +391,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     // Approval management (human-only; status polling is in api_v1_delegated)
     let approval_routes = Router::new()
         .route("/requests", get(handlers::approvals::list_requests))
+        .route(
+            "/requests/{request_id}",
+            get(handlers::approvals::get_request_by_id),
+        )
         .route(
             "/requests/{request_id}/decide",
             post(handlers::approvals::decide_request),
