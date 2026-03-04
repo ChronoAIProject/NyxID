@@ -45,19 +45,16 @@ pub async fn authorize(
         AppError::SocialAuthFailed(format!("Unsupported provider: {provider_name}"))
     })?;
 
-    let secure = state.config.use_secure_cookies();
+    let base_secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
 
-    // Apple requires SameSite=None (cross-site form_post callback)
-    let same_site = if provider == social_auth_service::SocialProvider::Apple {
-        if !secure {
-            return Err(AppError::SocialAuthFailed(
-                "Apple social login requires HTTPS (Secure cookies enabled)".to_string(),
-            ));
-        }
-        COOKIE_SAMESITE_NONE
+    // Apple's form_post callback is cross-origin, so cookies need SameSite=None.
+    // SameSite=None requires the Secure flag, but browsers treat localhost as a
+    // secure context even over plain HTTP, so we force Secure=true for Apple.
+    let (secure, same_site) = if provider == social_auth_service::SocialProvider::Apple {
+        (true, COOKIE_SAMESITE_NONE)
     } else {
-        COOKIE_SAMESITE_LAX
+        (base_secure, COOKIE_SAMESITE_LAX)
     };
 
     let is_mobile_client = query.client.as_deref() == Some(SOCIAL_CLIENT_MOBILE);
