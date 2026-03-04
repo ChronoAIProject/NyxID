@@ -11,18 +11,14 @@
     ],
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.nyxid.mobile"
+      "bundleIdentifier": "fun.chrono-ai.nyxid"
     },
     "android": {
-      "package": "com.nyxid.mobile"
+      "package": "fun.chrono-ai.nyxid"
     },
     "plugins": [
       "expo-secure-store",
       "expo-notifications"
-    ],
-    "extra": {
-      "apiBaseUrl": "http://localhost:3001/api/v1",
-      "useMock": true
-    }
+    ]
   }
 }

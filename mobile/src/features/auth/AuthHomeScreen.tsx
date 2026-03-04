@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
+import * as WebBrowser from "expo-web-browser";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { RootStackParamList } from "../../app/AppNavigator";
@@ -15,7 +16,6 @@ import { flowStyles } from "../../theme/flowStyles";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 
 type SocialProvider = "google" | "github" | "apple";
-type BackendSocialProvider = "google" | "github";
 type Props = NativeStackScreenProps<RootStackParamList, "Auth">;
 const SOCIAL_CALLBACK_URL = "nyxid://auth/social/callback";
 
@@ -164,10 +164,10 @@ export function AuthHomeScreen({ navigation }: Props) {
         try {
           const pushResult = await activatePushAfterLogin();
           if (__DEV__) {
-            console.log("[push] activate after social login", pushResult);
+            if (__DEV__) console.log("[push] activate after social login", pushResult);
           }
         } catch (pushError) {
-          console.warn("[push] activate after social login failed", pushError);
+          if (__DEV__) console.warn("[push] activate after social login failed", pushError);
         }
       } catch (error) {
         showToast(resolveAuthError(error), "error");
@@ -200,22 +200,29 @@ export function AuthHomeScreen({ navigation }: Props) {
       return;
     }
 
-    if (provider === "apple") {
-      showToast("Apple sign-in is not available yet.", "info");
-      return;
-    }
-
     if (isMountedRef.current) {
       setToast(null);
       setIsSocialAuthPending(true);
     }
 
     try {
-      const authorizeUrl = mobileApi.getSocialAuthorizeUrl(
-        provider as BackendSocialProvider,
+      const authorizeUrl = mobileApi.getSocialAuthorizeUrl(provider, SOCIAL_CALLBACK_URL);
+      const result = await WebBrowser.openAuthSessionAsync(
+        authorizeUrl,
         SOCIAL_CALLBACK_URL
       );
-      await Linking.openURL(authorizeUrl);
+
+      if (result.type === "success") {
+        await handleSocialCallback(result.url);
+        return;
+      }
+
+      if (result.type === "cancel" || result.type === "dismiss") {
+        showToast("Social sign-in was cancelled.", "info");
+        return;
+      }
+
+      showToast("Unable to complete social sign-in.", "error");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to start social sign-in.";
       showToast(message, "error");

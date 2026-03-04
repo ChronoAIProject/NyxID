@@ -12,6 +12,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 pub enum SocialProvider {
     GitHub,
     Google,
+    Apple,
 }
 
 impl SocialProvider {
@@ -20,6 +21,7 @@ impl SocialProvider {
         match s {
             "github" => Some(Self::GitHub),
             "google" => Some(Self::Google),
+            "apple" => Some(Self::Apple),
             _ => None,
         }
     }
@@ -28,6 +30,7 @@ impl SocialProvider {
         match self {
             Self::GitHub => "github",
             Self::Google => "google",
+            Self::Apple => "apple",
         }
     }
 }
@@ -45,6 +48,7 @@ pub struct SocialProfile {
 pub fn build_authorization_url(
     provider: SocialProvider,
     state: &str,
+    nonce: Option<&str>,
     config: &AppConfig,
 ) -> AppResult<String> {
     let base_url = config.base_url.trim_end_matches('/');
@@ -84,6 +88,29 @@ pub fn build_authorization_url(
                 client_id, redirect_uri, scope, state,
             ))
         }
+        SocialProvider::Apple => {
+            let client_id = config.apple_client_id.as_deref().ok_or_else(|| {
+                AppError::SocialAuthFailed("Apple provider not configured".to_string())
+            })?;
+            if !config.apple_configured() {
+                return Err(AppError::SocialAuthFailed(
+                    "Apple provider not fully configured".to_string(),
+                ));
+            }
+            let nonce = nonce.filter(|n| !n.is_empty()).ok_or_else(|| {
+                AppError::SocialAuthFailed("Apple authorization requires nonce".to_string())
+            })?;
+
+            let raw_redirect = format!("{base_url}/api/v1/auth/social/apple/callback");
+            let redirect_uri = urlencoding::encode(&raw_redirect);
+            let scope = urlencoding::encode("name email");
+            let nonce = urlencoding::encode(nonce);
+
+            Ok(format!(
+                "https://appleid.apple.com/auth/authorize?client_id={}&redirect_uri={}&scope={}&state={}&nonce={}&response_type=code&response_mode=form_post",
+                client_id, redirect_uri, scope, state, nonce,
+            ))
+        }
     }
 }
 
@@ -101,6 +128,14 @@ struct GoogleTokenResponse {
     access_token: Option<String>,
     error: Option<String>,
     error_description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AppleTokenResponse {
+    #[allow(dead_code)]
+    access_token: Option<String>,
+    id_token: Option<String>,
+    error: Option<String>,
 }
 
 /// Exchange an authorization code for an access token.
@@ -205,6 +240,51 @@ pub async fn exchange_code(
                 AppError::SocialAuthFailed("No access token in Google response".to_string())
             })
         }
+        SocialProvider::Apple => {
+            let client_id = config.apple_client_id.as_deref().ok_or_else(|| {
+                AppError::SocialAuthFailed("Apple provider not configured".to_string())
+            })?;
+
+            // Generate ephemeral client_secret JWT
+            let client_secret =
+                crate::crypto::apple_client_secret::generate_apple_client_secret(config)?;
+
+            let redirect_uri = format!("{base_url}/api/v1/auth/social/apple/callback");
+
+            let resp = http_client
+                .post("https://appleid.apple.com/auth/token")
+                .form(&[
+                    ("client_id", client_id),
+                    ("client_secret", client_secret.as_str()),
+                    ("code", code),
+                    ("redirect_uri", &redirect_uri),
+                    ("grant_type", "authorization_code"),
+                ])
+                .send()
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Apple token exchange HTTP error");
+                    AppError::SocialAuthFailed("Failed to exchange code with Apple".to_string())
+                })?;
+
+            let body: AppleTokenResponse = resp.json().await.map_err(|e| {
+                tracing::error!(error = %e, "Apple token response parse error");
+                AppError::SocialAuthFailed("Failed to exchange code with Apple".to_string())
+            })?;
+
+            if let Some(err) = body.error {
+                tracing::debug!(provider = "apple", error = %err, "Apple token exchange error");
+                return Err(AppError::SocialAuthFailed(
+                    "Failed to exchange code with Apple".to_string(),
+                ));
+            }
+
+            // Apple returns an id_token -- the caller verifies it via JWKS
+            // and extracts profile from claims.
+            body.id_token.ok_or_else(|| {
+                AppError::SocialAuthFailed("No id_token in Apple response".to_string())
+            })
+        }
     }
 }
 
@@ -243,7 +323,36 @@ pub async fn fetch_user_profile(
     match provider {
         SocialProvider::GitHub => fetch_github_profile(access_token, http_client).await,
         SocialProvider::Google => fetch_google_profile(access_token, http_client).await,
+        SocialProvider::Apple => Err(AppError::SocialAuthFailed(
+            "Apple does not support userinfo endpoint. Use ID token flow.".to_string(),
+        )),
     }
+}
+
+/// Build a SocialProfile from a verified Apple ID token.
+///
+/// Apple does not have a userinfo endpoint -- profile comes from the ID token itself.
+/// Note: display_name is NOT available from the ID token. Apple only sends the name
+/// in the initial POST body (handled in the callback handler).
+pub fn profile_from_apple_id_token(
+    claims: &crate::crypto::jwks::AppleIdTokenClaims,
+) -> AppResult<SocialProfile> {
+    let email = claims.email.clone().ok_or(AppError::SocialAuthNoEmail)?;
+
+    // Accept the email even if email_verified is not explicitly true.
+    // Apple private relay emails are always verified by Apple.
+    // However, reject if explicitly unverified.
+    if claims.is_email_verified() == Some(false) {
+        return Err(AppError::SocialAuthNoEmail);
+    }
+
+    Ok(SocialProfile {
+        provider: SocialProvider::Apple,
+        provider_id: claims.sub.clone(),
+        email,
+        display_name: None, // Apple only sends name in first auth POST body
+        avatar_url: None,   // Apple never provides avatars
+    })
 }
 
 async fn fetch_github_profile(
@@ -484,11 +593,12 @@ mod tests {
             SocialProvider::parse("google"),
             Some(SocialProvider::Google)
         );
+        assert_eq!(SocialProvider::parse("apple"), Some(SocialProvider::Apple));
     }
 
     #[test]
     fn provider_from_str_invalid() {
-        assert_eq!(SocialProvider::parse("apple"), None);
+        assert_eq!(SocialProvider::parse("facebook"), None);
         assert_eq!(SocialProvider::parse(""), None);
         assert_eq!(SocialProvider::parse("GitHub"), None);
     }
@@ -497,11 +607,12 @@ mod tests {
     fn provider_as_str() {
         assert_eq!(SocialProvider::GitHub.as_str(), "github");
         assert_eq!(SocialProvider::Google.as_str(), "google");
+        assert_eq!(SocialProvider::Apple.as_str(), "apple");
     }
 
     #[test]
     fn provider_roundtrip() {
-        for name in &["github", "google"] {
+        for name in &["github", "google", "apple"] {
             let provider = SocialProvider::parse(name).unwrap();
             assert_eq!(provider.as_str(), *name);
         }
@@ -529,6 +640,10 @@ mod tests {
             google_client_secret: google_secret.map(String::from),
             github_client_id: github_id.map(String::from),
             github_client_secret: github_secret.map(String::from),
+            apple_client_id: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_private_key_path: None,
             smtp_host: None,
             smtp_port: None,
             smtp_username: None,
@@ -557,7 +672,8 @@ mod tests {
     #[test]
     fn build_github_url() {
         let config = make_test_config(Some("gh_id"), Some("gh_secret"), None, None);
-        let url = build_authorization_url(SocialProvider::GitHub, "test_state", &config).unwrap();
+        let url =
+            build_authorization_url(SocialProvider::GitHub, "test_state", None, &config).unwrap();
         assert!(url.starts_with("https://github.com/login/oauth/authorize"));
         assert!(url.contains("client_id=gh_id"));
         assert!(url.contains("state=test_state"));
@@ -568,7 +684,8 @@ mod tests {
     #[test]
     fn build_google_url() {
         let config = make_test_config(None, None, Some("goog_id"), Some("goog_secret"));
-        let url = build_authorization_url(SocialProvider::Google, "test_state", &config).unwrap();
+        let url =
+            build_authorization_url(SocialProvider::Google, "test_state", None, &config).unwrap();
         assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth"));
         assert!(url.contains("client_id=goog_id"));
         assert!(url.contains("state=test_state"));
@@ -579,9 +696,9 @@ mod tests {
     #[test]
     fn build_url_errors_when_not_configured() {
         let config = make_test_config(None, None, None, None);
-        let result = build_authorization_url(SocialProvider::GitHub, "state", &config);
+        let result = build_authorization_url(SocialProvider::GitHub, "state", None, &config);
         assert!(result.is_err());
-        let result = build_authorization_url(SocialProvider::Google, "state", &config);
+        let result = build_authorization_url(SocialProvider::Google, "state", None, &config);
         assert!(result.is_err());
     }
 
@@ -589,7 +706,42 @@ mod tests {
     fn build_url_errors_when_secret_missing() {
         // Has client_id but not secret
         let config = make_test_config(Some("gh_id"), None, None, None);
-        let result = build_authorization_url(SocialProvider::GitHub, "state", &config);
+        let result = build_authorization_url(SocialProvider::GitHub, "state", None, &config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_apple_url_requires_nonce() {
+        let mut config = make_test_config(None, None, None, None);
+        config.apple_client_id = Some("com.example.nyxid".to_string());
+        config.apple_team_id = Some("TEAM123".to_string());
+        config.apple_key_id = Some("KEY123".to_string());
+        config.apple_private_key_path = Some("keys/apple.p8".to_string());
+
+        let err = build_authorization_url(SocialProvider::Apple, "state", None, &config)
+            .expect_err("apple url should require nonce");
+        assert!(matches!(err, AppError::SocialAuthFailed(_)));
+    }
+
+    #[test]
+    fn build_apple_url_includes_form_post_and_nonce() {
+        let mut config = make_test_config(None, None, None, None);
+        config.apple_client_id = Some("com.example.nyxid".to_string());
+        config.apple_team_id = Some("TEAM123".to_string());
+        config.apple_key_id = Some("KEY123".to_string());
+        config.apple_private_key_path = Some("keys/apple.p8".to_string());
+
+        let url = build_authorization_url(
+            SocialProvider::Apple,
+            "test_state",
+            Some("test_nonce"),
+            &config,
+        )
+        .unwrap();
+        assert!(url.starts_with("https://appleid.apple.com/auth/authorize"));
+        assert!(url.contains("response_mode=form_post"));
+        assert!(url.contains("nonce=test_nonce"));
+        assert!(url.contains("state=test_state"));
+        assert!(url.contains("scope=name%20email"));
     }
 }

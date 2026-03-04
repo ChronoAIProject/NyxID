@@ -30,11 +30,11 @@
           <string>nyxid</string>
         </array>
         <key>CFBundleURLName</key>
-        <string>com.nyxid.mobile</string>
+        <string>fun.chrono-ai.nyxid</string>
       </dict>
     </array>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>3</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>LSRequiresIPhoneOS</key>
