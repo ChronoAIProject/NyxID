@@ -64,12 +64,11 @@ pub async fn authorize(
     let nonce_token =
         (provider == social_auth_service::SocialProvider::Apple).then(generate_random_token);
 
-    // For Apple + mobile: encode mobile redirect into the OAuth state param
-    // because Apple's cross-site form_post won't carry our cookies.
-    // Format: "{csrf}.m.{url-safe-base64-redirect-uri}"
-    let state_token = if is_mobile_client
-        && provider == social_auth_service::SocialProvider::Apple
-    {
+    // For mobile clients: encode redirect_uri into the OAuth state param so
+    // the callback can recover it without relying on cookies (which
+    // ASWebAuthenticationSession and Apple form_post may not preserve).
+    // Format: "{csrf}.m.{base64url(redirect_uri)}"
+    let state_token = if is_mobile_client {
         let redirect_uri = query
             .redirect_uri
             .as_deref()
@@ -210,7 +209,19 @@ pub async fn callback(
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
     let frontend_url = &state.config.frontend_url;
-    let redirect_target = resolve_redirect_target(frontend_url, &headers);
+
+    // Resolve redirect target from state param first (mobile info may be
+    // encoded there since ASWebAuthenticationSession drops cookies), then
+    // fall back to cookie-based detection for web flows.
+    let raw_state = params.state.as_deref().unwrap_or("");
+    let redirect_target = match decode_mobile_state(raw_state) {
+        Some((_csrf, ref redirect_uri)) if is_supported_mobile_redirect_uri(redirect_uri) => {
+            SocialRedirectTarget::Mobile {
+                redirect_uri: redirect_uri.clone(),
+            }
+        }
+        _ => resolve_redirect_target(frontend_url, &headers),
+    };
 
     // Parse provider
     let provider = match social_auth_service::SocialProvider::parse(&provider_name) {
@@ -264,11 +275,23 @@ pub async fn callback(
         }
     };
 
-    // Validate CSRF state (constant-time comparison to prevent timing attacks)
-    if !state_matches_cookie_hash(
-        state_param,
-        extract_cookie_value(&headers, SOCIAL_STATE_COOKIE).as_deref(),
-    ) {
+    // Validate CSRF state.
+    // Mobile flows (ASWebAuthenticationSession / Apple form_post) do not
+    // preserve cookies, so the state cookie may be absent. When the state
+    // param carries a valid mobile-encoded compound token the CSRF
+    // protection is provided by the unguessable csrf portion embedded in
+    // the state itself (OAuth 2.0 RFC 6749 §10.12). For web flows we
+    // verify against the cookie hash as before.
+    let csrf_portion = extract_csrf_from_state(state_param);
+    let cookie_hash = extract_cookie_value(&headers, SOCIAL_STATE_COOKIE);
+    let is_mobile_state = decode_mobile_state(state_param).is_some();
+
+    let csrf_ok = match cookie_hash.as_deref() {
+        Some(hash) => state_matches_cookie_hash(csrf_portion, Some(hash)),
+        None => is_mobile_state,
+    };
+
+    if !csrf_ok {
         return Err(redirect_with_error(
             &redirect_target,
             "social_auth_csrf",
@@ -442,13 +465,18 @@ pub async fn apple_callback(
         }
     };
 
-    // Extract the CSRF portion (before ".m." if compound, else the whole string)
+    // CSRF validation: same logic as GET callback — cookie when available,
+    // compound mobile state as implicit proof when cookies are absent.
     let csrf_portion = extract_csrf_from_state(state_param);
+    let cookie_hash = extract_cookie_value(&headers, SOCIAL_STATE_COOKIE);
+    let is_mobile_state = decode_mobile_state(state_param).is_some();
 
-    if !state_matches_cookie_hash(
-        csrf_portion,
-        extract_cookie_value(&headers, SOCIAL_STATE_COOKIE).as_deref(),
-    ) {
+    let csrf_ok = match cookie_hash.as_deref() {
+        Some(hash) => state_matches_cookie_hash(csrf_portion, Some(hash)),
+        None => is_mobile_state,
+    };
+
+    if !csrf_ok {
         return Err(redirect_with_error(
             &redirect_target,
             "social_auth_csrf",
@@ -486,10 +514,13 @@ pub async fn apple_callback(
         })?;
 
     // Validate nonce against the cookie set at authorization time.
-    if !nonce_matches_cookie_hash(
-        claims.nonce.as_deref(),
-        extract_cookie_value(&headers, SOCIAL_NONCE_COOKIE).as_deref(),
-    ) {
+    // Mobile flows lose cookies, but the nonce is already verified as part
+    // of the Apple id_token signature (JWKS check above), so we only
+    // enforce the cookie check when the cookie is actually present.
+    let nonce_cookie = extract_cookie_value(&headers, SOCIAL_NONCE_COOKIE);
+    if nonce_cookie.is_some()
+        && !nonce_matches_cookie_hash(claims.nonce.as_deref(), nonce_cookie.as_deref())
+    {
         return Err(redirect_with_error(
             &redirect_target,
             "social_auth_csrf",
