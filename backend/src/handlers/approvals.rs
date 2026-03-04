@@ -1,6 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
+    http::HeaderMap,
 };
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +75,33 @@ pub struct MessageResponse {
     pub message: String,
 }
 
+fn to_approval_request_item(
+    request: crate::models::approval_request::ApprovalRequest,
+) -> ApprovalRequestItem {
+    ApprovalRequestItem {
+        id: request.id,
+        service_name: request.service_name,
+        service_slug: request.service_slug,
+        requester_type: request.requester_type,
+        requester_label: request.requester_label,
+        operation_summary: request.operation_summary,
+        status: request.status,
+        created_at: request.created_at.to_rfc3339(),
+        decided_at: request.decided_at.map(|d| d.to_rfc3339()),
+        decision_channel: request.decision_channel,
+    }
+}
+
+fn ensure_request_owned_by_user(request_user_id: &str, auth_user_id: &str) -> AppResult<()> {
+    if request_user_id != auth_user_id {
+        return Err(AppError::Forbidden(
+            "You are not authorized to view this approval request".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 // --- Query/Request types ---
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +120,7 @@ pub struct GrantsQuery {
 #[derive(Debug, Deserialize)]
 pub struct DecideRequest {
     pub approved: bool,
+    pub duration_sec: Option<i64>,
 }
 
 // --- Handlers ---
@@ -124,21 +153,7 @@ pub async fn list_requests(
     )
     .await?;
 
-    let items: Vec<ApprovalRequestItem> = requests
-        .into_iter()
-        .map(|r| ApprovalRequestItem {
-            id: r.id,
-            service_name: r.service_name,
-            service_slug: r.service_slug,
-            requester_type: r.requester_type,
-            requester_label: r.requester_label,
-            operation_summary: r.operation_summary,
-            status: r.status,
-            created_at: r.created_at.to_rfc3339(),
-            decided_at: r.decided_at.map(|d| d.to_rfc3339()),
-            decision_channel: r.decision_channel,
-        })
-        .collect();
+    let items: Vec<ApprovalRequestItem> = requests.into_iter().map(to_approval_request_item).collect();
 
     Ok(Json(ApprovalRequestsResponse {
         requests: items,
@@ -146,6 +161,22 @@ pub async fn list_requests(
         page,
         per_page,
     }))
+}
+
+/// GET /api/v1/approvals/requests/{request_id}
+///
+/// Returns approval request detail for the current user.
+pub async fn get_request_by_id(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(request_id): Path<String>,
+) -> AppResult<Json<ApprovalRequestItem>> {
+    let user_id = auth_user.user_id.to_string();
+    let request = approval_service::get_request(&state.db, &request_id).await?;
+
+    ensure_request_owned_by_user(&request.user_id, &user_id)?;
+
+    Ok(Json(to_approval_request_item(request)))
 }
 
 /// GET /api/v1/approvals/requests/{request_id}/status
@@ -189,9 +220,15 @@ pub async fn decide_request(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(request_id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<DecideRequest>,
 ) -> AppResult<Json<DecideResponse>> {
     let user_id = auth_user.user_id.to_string();
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
     // Verify the request belongs to this user
     let request = approval_service::get_request(&state.db, &request_id).await?;
@@ -201,12 +238,24 @@ pub async fn decide_request(
         ));
     }
 
+    if let Some(duration_sec) = body.duration_sec {
+        if duration_sec <= 0 {
+            return Err(crate::errors::AppError::ValidationError(
+                "duration_sec must be positive".to_string(),
+            ));
+        }
+    }
+
     let updated = approval_service::process_decision(
         &state.db,
         &state.config,
         &state.http_client,
+        state.fcm_auth.clone(),
+        state.apns_auth.clone(),
         &request_id,
         body.approved,
+        body.duration_sec,
+        idempotency_key,
         "web",
     )
     .await?;
@@ -413,4 +462,62 @@ pub async fn delete_service_config(
     Ok(Json(MessageResponse {
         message: "Per-service approval config removed".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::approval_request::ApprovalRequest;
+    use chrono::Utc;
+
+    fn sample_request(user_id: &str) -> ApprovalRequest {
+        ApprovalRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            service_id: uuid::Uuid::new_v4().to_string(),
+            service_name: "OpenAI".to_string(),
+            service_slug: "openai".to_string(),
+            requester_type: "service_account".to_string(),
+            requester_id: "sa_123".to_string(),
+            requester_label: Some("CI bot".to_string()),
+            operation_summary: "proxy:POST /v1/chat/completions".to_string(),
+            status: "pending".to_string(),
+            idempotency_key: "idem_123".to_string(),
+            notification_channel: Some("fcm".to_string()),
+            telegram_message_id: None,
+            telegram_chat_id: None,
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+            decided_at: None,
+            decision_channel: None,
+            decision_idempotency_key: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn ensure_request_owned_by_user_allows_owner() {
+        let result = ensure_request_owned_by_user("user_1", "user_1");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ensure_request_owned_by_user_rejects_non_owner() {
+        let result = ensure_request_owned_by_user("user_1", "user_2");
+        assert!(matches!(result, Err(AppError::Forbidden(_))));
+    }
+
+    #[test]
+    fn to_approval_request_item_maps_core_fields() {
+        let request = sample_request("user_1");
+        let expected_id = request.id.clone();
+        let expected_service = request.service_name.clone();
+        let expected_status = request.status.clone();
+
+        let item = to_approval_request_item(request);
+
+        assert_eq!(item.id, expected_id);
+        assert_eq!(item.service_name, expected_service);
+        assert_eq!(item.status, expected_status);
+        assert!(item.created_at.contains('T'));
+    }
 }

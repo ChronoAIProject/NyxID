@@ -5,6 +5,34 @@ use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "notification_channels";
 
+/// A registered push notification device token (FCM or APNs).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeviceToken {
+    /// Unique device ID (UUID v4 string, generated server-side)
+    pub device_id: String,
+
+    /// Platform: "fcm" or "apns"
+    pub platform: String,
+
+    /// The device registration token from FCM or APNs
+    pub token: String,
+
+    /// Human-readable device name (e.g. "iPhone 15", "Pixel 8")
+    pub device_name: Option<String>,
+
+    /// App bundle ID / package name (e.g. "dev.nyxid.app").
+    /// Used for APNs apns-topic header.
+    pub app_id: Option<String>,
+
+    /// When the token was registered or last refreshed
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub registered_at: DateTime<Utc>,
+
+    /// When a push was last successfully sent to this token
+    #[serde(default, with = "bson_datetime::optional")]
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NotificationChannel {
     /// UUID v4 string
@@ -48,6 +76,15 @@ pub struct NotificationChannel {
     #[serde(default)]
     pub approval_required: bool,
 
+    // -- Push Notifications --
+    /// Whether push notifications (FCM/APNs) are enabled
+    #[serde(default)]
+    pub push_enabled: bool,
+
+    /// Registered device tokens for push notifications
+    #[serde(default)]
+    pub push_devices: Vec<DeviceToken>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 
@@ -84,6 +121,8 @@ mod tests {
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             approval_required: true,
+            push_enabled: false,
+            push_devices: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -123,8 +162,43 @@ mod tests {
         assert!(keys.contains(&"approval_timeout_secs"));
         assert!(keys.contains(&"grant_expiry_days"));
         assert!(keys.contains(&"approval_required"));
+        assert!(keys.contains(&"push_enabled"));
+        assert!(keys.contains(&"push_devices"));
         assert!(keys.contains(&"created_at"));
         assert!(keys.contains(&"updated_at"));
+    }
+
+    #[test]
+    fn bson_roundtrip_with_push_devices() {
+        let mut ch = make_notification_channel();
+        ch.push_enabled = true;
+        ch.push_devices = vec![
+            DeviceToken {
+                device_id: uuid::Uuid::new_v4().to_string(),
+                platform: "fcm".to_string(),
+                token: "test-fcm-token-abc".to_string(),
+                device_name: Some("Pixel 8".to_string()),
+                app_id: Some("dev.nyxid.app".to_string()),
+                registered_at: Utc::now(),
+                last_used_at: None,
+            },
+            DeviceToken {
+                device_id: uuid::Uuid::new_v4().to_string(),
+                platform: "apns".to_string(),
+                token: "test-apns-token-def".to_string(),
+                device_name: Some("iPhone 15".to_string()),
+                app_id: Some("dev.nyxid.app".to_string()),
+                registered_at: Utc::now(),
+                last_used_at: Some(Utc::now()),
+            },
+        ];
+        let doc = bson::to_document(&ch).expect("serialize");
+        let restored: NotificationChannel = bson::from_document(doc).expect("deserialize");
+        assert!(restored.push_enabled);
+        assert_eq!(restored.push_devices.len(), 2);
+        assert_eq!(restored.push_devices[0].platform, "fcm");
+        assert_eq!(restored.push_devices[1].platform, "apns");
+        assert!(restored.push_devices[1].last_used_at.is_some());
     }
 
     #[test]

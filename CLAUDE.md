@@ -64,9 +64,9 @@ backend/src/
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
 |-- models/              # MongoDB document structs (25 models, 23 collections)
-|-- services/            # Business logic (29 services, incl. approval_service, notification_service, telegram_service, social_token_exchange_service)
-|-- handlers/            # HTTP handlers (29 handler modules, incl. approvals, notifications, webhooks)
-|-- crypto/              # JWT, AES, password hashing, token generation, JWKS cache (jwks.rs)
+|-- services/            # Business logic (29 services, incl. approval_service, notification_service, push_service, telegram_service)
+|-- handlers/            # HTTP handlers (30 handler modules, incl. approvals, notifications, device_tokens, webhooks)
+|-- crypto/              # JWT, AES, password hashing, token generation
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
@@ -98,7 +98,7 @@ All API routes under `/api/v1`:
 - `/proxy/services` -- service discovery (paginated list of proxyable services)
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
 - `/delegation/refresh` -- refresh delegated access tokens
-- `/notifications` -- notification settings CRUD, Telegram link/disconnect
+- `/notifications` -- notification settings CRUD, Telegram link/disconnect, device token management (register/list/remove)
 - `/approvals` -- approval request history, grants, decide, status polling, per-service approval configs
 - `/webhooks/telegram` -- Telegram webhook (unauthenticated, secret-verified)
 
@@ -135,6 +135,14 @@ TELEGRAM_WEBHOOK_SECRET=                # Random string for webhook verification
 TELEGRAM_WEBHOOK_URL=                   # e.g. https://auth.nyxid.dev/api/v1/webhooks/telegram
 TELEGRAM_BOT_USERNAME=                  # Bot username without @
 APPROVAL_EXPIRY_INTERVAL_SECS=5         # Interval between expiry sweeps
+
+# Mobile Push Notifications (optional)
+FCM_SERVICE_ACCOUNT_PATH=               # Path to Firebase service account JSON
+APNS_KEY_PATH=                          # Path to APNs .p8 private key
+APNS_KEY_ID=                            # APNs Key ID (Apple Developer portal)
+APNS_TEAM_ID=                           # APNs Team ID (Apple Developer portal)
+APNS_TOPIC=                             # APNs topic / iOS bundle ID (e.g. dev.nyxid.app)
+APNS_SANDBOX=true                       # Use APNs sandbox (default: true in dev)
 
 # Optional
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET

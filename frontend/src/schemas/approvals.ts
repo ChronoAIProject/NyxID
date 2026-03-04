@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const updateNotificationSettingsSchema = z.object({
   telegram_enabled: z.boolean(),
+  push_enabled: z.boolean(),
   approval_required: z.boolean(),
   approval_timeout_secs: z
     .number()

@@ -1,11 +1,16 @@
-use axum::{Json, extract::State};
+use axum::{
+    extract::State,
+    http::{header, HeaderMap},
+    Json,
+};
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
+use crate::models::user::{User, COLLECTION_NAME as USERS};
+use crate::services::{admin_user_service, audit_service};
 
 // --- Request / Response types ---
 
@@ -36,6 +41,27 @@ pub struct UpdateProfileResponse {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteAccountResponse {
+    pub status: String,
+    pub deleted_at: String,
+}
+
+fn extract_ip(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
 }
 
 // --- Handlers ---
@@ -137,5 +163,33 @@ pub async fn update_me(
         display_name: updated.display_name,
         avatar_url: updated.avatar_url,
         message: "Profile updated successfully".to_string(),
+    }))
+}
+
+/// DELETE /api/v1/users/me
+///
+/// Permanently delete the currently authenticated user and related credentials/sessions.
+pub async fn delete_me(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    headers: HeaderMap,
+) -> AppResult<Json<DeleteAccountResponse>> {
+    let user_id = auth_user.user_id.to_string();
+
+    admin_user_service::delete_current_user_cascade(&state.db, &user_id).await?;
+
+    let deleted_at = chrono::Utc::now().to_rfc3339();
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "user.account.deleted".to_string(),
+        Some(serde_json::json!({ "self_service": true })),
+        extract_ip(&headers),
+        extract_user_agent(&headers),
+    );
+
+    Ok(Json(DeleteAccountResponse {
+        status: "DELETED".to_string(),
+        deleted_at,
     }))
 }

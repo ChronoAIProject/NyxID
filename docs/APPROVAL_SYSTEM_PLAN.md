@@ -2,7 +2,7 @@
 
 ## Overview
 
-The approval system adds push-based transaction approval to NyxID. When a downstream service is accessed through the proxy or LLM gateway using user credentials, NyxID can require explicit user approval before forwarding the request. Approval notifications are sent via Telegram (with the architecture designed for future mobile app push notifications via FCM/APNs).
+The approval system adds push-based transaction approval to NyxID. When a downstream service is accessed through the proxy or LLM gateway using user credentials, NyxID can require explicit user approval before forwarding the request. Approval notifications are sent via Telegram and mobile push (FCM + APNs), with all channels firing in parallel.
 
 **Key design goals:**
 - Non-blocking: proxy requests that need approval return `403 approval_required` immediately; callers poll or retry after approval
@@ -249,10 +249,9 @@ pub struct NotificationChannel {
     #[serde(default, with = "bson_datetime::optional")]
     pub telegram_link_code_expires_at: Option<DateTime<Utc>>,
 
-    // -- Future: Mobile Push --
-    // pub fcm_device_tokens: Vec<String>,
-    // pub apns_device_tokens: Vec<String>,
-    // pub push_enabled: bool,
+    // -- Mobile Push (IMPLEMENTED -- see docs/MOBILE_PUSH_PLAN.md) --
+    pub push_enabled: bool,
+    pub push_devices: Vec<DeviceToken>,  // FCM + APNs device tokens
 
     // -- User preferences --
     /// How long to wait for user response before auto-rejecting (seconds).
@@ -657,24 +656,28 @@ r:550e8400e29b41d4a716446655440000
 
 **File:** `backend/src/services/notification_service.rs`
 
-Provides an abstraction over notification channels for future extensibility.
+Provides multi-channel notification delivery. Sends approval notifications via all enabled channels (Telegram + FCM + APNs) in parallel. At least one successful delivery is sufficient. Invalid push tokens are automatically cleaned up.
 
 ```rust
-/// Send an approval notification to the user via their configured channel.
-/// Currently only supports Telegram. Returns the channel name used.
+/// Send an approval notification to the user via all enabled channels.
+/// Returns which channels succeeded and Telegram metadata.
 pub async fn send_approval_notification(
     db: &Database,
     config: &AppConfig,
     http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
     user_id: &str,
     request: &ApprovalRequest,
-) -> AppResult<String>  // returns channel name, e.g. "telegram"
+) -> AppResult<NotificationResult>
 
-/// Edit the notification message after a decision is made.
+/// Edit the Telegram message and send silent push updates after a decision.
 pub async fn notify_decision(
-    db: &Database,
     config: &AppConfig,
     http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    db: &Database,
     request: &ApprovalRequest,
     approved: bool,
 ) -> AppResult<()>
@@ -685,6 +688,8 @@ pub async fn get_or_create_channel(
     user_id: &str,
 ) -> AppResult<NotificationChannel>
 ```
+
+See [docs/MOBILE_PUSH_PLAN.md](MOBILE_PUSH_PLAN.md) for the full mobile push notification architecture.
 
 ---
 
@@ -1425,32 +1430,35 @@ No new major dependencies. The Telegram Bot API is accessed via the existing `re
 ## 11. Approval Flow Sequence Diagram
 
 ```
-Service Account / OAuth Client          NyxID Proxy            NyxID Backend           Telegram
-         |                                  |                       |                      |
-         |-- POST /proxy/s/openai/v1/... -->|                       |                      |
-         |                                  |-- resolve_proxy_target |                      |
-         |                                  |-- check_approval ----->|                      |
-         |                                  |   (no grant found)     |                      |
-         |                                  |                        |-- create_approval_request
-         |                                  |                        |-- sendMessage ------->|
-         |                                  |                        |   (inline keyboard)   |
-         |<-- 403 approval_required --------|                        |                      |
-         |                                  |                        |                      |
-         |                                  |                        |      User clicks     |
-         |                                  |                        |      [Approve]       |
-         |                                  |                        |<-- callback_query ----|
-         |                                  |                        |-- verify webhook secret
-         |                                  |                        |-- process_decision("approved")
-         |                                  |                        |-- create ApprovalGrant
-         |                                  |                        |-- editMessageText --->|
-         |                                  |                        |   "Approved"          |
-         |                                  |                        |-- answerCallbackQuery->|
-         |                                  |                        |                      |
-         |-- POST /proxy/s/openai/v1/... -->|                       |                      |
-         |                                  |-- check_approval ----->|                      |
-         |                                  |   (grant found!)       |                      |
-         |                                  |-- forward_request ---> downstream service     |
-         |<-- 200 response -----------------|                       |                      |
+Service Account / OAuth Client     NyxID Proxy       NyxID Backend        Telegram     FCM/APNs
+         |                             |                   |                  |             |
+         |-- POST /proxy/s/openai/... ->|                  |                  |             |
+         |                             |-- check_approval ->|                 |             |
+         |                             |   (no grant found) |                 |             |
+         |                             |                    |-- create_approval_request     |
+         |                             |                    |-- send_approval_notification  |
+         |                             |                    |   (parallel delivery)         |
+         |                             |                    |-- sendMessage -->|             |
+         |                             |                    |   (inline kbd)  |             |
+         |                             |                    |-- push -------->|------------>|
+         |                             |                    |   (alert)       |    (alert)  |
+         |<-- 403 approval_required ---|                    |                 |             |
+         |                             |                    |                 |             |
+         |                             |                    |    User taps    |             |
+         |                             |                    |    [Approve]    |             |
+         |                             |                    |<-- callback ----|             |
+         |                             |                    |-- process_decision("approved")|
+         |                             |                    |-- create ApprovalGrant        |
+         |                             |                    |-- editMessage -->|             |
+         |                             |                    |   "Approved"    |             |
+         |                             |                    |-- silent push ->|------------>|
+         |                             |                    |   (UI refresh)  |             |
+         |                             |                    |                 |             |
+         |-- POST /proxy/s/openai/... ->|                  |                 |             |
+         |                             |-- check_approval ->|                 |             |
+         |                             |   (grant found!)   |                 |             |
+         |                             |-- forward -------> downstream       |             |
+         |<-- 200 response ------------|                    |                 |             |
 ```
 
 ---
@@ -1512,7 +1520,7 @@ Service Account / OAuth Client          NyxID Proxy            NyxID Backend    
 
 1. **Sync vs Async Approval:** The current design returns `403 approval_required` immediately. An alternative is holding the connection open (long-poll) for up to `timeout_secs` and returning the actual response if approved in time. This would be more convenient for CLI tools but adds complexity. For now, the async pattern with polling is simpler and more reliable.
 
-2. **Mobile App Push:** The `notification_channels` model has commented-out fields for FCM/APNs device tokens. When a NyxID mobile app is built, add a new notification channel implementation that sends push notifications alongside or instead of Telegram.
+2. ~~**Mobile App Push:**~~ **DONE** -- Implemented in March 2026. FCM HTTP v1 and APNs HTTP/2 push notifications fire in parallel alongside Telegram. Device token CRUD API, automatic stale token cleanup, and multi-device support. See [docs/MOBILE_PUSH_PLAN.md](MOBILE_PUSH_PLAN.md) for the full architecture.
 
 3. **Admin Override:** Admins might want to force approval requirements for all users or specific service accounts. This is deferred to a future iteration.
 

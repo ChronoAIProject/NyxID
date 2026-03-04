@@ -2,13 +2,33 @@ export interface NotificationSettings {
   readonly telegram_connected: boolean;
   readonly telegram_username: string | null;
   readonly telegram_enabled: boolean;
+  readonly push_enabled: boolean;
+  readonly push_device_count: number;
   readonly approval_required: boolean;
   readonly approval_timeout_secs: number;
   readonly grant_expiry_days: number;
 }
 
+export interface PushDeviceItem {
+  readonly device_id: string;
+  readonly platform: "fcm" | "apns";
+  readonly device_name: string | null;
+  readonly registered_at: string;
+  readonly last_used_at: string | null;
+}
+
+export interface PushDevicesResponse {
+  readonly devices: readonly PushDeviceItem[];
+  readonly push_enabled: boolean;
+}
+
+export interface RemoveDeviceResponse {
+  readonly message: string;
+}
+
 export interface UpdateNotificationSettingsRequest {
   readonly telegram_enabled: boolean;
+  readonly push_enabled: boolean;
   readonly approval_required: boolean;
   readonly approval_timeout_secs: number;
   readonly grant_expiry_days: number;

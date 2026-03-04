@@ -4,6 +4,7 @@ use mongodb::Database;
 use mongodb::bson::{self, doc};
 use mongodb::options::{FindOneAndUpdateOptions, FindOptions, ReturnDocument};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
@@ -14,6 +15,7 @@ use crate::models::service_approval_config::{
     COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
 };
 use crate::services::notification_service;
+use crate::services::push_service::{ApnsAuth, FcmAuth};
 
 /// Check whether a user has the global approval system enabled.
 pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<bool> {
@@ -91,6 +93,8 @@ pub async fn create_approval_request(
     db: &Database,
     config: &AppConfig,
     http_client: &reqwest::Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
     user_id: &str,
     service_id: &str,
     service_name: &str,
@@ -139,6 +143,7 @@ pub async fn create_approval_request(
             expires_at,
             decided_at: None,
             decision_channel: None,
+            decision_idempotency_key: None,
             created_at: now,
         };
 
@@ -164,18 +169,21 @@ pub async fn create_approval_request(
         db,
         config,
         http_client,
+        fcm_auth,
+        apns_auth,
         user_id,
         &request,
     )
     .await
     {
-        Ok((channel_name, chat_id, message_id)) => {
+        Ok(result) => {
             // Update the request with notification details
+            let channel_name = result.channels.join(",");
             let update = doc! {
                 "$set": {
                     "notification_channel": &channel_name,
-                    "telegram_chat_id": chat_id,
-                    "telegram_message_id": message_id,
+                    "telegram_chat_id": result.telegram_chat_id,
+                    "telegram_message_id": result.telegram_message_id,
                 }
             };
             collection
@@ -206,27 +214,35 @@ pub async fn process_decision(
     db: &Database,
     config: &AppConfig,
     http_client: &reqwest::Client,
+    fcm_auth: Option<Arc<FcmAuth>>,
+    apns_auth: Option<Arc<ApnsAuth>>,
     request_id: &str,
     approved: bool,
+    duration_sec: Option<i64>,
+    idempotency_key: Option<&str>,
     decision_channel: &str,
 ) -> AppResult<ApprovalRequest> {
     let now = Utc::now();
     let new_status = if approved { "approved" } else { "rejected" };
+    let collection = db.collection::<ApprovalRequest>(REQUESTS);
+    let mut update_set = doc! {
+        "status": new_status,
+        "decided_at": bson::DateTime::from_chrono(now),
+        "decision_channel": decision_channel,
+    };
+    if let Some(key) = idempotency_key {
+        update_set.insert("decision_idempotency_key", key);
+    }
 
     // Atomic update: only process if status is still "pending"
-    let updated = db
-        .collection::<ApprovalRequest>(REQUESTS)
+    let updated = collection
         .find_one_and_update(
             doc! {
                 "_id": request_id,
                 "status": "pending",
             },
             doc! {
-                "$set": {
-                    "status": new_status,
-                    "decided_at": bson::DateTime::from_chrono(now),
-                    "decision_channel": decision_channel,
-                }
+                "$set": update_set
             },
         )
         .with_options(
@@ -234,15 +250,28 @@ pub async fn process_decision(
                 .return_document(ReturnDocument::After)
                 .build(),
         )
-        .await?
-        .ok_or_else(|| {
-            AppError::NotFound("Approval request not found or already processed".to_string())
-        })?;
+        .await?;
+
+    let updated = match updated {
+        Some(updated) => updated,
+        None => {
+            let existing = get_request(db, request_id).await?;
+            if is_idempotent_replay(
+                &existing.status,
+                existing.decision_idempotency_key.as_deref(),
+                idempotency_key,
+                approved,
+            )? {
+                return Ok(existing);
+            }
+            return Err(AppError::Conflict("already_decided".to_string()));
+        }
+    };
 
     // On approval: create a grant
     if approved {
         let channel = notification_service::get_or_create_channel(db, &updated.user_id).await?;
-        let grant_expiry = now + Duration::days(i64::from(channel.grant_expiry_days));
+        let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
 
         let grant = ApprovalGrant {
             id: uuid::Uuid::new_v4().to_string(),
@@ -263,14 +292,20 @@ pub async fn process_decision(
             .await?;
     }
 
-    // Edit the Telegram message to show decision (non-blocking)
+    // Notify channels about the decision (best-effort, non-blocking).
     let request_clone = updated.clone();
     let config_clone = config.clone();
     let http_clone = http_client.clone();
+    let db_clone = db.clone();
+    let fcm_auth_clone = fcm_auth.clone();
+    let apns_auth_clone = apns_auth.clone();
     tokio::spawn(async move {
         let _ = notification_service::notify_decision(
             &config_clone,
             &http_clone,
+            fcm_auth_clone.as_deref(),
+            apns_auth_clone.as_deref(),
+            &db_clone,
             &request_clone,
             approved,
         )
@@ -280,12 +315,48 @@ pub async fn process_decision(
     Ok(updated)
 }
 
+fn is_idempotent_replay(
+    existing_status: &str,
+    existing_decision_idempotency_key: Option<&str>,
+    incoming_idempotency_key: Option<&str>,
+    approved: bool,
+) -> AppResult<bool> {
+    let already_decided = existing_status == "approved" || existing_status == "rejected";
+
+    if !already_decided {
+        return Err(AppError::Conflict("decision_state_conflict".to_string()));
+    }
+
+    if let Some(key) = incoming_idempotency_key {
+        if existing_decision_idempotency_key == Some(key) {
+            let existing_approved = existing_status == "approved";
+            if existing_approved == approved {
+                return Ok(true);
+            }
+            return Err(AppError::Conflict(
+                "idempotency_key_reused_with_different_decision".to_string(),
+            ));
+        }
+    }
+
+    Ok(false)
+}
+
+fn resolve_grant_expiry(now: chrono::DateTime<Utc>, duration_sec: Option<i64>, default_days: u32) -> chrono::DateTime<Utc> {
+    if let Some(duration_sec) = duration_sec {
+        return now + Duration::seconds(duration_sec);
+    }
+    now + Duration::days(i64::from(default_days))
+}
+
 /// Expire pending requests that have passed their expiry time.
 /// Called by the background task.
 pub async fn expire_pending_requests(
     db: &Database,
     config: &AppConfig,
     http_client: &reqwest::Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
 ) -> AppResult<u64> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
@@ -317,7 +388,11 @@ pub async fn expire_pending_requests(
 
     // Edit Telegram messages for expired requests (best-effort)
     for req in &expired {
-        if req.notification_channel.as_deref() == Some("telegram") {
+        if req
+            .notification_channel
+            .as_deref()
+            .map_or(false, |ch| ch.contains("telegram"))
+        {
             if let (Some(chat_id), Some(message_id)) =
                 (req.telegram_chat_id, req.telegram_message_id)
             {
@@ -339,6 +414,23 @@ pub async fn expire_pending_requests(
                 }
             }
         }
+    }
+
+    // Send silent push to update mobile app UI for expired requests (best-effort)
+    for req in &expired {
+        let mut data = std::collections::HashMap::new();
+        data.insert("type".to_string(), "approval_expired".to_string());
+        data.insert("request_id".to_string(), req.id.clone());
+        let _ = notification_service::send_silent_push_to_user(
+            db,
+            config,
+            http_client,
+            fcm_auth,
+            apns_auth,
+            &req.user_id,
+            &data,
+        )
+        .await;
     }
 
     Ok(count)
@@ -670,5 +762,40 @@ mod tests {
         let key = compute_idempotency_key("u", "s", "t", "r");
         assert_eq!(key.len(), 64);
         assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn idempotent_replay_allows_same_key_same_decision() {
+        let result = is_idempotent_replay("approved", Some("k1"), Some("k1"), true).expect("ok");
+        assert!(result);
+    }
+
+    #[test]
+    fn idempotent_replay_rejects_same_key_different_decision() {
+        let result = is_idempotent_replay("approved", Some("k1"), Some("k1"), false);
+        assert!(matches!(
+            result,
+            Err(AppError::Conflict(msg)) if msg == "idempotency_key_reused_with_different_decision"
+        ));
+    }
+
+    #[test]
+    fn idempotent_replay_rejects_without_matching_key() {
+        let result = is_idempotent_replay("approved", Some("k1"), Some("k2"), true).expect("ok");
+        assert!(!result);
+    }
+
+    #[test]
+    fn resolve_grant_expiry_prefers_duration_seconds() {
+        let now = Utc::now();
+        let expiry = resolve_grant_expiry(now, Some(3600), 30);
+        assert_eq!(expiry, now + Duration::seconds(3600));
+    }
+
+    #[test]
+    fn resolve_grant_expiry_falls_back_to_default_days() {
+        let now = Utc::now();
+        let expiry = resolve_grant_expiry(now, None, 30);
+        assert_eq!(expiry, now + Duration::days(30));
     }
 }
