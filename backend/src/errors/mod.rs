@@ -121,6 +121,12 @@ pub enum AppError {
 
     #[error("Approval required")]
     ApprovalRequired { request_id: String },
+
+    #[error("External token verification failed: {0}")]
+    ExternalTokenInvalid(String),
+
+    #[error("External provider not configured: {0}")]
+    ExternalProviderNotConfigured(String),
 }
 
 impl AppError {
@@ -153,6 +159,9 @@ impl AppError {
             Self::ConsentRequired { .. } => StatusCode::FORBIDDEN,
             Self::UnsupportedGrantType(_) => StatusCode::BAD_REQUEST,
             Self::ApprovalRequired { .. } => StatusCode::FORBIDDEN,
+            Self::ExternalTokenInvalid(_) | Self::ExternalProviderNotConfigured(_) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -191,6 +200,8 @@ impl AppError {
             Self::ConsentRequired { .. } => 3003,
             Self::UnsupportedGrantType(_) => 3004,
             Self::ApprovalRequired { .. } => 7000,
+            Self::ExternalTokenInvalid(_) => 6004,
+            Self::ExternalProviderNotConfigured(_) => 6005,
         }
     }
 
@@ -207,6 +218,8 @@ impl AppError {
             | Self::ServiceAccountInactive => "invalid_client",
             Self::NotFound(_) => "invalid_grant",
             Self::ConsentRequired { .. } => "consent_required",
+            Self::ExternalTokenInvalid(_) => "invalid_grant",
+            Self::ExternalProviderNotConfigured(_) => "invalid_request",
             _ => "invalid_request",
         }
     }
@@ -257,6 +270,8 @@ impl AppError {
             Self::ConsentRequired { .. } => "consent_required",
             Self::UnsupportedGrantType(_) => "unsupported_grant_type",
             Self::ApprovalRequired { .. } => "approval_required",
+            Self::ExternalTokenInvalid(_) => "external_token_invalid",
+            Self::ExternalProviderNotConfigured(_) => "external_provider_not_configured",
         }
     }
 }
@@ -448,6 +463,14 @@ mod tests {
             .status_code(),
             StatusCode::FORBIDDEN
         );
+        assert_eq!(
+            AppError::ExternalTokenInvalid("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::ExternalProviderNotConfigured("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
@@ -489,6 +512,8 @@ mod tests {
                 request_id: "".into(),
             }
             .error_code(),
+            AppError::ExternalTokenInvalid("".into()).error_code(),
+            AppError::ExternalProviderNotConfigured("".into()).error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(
@@ -602,6 +627,14 @@ mod tests {
             .error_key(),
             "approval_required"
         );
+        assert_eq!(
+            AppError::ExternalTokenInvalid("".into()).error_key(),
+            "external_token_invalid"
+        );
+        assert_eq!(
+            AppError::ExternalProviderNotConfigured("".into()).error_key(),
+            "external_provider_not_configured"
+        );
     }
 
     #[test]
@@ -652,6 +685,14 @@ mod tests {
             }
             .oauth_error_code(),
             "consent_required"
+        );
+        assert_eq!(
+            AppError::ExternalTokenInvalid("x".into()).oauth_error_code(),
+            "invalid_grant"
+        );
+        assert_eq!(
+            AppError::ExternalProviderNotConfigured("x".into()).oauth_error_code(),
+            "invalid_request"
         );
     }
 

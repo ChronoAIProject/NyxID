@@ -104,7 +104,7 @@ All API routes under `/api/v1`:
 
 - `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation, provider management (connect via API key/OAuth redirect/device-code, list, disconnect providers on behalf of SAs)
 
-- `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts) and `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access)
+- `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts), `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access and social token exchange via `subject_token_type=id_token` for native mobile Google/GitHub login)
 
 Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`
 

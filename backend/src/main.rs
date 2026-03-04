@@ -21,6 +21,7 @@ use std::sync::Arc;
 use crate::db::DbHandle;
 use config::AppConfig;
 use crypto::jwt::JwtKeys;
+use crypto::jwks::JwksCache;
 use models::mcp_session::McpSessionStore;
 
 use services::push_service::{ApnsAuth, FcmAuth};
@@ -36,6 +37,8 @@ pub struct AppState {
     pub jwk_json: serde_json::Value,
     /// Hybrid in-memory + MongoDB MCP session store
     pub mcp_sessions: Arc<McpSessionStore>,
+    /// JWKS cache for verifying external provider ID tokens (Google)
+    pub jwks_cache: Arc<JwksCache>,
     /// FCM push notification auth (None if not configured)
     pub fcm_auth: Option<Arc<FcmAuth>>,
     /// APNs push notification auth (None if not configured)
@@ -172,6 +175,9 @@ async fn main() {
         Err(e) => tracing::warn!("Failed to load MCP sessions from database: {e}"),
     }
 
+    // Create JWKS cache for external provider token verification
+    let jwks_cache = Arc::new(JwksCache::new(http_client.clone()));
+
     // Create shared state
     let state = AppState {
         db,
@@ -180,6 +186,7 @@ async fn main() {
         http_client,
         jwk_json,
         mcp_sessions: mcp_sessions.clone(),
+        jwks_cache,
         fcm_auth: fcm_auth.clone(),
         apns_auth: apns_auth.clone(),
     };

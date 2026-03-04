@@ -29,6 +29,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [MFA](#mfa-multi-factor-authentication)
   - [OAuth / OpenID Connect](#oauth--openid-connect)
   - [Token Exchange (Delegated Access)](#token-exchange-delegated-access)
+  - [Social Token Exchange (Native Mobile)](#social-token-exchange-native-mobile)
   - [Token Introspection](#token-introspection)
   - [Token Revocation](#token-revocation)
   - [User Consents](#user-consents)
@@ -114,6 +115,8 @@ Internal errors never leak implementation details. The `message` for error codes
 | 6001 | `social_auth_conflict`     | 409         | Email already linked to another provider |
 | 6002 | `social_auth_no_email`     | 400         | No verified email from provider          |
 | 6003 | `social_auth_deactivated`  | 403         | Social login account is deactivated      |
+| 6004 | `external_token_invalid`   | 400         | External provider token verification failed (signature, expiry, audience, or claims) |
+| 6005 | `external_provider_not_configured` | 400  | Provider hint missing or provider not configured on the server |
 | 7000 | `approval_required`        | 403         | User approval required (proxy/LLM requests block until decision; this code is used for async status polling) |
 
 ---
@@ -2927,7 +2930,7 @@ curl -G http://localhost:3001/oauth/authorize \
 
 #### POST /oauth/token
 
-Token endpoint. Exchanges an authorization code for access, refresh, and ID tokens. Also supports the `refresh_token` grant type and `urn:ietf:params:oauth:grant-type:token-exchange` for delegated access (see [Token Exchange](#token-exchange-delegated-access)).
+Token endpoint. Exchanges an authorization code for access, refresh, and ID tokens. Also supports the `refresh_token` grant type, `urn:ietf:params:oauth:grant-type:token-exchange` for delegated access (see [Token Exchange](#token-exchange-delegated-access)), and social token exchange for native mobile apps (see [Social Token Exchange](#social-token-exchange-native-mobile)).
 
 **Auth:** None (client authenticates via `client_id` and optionally `client_secret`)
 
@@ -3315,6 +3318,153 @@ def analyze():
         },
     )
     return response.json()
+```
+
+---
+
+### Social Token Exchange (Native Mobile)
+
+NyxID supports exchanging external provider tokens (Google ID tokens, GitHub access tokens) for full NyxID token sets via the existing [RFC 8693 Token Exchange](https://tools.ietf.org/html/rfc8693) endpoint. This enables mobile apps using native SDKs (Google Sign-In, Sign in with GitHub) to authenticate users without browser redirects.
+
+The social token exchange flow is distinguished from the [delegated access flow](#token-exchange-delegated-access) by the `provider` hint and provider-specific `subject_token_type`:
+- `provider` omitted + `subject_token_type=urn:ietf:params:oauth:token-type:access_token` -- Delegated access (existing flow, unchanged)
+- `provider=google` + `subject_token_type=urn:ietf:params:oauth:token-type:id_token` -- Google social token exchange
+- `provider=github` + `subject_token_type=urn:ietf:params:oauth:token-type:access_token` -- GitHub social token exchange
+
+#### POST /oauth/token (social token exchange grant)
+
+Exchange a Google ID token or GitHub access token for a full NyxID token set (access token, refresh token, ID token). If the user does not exist, a new account is created automatically (same logic as web-based social login).
+
+**Auth:** None (client authenticates via `client_id` and optionally `client_secret` in the request body)
+
+**Request Body (form-encoded):**
+
+| Field                | Type   | Required    | Description                                                |
+|----------------------|--------|-------------|------------------------------------------------------------|
+| `grant_type`         | string | Yes         | `urn:ietf:params:oauth:grant-type:token-exchange`          |
+| `subject_token`      | string | Yes         | The external provider token (Google JWT or GitHub access token) |
+| `subject_token_type` | string | Yes         | `urn:ietf:params:oauth:token-type:id_token` (Google) or `urn:ietf:params:oauth:token-type:access_token` (GitHub) |
+| `client_id`          | string | Yes         | NyxID OAuth client ID                                      |
+| `client_secret`      | string | Conditional | Required for confidential clients; omit for public clients |
+| `provider`           | string | Yes         | Provider hint: `"google"` or `"github"`                    |
+
+**Response (200):**
+
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "Bearer",
+  "expires_in": 900,
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "scope": "openid profile email",
+  "issued_token_type": "urn:ietf:params:oauth:token-type:access_token"
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Missing required parameters (`subject_token`, `subject_token_type`, `provider`)
+- `1001 unauthorized` -- Invalid client credentials
+- `6000 social_auth_failed` -- Provider API call failed (e.g., GitHub API unreachable)
+- `6001 social_auth_conflict` -- Email from provider is already linked to a different social provider
+- `6002 social_auth_no_email` -- No verified email returned by provider
+- `6003 social_auth_deactivated` -- Matched user account is deactivated
+- `6004 external_token_invalid` -- External token verification failed (expired, bad signature, wrong audience, unverified email)
+- `6005 external_provider_not_configured` -- Provider not configured on the server (e.g., missing `GOOGLE_CLIENT_ID` or `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`)
+
+**Example (Google ID token):**
+
+```bash
+curl -X POST http://localhost:3001/oauth/token \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  -d "subject_token=eyJhbGciOiJSUzI1NiIs..." \
+  -d "subject_token_type=urn:ietf:params:oauth:token-type:id_token" \
+  -d "client_id=your-nyxid-client-id" \
+  -d "provider=google"
+```
+
+**Example (GitHub access token):**
+
+```bash
+curl -X POST http://localhost:3001/oauth/token \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  -d "subject_token=gho_xxxxxxxxxxxxxxxxxxxx" \
+  -d "subject_token_type=urn:ietf:params:oauth:token-type:access_token" \
+  -d "client_id=your-nyxid-client-id" \
+  -d "provider=github"
+```
+
+**Provider Token Verification:**
+
+| Provider | Token Type     | Verification Method                                           |
+|----------|----------------|---------------------------------------------------------------|
+| Google   | JWT (RS256)    | JWKS signature verification against `googleapis.com/oauth2/v3/certs`; validates `iss`, `aud`, `exp`, `email_verified`, and `iat` freshness (max 10 min) |
+| GitHub   | Opaque token   | App-bound token verification via `POST https://api.github.com/applications/{client_id}/token` (using configured `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`), then profile lookup via `GET /user` + `GET /user/emails` |
+
+**User Matching:**
+
+The same account linking logic as web-based social login applies:
+
+1. **Returning user** -- If a user with the same provider + provider ID exists, log them in
+2. **Email linking** -- If a user with the same email exists (no social provider linked), link the social identity
+3. **New user** -- If no match, create a new user with `email_verified = true`
+
+**Security Notes:**
+- Google ID tokens are verified cryptographically (RS256 JWKS) -- NyxID never sends Google tokens to a third party
+- GitHub tokens are first verified against NyxID's configured GitHub OAuth app, then profile data is fetched from GitHub APIs
+- JWKS keys are cached with TTL (default 1 hour, respects `Cache-Control: max-age`) to minimize external calls
+- The `provider` parameter is required (not auto-detected) to avoid issuer guessing attacks
+- All exchanges are audit-logged with provider, client ID, and result
+- Existing rate limiting on `POST /oauth/token` applies
+
+**Mobile SDK Integration:**
+
+To use social token exchange from a mobile app:
+
+1. **Register an OAuth client** in NyxID (can be a public client for mobile -- no `client_secret` required)
+2. **Authenticate with the native SDK** in your mobile app:
+   - **iOS/Android (Google):** Use [Google Sign-In SDK](https://developers.google.com/identity/sign-in) to obtain a Google ID token
+   - **iOS/Android (GitHub):** Use GitHub OAuth (via ASWebAuthenticationSession / Chrome Custom Tabs) to obtain a GitHub access token
+3. **Exchange the token** by calling `POST /oauth/token` with the parameters above
+4. **Store the NyxID tokens** securely (iOS Keychain / Android Keystore) and use the access token for subsequent API calls
+5. **Refresh when expired** using the standard `refresh_token` grant at `POST /oauth/token`
+
+```swift
+// iOS (Swift) example
+let url = URL(string: "https://auth.example.com/oauth/token")!
+var request = URLRequest(url: url)
+request.httpMethod = "POST"
+request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+let body = [
+    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+    "subject_token": googleIdToken,
+    "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+    "client_id": "your-nyxid-client-id",
+    "provider": "google"
+].map { "\($0.key)=\($0.value)" }.joined(separator: "&")
+
+request.httpBody = body.data(using: .utf8)
+let (data, _) = try await URLSession.shared.data(for: request)
+```
+
+```kotlin
+// Android (Kotlin) example
+val client = OkHttpClient()
+val body = FormBody.Builder()
+    .add("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
+    .add("subject_token", googleIdToken)
+    .add("subject_token_type", "urn:ietf:params:oauth:token-type:id_token")
+    .add("client_id", "your-nyxid-client-id")
+    .add("provider", "google")
+    .build()
+
+val request = Request.Builder()
+    .url("https://auth.example.com/oauth/token")
+    .post(body)
+    .build()
+
+val response = client.newCall(request).execute()
 ```
 
 ---

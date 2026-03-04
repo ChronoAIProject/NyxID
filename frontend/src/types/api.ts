@@ -281,3 +281,30 @@ export interface LlmStatusResponse {
   readonly gateway_url: string;
   readonly supported_models: readonly string[];
 }
+
+/**
+ * Social Token Exchange (RFC 8693) - used by mobile apps with native SDK login.
+ * Mobile apps exchange provider tokens (Google ID token, GitHub access token) for NyxID token sets
+ * via POST /oauth/token with grant_type=urn:ietf:params:oauth:grant-type:token-exchange.
+ */
+
+export type SocialTokenExchangeProvider = "google" | "github";
+
+export interface SocialTokenExchangeRequest {
+  readonly grant_type: "urn:ietf:params:oauth:grant-type:token-exchange";
+  readonly subject_token: string;
+  readonly subject_token_type: "urn:ietf:params:oauth:token-type:id_token" | "urn:ietf:params:oauth:token-type:access_token";
+  readonly client_id: string;
+  readonly client_secret?: string;
+  readonly provider: SocialTokenExchangeProvider;
+}
+
+export interface SocialTokenExchangeResponse {
+  readonly access_token: string;
+  readonly token_type: "Bearer";
+  readonly expires_in: number;
+  readonly refresh_token: string;
+  readonly id_token?: string;
+  readonly scope: string;
+  readonly issued_token_type: string;
+}
