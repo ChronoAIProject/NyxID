@@ -361,6 +361,23 @@ pub async fn delete_user_cascade(
         ));
     }
 
+    delete_user_cascade_internal(db, target_user_id).await
+}
+
+/// Delete the currently authenticated user and cascade-delete all related documents.
+///
+/// This is intended for self-service account deletion flows (e.g. DELETE /users/me).
+pub async fn delete_current_user_cascade(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<()> {
+    delete_user_cascade_internal(db, user_id).await
+}
+
+async fn delete_user_cascade_internal(
+    db: &mongodb::Database,
+    target_user_id: &str,
+) -> AppResult<()> {
     let _target = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": target_user_id })
