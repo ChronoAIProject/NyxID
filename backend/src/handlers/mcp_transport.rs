@@ -714,18 +714,32 @@ async fn handle_meta_call_tool(
         return tool_result(request_id, "tool_name too long (max 200 chars)", true);
     }
 
-    // Accept arguments either nested under "arguments" key or flat alongside
-    // "tool_name".  LLMs sometimes flatten the structure, so we handle both:
-    //   { "tool_name": "x", "arguments": { "foo": 1 } }   -- nested
-    //   { "tool_name": "x", "foo": 1 }                     -- flat
-    let inner_args = if let Some(nested) = arguments.get("arguments") {
+    // Accept arguments in multiple formats (LLMs are unpredictable):
+    //   1. { "tool_name": "x", "arguments_json": "{\"foo\":1}" }  -- JSON string (preferred)
+    //   2. { "tool_name": "x", "arguments": { "foo": 1 } }       -- nested object (legacy)
+    //   3. { "tool_name": "x", "foo": 1 }                         -- flat (fallback)
+    let inner_args = if let Some(json_str) = arguments.get("arguments_json").and_then(|v| v.as_str()) {
+        // Preferred: arguments_json is a JSON string — parse it
+        match serde_json::from_str::<serde_json::Value>(json_str) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::warn!("Failed to parse arguments_json as JSON: {e}, raw: {json_str}");
+                return tool_result(
+                    request_id,
+                    &format!("arguments_json must be a valid JSON string. Parse error: {e}"),
+                    true,
+                );
+            }
+        }
+    } else if let Some(nested) = arguments.get("arguments") {
+        // Legacy: arguments as a nested object
         nested.clone()
     } else {
-        // Collect all keys except "tool_name" as the arguments
+        // Flat fallback: collect all keys except "tool_name" and "arguments_json"
         let mut flat = serde_json::Map::new();
         if let Some(obj) = arguments.as_object() {
             for (k, v) in obj {
-                if k != "tool_name" {
+                if k != "tool_name" && k != "arguments_json" {
                     flat.insert(k.clone(), v.clone());
                 }
             }
