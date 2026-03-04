@@ -59,10 +59,30 @@ pub async fn authorize(
 
     let is_mobile_client = query.client.as_deref() == Some(SOCIAL_CLIENT_MOBILE);
 
-    let state_token = generate_random_token();
-    let state_hash = hash_token(&state_token);
+    let csrf_token = generate_random_token();
+    let state_hash = hash_token(&csrf_token);
     let nonce_token =
         (provider == social_auth_service::SocialProvider::Apple).then(generate_random_token);
+
+    // For Apple + mobile: encode mobile redirect into the OAuth state param
+    // because Apple's cross-site form_post won't carry our cookies.
+    // Format: "{csrf}.m.{url-safe-base64-redirect-uri}"
+    let state_token = if is_mobile_client
+        && provider == social_auth_service::SocialProvider::Apple
+    {
+        let redirect_uri = query
+            .redirect_uri
+            .as_deref()
+            .ok_or_else(|| AppError::ValidationError("redirect_uri is required".to_string()))?;
+        if !is_supported_mobile_redirect_uri(redirect_uri) {
+            return Err(AppError::ValidationError(
+                "redirect_uri is not allowed for mobile auth".to_string(),
+            ));
+        }
+        encode_mobile_state(&csrf_token, redirect_uri)
+    } else {
+        csrf_token.clone()
+    };
 
     let authorization_url = social_auth_service::build_authorization_url(
         provider,
@@ -366,9 +386,8 @@ struct AppleUserName {
 /// state, and optionally user info (name/email, only on first auth) as
 /// application/x-www-form-urlencoded form data.
 ///
-/// Note: mobile client cookies (SameSite=Lax) are not sent on this cross-site
-/// POST, so Apple callbacks always redirect to the web frontend. Mobile apps
-/// should use the native Apple Sign In SDK with the token exchange endpoint.
+/// Mobile client info is encoded in the state param (not cookies) because
+/// Apple's cross-site POST does not carry SameSite=Lax cookies.
 pub async fn apple_callback(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -378,11 +397,19 @@ pub async fn apple_callback(
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
     let frontend_url = &state.config.frontend_url;
-    let redirect_target = SocialRedirectTarget::Web {
-        frontend_url: frontend_url.to_string(),
+
+    // Resolve redirect target from state param (mobile info encoded in state)
+    // before full validation so error redirects also go to the right place.
+    let raw_state = form.state.as_deref().unwrap_or("");
+    let redirect_target = match decode_mobile_state(raw_state) {
+        Some((_csrf, redirect_uri)) if is_supported_mobile_redirect_uri(&redirect_uri) => {
+            SocialRedirectTarget::Mobile { redirect_uri }
+        }
+        _ => SocialRedirectTarget::Web {
+            frontend_url: frontend_url.to_string(),
+        },
     };
 
-    // Check for provider error
     if form.error.is_some() {
         return Err(redirect_with_error(
             &redirect_target,
@@ -392,7 +419,6 @@ pub async fn apple_callback(
         ));
     }
 
-    // Extract code and state
     let code = match form.code {
         Some(ref c) if !c.is_empty() => c.as_str(),
         _ => {
@@ -416,9 +442,11 @@ pub async fn apple_callback(
         }
     };
 
-    // Validate CSRF state
+    // Extract the CSRF portion (before ".m." if compound, else the whole string)
+    let csrf_portion = extract_csrf_from_state(state_param);
+
     if !state_matches_cookie_hash(
-        state_param,
+        csrf_portion,
         extract_cookie_value(&headers, SOCIAL_STATE_COOKIE).as_deref(),
     ) {
         return Err(redirect_with_error(
@@ -749,6 +777,33 @@ fn redirect_with_error(
     (StatusCode::FOUND, headers, ())
 }
 
+// ─── Compound state helpers ─────────────────────────────────────────
+// Apple form_post loses cookies, so we embed mobile redirect info in
+// the OAuth state: "{csrf}.m.{base64url(redirect_uri)}".
+// Web flows use a plain csrf token with no separator.
+
+const STATE_MOBILE_SEPARATOR: &str = ".m.";
+
+fn encode_mobile_state(csrf_token: &str, redirect_uri: &str) -> String {
+    use base64::engine::{Engine, general_purpose::URL_SAFE_NO_PAD};
+    let encoded_uri = URL_SAFE_NO_PAD.encode(redirect_uri.as_bytes());
+    format!("{csrf_token}{STATE_MOBILE_SEPARATOR}{encoded_uri}")
+}
+
+fn decode_mobile_state(state: &str) -> Option<(String, String)> {
+    use base64::engine::{Engine, general_purpose::URL_SAFE_NO_PAD};
+    let (csrf, b64) = state.split_once(STATE_MOBILE_SEPARATOR)?;
+    let bytes = URL_SAFE_NO_PAD.decode(b64).ok()?;
+    let redirect_uri = String::from_utf8(bytes).ok()?;
+    Some((csrf.to_string(), redirect_uri))
+}
+
+fn extract_csrf_from_state(state: &str) -> &str {
+    state
+        .split_once(STATE_MOBILE_SEPARATOR)
+        .map_or(state, |(csrf, _)| csrf)
+}
+
 fn state_matches_cookie_hash(state_param: &str, cookie_hash: Option<&str>) -> bool {
     let computed_hash = hash_token(state_param);
     match cookie_hash {
@@ -871,5 +926,43 @@ mod tests {
         assert!(cookies.iter().any(|c| c.contains("nyx_social_nonce=")));
         assert!(cookies.iter().any(|c| c.contains("SameSite=Lax")));
         assert!(cookies.iter().any(|c| c.contains("SameSite=None")));
+    }
+
+    #[test]
+    fn encode_decode_mobile_state_roundtrip() {
+        let csrf = "abc123def456";
+        let redirect = "nyxid://auth/social/callback";
+        let encoded = encode_mobile_state(csrf, redirect);
+        assert!(encoded.contains(STATE_MOBILE_SEPARATOR));
+
+        let (decoded_csrf, decoded_uri) = decode_mobile_state(&encoded).unwrap();
+        assert_eq!(decoded_csrf, csrf);
+        assert_eq!(decoded_uri, redirect);
+    }
+
+    #[test]
+    fn decode_mobile_state_returns_none_for_plain_csrf() {
+        assert!(decode_mobile_state("plain_csrf_token_hex").is_none());
+    }
+
+    #[test]
+    fn extract_csrf_from_compound_state() {
+        let csrf = "abc123";
+        let compound = encode_mobile_state(csrf, "nyxid://callback");
+        assert_eq!(extract_csrf_from_state(&compound), csrf);
+    }
+
+    #[test]
+    fn extract_csrf_from_plain_state() {
+        assert_eq!(extract_csrf_from_state("plain_token"), "plain_token");
+    }
+
+    #[test]
+    fn compound_state_csrf_matches_cookie_hash() {
+        let csrf = generate_random_token();
+        let hash = hash_token(&csrf);
+        let compound = encode_mobile_state(&csrf, "nyxid://auth/social/callback");
+        let csrf_portion = extract_csrf_from_state(&compound);
+        assert!(state_matches_cookie_hash(csrf_portion, Some(&hash)));
     }
 }

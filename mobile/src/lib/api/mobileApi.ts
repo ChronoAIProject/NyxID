@@ -45,7 +45,7 @@ type RegisterWithPasswordResponse = {
   message: string;
 };
 
-type SocialProvider = "google" | "github";
+type SocialProvider = "google" | "github" | "apple";
 
 function getApiBaseUrl(): string {
   const rawBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:3001/api/v1";

@@ -8,9 +8,12 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:ios": "EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 expo run:ios --configuration Release",
+    "build:ios:testflight": "EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 xcodebuild -workspace ios/NyxIDMobile.xcworkspace -scheme NyxIDMobile -configuration Release -archivePath ios/build/NyxIDMobile.xcarchive archive"
   },
   "dependencies": {
+    "@babel/runtime": "^7.28.4",
     "@expo-google-fonts/manrope": "^0.4.2",
     "@expo-google-fonts/space-grotesk": "^0.4.1",
     "@expo/vector-icons": "^14.1.0",
@@ -23,6 +26,7 @@
     "expo-notifications": "~0.31.0",
     "expo-secure-store": "~14.2.0",
     "expo-status-bar": "~2.2.3",
+    "expo-web-browser": "^55.0.9",
     "react": "19.0.0",
     "react-hook-form": "^7.71.1",
     "react-native": "0.79.6",

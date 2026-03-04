@@ -76,7 +76,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
   const deleteAccountMutation = useMutation({
     mutationFn: () => mobileApi.deleteAccount(),
     onSuccess: async () => {
-      showToast("Account deleted. You have been signed out.", "success");
+      showToast("Account and server-side data deleted. You have been signed out.", "success");
       try {
         await signOut();
       } catch (error) {
@@ -122,17 +122,21 @@ export function AccountSettingsScreen({ navigation }: Props) {
   };
 
   const handleDeleteAccount = () => {
-    Alert.alert("Delete Account", "This action is permanent and will remove your local session.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: () => {
-          setToast(null);
-          deleteAccountMutation.mutate();
+    Alert.alert(
+      "Delete Account",
+      "This action is permanent and will permanently delete your account and server-side data.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            setToast(null);
+            deleteAccountMutation.mutate();
+          },
         },
-      },
-    ]);
+      ]
+    );
   };
 
   return (
@@ -167,7 +171,9 @@ export function AccountSettingsScreen({ navigation }: Props) {
             disabled={deleteAccountMutation.isPending}
             onPress={handleDeleteAccount}
           />
-          <Text style={styles.warningText}>Deleting your account will clear this device session.</Text>
+          <Text style={styles.warningText}>
+            Deleting your account is permanent and removes your account plus server-side data.
+          </Text>
         </View>
       </ScrollView>
       <ToastOverlay toast={toast} />

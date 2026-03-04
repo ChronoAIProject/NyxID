@@ -102,7 +102,7 @@ export async function activatePushAfterLogin(): Promise<PushActivateResult> {
     const devicePushToken = await Notifications.getDevicePushTokenAsync();
     token = normalizeDeviceToken(devicePushToken);
   } catch (error) {
-    console.warn("[push] native push token unavailable", error);
+    if (__DEV__) console.warn("[push] native push token unavailable", error);
     return {
       permission,
       token: null,
@@ -165,7 +165,7 @@ export async function activatePushAfterLogin(): Promise<PushActivateResult> {
       mode: "unchanged",
     };
   } catch (error) {
-    console.warn("[push] register token failed", error);
+    if (__DEV__) console.warn("[push] register token failed", error);
     return {
       permission,
       token,
