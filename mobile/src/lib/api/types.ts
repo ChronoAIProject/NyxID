@@ -54,6 +54,10 @@ export type PushTokenRegisterResponse = {
   previous_token?: string;
 };
 
+export type NotificationSettings = {
+  grant_expiry_days: number;
+};
+
 export type SubmitDecisionOptions = {
   idempotencyKey?: string;
 };

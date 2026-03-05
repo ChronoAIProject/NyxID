@@ -3,6 +3,7 @@ import {
   deleteCurrentUserAccountRequest,
   getCurrentUserProfileRequest,
   getChallengeRequest,
+  getNotificationSettingsRequest,
   listApprovalsRequest,
   listChallengesRequest,
   loginWithPasswordRequest,
@@ -18,6 +19,7 @@ import {
   ApprovalItem,
   ChallengeDetail,
   DeleteAccountResponse,
+  NotificationSettings,
   PageResponse,
   SubmitDecisionOptions,
   PushTokenRegisterRequest,
@@ -96,6 +98,9 @@ export const mobileApi = {
   },
   async getChallenges(): Promise<PageResponse<ChallengeDetail>> {
     return listChallengesRequest();
+  },
+  async getNotificationSettings(): Promise<NotificationSettings> {
+    return getNotificationSettingsRequest();
   },
   async getChallengeById(challengeId: string): Promise<ChallengeDetail> {
     return getChallengeRequest(challengeId);

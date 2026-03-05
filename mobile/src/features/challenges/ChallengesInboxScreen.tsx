@@ -13,6 +13,7 @@ import { mobileApi } from "../../lib/api/mobileApi";
 import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
+import { formatGrantExpiryFromCreatedAt } from "./challengeUiState";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Inbox">;
 
@@ -41,6 +42,10 @@ export function ChallengesInboxScreen({ navigation }: Props) {
   const { data, isLoading, isError, error, isRefetching, refetch } = useQuery({
     queryKey: ["challenges", "pending"],
     queryFn: mobileApi.getChallenges,
+  });
+  const { data: notificationSettings } = useQuery({
+    queryKey: ["notifications", "settings"],
+    queryFn: mobileApi.getNotificationSettings,
   });
   const items = Array.isArray(data?.items) ? data.items : [];
   const showErrorState = isError && items.length === 0;
@@ -119,7 +124,13 @@ export function ChallengesInboxScreen({ navigation }: Props) {
                     </View>
                   </View>
                   <Text style={styles.challengeResource}>{item.resource}</Text>
-                  <Text style={styles.challengeExpire}>expires: {item.expires_at}</Text>
+                  <Text style={styles.challengeExpire}>
+                    Grant expires:{" "}
+                    {formatGrantExpiryFromCreatedAt(
+                      item.created_at,
+                      notificationSettings?.grant_expiry_days
+                    )}
+                  </Text>
                 </Pressable>
               ))}
               {items.length === 0 ? (
