@@ -9,6 +9,7 @@ import {
   ChallengeDetail,
   ChallengeStatus,
   DeleteAccountResponse,
+  NotificationSettings,
   PageResponse,
   PushTokenRegisterRequest,
   PushTokenRegisterResponse,
@@ -54,6 +55,7 @@ type RegisterResponse = {
 type RefreshResponse = {
   access_token: string;
   expires_in: number;
+  refresh_token: string;
 };
 
 type SubmitDecisionResponse = {
@@ -113,6 +115,10 @@ type BackendDeviceResponse = {
 
 type MessageResponse = {
   message: string;
+};
+
+type BackendNotificationSettingsResponse = {
+  grant_expiry_days: number;
 };
 
 function getApiBaseUrl(): string {
@@ -261,13 +267,19 @@ function buildPushDevicePayload(payload: PushTokenRegisterRequest): {
   };
 }
 
-async function requestRefreshAccessToken(): Promise<string | null> {
+async function requestRefreshAccessToken(): Promise<RefreshResponse | null> {
+  const session = await loadStoredAuthSession();
+  if (!session?.refreshToken) {
+    return null;
+  }
+
   const response = await fetch(buildUrl("/auth/refresh"), {
     method: "POST",
     headers: {
       Accept: "application/json",
+      "Content-Type": "application/json",
     },
-    credentials: "include",
+    body: JSON.stringify({ refresh_token: session.refreshToken }),
   });
 
   const payload = await readJsonSafely(response);
@@ -276,9 +288,9 @@ async function requestRefreshAccessToken(): Promise<string | null> {
   }
 
   if (payload && typeof payload === "object") {
-    const maybeToken = (payload as RefreshResponse).access_token;
-    if (typeof maybeToken === "string" && maybeToken.length > 0) {
-      return maybeToken;
+    const data = payload as RefreshResponse;
+    if (typeof data.access_token === "string" && data.access_token.length > 0) {
+      return data;
     }
   }
 
@@ -320,13 +332,13 @@ async function requestJson<T>(path: string, options: RequestOptions = {}): Promi
   let payload = await readJsonSafely(response);
 
   if (response.status === 401 && requiresAuth && retryOnAuthFailure) {
-    const refreshedAccessToken = await requestRefreshAccessToken();
-    if (refreshedAccessToken) {
+    const refreshed = await requestRefreshAccessToken();
+    if (refreshed) {
       await persistAuthSession({
-        accessToken: refreshedAccessToken,
-        refreshToken: session?.refreshToken,
+        accessToken: refreshed.access_token,
+        refreshToken: refreshed.refresh_token,
       });
-      headers.Authorization = `Bearer ${refreshedAccessToken}`;
+      headers.Authorization = `Bearer ${refreshed.access_token}`;
       response = await send();
       payload = await readJsonSafely(response);
     }
@@ -349,6 +361,15 @@ async function listPendingApprovalRequests(
   return requestJson<BackendApprovalRequestsResponse>(
     `/approvals/requests?status=pending&page=${page}&per_page=${perPage}`
   );
+}
+
+export async function getNotificationSettingsRequest(): Promise<NotificationSettings> {
+  const response = await requestJson<BackendNotificationSettingsResponse>(
+    "/notifications/settings"
+  );
+  return {
+    grant_expiry_days: response.grant_expiry_days,
+  };
 }
 
 export async function loginWithPasswordRequest(payload: LoginRequest): Promise<LoginResponse> {

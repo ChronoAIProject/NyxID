@@ -264,6 +264,7 @@ pub async fn verify(
             user_id: user_id.to_string(),
             access_token: tokens.access_token,
             expires_in: tokens.access_expires_in,
+            refresh_token: tokens.refresh_token,
         }),
     ))
 }

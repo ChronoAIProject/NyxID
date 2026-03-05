@@ -14,6 +14,7 @@ import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
 import { typeScale } from "../../theme/designTokens";
 import {
+  formatGrantExpiryFromCreatedAt,
   getChallengeActionState,
   getChallengeQueryErrorMessage,
   getDecisionErrorMessage,
@@ -40,6 +41,10 @@ export function ChallengeMinimalScreen({ navigation, route }: Props) {
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["challenge", challengeId],
     queryFn: () => mobileApi.getChallengeById(challengeId),
+  });
+  const { data: notificationSettings } = useQuery({
+    queryKey: ["notifications", "settings"],
+    queryFn: mobileApi.getNotificationSettings,
   });
 
   const approveMutation = useMutation({
@@ -113,6 +118,10 @@ export function ChallengeMinimalScreen({ navigation, route }: Props) {
   const actionState = getChallengeActionState(data);
   const actionsDisabled =
     approveMutation.isPending || denyMutation.isPending || !actionState.canDecide;
+  const grantExpiryDisplay = formatGrantExpiryFromCreatedAt(
+    data.created_at,
+    notificationSettings?.grant_expiry_days
+  );
 
   return (
     <ScreenContainer>
@@ -143,8 +152,8 @@ export function ChallengeMinimalScreen({ navigation, route }: Props) {
             <Text style={flowStyles.rowValue}>{actionState.statusLabel}</Text>
           </View>
           <View style={flowStyles.rowLast}>
-            <Text style={flowStyles.rowLabel}>Expires</Text>
-            <Text style={flowStyles.rowValue}>{data.expires_at}</Text>
+            <Text style={flowStyles.rowLabel}>Grant Expires</Text>
+            <Text style={flowStyles.rowValue}>{grantExpiryDisplay}</Text>
           </View>
         </View>
         {actionState.reason ? (

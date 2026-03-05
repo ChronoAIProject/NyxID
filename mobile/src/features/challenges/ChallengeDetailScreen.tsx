@@ -121,10 +121,6 @@ export function ChallengeDetailScreen({ navigation, route }: Props) {
             <Text style={flowStyles.rowValue}>{data.resource}</Text>
           </View>
           <View style={flowStyles.row}>
-            <Text style={flowStyles.rowLabel}>IP</Text>
-            <Text style={flowStyles.rowValue}>{data.request_context.ip}</Text>
-          </View>
-          <View style={flowStyles.row}>
             <Text style={flowStyles.rowLabel}>Client</Text>
             <Text style={flowStyles.rowValue}>{data.request_context.client}</Text>
           </View>

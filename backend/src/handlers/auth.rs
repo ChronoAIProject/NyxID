@@ -51,12 +51,14 @@ pub struct LoginResponse {
     pub user_id: String,
     pub access_token: String,
     pub expires_in: i64,
+    pub refresh_token: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RefreshResponse {
     pub access_token: String,
     pub expires_in: i64,
+    pub refresh_token: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -336,6 +338,7 @@ pub async fn login(
             user_id: user.id.to_string(),
             access_token: tokens.access_token,
             expires_in: tokens.access_expires_in,
+            refresh_token: tokens.refresh_token,
         }),
     ))
 }
@@ -398,38 +401,55 @@ pub async fn logout(
     ))
 }
 
+/// Optional JSON body for /auth/refresh — mobile clients send the refresh
+/// token in the body since HttpOnly cookies are unreliable outside browsers.
+#[derive(Debug, Deserialize, Default)]
+pub struct RefreshRequest {
+    pub refresh_token: Option<String>,
+}
+
 /// POST /api/v1/auth/refresh
 ///
 /// Exchange a refresh token for a new access token.
+/// Accepts the refresh token from either the JSON body (mobile) or the
+/// `nyx_refresh_token` HttpOnly cookie (browser), with body taking priority.
 /// Implements token rotation for security.
 pub async fn refresh(
     State(state): State<AppState>,
     headers: HeaderMap,
+    body: Option<Json<RefreshRequest>>,
 ) -> AppResult<(HeaderMap, Json<RefreshResponse>)> {
-    // Extract refresh token from cookie
-    let cookie_header = headers
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    let body_token = body.and_then(|b| b.0.refresh_token);
 
-    let refresh_token = cookie_header
-        .split(';')
-        .find_map(|pair| {
-            let pair = pair.trim();
-            let (key, value) = pair.split_once('=')?;
-            if key.trim() == "nyx_refresh_token" {
-                Some(value.trim())
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| AppError::Unauthorized("No refresh token provided".to_string()))?;
+    let refresh_token_owned: String;
+    let refresh_token_str: &str = if let Some(ref t) = body_token {
+        t.as_str()
+    } else {
+        let cookie_header = headers
+            .get("cookie")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        refresh_token_owned = cookie_header
+            .split(';')
+            .find_map(|pair| {
+                let pair = pair.trim();
+                let (key, value) = pair.split_once('=')?;
+                if key.trim() == "nyx_refresh_token" {
+                    Some(value.trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| AppError::Unauthorized("No refresh token provided".to_string()))?;
+        &refresh_token_owned
+    };
 
     let tokens = token_service::refresh_tokens(
         &state.db,
         &state.config,
         &state.jwt_keys,
-        refresh_token,
+        refresh_token_str,
         Some(&state.mcp_sessions),
     )
     .await?;
@@ -470,6 +490,7 @@ pub async fn refresh(
         Json(RefreshResponse {
             access_token: tokens.access_token,
             expires_in: tokens.access_expires_in,
+            refresh_token: tokens.refresh_token,
         }),
     ))
 }
