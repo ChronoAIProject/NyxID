@@ -35,9 +35,6 @@ importers:
       expo-font:
         specifier: ~13.3.2
         version: 13.3.2(expo@53.0.27(@babel/core@7.29.0)(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react@19.0.0)
-      expo-local-authentication:
-        specifier: ~16.0.0
-        version: 16.0.5(expo@53.0.27(@babel/core@7.29.0)(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))
       expo-notifications:
         specifier: ~0.31.0
         version: 0.31.5(expo@53.0.27(@babel/core@7.29.0)(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0))(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)
@@ -1433,11 +1430,6 @@ packages:
     peerDependencies:
       expo: '*'
       react: '*'
-
-  expo-local-authentication@16.0.5:
-    resolution: {integrity: sha512-JzrUssLBB5tr06ffbZJC074fru2mw6He3ALtwlRnrmL7svMJS0zvm6e5Gx5CSxfHf1DgneBVBnyRlmtWxQzY9Q==}
-    peerDependencies:
-      expo: '*'
 
   expo-modules-autolinking@2.1.15:
     resolution: {integrity: sha512-IUITUERdkgooXjr9bXsX0PmhrZUIGTMyP6NtmQpAxN5+qtf/I7ewbwLx1/rX7tgiAOzaYme+PZOp/o6yqIhFsw==}
@@ -4621,11 +4613,6 @@ snapshots:
     dependencies:
       expo: 53.0.27(@babel/core@7.29.0)(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)
       react: 19.0.0
-
-  expo-local-authentication@16.0.5(expo@53.0.27(@babel/core@7.29.0)(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)):
-    dependencies:
-      expo: 53.0.27(@babel/core@7.29.0)(react-native@0.79.6(@babel/core@7.29.0)(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)
-      invariant: 2.2.4
 
   expo-modules-autolinking@2.1.15:
     dependencies:

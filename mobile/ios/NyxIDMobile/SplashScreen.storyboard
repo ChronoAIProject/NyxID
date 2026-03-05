@@ -15,8 +15,13 @@
                     <view key="view" userInteractionEnabled="NO" contentMode="scaleToFill" insetsLayoutMarginsFromSafeArea="NO" id="EXPO-ContainerView" userLabel="ContainerView">
                         <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
                         <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
-                        <subviews/>
+                        <subviews>
+                            <imageView clipsSubviews="YES" userInteractionEnabled="NO" contentMode="scaleAspectFit" image="SplashScreenLogo" translatesAutoresizingMaskIntoConstraints="NO" id="EXPO-SplashScreen">
+                                <rect key="frame" x="146.5" y="381" width="100" height="90"/>
+                            </imageView>
+                        </subviews>
                         <viewLayoutGuide key="safeArea" id="Rmq-lb-GrQ"/>
+                        <color key="backgroundColor" name="SplashScreenBackground"/>
                         <constraints>
                             <constraint firstItem="EXPO-SplashScreen" firstAttribute="centerY" secondItem="EXPO-ContainerView" secondAttribute="centerY" id="0VC-Wk-OaO"/>
                             <constraint firstItem="EXPO-SplashScreen" firstAttribute="centerX" secondItem="EXPO-ContainerView" secondAttribute="centerX" id="zR4-NK-mVN"/>
@@ -30,5 +35,6 @@
     </scenes>
     <resources>
         <image name="SplashScreenLogo" width="100" height="90.333335876464844"/>
+        <namedColor name="SplashScreenBackground"/>
     </resources>
 </document>

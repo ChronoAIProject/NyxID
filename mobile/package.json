@@ -1,6 +1,6 @@
 {
   "name": "nyxid-mobile",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "main": "index.ts",
   "scripts": {
@@ -10,7 +10,8 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "build:ios": "EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 expo run:ios --configuration Release",
-    "build:ios:testflight": "EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 xcodebuild -workspace ios/NyxIDMobile.xcworkspace -scheme NyxIDMobile -configuration Release -archivePath ios/build/NyxIDMobile.xcarchive archive"
+    "bump:ios:build": "sh scripts/bump-ios-build.sh",
+    "build:ios:testflight": "pnpm run bump:ios:build && EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 xcodebuild -workspace ios/NyxIDMobile.xcworkspace -scheme NyxIDMobile -configuration Release -destination 'generic/platform=iOS' -archivePath ios/build/NyxIDMobile.xcarchive archive"
   },
   "dependencies": {
     "@babel/runtime": "^7.28.4",
@@ -22,7 +23,6 @@
     "@tanstack/react-query": "^5.90.20",
     "expo": "~53.0.0",
     "expo-font": "~13.3.2",
-    "expo-local-authentication": "~16.0.0",
     "expo-notifications": "~0.31.0",
     "expo-secure-store": "~14.2.0",
     "expo-status-bar": "~2.2.3",

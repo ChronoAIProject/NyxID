@@ -80,7 +80,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
       try {
         await signOut();
       } catch (error) {
-        console.warn("[auth] sign out after delete failed", error);
+        if (__DEV__) console.warn("[auth] sign out after delete failed", error);
       }
       queryClient.clear();
     },
@@ -96,7 +96,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
           queryClient.clear();
         })
         .catch((signOutError) => {
-          console.warn("[auth] forced sign out after delete error failed", signOutError);
+          if (__DEV__) console.warn("[auth] forced sign out after delete error failed", signOutError);
         });
     },
   });
@@ -114,7 +114,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
               queryClient.clear();
             })
             .catch((error) => {
-              console.warn("[auth] sign out failed", error);
+              if (__DEV__) console.warn("[auth] sign out failed", error);
             });
         },
       },

@@ -17,84 +17,109 @@ type TermsSection = {
   bullets?: string[];
 };
 
-const EFFECTIVE_DATE = "2026-02-25";
+const EFFECTIVE_DATE = "2026-03-04";
 
 const TERMS_SECTIONS: TermsSection[] = [
   {
     title: "1. Acceptance of Terms",
     paragraphs: [
-      "By creating an account or using NyxID, you agree to these Terms of Service and applicable laws.",
+      "By creating an account, signing in, or using NyxID Mobile (the \"App\"), you agree to these Terms of Service and all applicable laws. If you do not agree, do not use the App.",
     ],
   },
   {
-    title: "2. Account and Security",
+    title: "2. Description of Service",
     paragraphs: [
-      "You are responsible for maintaining the confidentiality of your account credentials and for all activity under your account.",
+      "NyxID Mobile is a security authenticator that receives approval challenges from NyxID-connected services and allows you to approve, deny, or revoke access requests from your mobile device.",
     ],
     bullets: [
-      "Use accurate registration information",
-      "Enable MFA where available",
-      "Promptly notify us of unauthorized access",
-    ],
-  },
-  {
-    title: "3. Permitted Use",
-    paragraphs: ["NyxID may be used only for lawful identity and access management workflows."],
-    bullets: [
-      "Authentication and authorization operations",
-      "Service connection and consent management",
-      "Administrative security and audit tasks",
+      "Receive push notifications for high-risk approval requests",
+      "Review challenge details and approve or deny access",
+      "Manage and revoke previously approved sessions",
+      "Sign in with Google, GitHub, or Apple",
     ],
   },
   {
-    title: "4. Prohibited Conduct",
+    title: "3. Account and Security",
+    paragraphs: [
+      "You are responsible for maintaining the security of your account and device. All actions taken through your authenticated session are attributed to you.",
+    ],
     bullets: [
-      "Attempting to bypass security controls",
-      "Abusive traffic, scraping, or denial-of-service behavior",
-      "Using NyxID to violate law, rights, or contracts",
-      "Reverse engineering where prohibited by law",
+      "Use accurate information when signing in",
+      "Keep your device secure and up to date",
+      "Promptly report unauthorized access to your account",
+      "Do not share your session or allow others to act on your behalf",
+    ],
+  },
+  {
+    title: "4. Sign in with Apple",
+    paragraphs: [
+      "When you choose to sign in with Apple, we receive your Apple ID email (or a private relay address if you choose to hide your email) and a verified identity token. We do not receive your Apple ID password. Apple's terms of service and privacy policy also apply to your use of Sign in with Apple.",
+    ],
+  },
+  {
+    title: "5. Push Notifications",
+    paragraphs: [
+      "The App uses push notifications (APNs) to deliver time-sensitive approval requests. You may disable notifications in iOS Settings, but this may prevent you from receiving approval challenges in real time.",
+    ],
+  },
+  {
+    title: "6. Permitted Use",
+    paragraphs: ["The App may be used only for lawful identity and access management purposes."],
+    bullets: [
+      "Responding to authentication and approval challenges",
+      "Managing authorized sessions and revocations",
+      "Reviewing security audit information",
+    ],
+  },
+  {
+    title: "7. Prohibited Conduct",
+    bullets: [
+      "Attempting to bypass, tamper with, or exploit security controls",
+      "Automated, abusive, or denial-of-service interactions",
+      "Using the App to facilitate violations of law, rights, or contracts",
+      "Reverse engineering or decompiling the App except where permitted by law",
     ],
     paragraphs: [],
   },
   {
-    title: "5. Third-Party Integrations",
+    title: "8. Third-Party Services",
     paragraphs: [
-      "When you connect external providers, their terms and privacy policies also apply. NyxID is not responsible for third-party service availability or policy changes.",
+      "The App connects to third-party identity providers (Google, GitHub, Apple) for authentication. Their respective terms and privacy policies apply to your use of those services. NyxID is not responsible for third-party service availability or data practices.",
     ],
   },
   {
-    title: "6. Availability and Changes",
+    title: "9. Account Deletion",
     paragraphs: [
-      "We may update, suspend, or discontinue features to improve security, stability, and compliance.",
+      "You may permanently delete your account and all associated server-side data from the Account Settings screen within the App. This action is irreversible. Upon deletion, your sessions are revoked and personal data is removed in accordance with our Privacy Policy.",
     ],
   },
   {
-    title: "7. Suspension or Termination",
+    title: "10. Availability and Changes",
     paragraphs: [
-      "We may suspend or terminate access for violations, security risk, abuse, or legal requirements.",
+      "We may update, suspend, or discontinue features at any time to improve security, stability, or compliance. We will update the effective date when material changes are made to these terms.",
     ],
   },
   {
-    title: "8. Disclaimers",
+    title: "11. Disclaimers",
     paragraphs: [
-      "NyxID is provided on an \"as is\" basis to the extent permitted by law, without warranties of uninterrupted operation.",
+      "The App is provided on an \"as is\" and \"as available\" basis to the extent permitted by law, without warranties of merchantability, fitness for a particular purpose, or uninterrupted operation.",
     ],
   },
   {
-    title: "9. Limitation of Liability",
+    title: "12. Limitation of Liability",
     paragraphs: [
-      "To the maximum extent permitted by law, NyxID is not liable for indirect, incidental, or consequential damages arising from service use.",
+      "To the maximum extent permitted by law, NyxID and its operators are not liable for indirect, incidental, special, or consequential damages arising from your use of the App.",
     ],
   },
   {
-    title: "10. Privacy",
+    title: "13. Governing Law",
     paragraphs: [
-      "Our Privacy Policy describes how data is handled and protected. By using NyxID, you also agree to that policy.",
+      "These terms are governed by the laws of the jurisdiction in which the service operator is established, without regard to conflict of law provisions.",
     ],
   },
   {
-    title: "11. Contact",
-    paragraphs: ["Terms inquiries: legal@nyxid.com"],
+    title: "14. Contact",
+    paragraphs: ["For questions about these terms: legal@chrono-ai.fun"],
   },
 ];
 
