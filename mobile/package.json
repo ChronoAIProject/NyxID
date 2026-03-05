@@ -26,6 +26,7 @@
     "expo-notifications": "~0.31.0",
     "expo-secure-store": "~14.2.0",
     "expo-status-bar": "~2.2.3",
+    "expo-task-manager": "~13.0.0",
     "expo-web-browser": "^55.0.9",
     "react": "19.0.0",
     "react-hook-form": "^7.71.1",

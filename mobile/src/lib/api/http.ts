@@ -110,6 +110,10 @@ type BackendDeviceResponse = {
   registered_at: string;
 };
 
+type MessageResponse = {
+  message: string;
+};
+
 function getApiBaseUrl(): string {
   const rawBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL ?? DEFAULT_API_BASE_URL;
   const normalized = rawBaseUrl.replace(/\/+$/, "");
@@ -222,6 +226,38 @@ function toBackendPushPlatform(platform: PushTokenRegisterRequest["platform"]): 
   if (platform === "ios") return "apns";
   if (platform === "android") return "fcm";
   throw new Error("push_platform_unsupported");
+}
+
+function resolveIosPushAppId(): string {
+  const fromEnv = process.env.EXPO_PUBLIC_IOS_BUNDLE_ID?.trim();
+  if (fromEnv) return fromEnv;
+  return "fun.chrono-ai.nyxid";
+}
+
+function buildPushDevicePayload(payload: PushTokenRegisterRequest): {
+  platform: "apns" | "fcm";
+  token: string;
+  app_id?: string;
+  previous_token?: string;
+} {
+  const backendPlatform = toBackendPushPlatform(payload.platform);
+  const previousToken =
+    payload.previous_token && payload.previous_token !== payload.token
+      ? payload.previous_token
+      : undefined;
+  if (backendPlatform === "apns") {
+    return {
+      platform: backendPlatform,
+      token: payload.token,
+      app_id: resolveIosPushAppId(),
+      previous_token: previousToken,
+    };
+  }
+  return {
+    platform: backendPlatform,
+    token: payload.token,
+    previous_token: previousToken,
+  };
 }
 
 async function requestRefreshAccessToken(): Promise<string | null> {
@@ -420,14 +456,9 @@ export async function revokeApprovalRequest(approvalId: string): Promise<RevokeA
 export async function registerPushTokenRequest(
   payload: PushTokenRegisterRequest
 ): Promise<PushTokenRegisterResponse> {
-  const backendPlatform = toBackendPushPlatform(payload.platform);
   await requestJson<BackendDeviceResponse>("/notifications/devices", {
     method: "POST",
-    body: {
-      platform: backendPlatform,
-      token: payload.token,
-      app_id: "nyxid.mobile",
-    },
+    body: buildPushDevicePayload(payload),
   });
 
   return {
@@ -440,14 +471,9 @@ export async function registerPushTokenRequest(
 export async function rotatePushTokenRequest(
   payload: PushTokenRegisterRequest
 ): Promise<PushTokenRegisterResponse> {
-  const backendPlatform = toBackendPushPlatform(payload.platform);
   await requestJson<BackendDeviceResponse>("/notifications/devices", {
     method: "POST",
-    body: {
-      platform: backendPlatform,
-      token: payload.token,
-      app_id: "nyxid.mobile",
-    },
+    body: buildPushDevicePayload(payload),
   });
 
   return {
@@ -455,6 +481,15 @@ export async function rotatePushTokenRequest(
     token: payload.token,
     previous_token: payload.previous_token,
   };
+}
+
+export async function unregisterPushTokenRequest(
+  payload: PushTokenRegisterRequest
+): Promise<void> {
+  await requestJson<MessageResponse>("/notifications/devices/current", {
+    method: "DELETE",
+    body: buildPushDevicePayload(payload),
+  });
 }
 
 export async function deleteCurrentUserAccountRequest(): Promise<DeleteAccountResponse> {

@@ -10,6 +10,7 @@ import {
   revokeApprovalRequest,
   rotatePushTokenRequest,
   submitChallengeDecisionRequest,
+  unregisterPushTokenRequest,
 } from "./http";
 import {
   ApprovalItem,
@@ -122,6 +123,9 @@ export const mobileApi = {
     payload: PushTokenRegisterRequest
   ): Promise<PushTokenRegisterResponse> {
     return rotatePushTokenRequest(payload);
+  },
+  async unregisterPushToken(payload: PushTokenRegisterRequest): Promise<void> {
+    await unregisterPushTokenRequest(payload);
   },
   async deleteAccount(): Promise<DeleteAccountResponse> {
     return deleteCurrentUserAccountRequest();

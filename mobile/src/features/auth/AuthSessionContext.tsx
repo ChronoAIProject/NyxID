@@ -5,6 +5,11 @@ import {
   persistAuthSession,
   StoredAuthSession,
 } from "../../lib/auth/sessionStore";
+import {
+  activatePushAfterLogin,
+  clearLocalPushRegistrationState,
+  deactivatePushOnLogout,
+} from "../../lib/notifications/pushNotifications";
 
 type AuthSessionContextValue = {
   isAuthenticated: boolean;
@@ -26,6 +31,17 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       .then((session) => {
         if (!active) return;
         setIsAuthenticated(Boolean(session));
+        if (session) {
+          void activatePushAfterLogin({ forceRegister: true })
+            .then((result) => {
+              if (__DEV__) {
+                console.log("[push] activate after session restore", result);
+              }
+            })
+            .catch((error) => {
+              if (__DEV__) console.warn("[push] activate after session restore failed", error);
+            });
+        }
       })
       .finally(() => {
         if (!active) return;
@@ -41,9 +57,19 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
     const signInWithSession = async (session: StoredAuthSession) => {
       await persistAuthSession(session);
       setIsAuthenticated(true);
+      try {
+        const pushResult = await activatePushAfterLogin({ forceRegister: true });
+        if (__DEV__) {
+          console.log("[push] activate after sign in", pushResult);
+        }
+      } catch (error) {
+        if (__DEV__) console.warn("[push] activate after sign in failed", error);
+      }
     };
 
     const signOut = async () => {
+      await deactivatePushOnLogout();
+      await clearLocalPushRegistrationState();
       await clearStoredAuthSession();
       setIsAuthenticated(false);
     };

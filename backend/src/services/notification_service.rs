@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use mongodb::Database;
@@ -81,6 +81,7 @@ pub async fn send_approval_notification(
 
     // 2. Push notifications (FCM + APNs) -- fire in parallel
     if channel.push_enabled && !channel.push_devices.is_empty() {
+        let unique_devices = unique_devices_by_token(&channel.push_devices);
         let mut data = HashMap::new();
         data.insert("type".to_string(), "approval_request".to_string());
         data.insert("request_id".to_string(), request.id.clone());
@@ -90,8 +91,7 @@ pub async fn send_approval_notification(
             format!("nyxid://challenge/{}", request.id),
         );
 
-        let push_futures: Vec<_> = channel
-            .push_devices
+        let push_futures: Vec<_> = unique_devices
             .iter()
             .map(|device| {
                 send_push_to_device(
@@ -113,18 +113,18 @@ pub async fn send_approval_notification(
         for (i, result) in results.into_iter().enumerate() {
             match result {
                 Ok(PushResult::Success) => {
-                    let platform = &channel.push_devices[i].platform;
+                    let platform = &unique_devices[i].platform;
                     if !channels_used.contains(platform) {
                         channels_used.push(platform.clone());
                     }
-                    successful_device_ids.push(channel.push_devices[i].device_id.clone());
+                    successful_device_ids.push(unique_devices[i].device_id.clone());
                 }
                 Ok(PushResult::TokenInvalid) => {
-                    tokens_to_remove.push(channel.push_devices[i].device_id.clone());
+                    tokens_to_remove.push(unique_devices[i].device_id.clone());
                 }
                 Err(e) => {
                     tracing::warn!(
-                        device_id = %channel.push_devices[i].device_id,
+                        device_id = %unique_devices[i].device_id,
                         "Push notification failed: {e}"
                     );
                 }
@@ -202,13 +202,14 @@ pub async fn notify_decision(
     // 2. Send silent push to update mobile app UI
     let channel = get_or_create_channel(db, &request.user_id).await?;
     if channel.push_enabled && !channel.push_devices.is_empty() {
+        let unique_devices = unique_devices_by_token(&channel.push_devices);
         let decision_str = if approved { "approved" } else { "rejected" };
         let mut data = HashMap::new();
         data.insert("type".to_string(), "approval_decision".to_string());
         data.insert("request_id".to_string(), request.id.clone());
         data.insert("decision".to_string(), decision_str.to_string());
 
-        for device in &channel.push_devices {
+        for device in unique_devices {
             let _ = send_silent_push(http_client, fcm_auth, apns_auth, config, device, &data).await;
         }
     }
@@ -229,7 +230,8 @@ pub async fn send_silent_push_to_user(
 ) -> AppResult<()> {
     let channel = get_or_create_channel(db, user_id).await?;
     if channel.push_enabled && !channel.push_devices.is_empty() {
-        for device in &channel.push_devices {
+        let unique_devices = unique_devices_by_token(&channel.push_devices);
+        for device in unique_devices {
             let _ = send_silent_push(http_client, fcm_auth, apns_auth, config, device, data).await;
         }
     }
@@ -378,7 +380,7 @@ async fn send_silent_push(
                     .app_id
                     .as_deref()
                     .or(config.apns_topic.as_deref())
-                    .unwrap_or("dev.nyxid.app");
+                    .unwrap_or("fun.chrono-ai.nyxid");
 
                 let _ = push_service::send_apns_silent(
                     http_client,
@@ -466,4 +468,17 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
         return we.code == 11000;
     }
     false
+}
+
+fn unique_devices_by_token(devices: &[DeviceToken]) -> Vec<&DeviceToken> {
+    let mut seen_tokens: HashSet<&str> = HashSet::new();
+    let mut unique = Vec::with_capacity(devices.len());
+
+    for device in devices {
+        if seen_tokens.insert(device.token.as_str()) {
+            unique.push(device);
+        }
+    }
+
+    unique
 }

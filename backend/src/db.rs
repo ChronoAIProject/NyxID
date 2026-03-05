@@ -547,6 +547,15 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Supports token-based cleanup paths (e.g. account switching and logout detach).
+    notification_channels
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "push_devices.token": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
 
     Ok(())
 }

@@ -9,7 +9,6 @@ import { ScreenContainer } from "../../components/ScreenContainer";
 import { SectionBadge } from "../../components/SectionBadge";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { mobileApi } from "../../lib/api/mobileApi";
-import { activatePushAfterLogin } from "../../lib/notifications/pushNotifications";
 import { useAuthSession } from "./AuthSessionContext";
 import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
@@ -184,15 +183,6 @@ export function AuthHomeScreen({ navigation }: Props) {
           accessToken: callback.accessToken,
           refreshToken: callback.refreshToken,
         });
-
-        try {
-          const pushResult = await activatePushAfterLogin();
-          if (__DEV__) {
-            console.log("[push] activate after social login", pushResult);
-          }
-        } catch (pushError) {
-          if (__DEV__) console.warn("[push] activate after social login failed", pushError);
-        }
       } catch (error) {
         showToast(resolveAuthError(error), "error");
       } finally {
