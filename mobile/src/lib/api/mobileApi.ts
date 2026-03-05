@@ -1,6 +1,7 @@
 import { createIdempotencyKey } from "./idempotency";
 import {
   deleteCurrentUserAccountRequest,
+  getCurrentUserProfileRequest,
   getChallengeRequest,
   listApprovalsRequest,
   listChallengesRequest,
@@ -13,6 +14,7 @@ import {
   unregisterPushTokenRequest,
 } from "./http";
 import {
+  AccountProfile,
   ApprovalItem,
   ChallengeDetail,
   DeleteAccountResponse,
@@ -126,6 +128,9 @@ export const mobileApi = {
   },
   async unregisterPushToken(payload: PushTokenRegisterRequest): Promise<void> {
     await unregisterPushTokenRequest(payload);
+  },
+  async getAccountProfile(): Promise<AccountProfile> {
+    return getCurrentUserProfileRequest();
   },
   async deleteAccount(): Promise<DeleteAccountResponse> {
     return deleteCurrentUserAccountRequest();

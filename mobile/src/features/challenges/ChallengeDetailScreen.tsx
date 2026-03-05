@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useEffect, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { RootStackParamList } from "../../app/AppNavigator";
 import { FullScreenLoading } from "../../components/FullScreenLoading";
 import { MobileStatusBar } from "../../components/MobileStatusBar";
@@ -12,7 +12,7 @@ import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverl
 import { mobileApi } from "../../lib/api/mobileApi";
 import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
-import { radius, spacing, typeScale } from "../../theme/designTokens";
+import { typeScale } from "../../theme/designTokens";
 import {
   getChallengeActionState,
   getChallengeQueryErrorMessage,
@@ -22,37 +22,9 @@ import {
 
 type Props = NativeStackScreenProps<RootStackParamList, "ChallengeDetail">;
 
-const FIVE_MIN_SEC = 300;
-const THIRTY_MIN_SEC = 1800;
-const ALWAYS_DURATION_SEC = 315360000;
-
-function formatDuration(sec: number): string {
-  if (sec === ALWAYS_DURATION_SEC) return "Always";
-  if (sec >= 86400) return `${sec / 86400} day`;
-  if (sec >= 3600) return `${sec / 3600} hour`;
-  return `${sec / 60} min`;
-}
-
-function buildDurationOptions(input: number[]): number[] {
-  const filtered = input.filter((item) => item !== FIVE_MIN_SEC && item !== THIRTY_MIN_SEC);
-  if (!filtered.includes(ALWAYS_DURATION_SEC)) {
-    filtered.push(ALWAYS_DURATION_SEC);
-  }
-  return filtered;
-}
-
-function resolveInitialDuration(allowedDurationsSec: number[], defaultDurationSec: number): number {
-  const options = buildDurationOptions(allowedDurationsSec);
-  if (options.includes(defaultDurationSec)) {
-    return defaultDurationSec;
-  }
-  return options[0] ?? defaultDurationSec;
-}
-
 export function ChallengeDetailScreen({ navigation, route }: Props) {
   const queryClient = useQueryClient();
   const challengeId = route.params.challengeId;
-  const [selectedDuration, setSelectedDuration] = useState<number | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
 
   const showToast = (message: string, kind: ToastKind) => {
@@ -72,14 +44,7 @@ export function ChallengeDetailScreen({ navigation, route }: Props) {
 
   const decideMutation = useMutation({
     mutationFn: (decision: "APPROVE" | "DENY") =>
-      mobileApi.submitDecision(
-        challengeId,
-        decision,
-        selectedDuration ??
-          (data
-            ? resolveInitialDuration(data.allowed_durations_sec, data.default_duration_sec)
-            : undefined)
-      ),
+      mobileApi.submitDecision(challengeId, decision),
     onMutate: () => {
       setToast(null);
     },
@@ -129,9 +94,6 @@ export function ChallengeDetailScreen({ navigation, route }: Props) {
   }
 
   const actionState = getChallengeActionState(data);
-  const durationOptions = buildDurationOptions(data.allowed_durations_sec);
-  const initialDuration = resolveInitialDuration(data.allowed_durations_sec, data.default_duration_sec);
-  const effectiveDuration = selectedDuration ?? initialDuration;
   const actionDisabled = decideMutation.isPending || !actionState.canDecide;
 
   return (
@@ -175,38 +137,6 @@ export function ChallengeDetailScreen({ navigation, route }: Props) {
             <Text style={flowStyles.rowValue}>{data.request_context.location}</Text>
           </View>
         </View>
-
-        <View style={flowStyles.card}>
-          <Text style={flowStyles.cardTitle}>Approval Duration</Text>
-          <Text style={styles.helper}>Default action is 24-hour approval.</Text>
-          <View style={styles.durationWrap}>
-            {durationOptions.map((duration) => {
-              const active = effectiveDuration === duration;
-              return (
-                <Pressable
-                  key={duration}
-                  disabled={actionDisabled}
-                  onPress={() => setSelectedDuration(duration)}
-                  style={[
-                    styles.durationItem,
-                    active && styles.durationItemActive,
-                    actionDisabled && styles.durationItemDisabled,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.durationText,
-                      active && styles.durationTextActive,
-                      actionDisabled && styles.durationTextDisabled,
-                    ]}
-                  >
-                    {formatDuration(duration)}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-        </View>
         {actionState.reason ? (
           <View style={styles.stateNotice}>
             <Text style={styles.stateNoticeText}>{actionState.reason}</Text>
@@ -233,43 +163,6 @@ export function ChallengeDetailScreen({ navigation, route }: Props) {
 }
 
 const styles = StyleSheet.create({
-  helper: {
-    color: mobileTheme.textSecondary,
-    ...typeScale.caption,
-    fontSize: 13,
-  },
-  durationWrap: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: spacing.sm,
-  },
-  durationItem: {
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-    backgroundColor: mobileTheme.cardSoft,
-    paddingVertical: spacing.sm + spacing.xxs,
-    paddingHorizontal: spacing.lg,
-  },
-  durationItemActive: {
-    borderColor: "#8B5CF6",
-    backgroundColor: "#8B5CF620",
-  },
-  durationItemDisabled: {
-    opacity: 0.6,
-  },
-  durationText: {
-    color: mobileTheme.textSecondary,
-    ...typeScale.caption,
-    fontWeight: "600",
-    fontSize: 13,
-  },
-  durationTextActive: {
-    color: "#D8CCFF",
-  },
-  durationTextDisabled: {
-    color: mobileTheme.textMuted,
-  },
   stateNotice: {
     borderWidth: 1,
     borderColor: mobileTheme.borderSoft,

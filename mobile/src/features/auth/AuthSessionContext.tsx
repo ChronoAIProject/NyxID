@@ -7,6 +7,7 @@ import {
 } from "../../lib/auth/sessionStore";
 import {
   activatePushAfterLogin,
+  clearPendingPushSyncSignal,
   clearLocalPushRegistrationState,
   deactivatePushOnLogout,
 } from "../../lib/notifications/pushNotifications";
@@ -26,6 +27,11 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     let active = true;
+    const restoreTimeout = setTimeout(() => {
+      if (!active) return;
+      if (__DEV__) console.warn("[auth] restore session timeout, continuing without cache");
+      setIsRestoring(false);
+    }, 6000);
 
     void loadStoredAuthSession()
       .then((session) => {
@@ -43,13 +49,20 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
             });
         }
       })
+      .catch((error) => {
+        if (__DEV__) console.warn("[auth] restore session failed", error);
+        if (!active) return;
+        setIsAuthenticated(false);
+      })
       .finally(() => {
         if (!active) return;
+        clearTimeout(restoreTimeout);
         setIsRestoring(false);
       });
 
     return () => {
       active = false;
+      clearTimeout(restoreTimeout);
     };
   }, []);
 
@@ -68,8 +81,12 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
     };
 
     const signOut = async () => {
-      await deactivatePushOnLogout();
-      await clearLocalPushRegistrationState();
+      const pushUnlinked = await deactivatePushOnLogout();
+      if (pushUnlinked) {
+        await clearLocalPushRegistrationState();
+      } else {
+        await clearPendingPushSyncSignal();
+      }
       await clearStoredAuthSession();
       setIsAuthenticated(false);
     };

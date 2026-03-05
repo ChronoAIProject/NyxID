@@ -43,8 +43,7 @@ export function ChallengeMinimalScreen({ navigation, route }: Props) {
   });
 
   const approveMutation = useMutation({
-    mutationFn: () =>
-      mobileApi.submitDecision(challengeId, "APPROVE", data?.default_duration_sec ?? 86400),
+    mutationFn: () => mobileApi.submitDecision(challengeId, "APPROVE"),
     onMutate: () => {
       setToast(null);
     },
@@ -126,7 +125,7 @@ export function ChallengeMinimalScreen({ navigation, route }: Props) {
         <SectionBadge label="CHALLENGE" tone="warning" />
         <Text style={flowStyles.title}>Approve This Request?</Text>
         <Text style={flowStyles.subtitle}>
-          Default action is 24-hour approval for this same request pattern.
+          Grant access for this request. Expiry follows your account preference.
         </Text>
 
         <View style={flowStyles.card}>
@@ -156,7 +155,7 @@ export function ChallengeMinimalScreen({ navigation, route }: Props) {
 
         <View style={flowStyles.actionWrap}>
           <PrimaryButton
-            label="Approve 24h"
+            label="Approve"
             disabled={actionsDisabled}
             onPress={() => approveMutation.mutate()}
           />

@@ -58,6 +58,19 @@ export type SubmitDecisionOptions = {
   idempotencyKey?: string;
 };
 
+export type AccountProfile = {
+  id: string;
+  email: string;
+  display_name?: string | null;
+  avatar_url?: string | null;
+  email_verified: boolean;
+  mfa_enabled: boolean;
+  is_admin: boolean;
+  is_active: boolean;
+  created_at: string;
+  last_login_at?: string | null;
+};
+
 export type DeleteAccountResponse = {
   status: "DELETED";
   deleted_at: string;

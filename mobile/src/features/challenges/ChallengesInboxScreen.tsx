@@ -105,7 +105,7 @@ export function ChallengesInboxScreen({ navigation }: Props) {
                 <Pressable
                   key={item.id}
                   style={styles.challengeCard}
-                  onPress={() => navigation.navigate("ChallengeMinimal", { challengeId: item.id })}
+                  onPress={() => navigation.navigate("ChallengeDetail", { challengeId: item.id })}
                 >
                   <View style={styles.challengeHeader}>
                     <Text style={styles.challengeTitle}>{item.action}</Text>

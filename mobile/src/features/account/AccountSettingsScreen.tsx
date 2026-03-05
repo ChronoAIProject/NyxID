@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { RootStackParamList } from "../../app/AppNavigator";
@@ -58,10 +58,41 @@ function resolveDeleteAccountError(error: unknown): {
   };
 }
 
+function resolveLoadProfileError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : "";
+  const code = raw.toLowerCase();
+
+  if (
+    code.includes("auth_session_missing") ||
+    code.includes("unauthorized") ||
+    code.includes("invalid_token") ||
+    code.includes("token_expired") ||
+    code.includes("request_failed_401")
+  ) {
+    return "Session expired. Please sign in again.";
+  }
+
+  if (code.includes("network request failed") || code.includes("failed to fetch")) {
+    return "Network error. Check API server and try again.";
+  }
+
+  return __DEV__ && raw ? raw : "Failed to load account profile.";
+}
+
 export function AccountSettingsScreen({ navigation }: Props) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const queryClient = useQueryClient();
   const { signOut } = useAuthSession();
+  const {
+    data: profile,
+    isLoading: isProfileLoading,
+    isError: isProfileError,
+    error: profileError,
+    refetch: refetchProfile,
+  } = useQuery({
+    queryKey: ["account", "profile"],
+    queryFn: () => mobileApi.getAccountProfile(),
+  });
 
   const showToast = (message: string, kind: ToastKind) => {
     setToast({ message, kind });
@@ -154,6 +185,36 @@ export function AccountSettingsScreen({ navigation }: Props) {
         </Text>
 
         <View style={flowStyles.card}>
+          <Text style={flowStyles.cardTitle}>Account Information</Text>
+          {isProfileLoading ? (
+            <Text style={styles.metaText}>Loading account profile...</Text>
+          ) : isProfileError || !profile ? (
+            <>
+              <Text style={styles.errorText}>{resolveLoadProfileError(profileError)}</Text>
+              <PrimaryButton
+                label="Retry Profile Load"
+                kind="ghost"
+                disabled={deleteAccountMutation.isPending}
+                onPress={() => {
+                  void refetchProfile();
+                }}
+              />
+            </>
+          ) : (
+            <>
+              <View style={flowStyles.row}>
+                <Text style={flowStyles.rowLabel}>Email</Text>
+                <Text style={flowStyles.rowValue}>{profile.email}</Text>
+              </View>
+              <View style={flowStyles.rowLast}>
+                <Text style={flowStyles.rowLabel}>Display Name</Text>
+                <Text style={flowStyles.rowValue}>{profile.display_name || "Not set"}</Text>
+              </View>
+            </>
+          )}
+        </View>
+
+        <View style={flowStyles.card}>
           <Text style={flowStyles.cardTitle}>Session</Text>
           <PrimaryButton
             label="Sign Out"
@@ -182,6 +243,14 @@ export function AccountSettingsScreen({ navigation }: Props) {
 }
 
 const styles = StyleSheet.create({
+  metaText: {
+    color: mobileTheme.textSecondary,
+    ...typeScale.body,
+  },
+  errorText: {
+    color: "#FCA5A5",
+    ...typeScale.caption,
+  },
   warningText: {
     color: mobileTheme.textMuted,
     ...typeScale.caption,

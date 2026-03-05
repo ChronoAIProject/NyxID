@@ -283,6 +283,32 @@ async function ensureBackgroundTaskRegistered() {
   }
 }
 
+function safeAddPushTokenListener(
+  listener: (token: Notifications.DevicePushToken) => void
+): Notifications.EventSubscription | null {
+  try {
+    const maybeAddListener = (
+      Notifications as unknown as {
+        addPushTokenListener?: (
+          callback: (token: Notifications.DevicePushToken) => void
+        ) => Notifications.EventSubscription;
+      }
+    ).addPushTokenListener;
+
+    if (typeof maybeAddListener !== "function") {
+      if (__DEV__) {
+        console.warn("[push] addPushTokenListener unavailable in current runtime");
+      }
+      return null;
+    }
+
+    return maybeAddListener(listener);
+  } catch (error) {
+    if (__DEV__) console.warn("[push] addPushTokenListener failed", error);
+    return null;
+  }
+}
+
 export function setPushSyncHandler(handler: PushSyncHandler | null): () => void {
   pushSyncHandler = handler;
   return () => {
@@ -314,38 +340,43 @@ export async function consumePendingPushSyncSignal(): Promise<PushSyncSignal | n
   }
 }
 
-ensureBackgroundTaskDefined();
-
 export async function initializeNotificationRuntime(): Promise<() => void> {
-  configureNotificationHandler();
-  await ensureAndroidChannels();
-  await ensureBackgroundTaskRegistered();
+  let foregroundSubscription: Notifications.EventSubscription | null = null;
+  let tokenSubscription: Notifications.EventSubscription | null = null;
 
-  const foregroundSubscription = Notifications.addNotificationReceivedListener(
-    (notification) => {
-      const signal = parsePushSyncSignalFromData(
-        notification.request.content.data,
-        "foreground"
-      );
-      if (!signal) return;
-      void emitOrPersistPushSyncSignal(signal);
-    }
-  );
+  try {
+    configureNotificationHandler();
+    await ensureAndroidChannels();
+    await ensureBackgroundTaskRegistered();
 
-  const tokenSubscription = Notifications.addPushTokenListener((devicePushToken) => {
-    const token = normalizeDeviceToken(devicePushToken);
-    if (!token) return;
-
-    void syncTokenWithBackend(token, false).then((result) => {
-      if (__DEV__) {
-        console.log("[push] sync after runtime token refresh", result);
+    foregroundSubscription = Notifications.addNotificationReceivedListener(
+      (notification) => {
+        const signal = parsePushSyncSignalFromData(
+          notification.request.content.data,
+          "foreground"
+        );
+        if (!signal) return;
+        void emitOrPersistPushSyncSignal(signal);
       }
+    );
+
+    tokenSubscription = safeAddPushTokenListener((devicePushToken) => {
+      const token = normalizeDeviceToken(devicePushToken);
+      if (!token) return;
+
+      void syncTokenWithBackend(token, false).then((result) => {
+        if (__DEV__) {
+          console.log("[push] sync after runtime token refresh", result);
+        }
+      });
     });
-  });
+  } catch (error) {
+    if (__DEV__) console.warn("[push] initialize runtime failed", error);
+  }
 
   return () => {
-    foregroundSubscription.remove();
-    tokenSubscription.remove();
+    foregroundSubscription?.remove();
+    tokenSubscription?.remove();
   };
 }
 
@@ -360,15 +391,23 @@ export async function clearLocalPushRegistrationState(): Promise<void> {
   }
 }
 
-export async function deactivatePushOnLogout(): Promise<void> {
+export async function clearPendingPushSyncSignal(): Promise<void> {
+  try {
+    await SecureStore.deleteItemAsync(PUSH_PENDING_SYNC_SIGNAL_KEY);
+  } catch (error) {
+    if (__DEV__) console.warn("[push] clear pending sync signal failed", error);
+  }
+}
+
+export async function deactivatePushOnLogout(): Promise<boolean> {
   const token = await SecureStore.getItemAsync(PUSH_TOKEN_STORE_KEY);
   if (!token) {
-    return;
+    return true;
   }
 
   const platform = resolvePlatform();
   if (platform !== "ios" && platform !== "android") {
-    return;
+    return true;
   }
 
   const provider = resolveProvider(platform);
@@ -378,8 +417,10 @@ export async function deactivatePushOnLogout(): Promise<void> {
       provider,
       platform,
     });
+    return true;
   } catch (error) {
     if (__DEV__) console.warn("[push] unregister on logout failed", error);
+    return false;
   }
 }
 
