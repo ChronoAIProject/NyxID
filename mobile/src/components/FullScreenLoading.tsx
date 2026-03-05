@@ -1,8 +1,15 @@
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
-import { mobileTheme } from "../theme/mobileTheme";
-import { radius, spacing, typeScale } from "../theme/designTokens";
+import { radius, spacing } from "../theme/designTokens";
 import { MobileStatusBar } from "./MobileStatusBar";
 import { ScreenContainer } from "./ScreenContainer";
+
+// Use system font only so this screen always renders (e.g. when custom fonts not yet loaded).
+const FALLBACK_PRIMARY = "#8B5CF6";
+const FALLBACK_BG = "#10101A";
+const FALLBACK_CARD = "#1A1A24";
+const FALLBACK_BORDER = "#263042";
+const FALLBACK_TEXT = "#F0EEFF";
+const FALLBACK_MUTED = "#6A6480";
 
 type FullScreenLoadingProps = {
   title?: string;
@@ -18,7 +25,7 @@ export function FullScreenLoading({
       <MobileStatusBar />
       <View style={styles.center}>
         <View style={styles.card}>
-          <ActivityIndicator size="small" color={mobileTheme.primary} />
+          <ActivityIndicator size="small" color={FALLBACK_PRIMARY} />
           <Text style={styles.title}>{title}</Text>
           <Text style={styles.subtitle}>{subtitle}</Text>
         </View>
@@ -38,20 +45,21 @@ const styles = StyleSheet.create({
     width: "100%",
     borderRadius: radius.lg,
     borderWidth: 1,
-    borderColor: mobileTheme.borderSoft,
-    backgroundColor: mobileTheme.card,
+    borderColor: FALLBACK_BORDER,
+    backgroundColor: FALLBACK_CARD,
     paddingVertical: spacing.xxl,
     paddingHorizontal: spacing.xl,
     alignItems: "center",
     gap: spacing.sm,
   },
   title: {
-    color: mobileTheme.textPrimary,
-    ...typeScale.bodyStrong,
+    color: FALLBACK_TEXT,
+    fontSize: 16,
+    fontWeight: "600",
   },
   subtitle: {
-    color: mobileTheme.textMuted,
-    ...typeScale.caption,
+    color: FALLBACK_MUTED,
+    fontSize: 13,
     textAlign: "center",
   },
 });

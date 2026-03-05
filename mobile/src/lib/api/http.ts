@@ -4,6 +4,7 @@ import {
   persistAuthSession,
 } from "../auth/sessionStore";
 import {
+  AccountProfile,
   ApprovalItem,
   ChallengeDetail,
   ChallengeStatus,
@@ -217,8 +218,8 @@ function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): Challen
       client: item.requester_type,
       location: item.requester_label ?? item.service_slug,
     },
-    allowed_durations_sec: [ALWAYS_DURATION_SEC],
-    default_duration_sec: ALWAYS_DURATION_SEC,
+    allowed_durations_sec: [DEFAULT_CHALLENGE_DURATION_SEC, ALWAYS_DURATION_SEC],
+    default_duration_sec: DEFAULT_CHALLENGE_DURATION_SEC,
   };
 }
 
@@ -490,6 +491,10 @@ export async function unregisterPushTokenRequest(
     method: "DELETE",
     body: buildPushDevicePayload(payload),
   });
+}
+
+export async function getCurrentUserProfileRequest(): Promise<AccountProfile> {
+  return requestJson<AccountProfile>("/users/me");
 }
 
 export async function deleteCurrentUserAccountRequest(): Promise<DeleteAccountResponse> {

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useEffect, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { RootStackParamList } from "../../app/AppNavigator";
 import { FullScreenLoading } from "../../components/FullScreenLoading";
 import { MobileStatusBar } from "../../components/MobileStatusBar";
@@ -12,7 +12,7 @@ import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverl
 import { mobileApi } from "../../lib/api/mobileApi";
 import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
-import { radius, spacing, typeScale } from "../../theme/designTokens";
+import { typeScale } from "../../theme/designTokens";
 import {
   getChallengeActionState,
   getChallengeQueryErrorMessage,
@@ -21,33 +21,6 @@ import {
 } from "./challengeUiState";
 
 type Props = NativeStackScreenProps<RootStackParamList, "ChallengeOptions">;
-
-const FIVE_MIN_SEC = 300;
-const THIRTY_MIN_SEC = 1800;
-const ALWAYS_DURATION_SEC = 315360000;
-
-function formatDuration(sec: number): string {
-  if (sec === ALWAYS_DURATION_SEC) return "Always";
-  if (sec >= 86400) return `${sec / 86400} day`;
-  if (sec >= 3600) return `${sec / 3600} hour`;
-  return `${sec / 60} min`;
-}
-
-function buildDurationOptions(input: number[]): number[] {
-  const filtered = input.filter((item) => item !== FIVE_MIN_SEC && item !== THIRTY_MIN_SEC);
-  if (!filtered.includes(ALWAYS_DURATION_SEC)) {
-    filtered.push(ALWAYS_DURATION_SEC);
-  }
-  return filtered;
-}
-
-function resolveInitialDuration(allowedDurationsSec: number[], defaultDurationSec: number): number {
-  const options = buildDurationOptions(allowedDurationsSec);
-  if (options.includes(defaultDurationSec)) {
-    return defaultDurationSec;
-  }
-  return options[0] ?? defaultDurationSec;
-}
 
 export function ChallengeOptionsScreen({ navigation, route }: Props) {
   const queryClient = useQueryClient();
@@ -58,7 +31,6 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
     queryFn: () => mobileApi.getChallengeById(challengeId),
   });
 
-  const [selectedDuration, setSelectedDuration] = useState<number | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
 
   const showToast = (message: string, kind: ToastKind) => {
@@ -72,15 +44,7 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
   }, [toast]);
 
   const approveMutation = useMutation({
-    mutationFn: () =>
-      mobileApi.submitDecision(
-        challengeId,
-        "APPROVE",
-        selectedDuration ??
-          (data
-            ? resolveInitialDuration(data.allowed_durations_sec, data.default_duration_sec)
-            : 86400)
-      ),
+    mutationFn: () => mobileApi.submitDecision(challengeId, "APPROVE"),
     onMutate: () => {
       setToast(null);
     },
@@ -99,7 +63,7 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
   });
 
   if (isLoading) {
-    return <FullScreenLoading title="Loading approval options..." subtitle="Preparing durations and policy context" />;
+    return <FullScreenLoading title="Loading approval options..." subtitle="Preparing request context" />;
   }
 
   if (isError || !data) {
@@ -130,10 +94,7 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
   }
 
   const actionState = getChallengeActionState(data);
-  const durationOptions = buildDurationOptions(data.allowed_durations_sec);
-  const initialDuration = resolveInitialDuration(data.allowed_durations_sec, data.default_duration_sec);
   const actionDisabled = approveMutation.isPending || !actionState.canDecide;
-  const effectiveDuration = selectedDuration ?? initialDuration;
 
   return (
     <ScreenContainer>
@@ -144,39 +105,8 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
         showsVerticalScrollIndicator={false}
       >
         <SectionBadge label="OPTIONS" tone="info" />
-        <Text style={flowStyles.title}>Approval Duration</Text>
-        <Text style={flowStyles.subtitle}>Use this only when default 24h is not enough.</Text>
-
-        <View style={flowStyles.card}>
-          <Text style={flowStyles.cardTitle}>Choose Duration</Text>
-          <View style={styles.durationWrap}>
-            {durationOptions.map((duration) => {
-              const active = effectiveDuration === duration;
-              return (
-                <Pressable
-                  key={duration}
-                  disabled={actionDisabled}
-                  onPress={() => setSelectedDuration(duration)}
-                  style={[
-                    styles.durationItem,
-                    active && styles.durationItemActive,
-                    actionDisabled && styles.durationItemDisabled,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.durationText,
-                      active && styles.durationTextActive,
-                      actionDisabled && styles.durationTextDisabled,
-                    ]}
-                  >
-                    {formatDuration(duration)}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-        </View>
+        <Text style={flowStyles.title}>Approval Options</Text>
+        <Text style={flowStyles.subtitle}>Review and approve this request.</Text>
 
         <View style={flowStyles.card}>
           <Text style={flowStyles.cardTitle}>Preview</Text>
@@ -184,13 +114,9 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
             <Text style={flowStyles.rowLabel}>Action</Text>
             <Text style={flowStyles.rowValue}>{data.action}</Text>
           </View>
-          <View style={flowStyles.row}>
+          <View style={flowStyles.rowLast}>
             <Text style={flowStyles.rowLabel}>Status</Text>
             <Text style={flowStyles.rowValue}>{actionState.statusLabel}</Text>
-          </View>
-          <View style={flowStyles.rowLast}>
-            <Text style={flowStyles.rowLabel}>Selected</Text>
-            <Text style={flowStyles.rowValue}>{formatDuration(effectiveDuration)}</Text>
           </View>
         </View>
         {actionState.reason ? (
@@ -201,7 +127,7 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
 
         <View style={flowStyles.actionWrap}>
           <PrimaryButton
-            label="Approve with Selected Duration"
+            label="Approve"
             disabled={actionDisabled}
             onPress={() => approveMutation.mutate()}
           />
@@ -218,38 +144,6 @@ export function ChallengeOptionsScreen({ navigation, route }: Props) {
 }
 
 const styles = StyleSheet.create({
-  durationWrap: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: spacing.sm,
-  },
-  durationItem: {
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: mobileTheme.border,
-    backgroundColor: mobileTheme.cardSoft,
-    paddingVertical: spacing.sm + spacing.xxs,
-    paddingHorizontal: spacing.lg,
-  },
-  durationItemActive: {
-    borderColor: mobileTheme.info,
-    backgroundColor: "#60A5FA20",
-  },
-  durationItemDisabled: {
-    opacity: 0.6,
-  },
-  durationText: {
-    color: mobileTheme.textSecondary,
-    ...typeScale.caption,
-    fontWeight: "600",
-    fontSize: 13,
-  },
-  durationTextActive: {
-    color: "#D7E7FF",
-  },
-  durationTextDisabled: {
-    color: mobileTheme.textMuted,
-  },
   stateNotice: {
     borderWidth: 1,
     borderColor: mobileTheme.borderSoft,

@@ -16,6 +16,20 @@ import { radius, spacing, typeScale } from "../../theme/designTokens";
 
 type Props = NativeStackScreenProps<RootStackParamList, "Approvals">;
 
+/** Format backend RFC3339 grant expiry for display (e.g. "Mar 10, 2025" or "in 5 days"). */
+function formatGrantExpiry(expiresAt: string): string {
+  const date = new Date(expiresAt);
+  if (!Number.isFinite(date.getTime())) return expiresAt;
+  const now = Date.now();
+  const ms = date.getTime() - now;
+  const days = Math.round(ms / (24 * 60 * 60 * 1000));
+  if (days < 0) return "Expired";
+  if (days === 0) return "Today";
+  if (days === 1) return "Tomorrow";
+  if (days < 7) return `In ${days} days`;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
 function resolveApprovalsError(error: unknown): string {
   const raw = error instanceof Error ? error.message : "";
   const code = raw.toLowerCase();
@@ -118,7 +132,9 @@ export function ApprovalsScreen({ navigation }: Props) {
                 <View key={item.id} style={styles.itemCard}>
                   <Text style={styles.itemTitle}>{item.action}</Text>
                   <Text style={styles.itemSub}>{item.resource}</Text>
-                  <Text style={styles.itemTime}>expires: {item.expires_at}</Text>
+                  <Text style={styles.itemTime}>
+                    Grant expires: {formatGrantExpiry(item.expires_at)}
+                  </Text>
                   <PrimaryButton
                     label="Revoke"
                     kind="danger"

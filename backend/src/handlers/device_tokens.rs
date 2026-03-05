@@ -83,15 +83,17 @@ pub async fn register_device(
     let now = Utc::now();
     let bson_now = bson::DateTime::from_chrono(now);
 
+    let resolved_prev = body.previous_token.as_deref()
+        .filter(|prev| *prev != body.token.as_str());
+
     // Ensure one push token belongs to one user at a time (prevents account-switch leakage).
     detach_token_from_other_users(&collection, &user_id, &body.token, bson_now).await?;
+    if let Some(prev) = resolved_prev {
+        detach_token_from_other_users(&collection, &user_id, prev, bson_now).await?;
+    }
 
     // Rotation path: replace `previous_token` with the new token on the same device record.
-    if let Some(previous_token) = body
-        .previous_token
-        .as_deref()
-        .filter(|prev| *prev != body.token.as_str())
-    {
+    if let Some(previous_token) = resolved_prev {
         if let Some(existing) = channel.push_devices.iter().find(|d| d.token == previous_token) {
             ensure_platform_matches(existing, &body.platform)?;
 
