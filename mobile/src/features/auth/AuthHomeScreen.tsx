@@ -2,14 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import FontAwesome from "@expo/vector-icons/FontAwesome";
 import * as WebBrowser from "expo-web-browser";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { RootStackParamList } from "../../app/AppNavigator";
 import { MobileStatusBar } from "../../components/MobileStatusBar";
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { SectionBadge } from "../../components/SectionBadge";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { mobileApi } from "../../lib/api/mobileApi";
-import { activatePushAfterLogin } from "../../lib/notifications/pushNotifications";
 import { useAuthSession } from "./AuthSessionContext";
 import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
@@ -24,6 +23,7 @@ type SocialCallback = {
   accessToken?: string;
   refreshToken?: string;
   error?: string;
+  provider?: SocialProvider;
 };
 
 function resolveAuthError(error: unknown): string {
@@ -59,6 +59,11 @@ function parseSocialCallback(url: string): SocialCallback | null {
   try {
     const parsed = new URL(url);
     const statusRaw = parsed.searchParams.get("status");
+    const providerRaw = parsed.searchParams.get("provider");
+    const provider: SocialProvider | undefined =
+      providerRaw === "google" || providerRaw === "github" || providerRaw === "apple"
+        ? providerRaw
+        : undefined;
     if (statusRaw !== "success" && statusRaw !== "error") {
       return null;
     }
@@ -67,6 +72,7 @@ function parseSocialCallback(url: string): SocialCallback | null {
       return {
         status: "error",
         error: parsed.searchParams.get("error") ?? undefined,
+        provider,
       };
     }
 
@@ -74,6 +80,7 @@ function parseSocialCallback(url: string): SocialCallback | null {
       status: "success",
       accessToken: parsed.searchParams.get("access_token") ?? undefined,
       refreshToken: parsed.searchParams.get("refresh_token") ?? undefined,
+      provider,
     };
   } catch {
     return null;
@@ -84,21 +91,27 @@ function SocialAuthButton({
   label,
   provider,
   disabled = false,
+  loading = false,
   onPress,
 }: {
   label: string;
   provider: SocialProvider;
   disabled?: boolean;
+  loading?: boolean;
   onPress: () => void;
 }) {
   const iconName = provider === "google" ? "google" : provider === "github" ? "github" : "apple";
   const iconColor = "#F9FAFB";
 
   return (
-    <Pressable onPress={onPress} disabled={disabled} style={[styles.socialAuthButton, disabled && styles.socialAuthButtonDisabled]}>
+    <Pressable onPress={onPress} disabled={disabled} style={[styles.socialAuthButton, disabled && !loading && styles.socialAuthButtonDisabled]}>
       <View style={styles.socialAuthContent}>
-        <FontAwesome name={iconName} size={16} color={iconColor} />
-        <Text style={styles.socialAuthText}>{label}</Text>
+        {loading ? (
+          <ActivityIndicator size="small" color={iconColor} />
+        ) : (
+          <FontAwesome name={iconName} size={16} color={iconColor} />
+        )}
+        <Text style={styles.socialAuthText}>{loading ? "Connecting..." : label}</Text>
       </View>
     </Pressable>
   );
@@ -106,6 +119,7 @@ function SocialAuthButton({
 
 export function AuthHomeScreen({ navigation }: Props) {
   const [isSocialAuthPending, setIsSocialAuthPending] = useState(false);
+  const [pendingSocialProvider, setPendingSocialProvider] = useState<SocialProvider | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const { signInWithSession } = useAuthSession();
   const isMountedRef = useRef(true);
@@ -142,17 +156,26 @@ export function AuthHomeScreen({ navigation }: Props) {
 
       if (callback.status === "error") {
         showToast(resolveSocialAuthError(callback.error), "error");
+        if (isMountedRef.current) {
+          setIsSocialAuthPending(false);
+          setPendingSocialProvider(null);
+        }
         return;
       }
 
       if (!callback.accessToken) {
         showToast("Missing social auth access token.", "error");
+        if (isMountedRef.current) {
+          setIsSocialAuthPending(false);
+          setPendingSocialProvider(null);
+        }
         return;
       }
 
       if (isMountedRef.current) {
         setToast(null);
         setIsSocialAuthPending(true);
+        setPendingSocialProvider((current) => callback.provider ?? current);
       }
 
       try {
@@ -160,20 +183,12 @@ export function AuthHomeScreen({ navigation }: Props) {
           accessToken: callback.accessToken,
           refreshToken: callback.refreshToken,
         });
-
-        try {
-          const pushResult = await activatePushAfterLogin();
-          if (__DEV__) {
-            if (__DEV__) console.log("[push] activate after social login", pushResult);
-          }
-        } catch (pushError) {
-          if (__DEV__) console.warn("[push] activate after social login failed", pushError);
-        }
       } catch (error) {
         showToast(resolveAuthError(error), "error");
       } finally {
         if (isMountedRef.current) {
           setIsSocialAuthPending(false);
+          setPendingSocialProvider(null);
         }
       }
     },
@@ -203,6 +218,7 @@ export function AuthHomeScreen({ navigation }: Props) {
     if (isMountedRef.current) {
       setToast(null);
       setIsSocialAuthPending(true);
+      setPendingSocialProvider(provider);
     }
 
     try {
@@ -229,6 +245,7 @@ export function AuthHomeScreen({ navigation }: Props) {
     } finally {
       if (isMountedRef.current) {
         setIsSocialAuthPending(false);
+        setPendingSocialProvider(null);
       }
     }
   };
@@ -250,18 +267,21 @@ export function AuthHomeScreen({ navigation }: Props) {
             label="Continue with Google"
             provider="google"
             disabled={isSocialAuthPending}
+            loading={isSocialAuthPending && pendingSocialProvider === "google"}
             onPress={() => void startSocialLogin("google")}
           />
           <SocialAuthButton
             label="Continue with GitHub"
             provider="github"
             disabled={isSocialAuthPending}
+            loading={isSocialAuthPending && pendingSocialProvider === "github"}
             onPress={() => void startSocialLogin("github")}
           />
           <SocialAuthButton
             label="Continue with Apple"
             provider="apple"
             disabled={isSocialAuthPending}
+            loading={isSocialAuthPending && pendingSocialProvider === "apple"}
             onPress={() => void startSocialLogin("apple")}
           />
 

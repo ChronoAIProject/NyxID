@@ -4,6 +4,7 @@ use axum::{
 };
 use chrono::Utc;
 use mongodb::bson::{self, doc};
+use mongodb::Collection;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -21,8 +22,15 @@ const MAX_DEVICES_PER_USER: usize = 10;
 pub struct RegisterDeviceRequest {
     pub platform: String,
     pub token: String,
+    pub previous_token: Option<String>,
     pub device_name: Option<String>,
     pub app_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UnregisterCurrentDeviceRequest {
+    pub platform: String,
+    pub token: String,
 }
 
 // --- Response types ---
@@ -75,6 +83,61 @@ pub async fn register_device(
     let now = Utc::now();
     let bson_now = bson::DateTime::from_chrono(now);
 
+    // Ensure one push token belongs to one user at a time (prevents account-switch leakage).
+    detach_token_from_other_users(&collection, &user_id, &body.token, bson_now).await?;
+
+    // Rotation path: replace `previous_token` with the new token on the same device record.
+    if let Some(previous_token) = body
+        .previous_token
+        .as_deref()
+        .filter(|prev| *prev != body.token.as_str())
+    {
+        if let Some(existing) = channel.push_devices.iter().find(|d| d.token == previous_token) {
+            ensure_platform_matches(existing, &body.platform)?;
+
+            let device_id = existing.device_id.clone();
+            let mut update_doc = doc! {
+                "push_devices.$.token": &body.token,
+                "push_devices.$.platform": &body.platform,
+                "push_devices.$.registered_at": bson_now,
+                "updated_at": bson_now,
+            };
+
+            if let Some(ref name) = body.device_name {
+                update_doc.insert("push_devices.$.device_name", name);
+            }
+            if let Some(ref app_id) = body.app_id {
+                update_doc.insert("push_devices.$.app_id", app_id);
+            }
+
+            collection
+                .update_one(
+                    doc! {
+                        "_id": &channel.id,
+                        "push_devices.device_id": &device_id,
+                    },
+                    doc! { "$set": update_doc },
+                )
+                .await?;
+
+            remove_duplicate_token_entries(
+                &collection,
+                &channel.id,
+                &body.token,
+                &device_id,
+                bson::DateTime::from_chrono(Utc::now()),
+            )
+            .await?;
+
+            return Ok(Json(DeviceResponse {
+                device_id,
+                platform: body.platform.clone(),
+                device_name: body.device_name.clone().or(existing.device_name.clone()),
+                registered_at: now.to_rfc3339(),
+            }));
+        }
+    }
+
     // Check if device with this token already exists (token refresh)
     let existing_device = channel.push_devices.iter().find(|d| d.token == body.token);
 
@@ -104,6 +167,15 @@ pub async fn register_device(
                 doc! { "$set": update_doc },
             )
             .await?;
+
+        remove_duplicate_token_entries(
+            &collection,
+            &channel.id,
+            &body.token,
+            &device_id,
+            bson::DateTime::from_chrono(Utc::now()),
+        )
+        .await?;
 
         return Ok(Json(DeviceResponse {
             device_id,
@@ -181,6 +253,15 @@ pub async fn register_device(
                 )
                 .await?;
 
+            remove_duplicate_token_entries(
+                &collection,
+                &latest_channel.id,
+                &body.token,
+                &existing.device_id,
+                bson::DateTime::from_chrono(Utc::now()),
+            )
+            .await?;
+
             return Ok(Json(DeviceResponse {
                 device_id: existing.device_id.clone(),
                 platform: existing.platform.clone(),
@@ -193,6 +274,15 @@ pub async fn register_device(
             "Maximum of {MAX_DEVICES_PER_USER} devices per user exceeded"
         )));
     }
+
+    remove_duplicate_token_entries(
+        &collection,
+        &channel.id,
+        &body.token,
+        &device_id,
+        bson::DateTime::from_chrono(Utc::now()),
+    )
+    .await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -311,6 +401,140 @@ pub async fn remove_device(
     }))
 }
 
+/// DELETE /api/v1/notifications/devices/current
+///
+/// Remove current authenticated user's device by push token.
+/// Designed for sign-out to prevent old-account push leakage.
+pub async fn remove_current_device(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<UnregisterCurrentDeviceRequest>,
+) -> AppResult<Json<MessageResponse>> {
+    validate_token_for_platform(&body.platform, &body.token, "token")?;
+
+    let user_id = auth_user.user_id.to_string();
+    let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
+    let collection = state.db.collection::<NotificationChannel>(COLLECTION_NAME);
+    let now = bson::DateTime::from_chrono(Utc::now());
+
+    collection
+        .update_one(
+            doc! { "_id": &channel.id, "user_id": &user_id },
+            doc! {
+                "$pull": {
+                    "push_devices": {
+                        "token": &body.token
+                    }
+                },
+                "$set": { "updated_at": now }
+            },
+        )
+        .await?;
+
+    collection
+        .update_one(
+            doc! {
+                "_id": &channel.id,
+                "push_enabled": true,
+                "push_devices.0": { "$exists": false },
+            },
+            doc! {
+                "$set": {
+                    "push_enabled": false,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "push_device_removed_on_logout".to_string(),
+        Some(serde_json::json!({
+            "platform": body.platform,
+            "token_removed": true,
+        })),
+        None,
+        None,
+    );
+
+    Ok(Json(MessageResponse {
+        message: "Current device removed".to_string(),
+    }))
+}
+
+async fn detach_token_from_other_users(
+    collection: &Collection<NotificationChannel>,
+    user_id: &str,
+    token: &str,
+    now: bson::DateTime,
+) -> AppResult<()> {
+    let removed = collection
+        .update_many(
+            doc! {
+                "user_id": { "$ne": user_id },
+                "push_devices.token": token,
+            },
+            doc! {
+                "$pull": {
+                    "push_devices": { "token": token }
+                },
+                "$set": {
+                    "updated_at": now,
+                }
+            },
+        )
+        .await?;
+
+    if removed.modified_count > 0 {
+        // Keep push_enabled in sync for users whose last token was removed.
+        collection
+            .update_many(
+                doc! {
+                    "user_id": { "$ne": user_id },
+                    "push_enabled": true,
+                    "push_devices.0": { "$exists": false },
+                },
+                doc! {
+                    "$set": {
+                        "push_enabled": false,
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    }
+                },
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
+async fn remove_duplicate_token_entries(
+    collection: &Collection<NotificationChannel>,
+    channel_id: &str,
+    token: &str,
+    keep_device_id: &str,
+    now: bson::DateTime,
+) -> AppResult<()> {
+    collection
+        .update_one(
+            doc! { "_id": channel_id },
+            doc! {
+                "$pull": {
+                    "push_devices": {
+                        "token": token,
+                        "device_id": { "$ne": keep_device_id }
+                    }
+                },
+                "$set": {
+                    "updated_at": now,
+                }
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 // --- Validation ---
 
 fn validate_register_request(body: &RegisterDeviceRequest) -> AppResult<()> {
@@ -320,33 +544,9 @@ fn validate_register_request(body: &RegisterDeviceRequest) -> AppResult<()> {
         ));
     }
 
-    if body.token.is_empty() {
-        return Err(AppError::ValidationError(
-            "token must not be empty".to_string(),
-        ));
-    }
-
-    if body.token.len() > 4096 {
-        return Err(AppError::ValidationError(
-            "token must not exceed 4096 characters".to_string(),
-        ));
-    }
-
-    // H-2: Validate token content by platform (defense-in-depth against URL manipulation)
-    if body.platform == "apns" && !body.token.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(AppError::ValidationError(
-            "APNs token must contain only hexadecimal characters".to_string(),
-        ));
-    }
-    if body.platform == "fcm"
-        && !body
-            .token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_')
-    {
-        return Err(AppError::ValidationError(
-            "FCM token contains invalid characters".to_string(),
-        ));
+    validate_token_for_platform(&body.platform, &body.token, "token")?;
+    if let Some(previous_token) = body.previous_token.as_deref() {
+        validate_token_for_platform(&body.platform, previous_token, "previous_token")?;
     }
 
     if let Some(ref name) = body.device_name
@@ -376,6 +576,38 @@ fn validate_register_request(body: &RegisterDeviceRequest) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_token_for_platform(platform: &str, token: &str, field_name: &str) -> AppResult<()> {
+    if token.is_empty() {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must not be empty"
+        )));
+    }
+
+    if token.len() > 4096 {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must not exceed 4096 characters"
+        )));
+    }
+
+    if platform == "apns" && !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must contain only hexadecimal characters for APNs platform"
+        )));
+    }
+
+    if platform == "fcm"
+        && !token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_')
+    {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} contains invalid characters for FCM platform"
+        )));
+    }
+
+    Ok(())
+}
+
 fn ensure_platform_matches(existing: &DeviceToken, requested_platform: &str) -> AppResult<()> {
     if existing.platform != requested_platform {
         return Err(AppError::ValidationError(format!(
@@ -395,6 +627,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "fcm".to_string(),
             token: "test-token".to_string(),
+            previous_token: None,
             device_name: Some("Pixel 8".to_string()),
             app_id: None,
         };
@@ -406,6 +639,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "apns".to_string(),
             token: "a1b2c3d4e5f60011223344556677889900aabbccddeeff0011223344556677".to_string(),
+            previous_token: None,
             device_name: Some("iPhone".to_string()),
             app_id: Some("dev.nyxid.app".to_string()),
         };
@@ -417,6 +651,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "invalid".to_string(),
             token: "test".to_string(),
+            previous_token: None,
             device_name: None,
             app_id: None,
         };
@@ -428,6 +663,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "fcm".to_string(),
             token: "".to_string(),
+            previous_token: None,
             device_name: None,
             app_id: None,
         };
@@ -439,6 +675,31 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "fcm".to_string(),
             token: "x".repeat(4097),
+            previous_token: None,
+            device_name: None,
+            app_id: None,
+        };
+        assert!(validate_register_request(&body).is_err());
+    }
+
+    #[test]
+    fn validate_previous_token_too_long() {
+        let body = RegisterDeviceRequest {
+            platform: "fcm".to_string(),
+            token: "valid-token".to_string(),
+            previous_token: Some("x".repeat(4097)),
+            device_name: None,
+            app_id: None,
+        };
+        assert!(validate_register_request(&body).is_err());
+    }
+
+    #[test]
+    fn validate_previous_token_rejects_invalid_chars() {
+        let body = RegisterDeviceRequest {
+            platform: "fcm".to_string(),
+            token: "valid-token".to_string(),
+            previous_token: Some("token/with/slash".to_string()),
             device_name: None,
             app_id: None,
         };
@@ -450,6 +711,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "fcm".to_string(),
             token: "test".to_string(),
+            previous_token: None,
             device_name: Some("x".repeat(101)),
             app_id: None,
         };
@@ -461,6 +723,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "apns".to_string(),
             token: "test".to_string(),
+            previous_token: None,
             device_name: None,
             app_id: None,
         };
@@ -472,6 +735,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "apns".to_string(),
             token: "abcdef0123456789".to_string(),
+            previous_token: None,
             device_name: None,
             app_id: Some("dev.nyxid.app".to_string()),
         };
@@ -483,6 +747,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "apns".to_string(),
             token: "not-valid-hex!".to_string(),
+            previous_token: None,
             device_name: None,
             app_id: Some("dev.nyxid.app".to_string()),
         };
@@ -494,6 +759,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "fcm".to_string(),
             token: "token/with/slashes".to_string(),
+            previous_token: None,
             device_name: None,
             app_id: None,
         };
@@ -505,6 +771,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "fcm".to_string(),
             token: "abc123:def-456_ghi".to_string(),
+            previous_token: None,
             device_name: None,
             app_id: None,
         };
@@ -516,6 +783,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "fcm".to_string(),
             token: "valid-token".to_string(),
+            previous_token: None,
             device_name: None,
             app_id: Some("x".repeat(257)),
         };
@@ -527,6 +795,7 @@ mod tests {
         let body = RegisterDeviceRequest {
             platform: "fcm".to_string(),
             token: "valid-token".to_string(),
+            previous_token: None,
             device_name: None,
             app_id: Some("x".repeat(256)),
         };

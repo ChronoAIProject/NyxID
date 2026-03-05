@@ -388,6 +388,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .post(handlers::device_tokens::register_device),
         )
         .route(
+            "/devices/current",
+            delete(handlers::device_tokens::remove_current_device),
+        )
+        .route(
             "/devices/{device_id}",
             delete(handlers::device_tokens::remove_device),
         );

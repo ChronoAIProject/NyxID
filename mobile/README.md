@@ -32,6 +32,7 @@ npm run android
 
 ```env
 EXPO_PUBLIC_API_BASE_URL=http://localhost:3001/api/v1
+EXPO_PUBLIC_IOS_BUNDLE_ID=fun.chrono-ai.nyxid
 ```
 
 ## 当前实现

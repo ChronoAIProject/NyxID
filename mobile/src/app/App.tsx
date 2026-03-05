@@ -1,5 +1,6 @@
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
+import { AppState } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
@@ -20,11 +21,22 @@ import {
 } from "@expo-google-fonts/space-grotesk";
 import { AppNavigator, RootStackParamList } from "./AppNavigator";
 import { appLinking } from "./linking";
-import { initializeNotificationRuntime } from "../lib/notifications/pushNotifications";
+import {
+  consumePendingPushSyncSignal,
+  initializeNotificationRuntime,
+  PushSyncSignal,
+  setPushSyncHandler,
+} from "../lib/notifications/pushNotifications";
 import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
 import { BottomNavTab } from "../components/BottomNav";
 
 const queryClient = new QueryClient();
+
+function refreshQueryCacheFromPushSignal(signal: PushSyncSignal) {
+  void queryClient.invalidateQueries({ queryKey: ["challenges"] });
+  void queryClient.invalidateQueries({ queryKey: ["approvals"] });
+  void queryClient.invalidateQueries({ queryKey: ["challenge", signal.challengeId] });
+}
 
 function getActiveRouteName(
   state: NavigationState | PartialState<NavigationState> | undefined
@@ -69,6 +81,34 @@ export default function App() {
     return () => {
       disposed = true;
       cleanup?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const onPushSyncSignal = (signal: PushSyncSignal) => {
+      refreshQueryCacheFromPushSignal(signal);
+    };
+
+    const disposePushSyncHandler = setPushSyncHandler(onPushSyncSignal);
+
+    const consumePendingSignal = async () => {
+      const pendingSignal = await consumePendingPushSyncSignal();
+      if (pendingSignal) {
+        refreshQueryCacheFromPushSignal(pendingSignal);
+      }
+    };
+
+    void consumePendingSignal();
+
+    const appStateSubscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        void consumePendingSignal();
+      }
+    });
+
+    return () => {
+      disposePushSyncHandler();
+      appStateSubscription.remove();
     };
   }, []);
 

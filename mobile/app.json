@@ -11,14 +11,22 @@
     ],
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "fun.chrono-ai.nyxid"
+      "bundleIdentifier": "fun.chrono-ai.nyxid",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "fun.chrono-ai.nyxid"
     },
     "plugins": [
       "expo-secure-store",
-      "expo-notifications"
+      [
+        "expo-notifications",
+        {
+          "enableBackgroundRemoteNotifications": true
+        }
+      ]
     ]
   }
 }
