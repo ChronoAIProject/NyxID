@@ -573,7 +573,9 @@ fn codex_user_agent() -> String {
 /// Build a `reqwest::Client` for ChatGPT backend requests.
 /// Configures proxy from environment if set.
 fn chatgpt_http_client() -> AppResult<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().use_rustls_tls();
+    let mut builder = reqwest::Client::builder()
+        .use_rustls_tls()
+        .connect_timeout(std::time::Duration::from_secs(10));
 
     if let Ok(proxy_url) = std::env::var("CHATGPT_PROXY_URL")
         .or_else(|_| std::env::var("HTTPS_PROXY"))
@@ -673,7 +675,18 @@ async fn send_to_chatgpt_with_api_url(
 
     let request = build_chatgpt_request(&client, &api_url, request_text, bearer_token)?;
 
-    let response = client.execute(request).await.map_err(|e| {
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.execute(request),
+    )
+    .await
+    .map_err(|_| {
+        tracing::error!("ChatGPT HTTP request timed out waiting for response headers (30s)");
+        AppError::Internal(
+            "ChatGPT backend did not respond within 30 seconds".to_string(),
+        )
+    })?
+    .map_err(|e| {
         tracing::error!("ChatGPT HTTP request failed: {e}");
         AppError::Internal(format!("ChatGPT HTTP request failed: {e}"))
     })?;
