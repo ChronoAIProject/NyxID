@@ -18,7 +18,7 @@ server {
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript image/svg+xml;
 
     # Proxy API requests to the backend
-    location /api {
+    location /api/ {
         proxy_pass ${BACKEND_URL};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -27,7 +27,7 @@ server {
     }
 
     # Proxy OAuth requests to the backend
-    location /oauth {
+    location /oauth/ {
         proxy_pass ${BACKEND_URL};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
