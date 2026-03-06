@@ -20,8 +20,10 @@ pub struct ProviderConfig {
     pub revocation_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
     /// NyxID's OAuth client_id for this provider (encrypted)
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub client_id_encrypted: Option<Vec<u8>>,
     /// NyxID's OAuth client_secret for this provider (encrypted)
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub client_secret_encrypted: Option<Vec<u8>>,
     #[serde(default)]
     pub supports_pkce: bool,

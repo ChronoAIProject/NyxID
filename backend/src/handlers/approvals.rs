@@ -153,7 +153,8 @@ pub async fn list_requests(
     )
     .await?;
 
-    let items: Vec<ApprovalRequestItem> = requests.into_iter().map(to_approval_request_item).collect();
+    let items: Vec<ApprovalRequestItem> =
+        requests.into_iter().map(to_approval_request_item).collect();
 
     Ok(Json(ApprovalRequestsResponse {
         requests: items,

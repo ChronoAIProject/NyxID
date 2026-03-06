@@ -3,8 +3,8 @@ use axum::{
     extract::{Path, State},
 };
 use chrono::Utc;
-use mongodb::bson::{self, doc};
 use mongodb::Collection;
+use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -83,7 +83,9 @@ pub async fn register_device(
     let now = Utc::now();
     let bson_now = bson::DateTime::from_chrono(now);
 
-    let resolved_prev = body.previous_token.as_deref()
+    let resolved_prev = body
+        .previous_token
+        .as_deref()
         .filter(|prev| *prev != body.token.as_str());
 
     // Ensure one push token belongs to one user at a time (prevents account-switch leakage).
@@ -94,7 +96,11 @@ pub async fn register_device(
 
     // Rotation path: replace `previous_token` with the new token on the same device record.
     if let Some(previous_token) = resolved_prev {
-        if let Some(existing) = channel.push_devices.iter().find(|d| d.token == previous_token) {
+        if let Some(existing) = channel
+            .push_devices
+            .iter()
+            .find(|d| d.token == previous_token)
+        {
             ensure_platform_matches(existing, &body.platform)?;
 
             let device_id = existing.device_id.clone();

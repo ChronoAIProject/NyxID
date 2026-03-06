@@ -11,6 +11,7 @@ pub struct MfaFactor {
     /// Factor type: "totp", "webauthn", "recovery_codes"
     pub factor_type: String,
     /// Encrypted TOTP secret or WebAuthn credential
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub secret_encrypted: Option<Vec<u8>>,
     /// For recovery codes: JSON array of hashed codes
     #[allow(dead_code)]

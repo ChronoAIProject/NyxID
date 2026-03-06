@@ -16,13 +16,16 @@ pub struct UserProviderToken {
     pub token_type: String,
 
     // --- OAuth2 tokens (encrypted) ---
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub access_token_encrypted: Option<Vec<u8>>,
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub refresh_token_encrypted: Option<Vec<u8>>,
     pub token_scopes: Option<String>,
     #[serde(default, with = "bson_datetime::optional")]
     pub expires_at: Option<DateTime<Utc>>,
 
     // --- API key (encrypted) ---
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub api_key_encrypted: Option<Vec<u8>>,
 
     // --- Status ---

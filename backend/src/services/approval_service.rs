@@ -342,7 +342,11 @@ fn is_idempotent_replay(
     Ok(false)
 }
 
-fn resolve_grant_expiry(now: chrono::DateTime<Utc>, duration_sec: Option<i64>, default_days: u32) -> chrono::DateTime<Utc> {
+fn resolve_grant_expiry(
+    now: chrono::DateTime<Utc>,
+    duration_sec: Option<i64>,
+    default_days: u32,
+) -> chrono::DateTime<Utc> {
     if let Some(duration_sec) = duration_sec {
         return now + Duration::seconds(duration_sec);
     }

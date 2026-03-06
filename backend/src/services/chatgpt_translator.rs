@@ -50,22 +50,18 @@ impl ChatgptTranslator {
         // Convert messages -> instructions + input
         if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
             let (instructions, input) = convert_messages_to_input(messages);
-            if let Some(instr) = instructions {
-                translated.insert("instructions".to_string(), serde_json::Value::String(instr));
-            }
+            translated.insert(
+                "instructions".to_string(),
+                serde_json::Value::String(instructions.unwrap_or_default()),
+            );
             translated.insert("input".to_string(), serde_json::Value::Array(input));
-        }
-
-        // Rename max_tokens -> max_output_tokens (Responses API name)
-        if let Some(max) = body
-            .get("max_tokens")
-            .or_else(|| body.get("max_completion_tokens"))
-        {
-            translated.insert("max_output_tokens".to_string(), max.clone());
         }
 
         // Do not store responses in the user's ChatGPT history
         translated.insert("store".to_string(), serde_json::Value::Bool(false));
+
+        // Codex backend requires streaming
+        translated.insert("stream".to_string(), serde_json::Value::Bool(true));
 
         // Path: chat/completions -> responses
         let translated_path = path.replace("chat/completions", "responses");
@@ -91,6 +87,19 @@ impl ChatgptTranslator {
         enriched
             .entry("store".to_string())
             .or_insert(serde_json::Value::Bool(false));
+
+        // Strip token limit params not supported by the Codex backend
+        enriched.remove("max_tokens");
+        enriched.remove("max_output_tokens");
+        enriched.remove("max_completion_tokens");
+
+        // Codex backend requires instructions even if empty
+        enriched
+            .entry("instructions".to_string())
+            .or_insert(serde_json::Value::String(String::new()));
+
+        // Codex backend requires streaming
+        enriched.insert("stream".to_string(), serde_json::Value::Bool(true));
 
         Ok(TranslatedRequest {
             path: path.to_string(),
@@ -544,6 +553,7 @@ fn convert_messages_to_input(
 
 /// Codex CLI version to impersonate. Should track a recent stable release.
 const CODEX_VERSION: &str = "0.101.0";
+const CHATGPT_RESPONSES_API_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
 /// Build a User-Agent string matching the codex-rs format:
 /// `codex_cli_rs/{version} ({os_type} {os_version}; {arch})`
@@ -580,6 +590,33 @@ fn chatgpt_http_client() -> AppResult<reqwest::Client> {
         .map_err(|e| AppError::Internal(format!("Failed to build HTTP client: {e}")))
 }
 
+fn build_chatgpt_request(
+    client: &reqwest::Client,
+    api_url: &str,
+    request_text: String,
+    bearer_token: &str,
+) -> AppResult<reqwest::Request> {
+    client
+        .post(api_url)
+        .header("Authorization", format!("Bearer {bearer_token}"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .header("originator", "codex_cli_rs")
+        .header("User-Agent", codex_user_agent())
+        .body(request_text)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build HTTP request: {e}")))
+}
+
+fn build_chatgpt_api_url(api_url: &str, query: Option<&str>) -> String {
+    let mut api_url = api_url.to_string();
+    if let Some(query) = query.filter(|query| !query.is_empty()) {
+        api_url.push('?');
+        api_url.push_str(query);
+    }
+    api_url
+}
+
 /// Send a Responses API request via HTTP POST to `chatgpt.com/backend-api/codex`.
 ///
 /// Uses `reqwest` with SSE streaming, matching the default codex CLI behavior
@@ -593,12 +630,32 @@ pub async fn send_to_chatgpt(
     bearer_token: &str,
     is_streaming: bool,
     translate_response: bool,
+    query: Option<&str>,
+) -> AppResult<axum::response::Response> {
+    send_to_chatgpt_with_api_url(
+        translated_body,
+        bearer_token,
+        is_streaming,
+        translate_response,
+        query,
+        CHATGPT_RESPONSES_API_URL,
+    )
+    .await
+}
+
+async fn send_to_chatgpt_with_api_url(
+    translated_body: &serde_json::Value,
+    bearer_token: &str,
+    is_streaming: bool,
+    translate_response: bool,
+    query: Option<&str>,
+    api_url: &str,
 ) -> AppResult<axum::response::Response> {
     use axum::body::Body;
     use axum::http::StatusCode;
     use futures::StreamExt;
 
-    let api_url = "https://chatgpt.com/backend-api/codex/responses";
+    let api_url = build_chatgpt_api_url(api_url, query);
 
     let request_text = serde_json::to_string(translated_body)
         .map_err(|e| AppError::Internal(format!("Failed to serialize request: {e}")))?;
@@ -607,26 +664,19 @@ pub async fn send_to_chatgpt(
         translate_response,
         is_streaming,
         request_len = request_text.len(),
+        api_url,
         "ChatGPT HTTP request body: {}",
         &request_text,
     );
 
     let client = chatgpt_http_client()?;
 
-    let response = client
-        .post(api_url)
-        .header("Authorization", format!("Bearer {bearer_token}"))
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
-        .header("originator", "codex_cli_rs")
-        .header("User-Agent", codex_user_agent())
-        .body(request_text)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("ChatGPT HTTP request failed: {e}");
-            AppError::Internal(format!("ChatGPT HTTP request failed: {e}"))
-        })?;
+    let request = build_chatgpt_request(&client, &api_url, request_text, bearer_token)?;
+
+    let response = client.execute(request).await.map_err(|e| {
+        tracing::error!("ChatGPT HTTP request failed: {e}");
+        AppError::Internal(format!("ChatGPT HTTP request failed: {e}"))
+    })?;
 
     let status = response.status();
     tracing::debug!("ChatGPT HTTP response status: {status}");
@@ -973,10 +1023,11 @@ mod tests {
         assert_eq!(result.path, "responses");
         assert_eq!(result.body["instructions"], "You are helpful.");
         assert_eq!(result.body["model"], "gpt-5.2");
-        assert_eq!(result.body["max_output_tokens"], 1024);
         assert_eq!(result.body["temperature"], 0.7);
         assert_eq!(result.body["store"], false);
+        // Token limit params are stripped (Codex backend rejects them)
         assert!(result.body.get("max_tokens").is_none());
+        assert!(result.body.get("max_output_tokens").is_none());
         assert!(result.body.get("messages").is_none());
 
         let input = result.body["input"].as_array().unwrap();
@@ -1021,7 +1072,8 @@ mod tests {
             .translate_request("chat/completions", &body)
             .unwrap();
 
-        assert!(result.body.get("instructions").is_none());
+        // Codex backend requires instructions; defaults to empty string
+        assert_eq!(result.body["instructions"], "");
     }
 
     #[test]
@@ -1165,9 +1217,10 @@ mod tests {
         assert_eq!(result.body["model"], "o3");
         assert_eq!(result.body["input"][0]["role"], "user");
         assert_eq!(result.body["instructions"], "Be helpful");
-        assert_eq!(result.body["max_output_tokens"], 1024);
         assert_eq!(result.body["stream"], true);
         assert_eq!(result.body["store"], false);
+        // Token limit params are stripped (Codex backend rejects them)
+        assert!(result.body.get("max_output_tokens").is_none());
         // include is NOT added by us -- usage is default in Responses API
         assert!(result.body.get("include").is_none());
         // Should NOT have messages
@@ -1203,6 +1256,68 @@ mod tests {
         let result = translator.translate_request("responses", &body).unwrap();
 
         assert_eq!(result.body["input"], "What is 2+2?");
+    }
+
+    #[test]
+    fn build_chatgpt_request_preserves_query_headers_and_body() {
+        let translated_body = serde_json::json!({
+            "model": "o3",
+            "input": "Ping",
+            "stream": true,
+            "store": false,
+            "instructions": ""
+        });
+        let api_url = format!("{CHATGPT_RESPONSES_API_URL}?trace=1&mode=test");
+        let request_text = serde_json::to_string(&translated_body).unwrap();
+        let client = reqwest::Client::builder().build().unwrap();
+        let request =
+            build_chatgpt_request(&client, &api_url, request_text, "test-bearer").unwrap();
+
+        assert_eq!(
+            request.url().as_str(),
+            "https://chatgpt.com/backend-api/codex/responses?trace=1&mode=test"
+        );
+        assert_eq!(
+            request.headers().get("authorization").unwrap(),
+            "Bearer test-bearer"
+        );
+        assert_eq!(
+            request.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            request.headers().get("accept").unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(request.headers().get("originator").unwrap(), "codex_cli_rs");
+        assert!(
+            request
+                .headers()
+                .get("user-agent")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("codex_cli_rs/")
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                request.body().unwrap().as_bytes().unwrap()
+            )
+            .unwrap(),
+            translated_body
+        );
+    }
+
+    #[test]
+    fn send_to_chatgpt_query_preserves_empty_and_non_empty_cases() {
+        let without_query = build_chatgpt_api_url(CHATGPT_RESPONSES_API_URL, None);
+        let with_query = build_chatgpt_api_url(CHATGPT_RESPONSES_API_URL, Some("trace=1"));
+
+        assert_eq!(without_query, CHATGPT_RESPONSES_API_URL);
+        assert_eq!(
+            with_query,
+            "https://chatgpt.com/backend-api/codex/responses?trace=1"
+        );
     }
 
     // --- Response translation tests ---

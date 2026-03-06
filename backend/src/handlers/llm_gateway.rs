@@ -115,8 +115,8 @@ pub async fn llm_proxy_request(
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
 
-    // OpenAI Codex: use WebSocket transport with Responses API translation
-    // (Cloudflare blocks regular HTTP to chatgpt.com, but allows WebSocket)
+    // OpenAI Codex: use the specialized HTTP SSE transport with Responses API
+    // translation and Codex-specific headers.
     let response = if provider_slug == "openai-codex" && !body_bytes.is_empty() {
         let body_json: serde_json::Value = serde_json::from_slice(&body_bytes)
             .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
@@ -139,6 +139,7 @@ pub async fn llm_proxy_request(
             &bearer_token,
             is_streaming,
             is_chat_completions_path,
+            query.as_deref(),
         )
         .await?
     } else {
@@ -326,7 +327,8 @@ pub async fn gateway_request(
             }))
             .collect();
 
-    // OpenAI Codex: use WebSocket transport (Cloudflare blocks HTTP to chatgpt.com)
+    // OpenAI Codex: use the specialized HTTP SSE transport and preserve query
+    // parameters on the translated request.
     let response = if provider_slug == "openai-codex" {
         let bearer_token = extract_bearer_token(&delegated)?;
         // final_body_bytes is already the translated Responses API body
@@ -343,6 +345,7 @@ pub async fn gateway_request(
             &bearer_token,
             is_streaming,
             is_chat_completions_path,
+            query.as_deref(),
         )
         .await?
     } else {

@@ -259,7 +259,11 @@ pub async fn forward_request(
         if url.contains("/responses") {
             let body_str = String::from_utf8_lossy(body_bytes);
             let preview = if body_str.len() > 2048 {
-                format!("{}...(truncated, total {} bytes)", &body_str[..2048], body_str.len())
+                format!(
+                    "{}...(truncated, total {} bytes)",
+                    &body_str[..2048],
+                    body_str.len()
+                )
             } else {
                 body_str.to_string()
             };
