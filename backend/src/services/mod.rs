@@ -30,4 +30,5 @@ pub mod telegram_poller;
 pub mod telegram_service;
 pub mod token_exchange_service;
 pub mod token_service;
+pub mod user_credentials_service;
 pub mod user_token_service;

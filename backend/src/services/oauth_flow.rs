@@ -7,6 +7,7 @@ use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::user_provider_token::{COLLECTION_NAME, UserProviderToken};
+use crate::services::user_credentials_service;
 
 /// A reqwest client that does NOT follow redirects, preventing `client_secret`
 /// from being forwarded to redirect targets (SEC-H2).
@@ -59,27 +60,15 @@ pub async fn refresh_oauth_token(
         AppError::Internal("OAuth provider missing token_url for refresh".to_string())
     })?;
 
-    let decrypted_cid = Zeroizing::new(aes::decrypt(
-        provider
-            .client_id_encrypted
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("Provider missing client_id".to_string()))?,
+    let resolved = user_credentials_service::resolve_token_oauth_credentials(
+        db,
         encryption_key,
-    )?);
-    let client_id = String::from_utf8((*decrypted_cid).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))?;
-
-    // client_secret is optional -- public clients (device code flow) refresh
-    // with only client_id per RFC 6749 section 6.
-    let client_secret = if let Some(ref encrypted) = provider.client_secret_encrypted {
-        let decrypted_csec = Zeroizing::new(aes::decrypt(encrypted, encryption_key)?);
-        Some(
-            String::from_utf8((*decrypted_csec).clone())
-                .map_err(|e| AppError::Internal(format!("Failed to decode client_secret: {e}")))?,
-        )
-    } else {
-        None
-    };
+        &provider,
+        token.credential_user_id.as_deref(),
+    )
+    .await?;
+    let client_id = resolved.client_id;
+    let client_secret = resolved.client_secret;
 
     let decrypted_rt = Zeroizing::new(aes::decrypt(
         token

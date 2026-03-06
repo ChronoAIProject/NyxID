@@ -12,6 +12,7 @@ use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::user_provider_token::{COLLECTION_NAME, UserProviderToken};
 use crate::services::oauth_flow;
+use crate::services::user_credentials_service;
 
 /// Decrypted token ready for injection.
 pub struct DecryptedProviderToken {
@@ -32,6 +33,30 @@ pub struct UserProviderTokenSummary {
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub connected_at: String,
+}
+
+const OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE: &str =
+    "This provider is not configured for OAuth yet. Please contact your admin.";
+
+fn ensure_oauth_provider_configured(provider: &ProviderConfig) -> AppResult<()> {
+    // URLs are always required regardless of credential mode
+    if provider.authorization_url.is_none() || provider.token_url.is_none() {
+        return Err(AppError::BadRequest(
+            OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE.to_string(),
+        ));
+    }
+
+    // For "user" or "both" modes, URLs alone are sufficient (users bring their own credentials)
+    // For "admin" (default), admin-level credentials are also required
+    if provider.credential_mode != "user" && provider.credential_mode != "both" {
+        if provider.client_id_encrypted.is_none() || provider.client_secret_encrypted.is_none() {
+            return Err(AppError::BadRequest(
+                OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE.to_string(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Store an API key for a provider.
@@ -106,6 +131,7 @@ pub async fn store_api_key(
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         provider_config_id: provider_id.to_string(),
+        credential_user_id: None,
         token_type: "api_key".to_string(),
         access_token_encrypted: None,
         refresh_token_encrypted: None,
@@ -160,17 +186,17 @@ pub async fn initiate_oauth_connect(
         ));
     }
 
-    let authorization_url = provider.authorization_url.as_ref().ok_or_else(|| {
-        AppError::Internal("OAuth provider missing authorization_url".to_string())
-    })?;
+    ensure_oauth_provider_configured(&provider)?;
 
-    let client_id_bytes = provider
-        .client_id_encrypted
+    let authorization_url = provider
+        .authorization_url
         .as_ref()
-        .ok_or_else(|| AppError::Internal("OAuth provider missing client_id".to_string()))?;
-    let decrypted_cid = Zeroizing::new(aes::decrypt(client_id_bytes, encryption_key)?);
-    let client_id = String::from_utf8((*decrypted_cid).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))?;
+        .expect("OAuth provider configuration checked above");
+
+    let resolved =
+        user_credentials_service::resolve_oauth_credentials(db, encryption_key, &provider, user_id)
+            .await?;
+    let client_id = resolved.client_id;
 
     // Create state for CSRF protection
     let state_id = Uuid::new_v4().to_string();
@@ -202,6 +228,7 @@ pub async fn initiate_oauth_connect(
         user_code_encrypted: None,
         poll_interval: None,
         target_user_id: on_behalf_of.map(String::from),
+        credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: redirect_path.map(String::from),
         expires_at,
         created_at: now,
@@ -294,13 +321,10 @@ pub async fn request_device_code(
         AppError::Internal("Device code provider missing device_code_url".to_string())
     })?;
 
-    let client_id_bytes = provider
-        .client_id_encrypted
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("Device code provider missing client_id".to_string()))?;
-    let decrypted_cid = Zeroizing::new(aes::decrypt(client_id_bytes, encryption_key)?);
-    let client_id = String::from_utf8((*decrypted_cid).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))?;
+    let resolved =
+        user_credentials_service::resolve_oauth_credentials(db, encryption_key, &provider, user_id)
+            .await?;
+    let client_id = resolved.client_id;
 
     // POST JSON with client_id to device code endpoint
     let body = serde_json::json!({ "client_id": &client_id });
@@ -391,6 +415,7 @@ pub async fn request_device_code(
         user_code_encrypted: Some(user_code_encrypted),
         poll_interval: Some(interval),
         target_user_id: on_behalf_of.map(String::from),
+        credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: None,
         expires_at,
         created_at: now,
@@ -588,7 +613,14 @@ pub async fn poll_device_code(
             AppError::Internal("Provider missing token_url for code exchange".to_string())
         })?;
 
-        let client_id = decrypt_client_id(&provider, encryption_key)?;
+        let poll_resolved = user_credentials_service::resolve_token_oauth_credentials(
+            db,
+            encryption_key,
+            &provider,
+            oauth_state.credential_user_id.as_deref(),
+        )
+        .await?;
+        let client_id = poll_resolved.client_id;
 
         // Exchange authorization_code at token_url with PKCE
         // Codex CLI uses form-urlencoded (NOT JSON) and redirect_uri = {issuer}/deviceauth/callback
@@ -636,6 +668,7 @@ pub async fn poll_device_code(
             effective_user_id,
             provider_id,
             state,
+            poll_resolved.credential_user_id.as_deref(),
             &token_data,
             now,
         )
@@ -649,21 +682,11 @@ pub async fn poll_device_code(
         effective_user_id,
         provider_id,
         state,
+        oauth_state.credential_user_id.as_deref(),
         &resp_data,
         now,
     )
     .await
-}
-
-/// Decrypt the client_id from a provider config.
-fn decrypt_client_id(provider: &ProviderConfig, encryption_key: &[u8]) -> AppResult<String> {
-    let cid_encrypted = provider
-        .client_id_encrypted
-        .as_ref()
-        .ok_or_else(|| AppError::Internal("Provider missing client_id".to_string()))?;
-    let decrypted = Zeroizing::new(aes::decrypt(cid_encrypted, encryption_key)?);
-    String::from_utf8((*decrypted).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))
 }
 
 /// Store tokens from a device code flow response (either direct or after code exchange).
@@ -673,6 +696,7 @@ async fn store_device_code_tokens(
     user_id: &str,
     provider_id: &str,
     state: &str,
+    credential_user_id: Option<&str>,
     token_data: &serde_json::Value,
     now: chrono::DateTime<Utc>,
 ) -> AppResult<DeviceCodePollResult> {
@@ -709,6 +733,7 @@ async fn store_device_code_tokens(
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         provider_config_id: provider_id.to_string(),
+        credential_user_id: credential_user_id.map(String::from),
         token_type: "oauth2".to_string(),
         access_token_encrypted: Some(access_enc),
         refresh_token_encrypted: refresh_enc,
@@ -791,29 +816,21 @@ pub async fn handle_oauth_callback(
         .await?
         .ok_or_else(|| AppError::NotFound("Provider not found".to_string()))?;
 
+    ensure_oauth_provider_configured(&provider)?;
+
     let token_url = provider
         .token_url
         .as_ref()
-        .ok_or_else(|| AppError::Internal("OAuth provider missing token_url".to_string()))?;
+        .expect("OAuth provider configuration checked above");
 
-    let decrypted_cid = Zeroizing::new(aes::decrypt(
-        provider
-            .client_id_encrypted
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("OAuth provider missing client_id".to_string()))?,
+    // Reuse the same OAuth client that was selected during initiation.
+    let resolved = user_credentials_service::resolve_token_oauth_credentials(
+        db,
         encryption_key,
-    )?);
-    let client_id = String::from_utf8((*decrypted_cid).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))?;
-
-    let decrypted_csec = Zeroizing::new(aes::decrypt(
-        provider.client_secret_encrypted.as_ref().ok_or_else(|| {
-            AppError::Internal("OAuth provider missing client_secret".to_string())
-        })?,
-        encryption_key,
-    )?);
-    let client_secret = String::from_utf8((*decrypted_csec).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode client_secret: {e}")))?;
+        &provider,
+        oauth_state.credential_user_id.as_deref(),
+    )
+    .await?;
 
     // Use the generic callback URL (must match what was sent in initiate)
     let callback_url = format!(
@@ -826,9 +843,11 @@ pub async fn handle_oauth_callback(
         ("grant_type", "authorization_code".to_string()),
         ("code", code.to_string()),
         ("redirect_uri", callback_url),
-        ("client_id", client_id),
-        ("client_secret", client_secret),
+        ("client_id", resolved.client_id),
     ];
+    if let Some(secret) = resolved.client_secret {
+        params.push(("client_secret", secret));
+    }
 
     // SEC-M2: Decrypt code_verifier from stored state
     if let Some(ref encrypted_verifier) = oauth_state.code_verifier {
@@ -898,6 +917,7 @@ pub async fn handle_oauth_callback(
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
         provider_config_id: provider_id.to_string(),
+        credential_user_id: resolved.credential_user_id.clone(),
         token_type: "oauth2".to_string(),
         access_token_encrypted: Some(access_enc),
         refresh_token_encrypted: refresh_enc,

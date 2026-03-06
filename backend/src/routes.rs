@@ -185,6 +185,12 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route(
             "/{provider_id}/refresh",
             post(handlers::user_tokens::manual_refresh),
+        )
+        .route(
+            "/{provider_id}/credentials",
+            get(handlers::user_credentials::get_my_credentials)
+                .put(handlers::user_credentials::set_my_credentials)
+                .delete(handlers::user_credentials::delete_my_credentials),
         );
 
     // TODO(M-7): LLM endpoints share the global rate limiter. Consider adding a

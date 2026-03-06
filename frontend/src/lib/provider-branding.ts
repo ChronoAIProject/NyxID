@@ -39,7 +39,8 @@ const PROVIDER_BRANDS: Readonly<Record<string, ProviderBrand>> = {
     label: "Cohere",
     color: "#39594d",
     bgClass: "bg-[#39594d]/15",
-    textClass: "text-[#39594d]",
+    // dark:text-white needed because #39594d is too dark for dark backgrounds
+    textClass: "text-[#39594d] dark:text-white",
     initial: "Co",
   },
   deepseek: {
@@ -55,6 +56,14 @@ const PROVIDER_BRANDS: Readonly<Record<string, ProviderBrand>> = {
     bgClass: "bg-[#10a37f]/15",
     textClass: "text-[#10a37f]",
     initial: "CX",
+  },
+  twitter: {
+    label: "X (Twitter)",
+    color: "#000000",
+    bgClass: "bg-[#000000]/15",
+    // dark:text-white needed because #000000 is invisible on dark backgrounds
+    textClass: "text-[#000000] dark:text-white",
+    initial: "X",
   },
 };
 

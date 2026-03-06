@@ -5,6 +5,7 @@ import type {
   ProviderListResponse,
   UserProviderToken,
   UserTokenListResponse,
+  UserProviderCredentials,
   OAuthInitiateResponse,
   DeviceCodeInitiateResponse,
   DeviceCodePollRequest,
@@ -70,9 +71,7 @@ export function useConnectApiKey() {
 
 export function useInitiateOAuth() {
   return useMutation({
-    mutationFn: async (
-      providerId: string,
-    ): Promise<OAuthInitiateResponse> => {
+    mutationFn: async (providerId: string): Promise<OAuthInitiateResponse> => {
       return api.get<OAuthInitiateResponse>(
         `/providers/${providerId}/connect/oauth`,
       );
@@ -147,6 +146,65 @@ export function useRefreshProviderToken() {
   });
 }
 
+// --- User provider credentials hooks ---
+
+export function useMyProviderCredentials(providerId: string) {
+  return useQuery({
+    queryKey: ["provider-credentials", providerId],
+    queryFn: async (): Promise<UserProviderCredentials> => {
+      return api.get<UserProviderCredentials>(
+        `/providers/${providerId}/credentials`,
+      );
+    },
+    enabled: providerId.length > 0,
+  });
+}
+
+export function useSetProviderCredentials() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      providerId,
+      client_id,
+      client_secret,
+      label,
+    }: {
+      readonly providerId: string;
+      readonly client_id: string;
+      readonly client_secret?: string;
+      readonly label?: string;
+    }): Promise<UserProviderCredentials> => {
+      return api.put<UserProviderCredentials>(
+        `/providers/${providerId}/credentials`,
+        { client_id, client_secret, label },
+      );
+    },
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["provider-credentials", variables.providerId],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["providers"] });
+    },
+  });
+}
+
+export function useDeleteProviderCredentials() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (providerId: string): Promise<void> => {
+      return api.delete<void>(`/providers/${providerId}/credentials`);
+    },
+    onSuccess: (_data, providerId) => {
+      void queryClient.invalidateQueries({
+        queryKey: ["provider-credentials", providerId],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["providers"] });
+    },
+  });
+}
+
 // --- Admin CRUD hooks ---
 
 export function useCreateProvider() {
@@ -158,6 +216,7 @@ export function useCreateProvider() {
       readonly slug: string;
       readonly description?: string;
       readonly provider_type: string;
+      readonly credential_mode?: string;
       readonly authorization_url?: string;
       readonly token_url?: string;
       readonly revocation_url?: string;
@@ -189,6 +248,7 @@ export function useUpdateProvider(providerId: string) {
       readonly name?: string;
       readonly description?: string;
       readonly is_active?: boolean;
+      readonly credential_mode?: string;
       readonly authorization_url?: string;
       readonly token_url?: string;
       readonly revocation_url?: string;

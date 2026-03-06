@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "provider_configs";
 
+fn default_credential_mode() -> String {
+    "admin".to_string()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderConfig {
     #[serde(rename = "_id")]
@@ -54,6 +58,9 @@ pub struct ProviderConfig {
     pub documentation_url: Option<String>,
 
     pub is_active: bool,
+    /// "admin" | "user" | "both" -- controls where OAuth client credentials come from
+    #[serde(default = "default_credential_mode")]
+    pub credential_mode: String,
     pub created_by: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -94,6 +101,7 @@ mod tests {
             icon_url: None,
             documentation_url: None,
             is_active: true,
+            credential_mode: "admin".to_string(),
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -103,6 +111,7 @@ mod tests {
         assert_eq!(config.slug, restored.slug);
         assert_eq!(config.provider_type, restored.provider_type);
         assert!(restored.supports_pkce);
+        assert_eq!(restored.credential_mode, "admin");
     }
 
     #[test]
@@ -129,6 +138,7 @@ mod tests {
             icon_url: None,
             documentation_url: None,
             is_active: true,
+            credential_mode: "admin".to_string(),
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -137,5 +147,23 @@ mod tests {
         let restored: ProviderConfig = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.provider_type, "api_key");
         assert!(restored.api_key_instructions.is_some());
+    }
+
+    #[test]
+    fn credential_mode_defaults_to_admin() {
+        // Simulate a document without credential_mode (backward compat)
+        let doc = bson::doc! {
+            "_id": "test-id",
+            "slug": "test",
+            "name": "Test",
+            "provider_type": "api_key",
+            "supports_pkce": false,
+            "is_active": true,
+            "created_by": "admin",
+            "created_at": bson::DateTime::from_chrono(Utc::now()),
+            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        };
+        let restored: ProviderConfig = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.credential_mode, "admin");
     }
 }

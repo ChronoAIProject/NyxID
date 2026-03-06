@@ -1,8 +1,12 @@
 import { describe, it, expect } from "vitest";
-import type { DownstreamService } from "@/types/api";
+import type { DownstreamService, ProviderConfig } from "@/types/api";
 import {
   AUTH_TYPE_LABELS,
   SERVICE_CATEGORY_LABELS,
+  canConnectProvider,
+  getProviderConnectHint,
+  getProviderConnectLabel,
+  needsUserCredentials,
   getAuthTypeLabel,
   isOidcService,
   isConnectable,
@@ -28,6 +32,34 @@ function makeService(
     service_category: "connection",
     requires_user_credential: true,
     created_by: "user-1",
+    created_at: "2024-01-01T00:00:00Z",
+    updated_at: "2024-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function makeProvider(
+  overrides: Partial<ProviderConfig> = {},
+): ProviderConfig {
+  return {
+    id: "provider-1",
+    slug: "provider-1",
+    name: "Provider 1",
+    description: null,
+    provider_type: "oauth2",
+    has_oauth_config: true,
+    credential_mode: "admin",
+    default_scopes: null,
+    supports_pkce: true,
+    device_code_url: null,
+    device_token_url: null,
+    device_verification_url: null,
+    hosted_callback_url: null,
+    api_key_instructions: null,
+    api_key_url: null,
+    icon_url: null,
+    documentation_url: null,
+    is_active: true,
     created_at: "2024-01-01T00:00:00Z",
     updated_at: "2024-01-01T00:00:00Z",
     ...overrides,
@@ -137,6 +169,123 @@ describe("isProvider", () => {
     expect(isProvider(makeService({ service_category: "connection" }))).toBe(
       false,
     );
+  });
+});
+
+describe("needsUserCredentials", () => {
+  it("returns false for admin mode", () => {
+    expect(needsUserCredentials(makeProvider({ credential_mode: "admin" }))).toBe(false);
+  });
+
+  it("returns true for user mode", () => {
+    expect(needsUserCredentials(makeProvider({ credential_mode: "user" }))).toBe(true);
+  });
+
+  it("returns true for both mode", () => {
+    expect(needsUserCredentials(makeProvider({ credential_mode: "both" }))).toBe(true);
+  });
+});
+
+describe("provider connection helpers", () => {
+  it("allows configured oauth2 providers to connect", () => {
+    const provider = makeProvider({
+      provider_type: "oauth2",
+      has_oauth_config: true,
+    });
+
+    expect(canConnectProvider(provider)).toBe(true);
+    expect(getProviderConnectLabel(provider)).toBe("Connect");
+    expect(getProviderConnectHint(provider)).toBeNull();
+  });
+
+  it("blocks unconfigured oauth2 providers from connect flow", () => {
+    const provider = makeProvider({
+      provider_type: "oauth2",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider)).toBe(false);
+    expect(getProviderConnectLabel(provider)).toBe("Setup required");
+    expect(getProviderConnectHint(provider)).toBe(
+      "Admin must configure OAuth client credentials first.",
+    );
+  });
+
+  it("keeps device-code providers connectable", () => {
+    const provider = makeProvider({
+      provider_type: "device_code",
+      has_oauth_config: true,
+    });
+
+    expect(canConnectProvider(provider)).toBe(true);
+    expect(getProviderConnectLabel(provider)).toBe("Connect via OAuth");
+  });
+
+  it("blocks user-mode oauth2 provider without user credentials", () => {
+    const provider = makeProvider({
+      provider_type: "oauth2",
+      credential_mode: "user",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider, false)).toBe(false);
+    expect(getProviderConnectHint(provider, false)).toBe(
+      "Set up your OAuth app credentials first.",
+    );
+  });
+
+  it("allows user-mode oauth2 provider with user credentials", () => {
+    const provider = makeProvider({
+      provider_type: "oauth2",
+      credential_mode: "user",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider, true)).toBe(true);
+    expect(getProviderConnectHint(provider, true)).toBeNull();
+  });
+
+  it("allows both-mode provider with admin config and no user credentials", () => {
+    const provider = makeProvider({
+      provider_type: "oauth2",
+      credential_mode: "both",
+      has_oauth_config: true,
+    });
+
+    expect(canConnectProvider(provider, false)).toBe(true);
+  });
+
+  it("allows both-mode provider with user credentials and no admin config", () => {
+    const provider = makeProvider({
+      provider_type: "oauth2",
+      credential_mode: "both",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider, true)).toBe(true);
+  });
+
+  it("blocks both-mode provider without any credentials", () => {
+    const provider = makeProvider({
+      provider_type: "oauth2",
+      credential_mode: "both",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider, false)).toBe(false);
+    expect(getProviderConnectHint(provider, false)).toBe(
+      "Admin credentials not configured. Set up your own OAuth app.",
+    );
+  });
+
+  it("always allows api_key providers regardless of credential_mode", () => {
+    const provider = makeProvider({
+      provider_type: "api_key",
+      credential_mode: "user",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider, false)).toBe(true);
   });
 });
 

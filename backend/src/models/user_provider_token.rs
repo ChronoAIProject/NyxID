@@ -11,6 +11,11 @@ pub struct UserProviderToken {
     pub id: String,
     pub user_id: String,
     pub provider_config_id: String,
+    /// When present, the OAuth connection was minted with user-provided app
+    /// credentials owned by this user ID. `None` means provider-level
+    /// credentials were used instead.
+    #[serde(default)]
+    pub credential_user_id: Option<String>,
 
     /// "oauth2" | "api_key"
     pub token_type: String,
@@ -61,6 +66,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
+            credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             token_type: "oauth2".to_string(),
             access_token_encrypted: Some(vec![1, 2, 3]),
             refresh_token_encrypted: Some(vec![4, 5, 6]),
@@ -81,6 +87,7 @@ mod tests {
         assert_eq!(restored.token_type, "oauth2");
         assert!(restored.expires_at.is_some());
         assert!(restored.last_refreshed_at.is_some());
+        assert_eq!(restored.credential_user_id, token.credential_user_id);
     }
 
     #[test]
@@ -89,6 +96,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             provider_config_id: uuid::Uuid::new_v4().to_string(),
+            credential_user_id: None,
             token_type: "api_key".to_string(),
             access_token_encrypted: None,
             refresh_token_encrypted: None,
@@ -107,5 +115,20 @@ mod tests {
         let restored: UserProviderToken = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.token_type, "api_key");
         assert!(restored.api_key_encrypted.is_some());
+    }
+
+    #[test]
+    fn bson_backward_compat_missing_credential_user_id() {
+        let doc = bson::doc! {
+            "_id": uuid::Uuid::new_v4().to_string(),
+            "user_id": uuid::Uuid::new_v4().to_string(),
+            "provider_config_id": uuid::Uuid::new_v4().to_string(),
+            "token_type": "oauth2",
+            "status": "active",
+            "created_at": bson::DateTime::from_chrono(Utc::now()),
+            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        };
+        let restored: UserProviderToken = bson::from_document(doc).expect("deserialize");
+        assert!(restored.credential_user_id.is_none());
     }
 }

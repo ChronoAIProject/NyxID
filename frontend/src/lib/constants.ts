@@ -1,4 +1,4 @@
-import type { DownstreamService } from "@/types/api";
+import type { DownstreamService, ProviderConfig } from "@/types/api";
 
 export type OAuthScopeRisk = "low" | "medium" | "high";
 
@@ -84,6 +84,59 @@ export function isConnectable(service: DownstreamService): boolean {
 
 export function isProvider(service: DownstreamService): boolean {
   return service.service_category === "provider";
+}
+
+export function needsUserCredentials(provider: ProviderConfig): boolean {
+  const mode = provider.credential_mode;
+  return mode === "user" || mode === "both";
+}
+
+export function canConnectProvider(
+  provider: ProviderConfig,
+  hasUserCredentials = false,
+): boolean {
+  if (provider.provider_type !== "oauth2" && provider.provider_type !== "device_code") {
+    return true;
+  }
+  const mode = provider.credential_mode;
+  if (mode === "user") {
+    return hasUserCredentials;
+  }
+  if (mode === "both") {
+    return provider.has_oauth_config || hasUserCredentials;
+  }
+  return provider.has_oauth_config;
+}
+
+export function getProviderConnectLabel(
+  provider: ProviderConfig,
+  hasUserCredentials = false,
+): string {
+  if (!canConnectProvider(provider, hasUserCredentials)) {
+    return "Setup required";
+  }
+
+  return provider.provider_type === "device_code"
+    ? "Connect via OAuth"
+    : "Connect";
+}
+
+export function getProviderConnectHint(
+  provider: ProviderConfig,
+  hasUserCredentials = false,
+): string | null {
+  if (!canConnectProvider(provider, hasUserCredentials)) {
+    const mode = provider.credential_mode;
+    if (mode === "user") {
+      return "Set up your OAuth app credentials first.";
+    }
+    if (mode === "both" && !hasUserCredentials) {
+      return "Admin credentials not configured. Set up your own OAuth app.";
+    }
+    return "Admin must configure OAuth client credentials first.";
+  }
+
+  return null;
 }
 
 export function getCredentialInputType(service: DownstreamService): {

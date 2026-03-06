@@ -12,6 +12,7 @@ use crate::models::provider_config::{COLLECTION_NAME, ProviderConfig};
 use crate::models::service_provider_requirement::{
     COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
 };
+use crate::models::user_provider_credentials::COLLECTION_NAME as USER_PROVIDER_CREDENTIALS;
 use crate::models::user_provider_token::COLLECTION_NAME as USER_PROVIDER_TOKENS;
 
 /// Seed default AI provider configurations at startup (idempotent).
@@ -59,6 +60,7 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://platform.openai.com/docs".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -129,6 +131,7 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://developers.openai.com/codex/auth/".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -167,6 +170,7 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://docs.anthropic.com".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -202,6 +206,7 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://ai.google.dev/docs".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -240,6 +245,7 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://docs.mistral.ai".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -275,6 +281,7 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://docs.cohere.com".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -310,6 +317,7 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://api-docs.deepseek.com".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -319,6 +327,71 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 8. Twitter / X (OAuth 2.0 with PKCE)
+    if !slug_exists!("twitter") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "twitter".to_string(),
+            name: "Twitter / X".to_string(),
+            description: Some("Twitter/X API access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://x.com/i/oauth2/authorize".to_string()),
+            token_url: Some("https://api.x.com/2/oauth2/token".to_string()),
+            revocation_url: Some("https://api.x.com/2/oauth2/revoke".to_string()),
+            // Write access is intentional: NyxID is a credential broker, so delegated
+            // clients commonly need to post on behalf of users. Admins can customise
+            // scopes per deployment.
+            default_scopes: Some(vec![
+                "tweet.read".to_string(),
+                "tweet.write".to_string(),
+                "users.read".to_string(),
+                "offline.access".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://developer.x.com/en/docs/x-api".to_string()),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "twitter", "Seeded default provider: Twitter / X");
+        seeded_count += 1;
+    }
+
+    // Migration: set credential_mode on existing Twitter providers that predate user mode.
+    // The $ne filter means this is a no-op after migration completes.
+    if let Some(existing_twitter) = collection
+        .find_one(doc! { "slug": "twitter", "credential_mode": { "$ne": "user" } })
+        .await?
+    {
+        if existing_twitter.credential_mode == "admin" {
+            collection
+                .update_one(
+                    doc! { "_id": &existing_twitter.id },
+                    doc! { "$set": {
+                        "credential_mode": "user",
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    }},
+                )
+                .await?;
+            tracing::info!(
+                slug = "twitter",
+                "Migrated existing Twitter provider to credential_mode=user"
+            );
+        }
+    }
+
     if seeded_count > 0 {
         tracing::info!(count = seeded_count, "Default provider seeding complete");
     }
@@ -326,7 +399,7 @@ pub async fn seed_default_providers(
     Ok(())
 }
 
-struct LlmServiceSeed {
+struct DefaultServiceSeed {
     provider_slug: &'static str,
     service_slug: &'static str,
     service_name: &'static str,
@@ -335,8 +408,8 @@ struct LlmServiceSeed {
     injection_key: &'static str,
 }
 
-const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
-    LlmServiceSeed {
+const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
+    DefaultServiceSeed {
         provider_slug: "openai",
         service_slug: "llm-openai",
         service_name: "OpenAI API",
@@ -344,7 +417,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "bearer",
         injection_key: "Authorization",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "openai-codex",
         service_slug: "llm-openai-codex",
         service_name: "OpenAI Codex API",
@@ -352,7 +425,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "bearer",
         injection_key: "Authorization",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "anthropic",
         service_slug: "llm-anthropic",
         service_name: "Anthropic API",
@@ -360,7 +433,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "header",
         injection_key: "x-api-key",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "google-ai",
         service_slug: "llm-google-ai",
         service_name: "Google AI API",
@@ -368,7 +441,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "query",
         injection_key: "key",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "mistral",
         service_slug: "llm-mistral",
         service_name: "Mistral AI API",
@@ -376,7 +449,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "bearer",
         injection_key: "Authorization",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "cohere",
         service_slug: "llm-cohere",
         service_name: "Cohere API",
@@ -384,7 +457,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "bearer",
         injection_key: "Authorization",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "deepseek",
         service_slug: "llm-deepseek",
         service_name: "DeepSeek API",
@@ -392,13 +465,21 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "bearer",
         injection_key: "Authorization",
     },
+    DefaultServiceSeed {
+        provider_slug: "twitter",
+        service_slug: "api-twitter",
+        service_name: "Twitter / X API",
+        base_url: "https://api.x.com/2",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
 ];
 
-/// Seed downstream services for each LLM provider (idempotent).
+/// Seed downstream services for each default provider (idempotent).
 ///
 /// Creates a `DownstreamService` and a `ServiceProviderRequirement` for each
 /// seeded provider that does not yet have a corresponding downstream service.
-pub async fn seed_default_llm_services(
+pub async fn seed_default_services(
     db: &mongodb::Database,
     encryption_key_hex: &str,
 ) -> AppResult<()> {
@@ -435,7 +516,7 @@ pub async fn seed_default_llm_services(
         );
     }
 
-    for seed in LLM_SERVICE_SEEDS {
+    for seed in DEFAULT_SERVICE_SEEDS {
         // Find the provider by slug
         let provider = match provider_col
             .find_one(doc! { "slug": seed.provider_slug })
@@ -458,15 +539,23 @@ pub async fn seed_default_llm_services(
         let empty_credential = aes::encrypt(b"", &encryption_key)?;
 
         let service_id = Uuid::new_v4().to_string();
+        let is_llm_service = seed.service_slug.starts_with("llm-");
+        let description = if is_llm_service {
+            format!("{} proxied via NyxID LLM gateway", seed.service_name)
+        } else {
+            format!("{} proxied via NyxID proxy", seed.service_name)
+        };
+        let delegation_scope = if is_llm_service {
+            "llm:proxy"
+        } else {
+            "proxy:*"
+        };
 
         let service = DownstreamService {
             id: service_id.clone(),
             name: seed.service_name.to_string(),
             slug: seed.service_slug.to_string(),
-            description: Some(format!(
-                "{} proxied via NyxID LLM gateway",
-                seed.service_name
-            )),
+            description: Some(description),
             base_url: seed.base_url.to_string(),
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
@@ -484,7 +573,7 @@ pub async fn seed_default_llm_services(
             identity_include_name: false,
             identity_jwt_audience: None,
             inject_delegation_token: false,
-            delegation_token_scope: "llm:proxy".to_string(),
+            delegation_token_scope: delegation_scope.to_string(),
             provider_config_id: Some(provider.id.clone()),
             created_at: now,
             updated_at: now,
@@ -510,7 +599,7 @@ pub async fn seed_default_llm_services(
         tracing::info!(
             slug = seed.service_slug,
             provider = seed.provider_slug,
-            "Seeded LLM downstream service"
+            "Seeded default downstream service"
         );
         seeded_count += 1;
     }
@@ -518,7 +607,7 @@ pub async fn seed_default_llm_services(
     if seeded_count > 0 {
         tracing::info!(
             count = seeded_count,
-            "LLM downstream service seeding complete"
+            "Default downstream service seeding complete"
         );
     }
 
@@ -531,8 +620,8 @@ pub struct OAuthProviderInput {
     pub token_url: String,
     pub revocation_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
-    pub client_id: String,
-    pub client_secret: String,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
     pub supports_pkce: bool,
 }
 
@@ -545,7 +634,7 @@ pub struct DeviceCodeProviderInput {
     pub device_verification_url: Option<String>,
     pub hosted_callback_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
-    pub client_id: String,
+    pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub supports_pkce: bool,
 }
@@ -576,6 +665,7 @@ pub struct ProviderUpdateInput {
     pub api_key_url: Option<String>,
     pub icon_url: Option<String>,
     pub documentation_url: Option<String>,
+    pub credential_mode: Option<String>,
 }
 
 /// Create a new provider configuration. Admin only.
@@ -586,6 +676,7 @@ pub async fn create_provider(
     name: &str,
     slug: &str,
     provider_type: &str,
+    credential_mode: &str,
     oauth_config: Option<OAuthProviderInput>,
     api_key_config: Option<ApiKeyProviderInput>,
     device_code_config: Option<DeviceCodeProviderInput>,
@@ -599,6 +690,13 @@ pub async fn create_provider(
         return Err(AppError::ValidationError(format!(
             "provider_type must be one of: {}",
             valid_types.join(", ")
+        )));
+    }
+    let valid_modes = ["admin", "user", "both"];
+    if !valid_modes.contains(&credential_mode) {
+        return Err(AppError::ValidationError(format!(
+            "credential_mode must be one of: {}",
+            valid_modes.join(", ")
         )));
     }
 
@@ -619,16 +717,29 @@ pub async fn create_provider(
 
     // Encrypt OAuth credentials if provided
     let (client_id_enc, client_secret_enc) = if let Some(ref oauth) = oauth_config {
-        let cid = aes::encrypt(oauth.client_id.as_bytes(), encryption_key)?;
-        let csec = aes::encrypt(oauth.client_secret.as_bytes(), encryption_key)?;
-        (Some(cid), Some(csec))
+        let cid = oauth
+            .client_id
+            .as_ref()
+            .map(|value| aes::encrypt(value.as_bytes(), encryption_key))
+            .transpose()?;
+        let csec = oauth
+            .client_secret
+            .as_ref()
+            .map(|value| aes::encrypt(value.as_bytes(), encryption_key))
+            .transpose()?;
+        (cid, csec)
     } else if let Some(ref dc) = device_code_config {
-        let cid = aes::encrypt(dc.client_id.as_bytes(), encryption_key)?;
-        let csec = match dc.client_secret.as_ref() {
-            Some(s) => Some(aes::encrypt(s.as_bytes(), encryption_key)?),
-            None => None,
-        };
-        (Some(cid), csec)
+        let cid = dc
+            .client_id
+            .as_ref()
+            .map(|value| aes::encrypt(value.as_bytes(), encryption_key))
+            .transpose()?;
+        let csec = dc
+            .client_secret
+            .as_ref()
+            .map(|value| aes::encrypt(value.as_bytes(), encryption_key))
+            .transpose()?;
+        (cid, csec)
     } else {
         (None, None)
     };
@@ -683,6 +794,7 @@ pub async fn create_provider(
         icon_url: icon_url.map(String::from),
         documentation_url: documentation_url.map(String::from),
         is_active: true,
+        credential_mode: credential_mode.to_string(),
         created_by: created_by.to_string(),
         created_at: now,
         updated_at: now,
@@ -813,6 +925,16 @@ pub async fn update_provider(
     if let Some(ref url) = updates.documentation_url {
         set_doc.insert("documentation_url", url.as_str());
     }
+    if let Some(ref mode) = updates.credential_mode {
+        let valid_modes = ["admin", "user", "both"];
+        if !valid_modes.contains(&mode.as_str()) {
+            return Err(AppError::ValidationError(format!(
+                "credential_mode must be one of: {}",
+                valid_modes.join(", ")
+            )));
+        }
+        set_doc.insert("credential_mode", mode.as_str());
+    }
 
     use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
@@ -860,7 +982,12 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
         )
         .await?;
 
-    tracing::info!(provider_id = %provider_id, "Provider deactivated and user tokens revoked");
+    // Delete all per-user OAuth credentials for this provider
+    db.collection::<mongodb::bson::Document>(USER_PROVIDER_CREDENTIALS)
+        .delete_many(doc! { "provider_config_id": provider_id })
+        .await?;
+
+    tracing::info!(provider_id = %provider_id, "Provider deactivated, user tokens revoked, and user credentials deleted");
 
     Ok(())
 }

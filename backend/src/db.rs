@@ -521,6 +521,17 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     sac.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
+    // ── user_provider_credentials ──
+    let user_creds = db.collection::<mongodb::bson::Document>("user_provider_credentials");
+    user_creds
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "provider_config_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // ── notification_channels ──
     let notification_channels = db.collection::<mongodb::bson::Document>("notification_channels");
     notification_channels

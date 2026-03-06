@@ -8,7 +8,7 @@ use crate::AppState;
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, provider_service};
+use crate::services::{audit_service, provider_service, user_credentials_service};
 
 use super::services_helpers::{require_admin, validate_base_url};
 
@@ -20,6 +20,7 @@ pub struct CreateProviderRequest {
     pub slug: String,
     pub description: Option<String>,
     pub provider_type: String,
+    pub credential_mode: Option<String>,
     // OAuth2 fields
     pub authorization_url: Option<String>,
     pub token_url: Option<String>,
@@ -76,6 +77,7 @@ pub struct UpdateProviderRequest {
     pub api_key_url: Option<String>,
     pub icon_url: Option<String>,
     pub documentation_url: Option<String>,
+    pub credential_mode: Option<String>,
 }
 
 impl std::fmt::Debug for UpdateProviderRequest {
@@ -134,6 +136,7 @@ pub struct ProviderResponse {
     pub icon_url: Option<String>,
     pub documentation_url: Option<String>,
     pub is_active: bool,
+    pub credential_mode: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -149,13 +152,15 @@ pub struct DeleteProviderResponse {
 }
 
 fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> ProviderResponse {
+    let has_oauth_config = provider_has_oauth_config(&p);
+
     ProviderResponse {
         id: p.id,
         slug: p.slug,
         name: p.name,
         description: p.description,
         provider_type: p.provider_type,
-        has_oauth_config: p.client_id_encrypted.is_some(),
+        has_oauth_config,
         default_scopes: p.default_scopes,
         supports_pkce: p.supports_pkce,
         device_code_url: p.device_code_url,
@@ -167,9 +172,37 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         icon_url: p.icon_url,
         documentation_url: p.documentation_url,
         is_active: p.is_active,
+        credential_mode: p.credential_mode,
         created_at: p.created_at.to_rfc3339(),
         updated_at: p.updated_at.to_rfc3339(),
     }
+}
+
+/// Check whether a provider has enough configuration to start an OAuth flow.
+///
+/// - For `"user"` mode: true if the shared OAuth URLs are configured.
+/// - For `"admin"`/`"both"` mode: true if OAuth URLs AND admin-level credentials are configured.
+fn provider_has_oauth_config(p: &crate::models::provider_config::ProviderConfig) -> bool {
+    let has_urls = match p.provider_type.as_str() {
+        "oauth2" => p.authorization_url.is_some() && p.token_url.is_some(),
+        "device_code" => {
+            p.authorization_url.is_some()
+                && p.token_url.is_some()
+                && p.device_code_url.is_some()
+                && p.device_token_url.is_some()
+        }
+        _ => return false,
+    };
+
+    if !has_urls {
+        return false;
+    }
+
+    if p.credential_mode == "user" {
+        return true;
+    }
+
+    user_credentials_service::provider_has_admin_oauth_credentials(p)
 }
 
 // --- Handlers ---
@@ -217,17 +250,19 @@ pub async fn create_provider(
             valid_types.join(", ")
         )));
     }
+    let credential_mode = body.credential_mode.as_deref().unwrap_or("admin");
+    let valid_credential_modes = ["admin", "user", "both"];
+    if !valid_credential_modes.contains(&credential_mode) {
+        return Err(AppError::ValidationError(format!(
+            "credential_mode must be one of: {}",
+            valid_credential_modes.join(", ")
+        )));
+    }
 
     let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
     let user_id_str = auth_user.user_id.to_string();
 
     let oauth_config = if body.provider_type == "oauth2" {
-        let client_id = body.client_id.as_ref().ok_or_else(|| {
-            AppError::ValidationError("client_id is required for OAuth2 providers".to_string())
-        })?;
-        let client_secret = body.client_secret.as_ref().ok_or_else(|| {
-            AppError::ValidationError("client_secret is required for OAuth2 providers".to_string())
-        })?;
         let authorization_url = body.authorization_url.as_ref().ok_or_else(|| {
             AppError::ValidationError(
                 "authorization_url is required for OAuth2 providers".to_string(),
@@ -241,13 +276,36 @@ pub async fn create_provider(
         validate_base_url(authorization_url, state.config.is_development())?;
         validate_base_url(token_url, state.config.is_development())?;
 
+        let client_id = body.client_id.clone();
+        let client_secret = body.client_secret.clone();
+        let has_client_id = client_id.is_some();
+        let has_client_secret = client_secret.is_some();
+
+        if credential_mode == "admin" {
+            if !has_client_id {
+                return Err(AppError::ValidationError(
+                    "client_id is required for OAuth2 providers in admin mode".to_string(),
+                ));
+            }
+            if !has_client_secret {
+                return Err(AppError::ValidationError(
+                    "client_secret is required for OAuth2 providers in admin mode".to_string(),
+                ));
+            }
+        } else if has_client_id != has_client_secret {
+            return Err(AppError::ValidationError(
+                "OAuth2 admin fallback credentials must include both client_id and client_secret"
+                    .to_string(),
+            ));
+        }
+
         Some(provider_service::OAuthProviderInput {
             authorization_url: authorization_url.clone(),
             token_url: token_url.clone(),
             revocation_url: body.revocation_url.clone(),
             default_scopes: body.default_scopes.clone(),
-            client_id: client_id.clone(),
-            client_secret: client_secret.clone(),
+            client_id,
+            client_secret,
             supports_pkce: body.supports_pkce.unwrap_or(false),
         })
     } else {
@@ -255,9 +313,6 @@ pub async fn create_provider(
     };
 
     let device_code_config = if body.provider_type == "device_code" {
-        let client_id = body.client_id.as_ref().ok_or_else(|| {
-            AppError::ValidationError("client_id is required for device_code providers".to_string())
-        })?;
         let authorization_url = body.authorization_url.as_ref().ok_or_else(|| {
             AppError::ValidationError(
                 "authorization_url is required for device_code providers".to_string(),
@@ -289,6 +344,18 @@ pub async fn create_provider(
             validate_base_url(url, state.config.is_development())?;
         }
 
+        let client_id = body.client_id.clone();
+        if credential_mode == "admin" && client_id.is_none() {
+            return Err(AppError::ValidationError(
+                "client_id is required for device_code providers in admin mode".to_string(),
+            ));
+        }
+        if body.client_secret.is_some() && client_id.is_none() {
+            return Err(AppError::ValidationError(
+                "client_id is required when setting a device_code client_secret".to_string(),
+            ));
+        }
+
         Some(provider_service::DeviceCodeProviderInput {
             authorization_url: authorization_url.clone(),
             token_url: token_url.clone(),
@@ -297,7 +364,7 @@ pub async fn create_provider(
             device_verification_url: body.device_verification_url.clone(),
             hosted_callback_url: body.hosted_callback_url.clone(),
             default_scopes: body.default_scopes.clone(),
-            client_id: client_id.clone(),
+            client_id,
             client_secret: body.client_secret.clone(),
             supports_pkce: body.supports_pkce.unwrap_or(true),
         })
@@ -320,6 +387,7 @@ pub async fn create_provider(
         &body.name,
         &body.slug,
         &body.provider_type,
+        credential_mode,
         oauth_config,
         api_key_config,
         device_code_config,
@@ -405,6 +473,7 @@ pub async fn update_provider(
         api_key_url: body.api_key_url,
         icon_url: body.icon_url,
         documentation_url: body.documentation_url,
+        credential_mode: body.credential_mode,
     };
 
     let updated =
@@ -445,4 +514,78 @@ pub async fn delete_provider(
     Ok(Json(DeleteProviderResponse {
         message: "Provider deactivated and user tokens revoked".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::provider_has_oauth_config;
+    use crate::models::provider_config::ProviderConfig;
+
+    fn make_provider(provider_type: &str) -> ProviderConfig {
+        ProviderConfig {
+            id: "provider-1".to_string(),
+            slug: "provider-1".to_string(),
+            name: "Provider".to_string(),
+            description: None,
+            provider_type: provider_type.to_string(),
+            authorization_url: Some("https://auth.example.com/authorize".to_string()),
+            token_url: Some("https://auth.example.com/token".to_string()),
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: Some(vec![1, 2, 3]),
+            client_secret_encrypted: Some(vec![4, 5, 6]),
+            supports_pkce: true,
+            device_code_url: Some("https://auth.example.com/device".to_string()),
+            device_token_url: Some("https://auth.example.com/device/token".to_string()),
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            created_by: "system".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn oauth2_requires_a_client_secret_to_be_connectable() {
+        let mut provider = make_provider("oauth2");
+        provider.client_secret_encrypted = None;
+
+        assert!(!provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn device_code_provider_can_be_configured_without_a_client_secret() {
+        let mut provider = make_provider("device_code");
+        provider.client_secret_encrypted = None;
+
+        assert!(provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn both_mode_requires_admin_credentials_for_shared_connectability() {
+        let mut provider = make_provider("oauth2");
+        provider.credential_mode = "both".to_string();
+        provider.client_id_encrypted = None;
+        provider.client_secret_encrypted = None;
+
+        assert!(!provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn user_mode_only_needs_oauth_urls() {
+        let mut provider = make_provider("oauth2");
+        provider.credential_mode = "user".to_string();
+        provider.client_id_encrypted = None;
+        provider.client_secret_encrypted = None;
+
+        assert!(provider_has_oauth_config(&provider));
+    }
 }

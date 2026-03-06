@@ -45,6 +45,13 @@ describe("getProviderBrand", () => {
     expect(brand.initial).toBe("CX");
   });
 
+  it("returns Twitter brand for 'twitter' slug", () => {
+    const brand = getProviderBrand("twitter");
+    expect(brand.label).toBe("X (Twitter)");
+    expect(brand.initial).toBe("X");
+    expect(brand.color).toBe("#000000");
+  });
+
   it("returns default brand for unknown slug", () => {
     const brand = getProviderBrand("unknown-provider");
     expect(brand.label).toBe("");
@@ -63,6 +70,7 @@ describe("hasKnownBrand", () => {
     expect(hasKnownBrand("cohere")).toBe(true);
     expect(hasKnownBrand("openai-codex")).toBe(true);
     expect(hasKnownBrand("deepseek")).toBe(true);
+    expect(hasKnownBrand("twitter")).toBe(true);
   });
 
   it("returns false for unknown slugs", () => {
