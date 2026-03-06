@@ -1,5 +1,4 @@
 export type ChallengeStatus = "PENDING" | "APPROVED" | "DENIED" | "EXPIRED";
-export type ApprovalStatus = "ACTIVE" | "REVOKED" | "EXPIRED";
 
 export type ChallengeItem = {
   id: string;
@@ -15,23 +14,20 @@ export type ChallengeItem = {
 export type ChallengeDetail = ChallengeItem & {
   summary: string;
   request_context: {
-    ip: string;
     client: string;
     location: string;
   };
-  allowed_durations_sec: number[];
-  default_duration_sec: number;
 };
 
 export type ApprovalItem = {
   id: string;
-  challenge_id: string;
-  action: string;
-  resource: string;
-  status: ApprovalStatus;
-  approved_at: string;
+  service_id: string;
+  service_name: string;
+  requester_type: string;
+  requester_id: string;
+  requester_label?: string | null;
+  granted_at: string;
   expires_at: string;
-  revoked_at?: string;
 };
 
 export type PageResponse<T> = {

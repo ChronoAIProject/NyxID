@@ -22,6 +22,7 @@ type SocialCallback = {
   status: "success" | "error";
   accessToken?: string;
   refreshToken?: string;
+  expiresIn?: number;
   error?: string;
   provider?: SocialProvider;
 };
@@ -76,10 +77,15 @@ function parseSocialCallback(url: string): SocialCallback | null {
       };
     }
 
+    const expiresInRaw = parsed.searchParams.get("expires_in");
+    const expiresInParsed = expiresInRaw ? Number(expiresInRaw) : NaN;
+
     return {
       status: "success",
       accessToken: parsed.searchParams.get("access_token") ?? undefined,
       refreshToken: parsed.searchParams.get("refresh_token") ?? undefined,
+      expiresIn:
+        Number.isFinite(expiresInParsed) && expiresInParsed > 0 ? expiresInParsed : undefined,
       provider,
     };
   } catch {
@@ -182,6 +188,10 @@ export function AuthHomeScreen({ navigation }: Props) {
         await signInWithSession({
           accessToken: callback.accessToken,
           refreshToken: callback.refreshToken,
+          accessTokenExpiresAt:
+            typeof callback.expiresIn === "number"
+              ? Date.now() + Math.floor(callback.expiresIn * 1000)
+              : undefined,
         });
       } catch (error) {
         showToast(resolveAuthError(error), "error");

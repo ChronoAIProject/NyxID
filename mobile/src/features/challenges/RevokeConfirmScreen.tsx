@@ -12,6 +12,16 @@ import { radius, spacing, typeScale } from "../../theme/designTokens";
 
 type Props = NativeStackScreenProps<RootStackParamList, "RevokeConfirm">;
 
+function formatApprovalRequester(
+  requesterType: string,
+  requesterLabel: string | null | undefined
+): string {
+  if (requesterLabel && requesterLabel.trim().length > 0) {
+    return `${requesterType} · ${requesterLabel}`;
+  }
+  return requesterType;
+}
+
 export function RevokeConfirmScreen({ navigation, route }: Props) {
   const queryClient = useQueryClient();
   const approvalId = route.params.approvalId;
@@ -47,12 +57,16 @@ export function RevokeConfirmScreen({ navigation, route }: Props) {
         <View style={flowStyles.card}>
           <Text style={flowStyles.cardTitle}>Approval</Text>
           <View style={flowStyles.row}>
-            <Text style={flowStyles.rowLabel}>Action</Text>
-            <Text style={flowStyles.rowValue}>{approval?.action ?? "--"}</Text>
+            <Text style={flowStyles.rowLabel}>Service</Text>
+            <Text style={flowStyles.rowValue}>{approval?.service_name ?? "--"}</Text>
           </View>
           <View style={flowStyles.row}>
-            <Text style={flowStyles.rowLabel}>Resource</Text>
-            <Text style={flowStyles.rowValue}>{approval?.resource ?? "--"}</Text>
+            <Text style={flowStyles.rowLabel}>Requester</Text>
+            <Text style={flowStyles.rowValue}>
+              {approval
+                ? formatApprovalRequester(approval.requester_type, approval.requester_label)
+                : "--"}
+            </Text>
           </View>
           <View style={flowStyles.rowLast}>
             <Text style={flowStyles.rowLabel}>Approval ID</Text>

@@ -10,6 +10,7 @@ import { ScreenContainer } from "../../components/ScreenContainer";
 import { SectionBadge } from "../../components/SectionBadge";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { mobileApi } from "../../lib/api/mobileApi";
+import { formatRelativeTimeFromMs } from "../../lib/time";
 import { mobileTheme } from "../../theme/mobileTheme";
 import { flowStyles } from "../../theme/flowStyles";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
@@ -50,15 +51,27 @@ function resolveApprovalsError(error: unknown): string {
   return __DEV__ && raw ? raw : "Failed to load approvals.";
 }
 
+function formatApprovalRequester(
+  requesterType: string,
+  requesterLabel: string | null | undefined
+): string {
+  if (requesterLabel && requesterLabel.trim().length > 0) {
+    return `${requesterType} · ${requesterLabel}`;
+  }
+  return requesterType;
+}
+
 export function ApprovalsScreen({ navigation }: Props) {
   const [toast, setToast] = useState<ToastState | null>(null);
-  const { data, isLoading, isError, error, isRefetching, refetch } = useQuery({
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const { data, isLoading, isError, error, isRefetching, refetch, dataUpdatedAt } = useQuery({
     queryKey: ["approvals"],
     queryFn: mobileApi.getApprovals,
   });
   const items = Array.isArray(data?.items) ? data.items : [];
   const total = typeof data?.total === "number" ? data.total : items.length;
   const showErrorState = isError && items.length === 0;
+  const lastSyncLabel = formatRelativeTimeFromMs(dataUpdatedAt, nowMs);
 
   const showToast = (message: string, kind: ToastKind) => {
     setToast({ message, kind });
@@ -69,6 +82,11 @@ export function ApprovalsScreen({ navigation }: Props) {
     const timer = setTimeout(() => setToast(null), 2400);
     return () => clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!isError) return;
@@ -109,7 +127,7 @@ export function ApprovalsScreen({ navigation }: Props) {
           </View>
           <View style={flowStyles.rowLast}>
             <Text style={flowStyles.rowLabel}>Last Sync</Text>
-            <Text style={flowStyles.rowValue}>Just now</Text>
+            <Text style={flowStyles.rowValue}>{lastSyncLabel}</Text>
           </View>
         </View>
 
@@ -130,8 +148,10 @@ export function ApprovalsScreen({ navigation }: Props) {
             <>
               {items.map((item) => (
                 <View key={item.id} style={styles.itemCard}>
-                  <Text style={styles.itemTitle}>{item.action}</Text>
-                  <Text style={styles.itemSub}>{item.resource}</Text>
+                  <Text style={styles.itemTitle}>{item.service_name}</Text>
+                  <Text style={styles.itemSub}>
+                    {formatApprovalRequester(item.requester_type, item.requester_label)}
+                  </Text>
                   <Text style={styles.itemTime}>
                     Grant expires: {formatGrantExpiry(item.expires_at)}
                   </Text>
