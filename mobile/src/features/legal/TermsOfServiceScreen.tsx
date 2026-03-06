@@ -90,7 +90,7 @@ const TERMS_SECTIONS: TermsSection[] = [
   {
     title: "9. Account Deletion",
     paragraphs: [
-      "You may permanently delete your account and all associated server-side data from the Account Settings screen within the App. This action is irreversible. Upon deletion, your sessions are revoked and personal data is removed in accordance with our Privacy Policy.",
+      "You may permanently delete your account and all associated server-side data from the Account Settings screen within the App. This action is irreversible. Upon deletion, your sessions are revoked and personal data is removed in accordance with our Privacy Policy. If you sign in again with the same provider after deletion, a new account will be created; your previous data will not be restored.",
     ],
   },
   {

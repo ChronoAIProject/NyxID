@@ -22,6 +22,7 @@ type SocialCallback = {
   status: "success" | "error";
   accessToken?: string;
   refreshToken?: string;
+  expiresIn?: number;
   error?: string;
   provider?: SocialProvider;
 };
@@ -76,10 +77,15 @@ function parseSocialCallback(url: string): SocialCallback | null {
       };
     }
 
+    const expiresInRaw = parsed.searchParams.get("expires_in");
+    const expiresInParsed = expiresInRaw ? Number(expiresInRaw) : NaN;
+
     return {
       status: "success",
       accessToken: parsed.searchParams.get("access_token") ?? undefined,
       refreshToken: parsed.searchParams.get("refresh_token") ?? undefined,
+      expiresIn:
+        Number.isFinite(expiresInParsed) && expiresInParsed > 0 ? expiresInParsed : undefined,
       provider,
     };
   } catch {
@@ -182,6 +188,10 @@ export function AuthHomeScreen({ navigation }: Props) {
         await signInWithSession({
           accessToken: callback.accessToken,
           refreshToken: callback.refreshToken,
+          accessTokenExpiresAt:
+            typeof callback.expiresIn === "number"
+              ? Date.now() + Math.floor(callback.expiresIn * 1000)
+              : undefined,
         });
       } catch (error) {
         showToast(resolveAuthError(error), "error");
@@ -296,6 +306,9 @@ export function AuthHomeScreen({ navigation }: Props) {
             </Text>
             .
           </Text>
+          <Text style={styles.legalNote}>
+            Account deletion is permanent; signing in again with the same provider creates a new account.
+          </Text>
         </View>
       </ScrollView>
       <ToastOverlay toast={toast} bottom={64} />
@@ -312,6 +325,12 @@ const styles = StyleSheet.create({
     ...typeScale.caption,
     fontSize: 11,
     marginTop: spacing.sm,
+  },
+  legalNote: {
+    color: "#5A5468",
+    ...typeScale.caption,
+    fontSize: 10,
+    marginTop: spacing.xs,
   },
   legalLink: {
     color: "#B9B4CC",

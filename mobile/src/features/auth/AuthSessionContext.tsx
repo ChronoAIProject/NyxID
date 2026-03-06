@@ -1,4 +1,5 @@
-import { createContext, PropsWithChildren, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, PropsWithChildren, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { AppState } from "react-native";
 import {
   clearStoredAuthSession,
   loadStoredAuthSession,
@@ -11,6 +12,9 @@ import {
   clearLocalPushRegistrationState,
   deactivatePushOnLogout,
 } from "../../lib/notifications/pushNotifications";
+import { refreshAccessTokenIfNeeded, setSessionInvalidationListener } from "../../lib/api/http";
+
+const PROACTIVE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
 type AuthSessionContextValue = {
   isAuthenticated: boolean;
@@ -24,6 +28,60 @@ const AuthSessionContext = createContext<AuthSessionContextValue | null>(null);
 export function AuthSessionProvider({ children }: PropsWithChildren) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isRestoring, setIsRestoring] = useState(true);
+  const isSigningOutRef = useRef(false);
+
+  const performSignOut = useCallback(async () => {
+    if (isSigningOutRef.current) return;
+    isSigningOutRef.current = true;
+    try {
+      const pushUnlinked = await deactivatePushOnLogout();
+      if (pushUnlinked) {
+        await clearLocalPushRegistrationState();
+      } else {
+        await clearPendingPushSyncSignal();
+      }
+      await clearStoredAuthSession();
+      setIsAuthenticated(false);
+    } finally {
+      isSigningOutRef.current = false;
+    }
+  }, []);
+
+  // Register the HTTP-layer session invalidation hook so that a 401
+  // after failed refresh triggers a full sign-out (React state + storage
+  // + push cleanup) instead of silently clearing SecureStore.
+  useEffect(() => {
+    setSessionInvalidationListener(() => {
+      void performSignOut();
+    });
+    return () => setSessionInvalidationListener(null);
+  }, [performSignOut]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    let active = true;
+    const checkRefresh = () => {
+      if (!active) return;
+      void refreshAccessTokenIfNeeded().catch((error) => {
+        if (__DEV__) console.warn("[auth] proactive refresh check failed", error);
+      });
+    };
+
+    checkRefresh();
+    const interval = setInterval(checkRefresh, PROACTIVE_REFRESH_INTERVAL_MS);
+    const appStateSubscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        checkRefresh();
+      }
+    });
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+      appStateSubscription.remove();
+    };
+  }, [isAuthenticated]);
 
   useEffect(() => {
     let active = true;
@@ -80,24 +138,13 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       }
     };
 
-    const signOut = async () => {
-      const pushUnlinked = await deactivatePushOnLogout();
-      if (pushUnlinked) {
-        await clearLocalPushRegistrationState();
-      } else {
-        await clearPendingPushSyncSignal();
-      }
-      await clearStoredAuthSession();
-      setIsAuthenticated(false);
-    };
-
     return {
       isAuthenticated,
       isRestoring,
       signInWithSession,
-      signOut,
+      signOut: performSignOut,
     };
-  }, [isAuthenticated, isRestoring]);
+  }, [isAuthenticated, isRestoring, performSignOut]);
 
   return <AuthSessionContext.Provider value={value}>{children}</AuthSessionContext.Provider>;
 }

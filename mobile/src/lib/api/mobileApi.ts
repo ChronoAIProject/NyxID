@@ -118,7 +118,7 @@ export const mobileApi = {
   async getApprovals(): Promise<PageResponse<ApprovalItem>> {
     return listApprovalsRequest();
   },
-  async revoke(approvalId: string): Promise<{ approval_id: string; status: string }> {
+  async revoke(approvalId: string): Promise<{ message: string }> {
     return revokeApprovalRequest(approvalId);
   },
   async registerPushToken(
