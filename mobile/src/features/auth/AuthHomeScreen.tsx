@@ -306,6 +306,9 @@ export function AuthHomeScreen({ navigation }: Props) {
             </Text>
             .
           </Text>
+          <Text style={styles.legalNote}>
+            Account deletion is permanent; signing in again with the same provider creates a new account.
+          </Text>
         </View>
       </ScrollView>
       <ToastOverlay toast={toast} bottom={64} />
@@ -322,6 +325,12 @@ const styles = StyleSheet.create({
     ...typeScale.caption,
     fontSize: 11,
     marginTop: spacing.sm,
+  },
+  legalNote: {
+    color: "#5A5468",
+    ...typeScale.caption,
+    fontSize: 10,
+    marginTop: spacing.xs,
   },
   legalLink: {
     color: "#B9B4CC",

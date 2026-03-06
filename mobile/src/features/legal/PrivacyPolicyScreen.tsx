@@ -85,6 +85,7 @@ const PRIVACY_SECTIONS: LegalSection[] = [
     paragraphs: [
       "Account data is retained while your account is active.",
       "When you delete your account (available in Account Settings), all personal data and server-side records are permanently removed. Security audit logs may be retained for a limited period as required for compliance.",
+      "If you sign in again with the same provider (e.g. Apple, Google, GitHub) after deletion, a new account will be created; your previous data will not be restored.",
       "Push tokens are removed from our server when you sign out or delete your account.",
     ],
   },

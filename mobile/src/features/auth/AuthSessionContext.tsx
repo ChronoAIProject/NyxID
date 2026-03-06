@@ -14,6 +14,8 @@ import {
 } from "../../lib/notifications/pushNotifications";
 import { refreshAccessTokenIfNeeded, setSessionInvalidationListener } from "../../lib/api/http";
 
+const PROACTIVE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+
 type AuthSessionContextValue = {
   isAuthenticated: boolean;
   isRestoring: boolean;
@@ -67,7 +69,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
     };
 
     checkRefresh();
-    const interval = setInterval(checkRefresh, 60 * 1000);
+    const interval = setInterval(checkRefresh, PROACTIVE_REFRESH_INTERVAL_MS);
     const appStateSubscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
         checkRefresh();
