@@ -22,8 +22,8 @@ use crate::models::user_service_connection::{
 };
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    approval_service, audit_service, delegation_service, identity_service, notification_service,
-    proxy_service,
+    approval_service, audit_service, chatgpt_translator, delegation_service, identity_service,
+    notification_service, proxy_service,
 };
 
 /// Response headers that are safe to forward back to the client.
@@ -287,6 +287,73 @@ async fn execute_proxy(
         }
     }
 
+    // OpenAI Codex: use the specialized ChatGPT HTTP client for supported
+    // model endpoints. It sets the required Codex headers (originator,
+    // User-Agent, etc.), while preserving the caller's requested response mode.
+    let is_codex = target.service.slug == "llm-openai-codex";
+
+    if is_codex && body.is_some() && is_codex_transport_path(path) {
+        let body_ref = body
+            .as_ref()
+            .expect("body.is_some() checked above for Codex transport");
+        let body_json: serde_json::Value = serde_json::from_slice(body_ref)
+            .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+
+        // Use the ChatGPT translator to normalize the request. This handles
+        // both Chat Completions format (messages → input + instructions) and
+        // Responses API format (enriched with store=false, etc.).
+        let translator = chatgpt_translator::ChatgptTranslator;
+        let translated =
+            <chatgpt_translator::ChatgptTranslator as crate::services::llm_gateway_service::LlmTranslator>::translate_request(
+                &translator, path, &body_json,
+            )?;
+        let is_chat_completions_path = is_chat_completions_proxy_path(path);
+
+        let bearer_token = delegated
+            .iter()
+            .find(|c| c.injection_method == "bearer")
+            .map(|c| c.credential.clone())
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "No bearer token for Codex. Connect the provider first.".to_string(),
+                )
+            })?;
+
+        let is_streaming = body_json
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let response = chatgpt_translator::send_to_chatgpt(
+            &translated.body,
+            &bearer_token,
+            is_streaming,
+            is_chat_completions_path,
+            query.as_deref(),
+        )
+        .await?;
+
+        let status = response.status();
+
+        audit_service::log_async(
+            state.db.clone(),
+            Some(user_id_str),
+            "proxy_request".to_string(),
+            Some(serde_json::json!({
+                "service_id": service_id,
+                "method": method.as_str(),
+                "path": path,
+                "response_status": status.as_u16(),
+                "acting_client_id": &auth_user.acting_client_id,
+                "codex_transport": true,
+            })),
+            None,
+            None,
+        );
+
+        return Ok(response);
+    }
+
     // Reuse the shared reqwest::Client from AppState for connection pooling
     let downstream_response = proxy_service::forward_request(
         &state.http_client,
@@ -360,9 +427,8 @@ async fn execute_proxy(
 
         // Log non-2xx response bodies for diagnostics
         if !status.is_success() {
-            let body_preview = String::from_utf8_lossy(
-                &response_body[..response_body.len().min(1024)]
-            );
+            let body_preview =
+                String::from_utf8_lossy(&response_body[..response_body.len().min(1024)]);
             tracing::error!(
                 service_id = %service_id,
                 status = %status,
@@ -395,6 +461,19 @@ async fn execute_proxy(
     Ok(response)
 }
 
+fn is_codex_transport_path(path: &str) -> bool {
+    let normalized = path.trim_matches('/');
+    normalized == "responses"
+        || normalized == "chat/completions"
+        || normalized.ends_with("/responses")
+        || normalized.ends_with("/chat/completions")
+}
+
+fn is_chat_completions_proxy_path(path: &str) -> bool {
+    let normalized = path.trim_matches('/');
+    normalized == "chat/completions" || normalized.ends_with("/chat/completions")
+}
+
 fn should_enforce_runtime_approval(
     requires_approval: bool,
     auth_method: &crate::mw::auth::AuthMethod,
@@ -404,7 +483,9 @@ fn should_enforce_runtime_approval(
 
 #[cfg(test)]
 mod tests {
-    use super::should_enforce_runtime_approval;
+    use super::{
+        is_chat_completions_proxy_path, is_codex_transport_path, should_enforce_runtime_approval,
+    };
     use crate::mw::auth::AuthMethod;
 
     #[test]
@@ -436,6 +517,23 @@ mod tests {
             &AuthMethod::Session
         ));
         assert!(!should_enforce_runtime_approval(false, &AuthMethod::ApiKey));
+    }
+
+    #[test]
+    fn codex_transport_only_handles_supported_endpoints() {
+        assert!(is_codex_transport_path("responses"));
+        assert!(is_codex_transport_path("/responses"));
+        assert!(is_codex_transport_path("chat/completions"));
+        assert!(is_codex_transport_path("v1/chat/completions"));
+        assert!(!is_codex_transport_path("models"));
+        assert!(!is_codex_transport_path("responses/items"));
+    }
+
+    #[test]
+    fn codex_chat_completions_detection_handles_prefixed_paths() {
+        assert!(is_chat_completions_proxy_path("chat/completions"));
+        assert!(is_chat_completions_proxy_path("/v1/chat/completions"));
+        assert!(!is_chat_completions_proxy_path("responses"));
     }
 }
 

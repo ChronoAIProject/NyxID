@@ -1,15 +1,15 @@
 use axum::{
-    extract::State,
-    http::{header, HeaderMap},
     Json,
+    extract::State,
+    http::{HeaderMap, header},
 };
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
-use crate::models::user::{User, COLLECTION_NAME as USERS};
 use crate::services::{admin_user_service, audit_service};
 
 // --- Request / Response types ---

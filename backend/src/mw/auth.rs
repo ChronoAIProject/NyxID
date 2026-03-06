@@ -103,7 +103,57 @@ impl FromRequestParts<AppState> for AuthUser {
                 })?;
 
                 if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                    let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)?;
+                    // Try JWT verification first. If it fails for a reason
+                    // other than expiry, fall back to API-key validation so
+                    // that OpenAI-compatible clients (which send API keys as
+                    // `Authorization: Bearer <key>`) work against the LLM
+                    // gateway and proxy routes.
+                    let claims = match jwt::verify_token(&state.jwt_keys, &state.config, token) {
+                        Ok(claims) => claims,
+                        Err(AppError::TokenExpired) => return Err(AppError::TokenExpired),
+                        Err(jwt_err) => {
+                            match crate::services::key_service::validate_api_key(&state.db, token)
+                                .await
+                            {
+                                Ok((api_user_id_str, api_key)) => {
+                                    let user_id =
+                                        Uuid::parse_str(&api_user_id_str).map_err(|_| {
+                                            AppError::Internal(
+                                                "Invalid user_id in API key".to_string(),
+                                            )
+                                        })?;
+
+                                    let user_model = state
+                                        .db
+                                        .collection::<User>(USERS)
+                                        .find_one(doc! { "_id": &api_user_id_str })
+                                        .await
+                                        .map_err(|e| {
+                                            AppError::Internal(format!("User lookup failed: {e}"))
+                                        })?;
+
+                                    match user_model {
+                                        Some(u) if u.is_active => {}
+                                        _ => {
+                                            return Err(AppError::Unauthorized(
+                                                "User account is inactive".to_string(),
+                                            ));
+                                        }
+                                    }
+
+                                    return Ok(AuthUser {
+                                        user_id,
+                                        session_id: None,
+                                        scope: api_key.scopes.clone(),
+                                        acting_client_id: None,
+                                        approval_owner_user_id: None,
+                                        auth_method: AuthMethod::ApiKey,
+                                    });
+                                }
+                                Err(_) => return Err(jwt_err),
+                            }
+                        }
+                    };
 
                     if claims.token_type != "access" {
                         return Err(AppError::Unauthorized("Expected access token".to_string()));

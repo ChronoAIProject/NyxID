@@ -69,15 +69,17 @@ pub async fn refresh_oauth_token(
     let client_id = String::from_utf8((*decrypted_cid).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))?;
 
-    let decrypted_csec = Zeroizing::new(aes::decrypt(
-        provider
-            .client_secret_encrypted
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("Provider missing client_secret".to_string()))?,
-        encryption_key,
-    )?);
-    let client_secret = String::from_utf8((*decrypted_csec).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode client_secret: {e}")))?;
+    // client_secret is optional -- public clients (device code flow) refresh
+    // with only client_id per RFC 6749 section 6.
+    let client_secret = if let Some(ref encrypted) = provider.client_secret_encrypted {
+        let decrypted_csec = Zeroizing::new(aes::decrypt(encrypted, encryption_key)?);
+        Some(
+            String::from_utf8((*decrypted_csec).clone())
+                .map_err(|e| AppError::Internal(format!("Failed to decode client_secret: {e}")))?,
+        )
+    } else {
+        None
+    };
 
     let decrypted_rt = Zeroizing::new(aes::decrypt(
         token
@@ -89,12 +91,14 @@ pub async fn refresh_oauth_token(
     let refresh_token = String::from_utf8((*decrypted_rt).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode refresh_token: {e}")))?;
 
-    let params = vec![
-        ("grant_type", "refresh_token"),
-        ("refresh_token", &refresh_token),
-        ("client_id", &client_id),
-        ("client_secret", &client_secret),
+    let mut params = vec![
+        ("grant_type".to_string(), "refresh_token".to_string()),
+        ("refresh_token".to_string(), refresh_token.clone()),
+        ("client_id".to_string(), client_id.clone()),
     ];
+    if let Some(ref secret) = client_secret {
+        params.push(("client_secret".to_string(), secret.clone()));
+    }
 
     let response = token_exchange_client()
         .post(token_url)

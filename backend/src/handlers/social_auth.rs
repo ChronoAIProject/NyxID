@@ -169,8 +169,13 @@ pub async fn authorize(
         {
             headers.append(header::SET_COOKIE, cookie);
         }
-        if let Ok(cookie) =
-            clear_cookie(SOCIAL_REDIRECT_COOKIE, "/api/v1/auth/social", secure, domain).parse()
+        if let Ok(cookie) = clear_cookie(
+            SOCIAL_REDIRECT_COOKIE,
+            "/api/v1/auth/social",
+            secure,
+            domain,
+        )
+        .parse()
         {
             headers.append(header::SET_COOKIE, cookie);
         }
@@ -499,10 +504,9 @@ pub async fn apple_callback(
     })?;
 
     // Verify id_token via Apple JWKS
-    let apple_client_id =
-        state.config.apple_client_id.as_deref().ok_or_else(|| {
-            redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
-        })?;
+    let apple_client_id = state.config.apple_client_id.as_deref().ok_or_else(|| {
+        redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+    })?;
 
     let claims = state
         .jwks_cache
@@ -672,9 +676,9 @@ fn build_auth_redirect(
     for cookie in social_clear_cookie_values(secure, domain) {
         headers.append(
             header::SET_COOKIE,
-            cookie.parse().map_err(|_| {
-                redirect_with_error(target, "social_auth_exchange", secure, domain)
-            })?,
+            cookie
+                .parse()
+                .map_err(|_| redirect_with_error(target, "social_auth_exchange", secure, domain))?,
         );
     }
 
@@ -684,8 +688,13 @@ fn build_auth_redirect(
     {
         headers.append(header::SET_COOKIE, cookie);
     }
-    if let Ok(cookie) =
-        clear_cookie(SOCIAL_REDIRECT_COOKIE, "/api/v1/auth/social", secure, domain).parse()
+    if let Ok(cookie) = clear_cookie(
+        SOCIAL_REDIRECT_COOKIE,
+        "/api/v1/auth/social",
+        secure,
+        domain,
+    )
+    .parse()
     {
         headers.append(header::SET_COOKIE, cookie);
     }
@@ -700,9 +709,9 @@ fn build_auth_redirect(
     );
     headers.insert(
         header::LOCATION,
-        redirect_url.parse().map_err(|_| {
-            redirect_with_error(target, "social_auth_exchange", secure, domain)
-        })?,
+        redirect_url
+            .parse()
+            .map_err(|_| redirect_with_error(target, "social_auth_exchange", secure, domain))?,
     );
 
     Ok((StatusCode::FOUND, headers, ()))
@@ -800,8 +809,13 @@ fn redirect_with_error(
     {
         headers.append(header::SET_COOKIE, cookie);
     }
-    if let Ok(cookie) =
-        clear_cookie(SOCIAL_REDIRECT_COOKIE, "/api/v1/auth/social", secure, domain).parse()
+    if let Ok(cookie) = clear_cookie(
+        SOCIAL_REDIRECT_COOKIE,
+        "/api/v1/auth/social",
+        secure,
+        domain,
+    )
+    .parse()
     {
         headers.append(header::SET_COOKIE, cookie);
     }
