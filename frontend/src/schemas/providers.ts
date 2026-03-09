@@ -112,6 +112,16 @@ const baseProviderFields = {
     .url("Must be a valid URL")
     .optional()
     .or(z.literal("")),
+  token_endpoint_auth_method: z
+    .enum(["client_secret_post", "client_secret_basic"])
+    .optional(),
+  extra_auth_params: z.record(z.string(), z.string()).optional(),
+  device_code_format: z.enum(["rfc8628", "openai"]).optional(),
+  client_id_param_name: z
+    .string()
+    .max(100, "Param name must be at most 100 characters")
+    .optional()
+    .or(z.literal("")),
 } as const;
 
 export const createProviderSchema = z

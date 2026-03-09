@@ -213,6 +213,10 @@ export interface ProviderConfig {
   readonly hosted_callback_url: string | null;
   readonly api_key_instructions: string | null;
   readonly api_key_url: string | null;
+  readonly token_endpoint_auth_method: string;
+  readonly extra_auth_params: Readonly<Record<string, string>> | null;
+  readonly device_code_format: string;
+  readonly client_id_param_name: string | null;
   readonly icon_url: string | null;
   readonly documentation_url: string | null;
   readonly is_active: boolean;
@@ -224,8 +228,8 @@ export interface UserProviderCredentials {
   readonly provider_config_id: string;
   readonly has_credentials: boolean;
   readonly label: string | null;
-  readonly created_at: string;
-  readonly updated_at: string;
+  readonly created_at: string | null;
+  readonly updated_at: string | null;
 }
 
 export interface UserProviderToken {

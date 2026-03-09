@@ -275,7 +275,9 @@ function ExistingCredentialsInfo({
       <Badge variant="success">Configured</Badge>
       <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
         {credentials.label && <span>{credentials.label}</span>}
-        <span>Updated {formatDate(credentials.updated_at)}</span>
+        {credentials.updated_at && (
+          <span>Updated {formatDate(credentials.updated_at)}</span>
+        )}
       </div>
     </div>
   );
