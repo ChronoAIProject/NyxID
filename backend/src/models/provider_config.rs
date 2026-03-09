@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +11,10 @@ fn default_credential_mode() -> String {
 
 fn default_token_endpoint_auth_method() -> String {
     "client_secret_post".to_string()
+}
+
+fn default_device_code_format() -> String {
+    "rfc8628".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,6 +75,22 @@ pub struct ProviderConfig {
     /// "client_secret_post" (form body, default) | "client_secret_basic" (HTTP Basic Auth)
     #[serde(default = "default_token_endpoint_auth_method")]
     pub token_endpoint_auth_method: String,
+
+    /// Provider-specific extra auth URL parameters (e.g., {"access_type": "offline"} for Google)
+    /// Blocklist: client_id, client_secret, redirect_uri, response_type, state, code,
+    ///            code_challenge, code_challenge_method, scope
+    #[serde(default)]
+    pub extra_auth_params: Option<HashMap<String, String>>,
+
+    /// "rfc8628" (standard, default) | "openai" (non-standard) - controls device code poll format
+    #[serde(default = "default_device_code_format")]
+    pub device_code_format: String,
+
+    /// Override the query-param name used instead of "client_id" in the authorization URL
+    /// (e.g., TikTok uses "client_key"). Default is "client_id".
+    #[serde(default)]
+    pub client_id_param_name: Option<String>,
+
     pub created_by: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -111,6 +133,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -149,6 +174,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

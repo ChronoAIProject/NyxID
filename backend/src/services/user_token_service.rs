@@ -244,9 +244,14 @@ pub async fn initiate_oauth_connect(
         base_url.trim_end_matches('/')
     );
 
+    let cid_param = provider
+        .client_id_param_name
+        .as_deref()
+        .unwrap_or("client_id");
     let mut auth_url = format!(
-        "{}?client_id={}&redirect_uri={}&response_type=code&state={}",
+        "{}?{}={}&redirect_uri={}&response_type=code&state={}",
         authorization_url,
+        urlencoding::encode(cid_param),
         urlencoding::encode(&client_id),
         urlencoding::encode(&callback_url),
         urlencoding::encode(&state_id),
@@ -263,6 +268,32 @@ pub async fn initiate_oauth_connect(
             "&code_challenge={}&code_challenge_method=S256",
             urlencoding::encode(&challenge)
         ));
+    }
+
+    // Append provider-specific extra auth params (blocklist enforced)
+    if let Some(ref extra) = provider.extra_auth_params {
+        const BLOCKLIST: &[&str] = &[
+            "client_id",
+            "client_secret",
+            "redirect_uri",
+            "response_type",
+            "state",
+            "code",
+            "code_challenge",
+            "code_challenge_method",
+            "scope",
+            "grant_type",
+            "nonce",
+        ];
+        for (key, value) in extra {
+            if !BLOCKLIST.contains(&key.as_str()) && key != cid_param {
+                auth_url.push_str(&format!(
+                    "&{}={}",
+                    urlencoding::encode(key),
+                    urlencoding::encode(value)
+                ));
+            }
+        }
     }
 
     tracing::info!(
@@ -326,15 +357,28 @@ pub async fn request_device_code(
             .await?;
     let client_id = resolved.client_id;
 
-    // POST JSON with client_id to device code endpoint
-    let body = serde_json::json!({ "client_id": &client_id });
-
-    let response = oauth_flow::token_exchange_client()
-        .post(device_code_url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("Device code request failed: {e}")))?;
+    // Branch on device_code_format: "openai" uses JSON, "rfc8628" uses form-urlencoded
+    let response = if provider.device_code_format == "openai" {
+        let body = serde_json::json!({ "client_id": &client_id });
+        oauth_flow::token_exchange_client()
+            .post(device_code_url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("Device code request failed: {e}")))?
+    } else {
+        // RFC 8628: form-urlencoded with client_id and optional scope
+        let mut params: Vec<(&str, String)> = vec![("client_id", client_id.clone())];
+        if let Some(ref scopes) = provider.default_scopes {
+            params.push(("scope", scopes.join(" ")));
+        }
+        oauth_flow::token_exchange_client()
+            .post(device_code_url)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("Device code request failed: {e}")))?
+    };
 
     if !response.status().is_success() {
         let status = response.status();
@@ -521,24 +565,54 @@ pub async fn poll_device_code(
         AppError::Internal("Device code provider missing device_token_url".to_string())
     })?;
 
-    // OpenAI-style poll: send device_auth_id + user_code as JSON
-    let poll_body = serde_json::json!({
-        "device_auth_id": &device_auth_id,
-        "user_code": &user_code,
-    });
+    let resolved = user_credentials_service::resolve_token_oauth_credentials(
+        db,
+        encryption_key,
+        &provider,
+        oauth_state.credential_user_id.as_deref(),
+    )
+    .await?;
+    let poll_client_id = resolved.client_id;
 
-    let response = oauth_flow::token_exchange_client()
-        .post(device_token_url)
-        .json(&poll_body)
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("Device code poll failed: {e}")))?;
+    // Branch on device_code_format
+    let is_openai = provider.device_code_format == "openai";
+
+    let response = if is_openai {
+        // OpenAI-style poll: send device_auth_id + user_code as JSON
+        let poll_body = serde_json::json!({
+            "device_auth_id": &device_auth_id,
+            "user_code": &user_code,
+        });
+        oauth_flow::token_exchange_client()
+            .post(device_token_url)
+            .json(&poll_body)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("Device code poll failed: {e}")))?
+    } else {
+        // RFC 8628: form-urlencoded with grant_type, device_code, client_id
+        let params = [
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:device_code",
+            ),
+            ("device_code", &device_auth_id),
+            ("client_id", &poll_client_id),
+        ];
+        oauth_flow::token_exchange_client()
+            .post(device_token_url)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("Device code poll failed: {e}")))?
+    };
 
     let status_code = response.status();
 
     // OpenAI: 403/404 = authorization pending
-    if status_code == reqwest::StatusCode::FORBIDDEN
-        || status_code == reqwest::StatusCode::NOT_FOUND
+    if is_openai
+        && (status_code == reqwest::StatusCode::FORBIDDEN
+            || status_code == reqwest::StatusCode::NOT_FOUND)
     {
         return Ok(DeviceCodePollResult {
             status: "pending".to_string(),
@@ -547,7 +621,7 @@ pub async fn poll_device_code(
     }
 
     if !status_code.is_success() {
-        // Try to parse RFC 8628 error response as fallback
+        // Parse RFC 8628 error response (used by both formats as fallback)
         if let Ok(resp_data) = response.json::<serde_json::Value>().await
             && let Some(error) = resp_data["error"].as_str()
         {
@@ -613,15 +687,6 @@ pub async fn poll_device_code(
             AppError::Internal("Provider missing token_url for code exchange".to_string())
         })?;
 
-        let poll_resolved = user_credentials_service::resolve_token_oauth_credentials(
-            db,
-            encryption_key,
-            &provider,
-            oauth_state.credential_user_id.as_deref(),
-        )
-        .await?;
-        let client_id = poll_resolved.client_id;
-
         // Exchange authorization_code at token_url with PKCE
         // Codex CLI uses form-urlencoded (NOT JSON) and redirect_uri = {issuer}/deviceauth/callback
         let issuer = device_token_url
@@ -634,7 +699,7 @@ pub async fn poll_device_code(
             ("grant_type", "authorization_code"),
             ("code", authorization_code),
             ("redirect_uri", redirect_uri.as_str()),
-            ("client_id", client_id.as_str()),
+            ("client_id", poll_client_id.as_str()),
             ("code_verifier", code_verifier),
         ];
 
@@ -668,7 +733,7 @@ pub async fn poll_device_code(
             effective_user_id,
             provider_id,
             state,
-            poll_resolved.credential_user_id.as_deref(),
+            resolved.credential_user_id.as_deref(),
             &token_data,
             now,
         )
@@ -1046,12 +1111,41 @@ pub async fn get_active_token(
 }
 
 /// Revoke and delete a user's stored token for a provider.
+///
+/// Attempts best-effort remote token revocation before clearing local state.
 pub async fn disconnect_provider(
     db: &mongodb::Database,
+    encryption_key: &[u8],
     user_id: &str,
     provider_id: &str,
 ) -> AppResult<()> {
     let now = Utc::now();
+
+    // Load the token before marking as revoked (for remote revocation)
+    let token = db
+        .collection::<UserProviderToken>(COLLECTION_NAME)
+        .find_one(doc! {
+            "user_id": user_id,
+            "provider_config_id": provider_id,
+            "status": { "$ne": "revoked" },
+        })
+        .await?;
+
+    // Best-effort remote revocation for OAuth2 tokens
+    if let Some(ref tok) = token {
+        if tok.token_type == "oauth2" {
+            let provider = db
+                .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                .find_one(doc! { "_id": provider_id })
+                .await?;
+            if let Some(ref provider) = provider {
+                if provider.revocation_url.is_some() {
+                    let _ =
+                        try_revoke_token_remote(db, encryption_key, provider, tok).await;
+                }
+            }
+        }
+    }
 
     let result = db
         .collection::<UserProviderToken>(COLLECTION_NAME)
@@ -1083,6 +1177,108 @@ pub async fn disconnect_provider(
         "Provider disconnected"
     );
 
+    Ok(())
+}
+
+/// Best-effort remote token revocation (RFC 7009).
+///
+/// Resolves OAuth client credentials so the revocation request includes proper
+/// client authentication (`client_secret_basic` or `client_secret_post`).
+/// If credential resolution fails, revocation is silently skipped.
+async fn try_revoke_token_remote(
+    db: &mongodb::Database,
+    encryption_key: &[u8],
+    provider: &ProviderConfig,
+    token: &UserProviderToken,
+) {
+    let revocation_url = match provider.revocation_url.as_deref() {
+        Some(url) => url,
+        None => return,
+    };
+
+    // Resolve the same OAuth credentials that were used to mint this token.
+    // If resolution fails (e.g. credentials deleted), skip revocation silently.
+    let creds = match user_credentials_service::resolve_token_oauth_credentials(
+        db,
+        encryption_key,
+        provider,
+        token.credential_user_id.as_deref(),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let use_basic_auth = provider.token_endpoint_auth_method == "client_secret_basic";
+
+    // Try revoking access token
+    if let Some(ref enc) = token.access_token_encrypted {
+        if let Ok(decrypted) = aes::decrypt(enc, encryption_key) {
+            if let Ok(access_token) = String::from_utf8(decrypted) {
+                let _ = send_revocation_request(
+                    revocation_url,
+                    &access_token,
+                    "access_token",
+                    &creds.client_id,
+                    creds.client_secret.as_deref(),
+                    use_basic_auth,
+                )
+                .await;
+            }
+        }
+    }
+
+    // Try revoking refresh token
+    if let Some(ref enc) = token.refresh_token_encrypted {
+        if let Ok(decrypted) = aes::decrypt(enc, encryption_key) {
+            if let Ok(refresh_token) = String::from_utf8(decrypted) {
+                let _ = send_revocation_request(
+                    revocation_url,
+                    &refresh_token,
+                    "refresh_token",
+                    &creds.client_id,
+                    creds.client_secret.as_deref(),
+                    use_basic_auth,
+                )
+                .await;
+            }
+        }
+    }
+}
+
+/// Send a single RFC 7009 revocation request with client authentication.
+async fn send_revocation_request(
+    revocation_url: &str,
+    token_value: &str,
+    token_type_hint: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    use_basic_auth: bool,
+) -> Result<(), ()> {
+    let client = oauth_flow::token_exchange_client();
+
+    let mut request = client.post(revocation_url);
+
+    if use_basic_auth {
+        request = request.basic_auth(client_id, client_secret);
+        request = request.form(&[
+            ("token", token_value),
+            ("token_type_hint", token_type_hint),
+        ]);
+    } else {
+        let mut params = vec![
+            ("token", token_value),
+            ("token_type_hint", token_type_hint),
+            ("client_id", client_id),
+        ];
+        if let Some(secret) = client_secret {
+            params.push(("client_secret", secret));
+        }
+        request = request.form(&params);
+    }
+
+    let _ = request.send().await;
     Ok(())
 }
 

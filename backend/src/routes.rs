@@ -150,7 +150,8 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/my-tokens", get(handlers::user_tokens::list_my_tokens))
         .route(
             "/callback",
-            get(handlers::user_tokens::generic_oauth_callback),
+            get(handlers::user_tokens::generic_oauth_callback)
+                .post(handlers::user_tokens::generic_oauth_callback_post),
         )
         .route("/{provider_id}", get(handlers::providers::get_provider))
         .route("/{provider_id}", put(handlers::providers::update_provider))

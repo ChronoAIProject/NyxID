@@ -34,8 +34,8 @@ pub struct UserCredentialsResponse {
     pub provider_config_id: String,
     pub has_credentials: bool,
     pub label: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,15 +65,15 @@ pub async fn get_my_credentials(
             provider_config_id: m.provider_config_id,
             has_credentials: true,
             label: m.label,
-            created_at: m.created_at.to_rfc3339(),
-            updated_at: m.updated_at.to_rfc3339(),
+            created_at: Some(m.created_at.to_rfc3339()),
+            updated_at: Some(m.updated_at.to_rfc3339()),
         })),
         None => Ok(Json(UserCredentialsResponse {
             provider_config_id: provider_id,
             has_credentials: false,
             label: None,
-            created_at: String::new(),
-            updated_at: String::new(),
+            created_at: None,
+            updated_at: None,
         })),
     }
 }
@@ -148,8 +148,8 @@ pub async fn set_my_credentials(
         provider_config_id: cred.provider_config_id,
         has_credentials: true,
         label: cred.label,
-        created_at: cred.created_at.to_rfc3339(),
-        updated_at: cred.updated_at.to_rfc3339(),
+        created_at: Some(cred.created_at.to_rfc3339()),
+        updated_at: Some(cred.updated_at.to_rfc3339()),
     }))
 }
 

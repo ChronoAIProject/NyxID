@@ -40,6 +40,12 @@ pub struct CreateProviderRequest {
     // Display
     pub icon_url: Option<String>,
     pub documentation_url: Option<String>,
+    // Auth method
+    pub token_endpoint_auth_method: Option<String>,
+    // Generic OAuth edge case fields
+    pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
+    pub device_code_format: Option<String>,
+    pub client_id_param_name: Option<String>,
 }
 
 impl std::fmt::Debug for CreateProviderRequest {
@@ -79,6 +85,9 @@ pub struct UpdateProviderRequest {
     pub documentation_url: Option<String>,
     pub credential_mode: Option<String>,
     pub token_endpoint_auth_method: Option<String>,
+    pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
+    pub device_code_format: Option<String>,
+    pub client_id_param_name: Option<String>,
 }
 
 impl std::fmt::Debug for UpdateProviderRequest {
@@ -139,6 +148,9 @@ pub struct ProviderResponse {
     pub is_active: bool,
     pub credential_mode: String,
     pub token_endpoint_auth_method: String,
+    pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
+    pub device_code_format: String,
+    pub client_id_param_name: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -176,6 +188,9 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         is_active: p.is_active,
         credential_mode: p.credential_mode,
         token_endpoint_auth_method: p.token_endpoint_auth_method,
+        extra_auth_params: p.extra_auth_params,
+        device_code_format: p.device_code_format,
+        client_id_param_name: p.client_id_param_name,
         created_at: p.created_at.to_rfc3339(),
         updated_at: p.updated_at.to_rfc3339(),
     }
@@ -253,6 +268,7 @@ pub async fn create_provider(
             valid_types.join(", ")
         )));
     }
+    // Defense-in-depth: service layer also validates credential_mode
     let credential_mode = body.credential_mode.as_deref().unwrap_or("admin");
     let valid_credential_modes = ["admin", "user", "both"];
     if !valid_credential_modes.contains(&credential_mode) {
@@ -260,6 +276,26 @@ pub async fn create_provider(
             "credential_mode must be one of: {}",
             valid_credential_modes.join(", ")
         )));
+    }
+
+    let token_endpoint_auth_method = body
+        .token_endpoint_auth_method
+        .as_deref()
+        .unwrap_or("client_secret_post");
+    let valid_auth_methods = ["client_secret_post", "client_secret_basic"];
+    if !valid_auth_methods.contains(&token_endpoint_auth_method) {
+        return Err(AppError::ValidationError(format!(
+            "token_endpoint_auth_method must be one of: {}",
+            valid_auth_methods.join(", ")
+        )));
+    }
+
+    if let Some(ref format) = body.device_code_format {
+        if !["rfc8628", "openai"].contains(&format.as_str()) {
+            return Err(AppError::ValidationError(
+                "device_code_format must be 'rfc8628' or 'openai'".to_string(),
+            ));
+        }
     }
 
     let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
@@ -278,6 +314,9 @@ pub async fn create_provider(
         // SSRF validation on OAuth provider URLs
         validate_base_url(authorization_url, state.config.is_development())?;
         validate_base_url(token_url, state.config.is_development())?;
+        if let Some(ref url) = body.revocation_url {
+            validate_base_url(url, state.config.is_development())?;
+        }
 
         let client_id = body.client_id.clone();
         let client_secret = body.client_secret.clone();
@@ -391,6 +430,7 @@ pub async fn create_provider(
         &body.slug,
         &body.provider_type,
         credential_mode,
+        token_endpoint_auth_method,
         oauth_config,
         api_key_config,
         device_code_config,
@@ -398,6 +438,9 @@ pub async fn create_provider(
         body.icon_url.as_deref(),
         body.documentation_url.as_deref(),
         &user_id_str,
+        body.extra_auth_params,
+        body.device_code_format.as_deref(),
+        body.client_id_param_name.as_deref(),
     )
     .await?;
 
@@ -442,6 +485,9 @@ pub async fn update_provider(
     if let Some(ref url) = body.token_url {
         validate_base_url(url, state.config.is_development())?;
     }
+    if let Some(ref url) = body.revocation_url {
+        validate_base_url(url, state.config.is_development())?;
+    }
     if let Some(ref url) = body.device_code_url {
         validate_base_url(url, state.config.is_development())?;
     }
@@ -478,6 +524,9 @@ pub async fn update_provider(
         documentation_url: body.documentation_url,
         credential_mode: body.credential_mode,
         token_endpoint_auth_method: body.token_endpoint_auth_method,
+        extra_auth_params: body.extra_auth_params,
+        device_code_format: body.device_code_format,
+        client_id_param_name: body.client_id_param_name,
     };
 
     let updated =
@@ -552,6 +601,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
             created_by: "system".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

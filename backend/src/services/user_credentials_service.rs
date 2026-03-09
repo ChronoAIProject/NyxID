@@ -176,9 +176,14 @@ pub struct ResolvedOAuthCredentials {
 pub fn provider_has_admin_oauth_credentials(provider: &ProviderConfig) -> bool {
     match provider.provider_type.as_str() {
         "oauth2" => {
+            // OAuth2 requires both client_id and client_secret for admin credentials
             provider.client_id_encrypted.is_some() && provider.client_secret_encrypted.is_some()
         }
-        "device_code" => provider.client_id_encrypted.is_some(),
+        "device_code" => {
+            // Device code flow uses public clients -- only client_id is required
+            // (no client_secret needed per RFC 8628 section 3.1)
+            provider.client_id_encrypted.is_some()
+        }
         _ => false,
     }
 }

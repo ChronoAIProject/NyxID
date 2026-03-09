@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use axum::{
-    Json,
+    Form, Json,
     extract::{Path, Query, State},
 };
 use serde::{Deserialize, Serialize};
@@ -382,6 +384,24 @@ pub async fn generic_oauth_callback(
     }
 }
 
+/// POST /api/v1/providers/callback
+///
+/// Handles OAuth callbacks from providers that use response_mode=form_post (e.g., Apple).
+/// Reads code and state from the form body instead of query params.
+pub async fn generic_oauth_callback_post(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Form(params): Form<HashMap<String, String>>,
+) -> axum::response::Redirect {
+    let query = GenericOAuthCallbackQuery {
+        code: params.get("code").cloned(),
+        state: params.get("state").cloned(),
+        error: params.get("error").cloned(),
+        error_description: params.get("error_description").cloned(),
+    };
+    generic_oauth_callback(State(state), auth_user, Query(query)).await
+}
+
 /// Build a redirect URL to the frontend callback page with status params.
 fn redirect_callback(
     frontend_url: &str,
@@ -421,8 +441,15 @@ pub async fn disconnect_provider(
     Path(provider_id): Path<String>,
 ) -> AppResult<Json<ConnectResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
-    user_token_service::disconnect_provider(&state.db, &user_id_str, &provider_id).await?;
+    user_token_service::disconnect_provider(
+        &state.db,
+        &encryption_key,
+        &user_id_str,
+        &provider_id,
+    )
+    .await?;
 
     audit_service::log_async(
         state.db.clone(),

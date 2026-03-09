@@ -187,7 +187,9 @@ pub async fn disconnect_sa_provider(
     // Verify SA exists
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
 
-    user_token_service::disconnect_provider(&state.db, &sa_id, &provider_id).await?;
+    let encryption_key = crate::crypto::aes::parse_hex_key(&state.config.encryption_key)?;
+    user_token_service::disconnect_provider(&state.db, &encryption_key, &sa_id, &provider_id)
+        .await?;
 
     audit_service::log_async(
         state.db.clone(),
