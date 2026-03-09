@@ -46,8 +46,15 @@ async function attemptTokenRefresh(): Promise<boolean> {
     const response = await fetch(`${BASE_URL}/auth/refresh`, {
       method: "POST",
       credentials: "include",
-      headers: { "Content-Type": "application/json" },
     });
+
+    if (!response.ok) {
+      // Clear auth state so the UI redirects to login instead of
+      // showing broken error states on every subsequent query.
+      const { useAuthStore } = await import("@/stores/auth-store");
+      useAuthStore.getState().setUser(null);
+    }
+
     return response.ok;
   } catch {
     return false;

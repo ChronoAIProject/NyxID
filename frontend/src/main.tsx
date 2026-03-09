@@ -27,10 +27,28 @@ const queryClient = new QueryClient({
 
 function Root() {
   const [ready, setReady] = useState(false);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   useEffect(() => {
     useAuthStore.getState().checkAuth().finally(() => setReady(true));
   }, []);
+
+  // When auth state is cleared (e.g. after failed token refresh),
+  // redirect to login so the user isn't stuck on a broken dashboard.
+  useEffect(() => {
+    if (ready && !isAuthenticated) {
+      const path = window.location.pathname;
+      const isPublicRoute =
+        path === "/login" ||
+        path === "/register" ||
+        path === "/privacy" ||
+        path.startsWith("/error") ||
+        path.startsWith("/oauth-consent");
+      if (!isPublicRoute) {
+        router.navigate({ to: "/login" });
+      }
+    }
+  }, [ready, isAuthenticated]);
 
   if (!ready) return null;
 

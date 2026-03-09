@@ -266,47 +266,62 @@ impl FromRequestParts<AppState> for AuthUser {
                     .await
                     .map_err(|e| AppError::Internal(format!("Session lookup failed: {e}")))?;
 
-                if let Some(sess) = session
-                    && sess.expires_at > chrono::Utc::now()
-                {
-                    let user_id = Uuid::parse_str(&sess.user_id).map_err(|_| {
-                        AppError::Internal("Invalid user_id in session".to_string())
-                    })?;
-                    let session_id = Uuid::parse_str(&sess.id)
-                        .map_err(|_| AppError::Internal("Invalid session id".to_string()))?;
+                if session.is_none() {
+                    tracing::debug!("Session cookie present but no matching active session in DB");
+                }
 
-                    // Verify the user account is still active
-                    let user_model = state
-                        .db
-                        .collection::<User>(USERS)
-                        .find_one(doc! { "_id": &sess.user_id })
-                        .await
-                        .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
+                match session {
+                    Some(sess) if sess.expires_at > chrono::Utc::now() => {
+                        let user_id = Uuid::parse_str(&sess.user_id).map_err(|_| {
+                            AppError::Internal("Invalid user_id in session".to_string())
+                        })?;
+                        let session_id = Uuid::parse_str(&sess.id)
+                            .map_err(|_| AppError::Internal("Invalid session id".to_string()))?;
 
-                    match user_model {
-                        Some(u) if u.is_active => {
-                            // Session-based auth uses an empty scope string.
-                            // RBAC-scoped claims (roles, groups) are only
-                            // included in OAuth tokens that explicitly request
-                            // those scopes. Session users can retrieve RBAC
-                            // data via the /oauth/userinfo endpoint instead.
-                            return Ok(AuthUser {
-                                user_id,
-                                session_id: Some(session_id),
-                                scope: String::new(),
-                                acting_client_id: None,
-                                approval_owner_user_id: None,
-                                auth_method: AuthMethod::Session,
-                            });
-                        }
-                        _ => {
-                            // User not found or inactive -- reject session
-                            tracing::warn!(
-                                user_id = %sess.user_id,
-                                "Session auth rejected: user inactive or not found"
-                            );
+                        // Verify the user account is still active
+                        let user_model = state
+                            .db
+                            .collection::<User>(USERS)
+                            .find_one(doc! { "_id": &sess.user_id })
+                            .await
+                            .map_err(|e| {
+                                AppError::Internal(format!("User lookup failed: {e}"))
+                            })?;
+
+                        match user_model {
+                            Some(u) if u.is_active => {
+                                // Session-based auth uses an empty scope string.
+                                // RBAC-scoped claims (roles, groups) are only
+                                // included in OAuth tokens that explicitly request
+                                // those scopes. Session users can retrieve RBAC
+                                // data via the /oauth/userinfo endpoint instead.
+                                return Ok(AuthUser {
+                                    user_id,
+                                    session_id: Some(session_id),
+                                    scope: String::new(),
+                                    acting_client_id: None,
+                                    approval_owner_user_id: None,
+                                    auth_method: AuthMethod::Session,
+                                });
+                            }
+                            _ => {
+                                // User not found or inactive -- reject session
+                                tracing::warn!(
+                                    user_id = %sess.user_id,
+                                    "Session auth rejected: user inactive or not found"
+                                );
+                            }
                         }
                     }
+                    Some(sess) => {
+                        tracing::debug!(
+                            user_id = %sess.user_id,
+                            session_id = %sess.id,
+                            expires_at = %sess.expires_at,
+                            "Session cookie present but session expired in DB"
+                        );
+                    }
+                    None => {}
                 }
             }
 
@@ -396,6 +411,14 @@ impl FromRequestParts<AppState> for AuthUser {
                     auth_method: AuthMethod::ApiKey,
                 });
             }
+
+            tracing::debug!(
+                has_session_cookie = session_token.is_some(),
+                has_access_cookie = access_token.is_some(),
+                has_api_key = parts.headers.get("x-api-key").is_some(),
+                has_bearer = parts.headers.get("authorization").is_some(),
+                "All auth methods exhausted"
+            );
 
             Err(AppError::Unauthorized(
                 "No valid authentication credentials provided".to_string(),
