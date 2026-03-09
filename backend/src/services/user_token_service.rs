@@ -244,10 +244,7 @@ pub async fn initiate_oauth_connect(
         base_url.trim_end_matches('/')
     );
 
-    let cid_param = provider
-        .client_id_param_name
-        .as_deref()
-        .unwrap_or("client_id");
+    let cid_param = oauth_flow::client_id_param_name(&provider);
     let mut auth_url = format!(
         "{}?{}={}&redirect_uri={}&response_type=code&state={}",
         authorization_url,
@@ -359,21 +356,23 @@ pub async fn request_device_code(
 
     // Branch on device_code_format: "openai" uses JSON, "rfc8628" uses form-urlencoded
     let response = if provider.device_code_format == "openai" {
-        let body = serde_json::json!({ "client_id": &client_id });
-        oauth_flow::token_exchange_client()
-            .post(device_code_url)
+        let mut body = serde_json::Map::new();
+        body.insert(
+            oauth_flow::client_id_param_name(&provider).to_string(),
+            serde_json::Value::String(client_id.clone()),
+        );
+        oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(device_code_url))
             .json(&body)
             .send()
             .await
             .map_err(|e| AppError::Internal(format!("Device code request failed: {e}")))?
     } else {
         // RFC 8628: form-urlencoded with client_id and optional scope
-        let mut params: Vec<(&str, String)> = vec![("client_id", client_id.clone())];
+        let mut params = vec![oauth_flow::client_id_form_field(&provider, &client_id)];
         if let Some(ref scopes) = provider.default_scopes {
-            params.push(("scope", scopes.join(" ")));
+            params.push(("scope".to_string(), scopes.join(" ")));
         }
-        oauth_flow::token_exchange_client()
-            .post(device_code_url)
+        oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(device_code_url))
             .form(&params)
             .send()
             .await
@@ -583,24 +582,22 @@ pub async fn poll_device_code(
             "device_auth_id": &device_auth_id,
             "user_code": &user_code,
         });
-        oauth_flow::token_exchange_client()
-            .post(device_token_url)
+        oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(device_token_url))
             .json(&poll_body)
             .send()
             .await
             .map_err(|e| AppError::Internal(format!("Device code poll failed: {e}")))?
     } else {
         // RFC 8628: form-urlencoded with grant_type, device_code, client_id
-        let params = [
+        let mut params = vec![
             (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:device_code",
+                "grant_type".to_string(),
+                "urn:ietf:params:oauth:grant-type:device_code".to_string(),
             ),
-            ("device_code", &device_auth_id),
-            ("client_id", &poll_client_id),
+            ("device_code".to_string(), device_auth_id.clone()),
         ];
-        oauth_flow::token_exchange_client()
-            .post(device_token_url)
+        params.push(oauth_flow::client_id_form_field(&provider, &poll_client_id));
+        oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(device_token_url))
             .form(&params)
             .send()
             .await
@@ -695,20 +692,22 @@ pub async fn poll_device_code(
             .unwrap_or("https://auth.openai.com");
         let redirect_uri = format!("{issuer}/deviceauth/callback");
 
-        let token_params = [
-            ("grant_type", "authorization_code"),
-            ("code", authorization_code),
-            ("redirect_uri", redirect_uri.as_str()),
-            ("client_id", poll_client_id.as_str()),
-            ("code_verifier", code_verifier),
+        let mut token_params = vec![
+            ("grant_type".to_string(), "authorization_code".to_string()),
+            ("code".to_string(), authorization_code.to_string()),
+            ("redirect_uri".to_string(), redirect_uri),
+            ("code_verifier".to_string(), code_verifier.to_string()),
         ];
+        token_params.push(oauth_flow::client_id_form_field(&provider, &poll_client_id));
 
-        let token_response = oauth_flow::token_exchange_client()
-            .post(token_url)
-            .form(&token_params)
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("Device code token exchange failed: {e}")))?;
+        let token_response =
+            oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(token_url))
+                .form(&token_params)
+                .send()
+                .await
+                .map_err(|e| {
+                    AppError::Internal(format!("Device code token exchange failed: {e}"))
+                })?;
 
         if !token_response.status().is_success() {
             let err_status = token_response.status();
@@ -905,19 +904,22 @@ pub async fn handle_oauth_callback(
 
     // Exchange code for tokens
     let use_basic_auth = provider.token_endpoint_auth_method == "client_secret_basic";
-    let mut params: Vec<(&str, String)> = vec![
-        ("grant_type", "authorization_code".to_string()),
-        ("code", code.to_string()),
-        ("redirect_uri", callback_url),
+    let mut params = vec![
+        ("grant_type".to_string(), "authorization_code".to_string()),
+        ("code".to_string(), code.to_string()),
+        ("redirect_uri".to_string(), callback_url),
     ];
 
     if use_basic_auth {
         // client_id still needed in body for some providers even with Basic Auth
         // but credentials go in the Authorization header
     } else {
-        params.push(("client_id", resolved.client_id.clone()));
+        params.push(oauth_flow::client_id_form_field(
+            &provider,
+            &resolved.client_id,
+        ));
         if let Some(ref secret) = resolved.client_secret {
-            params.push(("client_secret", secret.clone()));
+            params.push(("client_secret".to_string(), secret.clone()));
         }
     }
 
@@ -928,18 +930,15 @@ pub async fn handle_oauth_callback(
         let decrypted = Zeroizing::new(aes::decrypt(&verifier_bytes, encryption_key)?);
         let verifier = String::from_utf8((*decrypted).clone())
             .map_err(|e| AppError::Internal(format!("Failed to decode verifier: {e}")))?;
-        params.push(("code_verifier", verifier));
+        params.push(("code_verifier".to_string(), verifier));
     }
 
     // SEC-H2: Use no-redirect client for token exchange
-    let mut request = oauth_flow::token_exchange_client()
-        .post(token_url)
-        .form(&params);
+    let mut request =
+        oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(token_url))
+            .form(&params);
     if use_basic_auth {
-        request = request.basic_auth(
-            &resolved.client_id,
-            resolved.client_secret.as_deref(),
-        );
+        request = request.basic_auth(&resolved.client_id, resolved.client_secret.as_deref());
     }
     let token_response = request
         .send()
@@ -1140,8 +1139,7 @@ pub async fn disconnect_provider(
                 .await?;
             if let Some(ref provider) = provider {
                 if provider.revocation_url.is_some() {
-                    let _ =
-                        try_revoke_token_remote(db, encryption_key, provider, tok).await;
+                    let _ = try_revoke_token_remote(db, encryption_key, provider, tok).await;
                 }
             }
         }
@@ -1223,6 +1221,7 @@ async fn try_revoke_token_remote(
                     &creds.client_id,
                     creds.client_secret.as_deref(),
                     use_basic_auth,
+                    oauth_flow::client_id_param_name(provider),
                 )
                 .await;
             }
@@ -1240,6 +1239,7 @@ async fn try_revoke_token_remote(
                     &creds.client_id,
                     creds.client_secret.as_deref(),
                     use_basic_auth,
+                    oauth_flow::client_id_param_name(provider),
                 )
                 .await;
             }
@@ -1255,6 +1255,7 @@ async fn send_revocation_request(
     client_id: &str,
     client_secret: Option<&str>,
     use_basic_auth: bool,
+    client_id_param_name: &str,
 ) -> Result<(), ()> {
     let client = oauth_flow::token_exchange_client();
 
@@ -1262,18 +1263,15 @@ async fn send_revocation_request(
 
     if use_basic_auth {
         request = request.basic_auth(client_id, client_secret);
-        request = request.form(&[
-            ("token", token_value),
-            ("token_type_hint", token_type_hint),
-        ]);
+        request = request.form(&[("token", token_value), ("token_type_hint", token_type_hint)]);
     } else {
         let mut params = vec![
-            ("token", token_value),
-            ("token_type_hint", token_type_hint),
-            ("client_id", client_id),
+            ("token".to_string(), token_value.to_string()),
+            ("token_type_hint".to_string(), token_type_hint.to_string()),
+            (client_id_param_name.to_string(), client_id.to_string()),
         ];
         if let Some(secret) = client_secret {
-            params.push(("client_secret", secret));
+            params.push(("client_secret".to_string(), secret.to_string()));
         }
         request = request.form(&params);
     }

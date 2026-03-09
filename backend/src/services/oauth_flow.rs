@@ -24,6 +24,24 @@ pub fn token_exchange_client() -> &'static reqwest::Client {
     &TOKEN_EXCHANGE_CLIENT
 }
 
+pub fn expect_json_response(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request.header(reqwest::header::ACCEPT, "application/json")
+}
+
+pub fn client_id_param_name(provider: &ProviderConfig) -> &str {
+    provider
+        .client_id_param_name
+        .as_deref()
+        .unwrap_or("client_id")
+}
+
+pub fn client_id_form_field(provider: &ProviderConfig, client_id: &str) -> (String, String) {
+    (
+        client_id_param_name(provider).to_string(),
+        client_id.to_string(),
+    )
+}
+
 /// Generate a PKCE code verifier (43-128 characters, URL-safe).
 pub fn generate_code_verifier() -> String {
     use rand::RngCore;
@@ -88,15 +106,13 @@ pub async fn refresh_oauth_token(
     if use_basic_auth {
         // Credentials go in Authorization header, not body
     } else {
-        params.push(("client_id".to_string(), client_id.clone()));
+        params.push(client_id_form_field(&provider, &client_id));
         if let Some(ref secret) = client_secret {
             params.push(("client_secret".to_string(), secret.clone()));
         }
     }
 
-    let mut request = token_exchange_client()
-        .post(token_url)
-        .form(&params);
+    let mut request = expect_json_response(token_exchange_client().post(token_url)).form(&params);
     if use_basic_auth {
         request = request.basic_auth(&client_id, client_secret.as_deref());
     }
@@ -182,4 +198,79 @@ pub async fn refresh_oauth_token(
     );
 
     Ok(new_access_token.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_provider() -> ProviderConfig {
+        ProviderConfig {
+            id: "provider-id".to_string(),
+            slug: "provider".to_string(),
+            name: "Provider".to_string(),
+            description: None,
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://example.com/oauth/authorize".to_string()),
+            token_url: Some("https://example.com/oauth/token".to_string()),
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "test".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn token_exchange_client_requests_json_responses() {
+        let request =
+            expect_json_response(token_exchange_client().post("https://example.com/oauth/token"))
+                .build()
+                .expect("request should build");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::ACCEPT)
+                .expect("accept header should be set"),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn client_id_form_field_defaults_to_client_id() {
+        let provider = test_provider();
+        assert_eq!(
+            client_id_form_field(&provider, "client-123"),
+            ("client_id".to_string(), "client-123".to_string())
+        );
+    }
+
+    #[test]
+    fn client_id_form_field_uses_provider_override() {
+        let mut provider = test_provider();
+        provider.client_id_param_name = Some("client_key".to_string());
+
+        assert_eq!(
+            client_id_form_field(&provider, "client-123"),
+            ("client_key".to_string(), "client-123".to_string())
+        );
+    }
 }

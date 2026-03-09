@@ -86,8 +86,8 @@ pub struct ProviderConfig {
     #[serde(default = "default_device_code_format")]
     pub device_code_format: String,
 
-    /// Override the query-param name used instead of "client_id" in the authorization URL
-    /// (e.g., TikTok uses "client_key"). Default is "client_id".
+    /// Override the parameter name used instead of "client_id" across provider-facing
+    /// OAuth requests (e.g., TikTok uses "client_key"). Default is "client_id".
     #[serde(default)]
     pub client_id_param_name: Option<String>,
 

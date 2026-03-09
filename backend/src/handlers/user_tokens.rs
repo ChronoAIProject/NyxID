@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
-use crate::mw::auth::AuthUser;
+use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{audit_service, user_token_service};
 
 // TODO(SEC-9): Apply stricter per-endpoint rate limiting to OAuth callback and
@@ -249,11 +249,20 @@ pub async fn oauth_callback(
 /// GET /api/v1/providers/callback?code=...&state=...
 ///
 /// Generic OAuth callback that resolves the provider from the state parameter.
-/// Requires session auth (AuthUser) and redirects to the frontend with status params.
+/// If the browser still has an active session cookie, the callback verifies it
+/// matches the initiating user. Otherwise it relies on the one-time OAuth state.
 pub async fn generic_oauth_callback(
     State(state): State<AppState>,
-    auth_user: AuthUser,
+    opt_auth_user: OptionalAuthUser,
     Query(query): Query<GenericOAuthCallbackQuery>,
+) -> axum::response::Redirect {
+    generic_oauth_callback_impl(state, opt_auth_user.0, query).await
+}
+
+async fn generic_oauth_callback_impl(
+    state: AppState,
+    auth_user: Option<AuthUser>,
+    query: GenericOAuthCallbackQuery,
 ) -> axum::response::Redirect {
     let frontend_url = state.config.frontend_url.trim_end_matches('/');
 
@@ -262,7 +271,7 @@ pub async fn generic_oauth_callback(
         let msg = query.error_description.as_deref().unwrap_or(error.as_str());
         audit_service::log_async(
             state.db.clone(),
-            Some(auth_user.user_id.to_string()),
+            auth_user.as_ref().map(|u| u.user_id.to_string()),
             "provider_oauth_callback_failed".to_string(),
             Some(serde_json::json!({
                 "error": error,
@@ -300,7 +309,7 @@ pub async fn generic_oauth_callback(
         Err(e) => {
             audit_service::log_async(
                 state.db.clone(),
-                Some(auth_user.user_id.to_string()),
+                auth_user.as_ref().map(|u| u.user_id.to_string()),
                 "provider_oauth_callback_failed".to_string(),
                 Some(serde_json::json!({ "error": e.to_string() })),
                 None,
@@ -314,14 +323,12 @@ pub async fn generic_oauth_callback(
         }
     };
 
-    // Verify the session user matches the state's user_id
-    let user_id_str = auth_user.user_id.to_string();
-    if oauth_state.user_id != user_id_str {
+    if let Err(e) = ensure_callback_user_matches_state(auth_user.as_ref(), &oauth_state.user_id) {
         audit_service::log_async(
             state.db.clone(),
-            Some(user_id_str.clone()),
+            auth_user.as_ref().map(|u| u.user_id.to_string()),
             "provider_oauth_callback_failed".to_string(),
-            Some(serde_json::json!({ "error": "user_id mismatch" })),
+            Some(serde_json::json!({ "error": e.to_string() })),
             None,
             None,
         );
@@ -363,7 +370,7 @@ pub async fn generic_oauth_callback(
         Err(e) => {
             audit_service::log_async(
                 state.db.clone(),
-                Some(user_id_str),
+                Some(oauth_state.user_id.clone()),
                 "provider_oauth_callback_failed".to_string(),
                 Some(serde_json::json!({
                     "provider_id": provider_id,
@@ -387,10 +394,11 @@ pub async fn generic_oauth_callback(
 /// POST /api/v1/providers/callback
 ///
 /// Handles OAuth callbacks from providers that use response_mode=form_post (e.g., Apple).
-/// Reads code and state from the form body instead of query params.
+/// Reads code and state from the form body instead of query params. Session
+/// cookies are optional here because cross-site POST callbacks may omit Lax cookies.
 pub async fn generic_oauth_callback_post(
     State(state): State<AppState>,
-    auth_user: AuthUser,
+    opt_auth_user: OptionalAuthUser,
     Form(params): Form<HashMap<String, String>>,
 ) -> axum::response::Redirect {
     let query = GenericOAuthCallbackQuery {
@@ -399,7 +407,7 @@ pub async fn generic_oauth_callback_post(
         error: params.get("error").cloned(),
         error_description: params.get("error_description").cloned(),
     };
-    generic_oauth_callback(State(state), auth_user, Query(query)).await
+    generic_oauth_callback_impl(state, opt_auth_user.0, query).await
 }
 
 /// Build a redirect URL to the frontend callback page with status params.
@@ -443,13 +451,8 @@ pub async fn disconnect_provider(
     let user_id_str = auth_user.user_id.to_string();
     let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
-    user_token_service::disconnect_provider(
-        &state.db,
-        &encryption_key,
-        &user_id_str,
-        &provider_id,
-    )
-    .await?;
+    user_token_service::disconnect_provider(&state.db, &encryption_key, &user_id_str, &provider_id)
+        .await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -585,5 +588,59 @@ fn safe_error_message(e: &AppError) -> String {
             "An internal error occurred".to_string()
         }
         other => other.to_string(),
+    }
+}
+
+fn ensure_callback_user_matches_state(
+    auth_user: Option<&AuthUser>,
+    oauth_state_user_id: &str,
+) -> AppResult<()> {
+    if let Some(auth_user) = auth_user
+        && auth_user.user_id.to_string() != oauth_state_user_id
+    {
+        return Err(AppError::BadRequest("Session mismatch".to_string()));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mw::auth::AuthMethod;
+    use uuid::Uuid;
+
+    fn test_auth_user() -> AuthUser {
+        AuthUser {
+            user_id: Uuid::new_v4(),
+            session_id: None,
+            scope: String::new(),
+            acting_client_id: None,
+            approval_owner_user_id: None,
+            auth_method: AuthMethod::Session,
+        }
+    }
+
+    #[test]
+    fn callback_state_allows_missing_session_cookie() {
+        assert!(ensure_callback_user_matches_state(None, "user-123").is_ok());
+    }
+
+    #[test]
+    fn callback_state_accepts_matching_session_user() {
+        let auth_user = test_auth_user();
+        assert!(
+            ensure_callback_user_matches_state(Some(&auth_user), &auth_user.user_id.to_string())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn callback_state_rejects_mismatched_session_user() {
+        let auth_user = test_auth_user();
+        let err = ensure_callback_user_matches_state(Some(&auth_user), "other-user")
+            .expect_err("mismatched session should fail");
+
+        assert!(matches!(err, AppError::BadRequest(message) if message == "Session mismatch"));
     }
 }
