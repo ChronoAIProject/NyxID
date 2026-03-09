@@ -80,18 +80,27 @@ pub async fn refresh_oauth_token(
     let refresh_token = String::from_utf8((*decrypted_rt).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode refresh_token: {e}")))?;
 
+    let use_basic_auth = provider.token_endpoint_auth_method == "client_secret_basic";
     let mut params = vec![
         ("grant_type".to_string(), "refresh_token".to_string()),
         ("refresh_token".to_string(), refresh_token.clone()),
-        ("client_id".to_string(), client_id.clone()),
     ];
-    if let Some(ref secret) = client_secret {
-        params.push(("client_secret".to_string(), secret.clone()));
+    if use_basic_auth {
+        // Credentials go in Authorization header, not body
+    } else {
+        params.push(("client_id".to_string(), client_id.clone()));
+        if let Some(ref secret) = client_secret {
+            params.push(("client_secret".to_string(), secret.clone()));
+        }
     }
 
-    let response = token_exchange_client()
+    let mut request = token_exchange_client()
         .post(token_url)
-        .form(&params)
+        .form(&params);
+    if use_basic_auth {
+        request = request.basic_auth(&client_id, client_secret.as_deref());
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("Token refresh request failed: {e}")))?;

@@ -61,6 +61,7 @@ pub async fn seed_default_providers(
             documentation_url: Some("https://platform.openai.com/docs".to_string()),
             is_active: true,
             credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -132,6 +133,7 @@ pub async fn seed_default_providers(
             documentation_url: Some("https://developers.openai.com/codex/auth/".to_string()),
             is_active: true,
             credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -171,6 +173,7 @@ pub async fn seed_default_providers(
             documentation_url: Some("https://docs.anthropic.com".to_string()),
             is_active: true,
             credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -207,6 +210,7 @@ pub async fn seed_default_providers(
             documentation_url: Some("https://ai.google.dev/docs".to_string()),
             is_active: true,
             credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -246,6 +250,7 @@ pub async fn seed_default_providers(
             documentation_url: Some("https://docs.mistral.ai".to_string()),
             is_active: true,
             credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -282,6 +287,7 @@ pub async fn seed_default_providers(
             documentation_url: Some("https://docs.cohere.com".to_string()),
             is_active: true,
             credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -318,6 +324,7 @@ pub async fn seed_default_providers(
             documentation_url: Some("https://api-docs.deepseek.com".to_string()),
             is_active: true,
             credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -360,6 +367,7 @@ pub async fn seed_default_providers(
             documentation_url: Some("https://developer.x.com/en/docs/x-api".to_string()),
             is_active: true,
             credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_basic".to_string(),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -369,27 +377,29 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // Migration: set credential_mode on existing Twitter providers that predate user mode.
+    // Migration: set credential_mode and token_endpoint_auth_method on existing Twitter providers.
     // The $ne filter means this is a no-op after migration completes.
     if let Some(existing_twitter) = collection
-        .find_one(doc! { "slug": "twitter", "credential_mode": { "$ne": "user" } })
+        .find_one(doc! { "slug": "twitter", "$or": [
+            { "credential_mode": { "$ne": "user" } },
+            { "token_endpoint_auth_method": { "$ne": "client_secret_basic" } },
+        ]})
         .await?
     {
-        if existing_twitter.credential_mode == "admin" {
-            collection
-                .update_one(
-                    doc! { "_id": &existing_twitter.id },
-                    doc! { "$set": {
-                        "credential_mode": "user",
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    }},
-                )
-                .await?;
-            tracing::info!(
-                slug = "twitter",
-                "Migrated existing Twitter provider to credential_mode=user"
-            );
-        }
+        collection
+            .update_one(
+                doc! { "_id": &existing_twitter.id },
+                doc! { "$set": {
+                    "credential_mode": "user",
+                    "token_endpoint_auth_method": "client_secret_basic",
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }},
+            )
+            .await?;
+        tracing::info!(
+            slug = "twitter",
+            "Migrated existing Twitter provider to credential_mode=user, token_endpoint_auth_method=client_secret_basic"
+        );
     }
 
     if seeded_count > 0 {
@@ -666,6 +676,7 @@ pub struct ProviderUpdateInput {
     pub icon_url: Option<String>,
     pub documentation_url: Option<String>,
     pub credential_mode: Option<String>,
+    pub token_endpoint_auth_method: Option<String>,
 }
 
 /// Create a new provider configuration. Admin only.
@@ -795,6 +806,7 @@ pub async fn create_provider(
         documentation_url: documentation_url.map(String::from),
         is_active: true,
         credential_mode: credential_mode.to_string(),
+        token_endpoint_auth_method: "client_secret_post".to_string(),
         created_by: created_by.to_string(),
         created_at: now,
         updated_at: now,
@@ -934,6 +946,17 @@ pub async fn update_provider(
             )));
         }
         set_doc.insert("credential_mode", mode.as_str());
+    }
+
+    if let Some(ref method) = updates.token_endpoint_auth_method {
+        let valid_methods: [&str; 2] = ["client_secret_post", "client_secret_basic"];
+        if !valid_methods.contains(&method.as_str()) {
+            return Err(AppError::ValidationError(format!(
+                "token_endpoint_auth_method must be one of: {}",
+                valid_methods.join(", ")
+            )));
+        }
+        set_doc.insert("token_endpoint_auth_method", method.as_str());
     }
 
     use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};

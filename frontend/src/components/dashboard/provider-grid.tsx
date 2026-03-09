@@ -46,10 +46,10 @@ export function ProviderGrid() {
 
   const isLoading = providersLoading || tokensLoading;
 
-  function handleConnect(provider: ProviderConfig) {
-    if (!canConnectProvider(provider)) {
+  function handleConnect(provider: ProviderConfig, hasUserCredentials = false) {
+    if (!canConnectProvider(provider, hasUserCredentials)) {
       toast.error(
-        getProviderConnectHint(provider) ?? "Provider is not ready to connect.",
+        getProviderConnectHint(provider, hasUserCredentials) ?? "Provider is not ready to connect.",
       );
       return;
     }

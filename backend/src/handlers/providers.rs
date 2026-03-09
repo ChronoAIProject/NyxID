@@ -78,6 +78,7 @@ pub struct UpdateProviderRequest {
     pub icon_url: Option<String>,
     pub documentation_url: Option<String>,
     pub credential_mode: Option<String>,
+    pub token_endpoint_auth_method: Option<String>,
 }
 
 impl std::fmt::Debug for UpdateProviderRequest {
@@ -137,6 +138,7 @@ pub struct ProviderResponse {
     pub documentation_url: Option<String>,
     pub is_active: bool,
     pub credential_mode: String,
+    pub token_endpoint_auth_method: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -173,6 +175,7 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         documentation_url: p.documentation_url,
         is_active: p.is_active,
         credential_mode: p.credential_mode,
+        token_endpoint_auth_method: p.token_endpoint_auth_method,
         created_at: p.created_at.to_rfc3339(),
         updated_at: p.updated_at.to_rfc3339(),
     }
@@ -474,6 +477,7 @@ pub async fn update_provider(
         icon_url: body.icon_url,
         documentation_url: body.documentation_url,
         credential_mode: body.credential_mode,
+        token_endpoint_auth_method: body.token_endpoint_auth_method,
     };
 
     let updated =
@@ -547,6 +551,7 @@ mod tests {
             documentation_url: None,
             is_active: true,
             credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
             created_by: "system".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

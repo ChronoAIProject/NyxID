@@ -37,7 +37,7 @@ interface ProviderCardProps {
   readonly llmStatus: LlmProviderStatus | undefined;
   readonly gatewayUrl: string;
   readonly hasUserCredentials: boolean;
-  readonly onConnect: (provider: ProviderConfig) => void;
+  readonly onConnect: (provider: ProviderConfig, hasUserCredentials: boolean) => void;
   readonly onDisconnect: (providerId: string) => void;
   readonly onRefresh: (providerId: string) => void;
   readonly onSetupCredentials: (provider: ProviderConfig) => void;
@@ -236,7 +236,7 @@ export function ProviderCard({
               )}
               <Button
                 size="sm"
-                onClick={() => onConnect(provider)}
+                onClick={() => onConnect(provider, hasUserCredentials)}
                 disabled={isConnecting || !canConnect}
                 isLoading={isConnecting}
               >

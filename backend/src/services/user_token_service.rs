@@ -839,14 +839,21 @@ pub async fn handle_oauth_callback(
     );
 
     // Exchange code for tokens
-    let mut params = vec![
+    let use_basic_auth = provider.token_endpoint_auth_method == "client_secret_basic";
+    let mut params: Vec<(&str, String)> = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code.to_string()),
         ("redirect_uri", callback_url),
-        ("client_id", resolved.client_id),
     ];
-    if let Some(secret) = resolved.client_secret {
-        params.push(("client_secret", secret));
+
+    if use_basic_auth {
+        // client_id still needed in body for some providers even with Basic Auth
+        // but credentials go in the Authorization header
+    } else {
+        params.push(("client_id", resolved.client_id.clone()));
+        if let Some(ref secret) = resolved.client_secret {
+            params.push(("client_secret", secret.clone()));
+        }
     }
 
     // SEC-M2: Decrypt code_verifier from stored state
@@ -860,9 +867,16 @@ pub async fn handle_oauth_callback(
     }
 
     // SEC-H2: Use no-redirect client for token exchange
-    let token_response = oauth_flow::token_exchange_client()
+    let mut request = oauth_flow::token_exchange_client()
         .post(token_url)
-        .form(&params)
+        .form(&params);
+    if use_basic_auth {
+        request = request.basic_auth(
+            &resolved.client_id,
+            resolved.client_secret.as_deref(),
+        );
+    }
+    let token_response = request
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("OAuth token exchange failed: {e}")))?;

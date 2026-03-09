@@ -7,6 +7,10 @@ fn default_credential_mode() -> String {
     "admin".to_string()
 }
 
+fn default_token_endpoint_auth_method() -> String {
+    "client_secret_post".to_string()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderConfig {
     #[serde(rename = "_id")]
@@ -61,6 +65,10 @@ pub struct ProviderConfig {
     /// "admin" | "user" | "both" -- controls where OAuth client credentials come from
     #[serde(default = "default_credential_mode")]
     pub credential_mode: String,
+    /// How client credentials are sent to the token endpoint:
+    /// "client_secret_post" (form body, default) | "client_secret_basic" (HTTP Basic Auth)
+    #[serde(default = "default_token_endpoint_auth_method")]
+    pub token_endpoint_auth_method: String,
     pub created_by: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -102,6 +110,7 @@ mod tests {
             documentation_url: None,
             is_active: true,
             credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -139,6 +148,7 @@ mod tests {
             documentation_url: None,
             is_active: true,
             credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
