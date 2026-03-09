@@ -19,6 +19,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Service Connections](#service-connections)
   - [Service Provider Requirements](#service-provider-requirements)
   - [Providers](#providers)
+  - [User Provider Credentials](#user-provider-credentials)
   - [User Provider Tokens](#user-provider-tokens)
   - [Sessions](#sessions)
   - [Service Endpoints](#service-endpoints)
@@ -1951,7 +1952,7 @@ curl -X DELETE http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567
 
 ### Providers
 
-Providers represent external service providers (e.g., OpenAI, Anthropic, Google AI) that users can connect their credentials to. NyxID stores provider configurations centrally, and users connect by entering API keys or completing OAuth flows.
+Providers represent external service providers that users can connect their credentials to. NyxID seeds 19 providers at startup: API key providers (OpenAI, Anthropic, Google AI, Mistral, Cohere, DeepSeek), OAuth2 providers (Google, GitHub, Twitter/X, Facebook, Discord, Spotify, LinkedIn, Slack, Microsoft, TikTok, Twitch, Reddit), and device-code providers (OpenAI Codex). Users connect by entering API keys, completing OAuth2 flows, or using device-code authorization. Providers support three credential modes: `admin` (admin-configured OAuth app), `user` (users bring their own OAuth app credentials), or `both`.
 
 #### GET /api/v1/providers
 
@@ -1970,9 +1971,14 @@ List all active provider configurations.
       "name": "OpenAI",
       "description": "OpenAI API for GPT models",
       "provider_type": "api_key",
+      "credential_mode": "admin",
       "has_oauth_config": false,
       "default_scopes": null,
       "supports_pkce": false,
+      "token_endpoint_auth_method": "client_secret_post",
+      "extra_auth_params": null,
+      "device_code_format": "rfc8628",
+      "client_id_param_name": null,
       "api_key_instructions": "Get your API key from https://platform.openai.com/api-keys",
       "api_key_url": "https://platform.openai.com/api-keys",
       "icon_url": "https://example.com/openai-icon.svg",
@@ -2007,14 +2013,22 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `name`              | string   | Yes      | Display name (max 200 chars)                                         |
 | `slug`              | string   | Yes      | URL-safe identifier (1-100 chars, lowercase alphanumeric + hyphens)  |
 | `description`       | string   | No       | Provider description                                                 |
-| `provider_type`     | string   | Yes      | `oauth2` or `api_key`                                                |
+| `provider_type`     | string   | Yes      | `oauth2`, `api_key`, or `device_code`                                |
+| `credential_mode`   | string   | No       | `admin` (default), `user`, or `both` -- controls where OAuth credentials come from |
 | `authorization_url` | string   | OAuth2   | OAuth2 authorization endpoint (required for `oauth2` type)           |
 | `token_url`         | string   | OAuth2   | OAuth2 token endpoint (required for `oauth2` type)                   |
-| `revocation_url`    | string   | No       | OAuth2 token revocation endpoint                                     |
+| `revocation_url`    | string   | No       | OAuth2 token revocation endpoint (RFC 7009)                          |
 | `default_scopes`    | string[] | No       | Default OAuth2 scopes to request                                     |
 | `client_id`         | string   | OAuth2   | OAuth2 client ID (required for `oauth2` type, encrypted at rest)     |
 | `client_secret`     | string   | OAuth2   | OAuth2 client secret (required for `oauth2` type, encrypted at rest) |
 | `supports_pkce`     | boolean  | No       | Whether the provider supports PKCE (default: `false`)                |
+| `token_endpoint_auth_method` | string | No | `client_secret_post` (default) or `client_secret_basic`             |
+| `extra_auth_params` | object   | No       | Extra authorization URL parameters (e.g., `{"access_type": "offline"}`) |
+| `device_code_url`   | string   | device_code | Device authorization endpoint (required for `device_code` type)   |
+| `device_token_url`  | string   | device_code | Device token polling endpoint (required for `device_code` type)   |
+| `device_verification_url` | string | No   | User verification URL for device code flow                           |
+| `device_code_format` | string  | No       | `rfc8628` (default) or `openai`                                      |
+| `client_id_param_name` | string | No      | Custom client_id parameter name (e.g., `client_key` for TikTok)     |
 | `api_key_instructions` | string | No      | Instructions for obtaining an API key (for `api_key` type)           |
 | `api_key_url`       | string   | No       | URL where users can create API keys                                  |
 | `icon_url`          | string   | No       | Provider icon/logo URL                                               |
@@ -2061,7 +2075,7 @@ Returns the created provider (same shape as list response items, without encrypt
 **Errors:**
 - `1002 forbidden` -- User is not an admin
 - `1004 conflict` -- Slug already exists
-- `1008 validation_error` -- Missing required fields, invalid provider_type, invalid slug, or SSRF-blocked URL
+- `1008 validation_error` -- Missing required fields, invalid provider_type/credential_mode, invalid slug, or SSRF-blocked URL
 
 **Example:**
 
@@ -2126,13 +2140,21 @@ Update a provider configuration. Only the provided fields are updated (partial u
 | `name`              | string   | No       | Display name                                         |
 | `description`       | string   | No       | Provider description                                 |
 | `is_active`         | boolean  | No       | Enable or disable the provider                       |
+| `credential_mode`   | string   | No       | `admin`, `user`, or `both`                           |
 | `authorization_url` | string   | No       | OAuth2 authorization endpoint                        |
 | `token_url`         | string   | No       | OAuth2 token endpoint                                |
-| `revocation_url`    | string   | No       | OAuth2 revocation endpoint                           |
+| `revocation_url`    | string   | No       | OAuth2 revocation endpoint (RFC 7009)                |
 | `default_scopes`    | string[] | No       | Default OAuth2 scopes                                |
 | `client_id`         | string   | No       | OAuth2 client ID (encrypted at rest)                 |
 | `client_secret`     | string   | No       | OAuth2 client secret (encrypted at rest)             |
 | `supports_pkce`     | boolean  | No       | PKCE support flag                                    |
+| `token_endpoint_auth_method` | string | No | `client_secret_post` or `client_secret_basic`       |
+| `extra_auth_params` | object   | No       | Extra authorization URL parameters                   |
+| `device_code_url`   | string   | No       | Device authorization endpoint                        |
+| `device_token_url`  | string   | No       | Device token polling endpoint                        |
+| `device_verification_url` | string | No   | User verification URL for device code flow           |
+| `device_code_format` | string  | No       | `rfc8628` or `openai`                                |
+| `client_id_param_name` | string | No      | Custom client_id parameter name                      |
 | `api_key_instructions` | string | No      | Instructions for obtaining an API key                |
 | `api_key_url`       | string   | No       | URL where users can create API keys                  |
 | `icon_url`          | string   | No       | Provider icon/logo URL                               |
@@ -2187,6 +2209,129 @@ Deactivate a provider and revoke all user tokens associated with it.
 ```bash
 curl -X DELETE http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890 \
   -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+### User Provider Credentials
+
+Per-user OAuth app credentials for providers configured with `credential_mode` of `"user"` or `"both"`. Users bring their own OAuth client_id and client_secret.
+
+#### GET /api/v1/providers/{provider_id}/credentials
+
+Get the current user's OAuth app credentials metadata for a provider.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Response (200) -- credentials exist:**
+
+```json
+{
+  "provider_config_id": "p1a2b3c4-d5e6-7890-abcd-ef1234567890",
+  "has_credentials": true,
+  "label": "My Twitter App",
+  "created_at": "2026-03-09T10:00:00+00:00",
+  "updated_at": "2026-03-09T10:00:00+00:00"
+}
+```
+
+**Response (200) -- no credentials:**
+
+```json
+{
+  "provider_config_id": "p1a2b3c4-d5e6-7890-abcd-ef1234567890",
+  "has_credentials": false,
+  "label": null,
+  "created_at": null,
+  "updated_at": null
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Provider does not exist
+- `1008 validation_error` -- Provider does not support user credentials
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/credentials \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### PUT /api/v1/providers/{provider_id}/credentials
+
+Set or update the current user's OAuth app credentials for a provider.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Request Body:**
+
+| Field           | Type   | Required | Description                                           |
+|-----------------|--------|----------|-------------------------------------------------------|
+| `client_id`     | string | Yes      | OAuth client ID (max 500 chars, encrypted at rest)    |
+| `client_secret` | string | No       | OAuth client secret (max 2000 chars, encrypted at rest) |
+| `label`         | string | No       | Display label (max 200 chars)                         |
+
+**Response (200):**
+
+Same as GET response with `has_credentials: true`.
+
+**Errors:**
+- `1008 validation_error` -- Provider does not support user credentials, or invalid input
+
+**Example:**
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/credentials \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"client_id": "my-app-client-id", "client_secret": "my-app-secret", "label": "My Twitter App"}'
+```
+
+---
+
+#### DELETE /api/v1/providers/{provider_id}/credentials
+
+Delete the current user's OAuth app credentials for a provider.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Response (200):**
+
+```json
+{
+  "message": "Credentials deleted"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Provider does not exist or no credentials found
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/credentials \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ---
@@ -2344,9 +2489,28 @@ This endpoint is not called directly by the frontend. It is the OAuth redirect U
 
 ---
 
+#### POST /api/v1/providers/callback
+
+OAuth callback endpoint for providers that use `response_mode=form_post` (e.g., Apple). Accepts the authorization code and state as a form body instead of query parameters, then redirects the same way as the GET callback.
+
+**Auth:** Required (session cookie)
+
+**Form Body:**
+
+| Field               | Type   | Required | Description                                |
+|---------------------|--------|----------|--------------------------------------------|
+| `code`              | string | Yes      | Authorization code from the provider       |
+| `state`             | string | Yes      | State parameter (maps to NyxID OAuth state)|
+| `error`             | string | No       | Error code from the provider               |
+| `error_description` | string | No       | Error description from the provider        |
+
+**Response:** HTTP 302 redirect to `{FRONTEND_URL}/providers/callback?status=success` on success, or `?status=error&message=...` on failure.
+
+---
+
 #### DELETE /api/v1/providers/{provider_id}/disconnect
 
-Disconnect from a provider. Sets the token status to "revoked" and clears encrypted credential data.
+Disconnect from a provider. Sets the token status to "revoked", clears encrypted credential data, and performs best-effort remote token revocation via the provider's revocation endpoint (RFC 7009) if configured.
 
 **Auth:** Required
 
