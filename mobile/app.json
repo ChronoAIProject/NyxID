@@ -17,7 +17,7 @@
       }
     },
     "android": {
-      "package": "fun.chrono-ai.nyxid"
+      "package": "fun.chronoai.nyxid"
     },
     "plugins": [
       "expo-secure-store",
