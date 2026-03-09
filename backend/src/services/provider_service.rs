@@ -17,6 +17,20 @@ use crate::models::service_provider_requirement::{
 use crate::models::user_provider_credentials::COLLECTION_NAME as USER_PROVIDER_CREDENTIALS;
 use crate::models::user_provider_token::COLLECTION_NAME as USER_PROVIDER_TOKENS;
 
+const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
+    "google",
+    "github",
+    "facebook",
+    "discord",
+    "spotify",
+    "linkedin",
+    "slack",
+    "microsoft",
+    "tiktok",
+    "twitch",
+    "reddit",
+];
+
 /// Seed default AI provider configurations at startup (idempotent).
 ///
 /// Checks for each provider by slug; if it does not exist, inserts it.
@@ -448,6 +462,25 @@ pub async fn seed_default_providers(
         );
     }
 
+    let social_user_mode_migration = collection
+        .update_many(
+            doc! {
+                "slug": { "$in": SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS },
+                "credential_mode": { "$ne": "user" }
+            },
+            doc! { "$set": {
+                "credential_mode": "user",
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+    if social_user_mode_migration.modified_count > 0 {
+        tracing::info!(
+            count = social_user_mode_migration.modified_count,
+            "Migrated existing seeded social providers to credential_mode=user"
+        );
+    }
+
     // 9. Google (OAuth2)
     if !slug_exists!("google") {
         let provider = ProviderConfig {
@@ -478,7 +511,7 @@ pub async fn seed_default_providers(
                 "https://developers.google.com/identity/protocols/oauth2".to_string(),
             ),
             is_active: true,
-            credential_mode: "both".to_string(),
+            credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: Some(HashMap::from([
                 ("access_type".to_string(), "offline".to_string()),
@@ -524,7 +557,7 @@ pub async fn seed_default_providers(
                 "https://docs.github.com/en/apps/oauth-apps".to_string(),
             ),
             is_active: true,
-            credential_mode: "both".to_string(),
+            credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -571,7 +604,7 @@ pub async fn seed_default_providers(
                 "https://developers.facebook.com/docs/facebook-login/".to_string(),
             ),
             is_active: true,
-            credential_mode: "both".to_string(),
+            credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -614,7 +647,7 @@ pub async fn seed_default_providers(
                 "https://discord.com/developers/docs/topics/oauth2".to_string(),
             ),
             is_active: true,
-            credential_mode: "both".to_string(),
+            credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -657,7 +690,7 @@ pub async fn seed_default_providers(
                 "https://developer.spotify.com/documentation/web-api".to_string(),
             ),
             is_active: true,
-            credential_mode: "both".to_string(),
+            credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -703,7 +736,7 @@ pub async fn seed_default_providers(
                 "https://learn.microsoft.com/en-us/linkedin/shared/authentication/authorization-code-flow".to_string(),
             ),
             is_active: true,
-            credential_mode: "both".to_string(),
+            credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -746,7 +779,7 @@ pub async fn seed_default_providers(
                 "https://api.slack.com/authentication/oauth-v2".to_string(),
             ),
             is_active: true,
-            credential_mode: "both".to_string(),
+            credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -795,7 +828,7 @@ pub async fn seed_default_providers(
                 "https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow".to_string(),
             ),
             is_active: true,
-            credential_mode: "both".to_string(),
+            credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -839,7 +872,7 @@ pub async fn seed_default_providers(
                 "https://developers.tiktok.com/doc/oauth-user-access-token-management/".to_string(),
             ),
             is_active: true,
-            credential_mode: "both".to_string(),
+            credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -879,7 +912,7 @@ pub async fn seed_default_providers(
                 "https://dev.twitch.tv/docs/authentication/".to_string(),
             ),
             is_active: true,
-            credential_mode: "both".to_string(),
+            credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -923,7 +956,7 @@ pub async fn seed_default_providers(
                 "https://www.reddit.com/dev/api/oauth".to_string(),
             ),
             is_active: true,
-            credential_mode: "both".to_string(),
+            credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_basic".to_string(),
             extra_auth_params: Some(HashMap::from([
                 ("duration".to_string(), "permanent".to_string()),
