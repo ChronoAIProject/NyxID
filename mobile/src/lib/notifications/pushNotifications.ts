@@ -90,11 +90,6 @@ export function bootstrapNotificationInfrastructure() {
 async function ensureAndroidChannels() {
   if (Platform.OS !== "android") return;
 
-  // Android freezes channel properties after first creation.
-  // Delete-then-recreate forces the OS to pick up correct settings.
-  await Notifications.deleteNotificationChannelAsync("default").catch(() => {});
-  await Notifications.deleteNotificationChannelAsync("approvals").catch(() => {});
-
   await Notifications.setNotificationChannelAsync("default", {
     name: "Default",
     importance: Notifications.AndroidImportance.MAX,
