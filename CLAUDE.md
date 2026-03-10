@@ -63,7 +63,7 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (25 models, 23 collections)
+|-- models/              # MongoDB document structs (26 models, 24 collections)
 |-- services/            # Business logic (29 services, incl. approval_service, notification_service, push_service, telegram_service)
 |-- handlers/            # HTTP handlers (30 handler modules, incl. approvals, notifications, device_tokens, webhooks)
 |-- crypto/              # JWT, AES, password hashing, token generation
@@ -91,7 +91,7 @@ All API routes under `/api/v1`:
 - `/services` -- CRUD + OIDC credentials + endpoints + requirements
 - `/sessions` -- list sessions
 - `/connections` -- connect/disconnect services
-- `/providers` -- CRUD + OAuth/device-code/API-key flows + token management
+- `/providers` -- CRUD + OAuth/device-code/API-key flows + token management + per-user credentials
 - `/admin` -- user management, audit log, OAuth clients, service accounts
 - `/proxy/{service_id}/{path}` -- authenticated proxy (UUID-based)
 - `/proxy/s/{slug}/{path}` -- authenticated proxy (slug-based)

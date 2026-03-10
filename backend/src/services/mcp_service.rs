@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
@@ -661,7 +661,7 @@ pub async fn execute_tool(
         }
     }
 
-    // Resolve delegated credentials (CR-8)
+    // Resolve delegated credentials. Required provider connections must succeed.
     let delegated = delegation_service::resolve_delegated_credentials(
         db,
         encryption_key,
@@ -669,7 +669,7 @@ pub async fn execute_tool(
         &service.service_id,
     )
     .await
-    .unwrap_or_default();
+    .map_err(|e| AppError::BadRequest(format!("Provider credentials not available: {e}")))?;
 
     // Minimal headers for the downstream request.
     // Always set Content-Type for methods that typically carry a body, even

@@ -1,5 +1,5 @@
 use futures::TryStreamExt;
-use mongodb::bson::doc;
+use mongodb::bson::{Bson, doc};
 use serde::Serialize;
 
 use crate::errors::{AppError, AppResult};
@@ -14,6 +14,8 @@ use crate::models::user_provider_token::{
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
+
+const LLM_SERVICE_SLUG_PREFIX: &str = "llm-";
 
 #[derive(Debug, Serialize)]
 pub struct LlmProviderStatus {
@@ -48,12 +50,10 @@ pub async fn resolve_llm_service_by_slug(
 
     let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "provider_config_id": &provider.id, "is_active": true })
+        .find_one(build_llm_service_filter(Some(&provider.id)))
         .await?
         .ok_or_else(|| {
-            AppError::Internal(format!(
-                "LLM service not configured for provider '{provider_slug}'"
-            ))
+            AppError::NotFound(format!("LLM provider '{provider_slug}' is not available"))
         })?;
 
     Ok((service, provider))
@@ -65,10 +65,10 @@ pub async fn get_llm_status(
     user_id: &str,
     base_url: &str,
 ) -> AppResult<LlmStatusResponse> {
-    // Get all auto-seeded downstream services
+    // Get all auto-seeded LLM downstream services.
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(doc! { "provider_config_id": { "$ne": null }, "is_active": true })
+        .find(build_llm_service_filter(None))
         .await?
         .try_collect()
         .await?;
@@ -155,6 +155,24 @@ pub async fn get_llm_status(
             "deepseek-*".to_string(),
         ],
     })
+}
+
+fn build_llm_service_filter(provider_config_id: Option<&str>) -> mongodb::bson::Document {
+    let mut filter = doc! {
+        "slug": { "$regex": format!("^{}", LLM_SERVICE_SLUG_PREFIX) },
+        "is_active": true,
+    };
+
+    match provider_config_id {
+        Some(id) => {
+            filter.insert("provider_config_id", id);
+        }
+        None => {
+            filter.insert("provider_config_id", doc! { "$ne": Bson::Null });
+        }
+    }
+
+    filter
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +724,30 @@ impl LlmTranslator for GoogleAiTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mongodb::bson::Bson;
+
+    #[test]
+    fn build_llm_service_filter_targets_llm_service_slugs() {
+        let filter = build_llm_service_filter(None);
+        let slug_filter = filter.get_document("slug").expect("slug filter");
+        let provider_filter = filter
+            .get_document("provider_config_id")
+            .expect("provider_config_id filter");
+
+        assert_eq!(slug_filter.get_str("$regex").unwrap(), "^llm-");
+        assert_eq!(filter.get_bool("is_active").unwrap(), true);
+        assert_eq!(provider_filter.get("$ne"), Some(&Bson::Null));
+    }
+
+    #[test]
+    fn build_llm_service_filter_can_target_a_specific_provider() {
+        let filter = build_llm_service_filter(Some("provider-123"));
+
+        assert_eq!(
+            filter.get_str("provider_config_id").unwrap(),
+            "provider-123"
+        );
+    }
 
     // --- resolve_provider_for_model tests ---
 

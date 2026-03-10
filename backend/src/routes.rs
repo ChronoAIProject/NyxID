@@ -150,7 +150,8 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/my-tokens", get(handlers::user_tokens::list_my_tokens))
         .route(
             "/callback",
-            get(handlers::user_tokens::generic_oauth_callback),
+            get(handlers::user_tokens::generic_oauth_callback)
+                .post(handlers::user_tokens::generic_oauth_callback_post),
         )
         .route("/{provider_id}", get(handlers::providers::get_provider))
         .route("/{provider_id}", put(handlers::providers::update_provider))
@@ -185,6 +186,12 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route(
             "/{provider_id}/refresh",
             post(handlers::user_tokens::manual_refresh),
+        )
+        .route(
+            "/{provider_id}/credentials",
+            get(handlers::user_credentials::get_my_credentials)
+                .put(handlers::user_credentials::set_my_credentials)
+                .delete(handlers::user_credentials::delete_my_credentials),
         );
 
     // TODO(M-7): LLM endpoints share the global rate limiter. Consider adding a

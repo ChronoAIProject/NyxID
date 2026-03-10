@@ -132,9 +132,11 @@ It provides a complete identity layer: user registration, session management, Op
 - Full audit logging for all service account operations
 
 ### Credential Broker
-- Admin-managed provider registry (OpenAI, Anthropic, Google AI, Mistral, Cohere, etc.)
-- Users connect by entering API keys or completing OAuth2 flows
+- 19 providers auto-seeded at startup: 7 API key providers (OpenAI, Anthropic, Google AI, Mistral, Cohere, DeepSeek, OpenAI Codex) and 11 social OAuth2 providers (Google, GitHub, Twitter/X, Facebook, Discord, Spotify, LinkedIn, Slack, Microsoft, TikTok, Twitch) plus Reddit
+- Three credential modes: admin-managed (`admin`), user-provided (`user`), or both -- users can bring their own OAuth app credentials for supported providers
+- Users connect by entering API keys or completing OAuth2/device-code flows
 - All credentials encrypted at rest (AES-256-GCM) with secure memory cleanup (zeroize)
+- Token revocation on disconnect: best-effort remote revocation via provider's revocation endpoint (RFC 7009)
 - Credential delegation: downstream services declare provider requirements, proxy injects user tokens automatically
 - Lazy OAuth token refresh with 5-minute buffer before expiry
 - Token lifecycle tracking: active, expired, revoked, refresh_failed
@@ -144,11 +146,11 @@ It provides a complete identity layer: user registration, session management, Op
 - **Provider-specific endpoint:** `ANY /api/v1/llm/{provider_slug}/v1/{*path}` -- passthrough proxy to a specific provider's API
 - **OpenAI-compatible gateway:** `ANY /api/v1/llm/gateway/v1/{*path}` -- routes requests by `model` field and translates between API formats
 - **Status endpoint:** `GET /api/v1/llm/status` -- per-user provider readiness with proxy URLs
-- Auto-seeded downstream services for 6 LLM providers at startup (no manual configuration required)
+- Auto-seeded downstream services for 7 LLM providers at startup (no manual configuration required)
 - Model-to-provider routing based on model name prefix (e.g., `gpt-*` to OpenAI, `claude-*` to Anthropic)
 - Automatic Anthropic format translation: send OpenAI-format requests to Claude models through the gateway
 - Google AI routed through its OpenAI-compatible endpoint automatically
-- Supported providers: OpenAI, OpenAI Codex (OAuth), Anthropic, Google AI, Mistral, Cohere
+- Supported providers: OpenAI, OpenAI Codex (OAuth), Anthropic, Google AI, Mistral, Cohere, DeepSeek
 
 ### Identity Propagation
 - Forward authenticated user identity to downstream services during proxy requests

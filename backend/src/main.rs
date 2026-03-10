@@ -94,10 +94,10 @@ async fn main() {
         .await
         .expect("Failed to seed default providers");
 
-    // Seed downstream services for LLM providers (idempotent)
-    services::provider_service::seed_default_llm_services(&db, &config.encryption_key)
+    // Seed downstream services for default providers (idempotent)
+    services::provider_service::seed_default_services(&db, &config.encryption_key)
         .await
-        .expect("Failed to seed default LLM services");
+        .expect("Failed to seed default services");
 
     // Seed system roles for RBAC (idempotent)
     services::role_service::seed_system_roles(&db)

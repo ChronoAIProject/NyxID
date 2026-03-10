@@ -3,6 +3,12 @@ import type {
   UserProviderToken,
   LlmProviderStatus,
 } from "@/types/api";
+import {
+  canConnectProvider,
+  getProviderConnectHint,
+  getProviderConnectLabel,
+  needsUserCredentials,
+} from "@/lib/constants";
 import { ProviderStatusBadge } from "./provider-status-badge";
 import { LlmReadyBadge } from "./llm-ready-badge";
 import { getProviderBrand, hasKnownBrand } from "@/lib/provider-branding";
@@ -22,6 +28,7 @@ import {
   RefreshCw,
   KeyRound,
   ExternalLink,
+  Settings2,
 } from "lucide-react";
 
 interface ProviderCardProps {
@@ -29,9 +36,11 @@ interface ProviderCardProps {
   readonly token: UserProviderToken | undefined;
   readonly llmStatus: LlmProviderStatus | undefined;
   readonly gatewayUrl: string;
-  readonly onConnect: (provider: ProviderConfig) => void;
+  readonly hasUserCredentials: boolean;
+  readonly onConnect: (provider: ProviderConfig, hasUserCredentials: boolean) => void;
   readonly onDisconnect: (providerId: string) => void;
   readonly onRefresh: (providerId: string) => void;
+  readonly onSetupCredentials: (provider: ProviderConfig) => void;
   readonly isConnecting: boolean;
   readonly isDisconnecting: boolean;
   readonly isRefreshing: boolean;
@@ -42,9 +51,11 @@ export function ProviderCard({
   token,
   llmStatus,
   gatewayUrl,
+  hasUserCredentials,
   onConnect,
   onDisconnect,
   onRefresh,
+  onSetupCredentials,
   isConnecting,
   isDisconnecting,
   isRefreshing,
@@ -55,6 +66,10 @@ export function ProviderCard({
     token?.status === "expired" || token?.status === "refresh_failed";
   const brand = getProviderBrand(provider.slug);
   const hasBrand = hasKnownBrand(provider.slug);
+  const canConnect = canConnectProvider(provider, hasUserCredentials);
+  const connectHint = getProviderConnectHint(provider, hasUserCredentials);
+  const connectLabel = getProviderConnectLabel(provider, hasUserCredentials);
+  const showCredentialsSetup = needsUserCredentials(provider);
 
   return (
     <Card
@@ -174,34 +189,61 @@ export function ProviderCard({
             </div>
           </div>
         ) : (
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">
-                Not connected
-              </span>
-              {provider.documentation_url && (
-                <a
-                  href={provider.documentation_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-0.5 text-xs text-primary hover:underline"
-                >
-                  Docs
-                  <ExternalLink className="h-2.5 w-2.5" />
-                </a>
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  Not connected
+                </span>
+                {provider.documentation_url && (
+                  <a
+                    href={provider.documentation_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-0.5 text-xs text-primary hover:underline"
+                  >
+                    Docs
+                    <ExternalLink className="h-2.5 w-2.5" />
+                  </a>
+                )}
+              </div>
+              {connectHint && (
+                <span className="text-xs text-muted-foreground/70">
+                  {connectHint}
+                </span>
               )}
             </div>
-            <Button
-              size="sm"
-              onClick={() => onConnect(provider)}
-              disabled={isConnecting}
-              isLoading={isConnecting}
-            >
-              <Plug className="mr-1.5 h-3 w-3" />
-              {provider.provider_type === "device_code"
-                ? "Connect via OAuth"
-                : "Connect"}
-            </Button>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {showCredentialsSetup && !hasUserCredentials && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onSetupCredentials(provider)}
+                >
+                  <Settings2 className="mr-1.5 h-3 w-3" />
+                  Setup OAuth App
+                </Button>
+              )}
+              {showCredentialsSetup && hasUserCredentials && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => onSetupCredentials(provider)}
+                >
+                  <Settings2 className="mr-1.5 h-3 w-3" />
+                  Manage App
+                </Button>
+              )}
+              <Button
+                size="sm"
+                onClick={() => onConnect(provider, hasUserCredentials)}
+                disabled={isConnecting || !canConnect}
+                isLoading={isConnecting}
+              >
+                <Plug className="mr-1.5 h-3 w-3" />
+                {connectLabel}
+              </Button>
+            </div>
           </div>
         )}
       </CardContent>

@@ -23,6 +23,11 @@ pub struct OAuthState {
     /// this holds the SA ID. Tokens are stored under this ID instead of user_id.
     #[serde(default)]
     pub target_user_id: Option<String>,
+    /// If the flow was initiated with user-provided OAuth app credentials,
+    /// this records the credential owner's user ID so later steps keep using
+    /// the same OAuth client even if provider config changes.
+    #[serde(default)]
+    pub credential_user_id: Option<String>,
     /// Custom frontend redirect path after OAuth callback completes.
     /// e.g., "/admin/service-accounts/{sa_id}" for admin flows.
     #[serde(default)]
@@ -53,6 +58,7 @@ mod tests {
             user_code_encrypted: None,
             poll_interval: None,
             target_user_id: None,
+            credential_user_id: None,
             redirect_path: None,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -62,6 +68,7 @@ mod tests {
         assert_eq!(state.id, restored.id);
         assert_eq!(state.code_verifier, restored.code_verifier);
         assert!(restored.target_user_id.is_none());
+        assert!(restored.credential_user_id.is_none());
         assert!(restored.redirect_path.is_none());
     }
 
@@ -76,6 +83,7 @@ mod tests {
             user_code_encrypted: Some("encrypted_user_code".to_string()),
             poll_interval: Some(5),
             target_user_id: None,
+            credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: None,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -84,6 +92,7 @@ mod tests {
         let restored: OAuthState = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.poll_interval, Some(5));
         assert!(restored.device_code_encrypted.is_some());
+        assert!(restored.credential_user_id.is_some());
     }
 
     #[test]
@@ -99,6 +108,7 @@ mod tests {
             user_code_encrypted: None,
             poll_interval: None,
             target_user_id: Some(sa_id.clone()),
+            credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: Some(redirect.clone()),
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -107,6 +117,7 @@ mod tests {
         let restored: OAuthState = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.target_user_id, Some(sa_id));
         assert_eq!(restored.redirect_path, Some(redirect));
+        assert!(restored.credential_user_id.is_some());
     }
 
     #[test]
@@ -121,6 +132,7 @@ mod tests {
         };
         let restored: OAuthState = bson::from_document(doc).expect("deserialize");
         assert!(restored.target_user_id.is_none());
+        assert!(restored.credential_user_id.is_none());
         assert!(restored.redirect_path.is_none());
         assert!(restored.code_verifier.is_none());
     }

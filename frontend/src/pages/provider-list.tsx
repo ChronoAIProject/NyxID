@@ -68,9 +68,7 @@ function stripEmptyStrings<T extends Record<string, unknown>>(
   obj: T,
 ): Record<string, unknown> {
   return Object.fromEntries(
-    Object.entries(obj).filter(
-      ([, v]) => v !== "" && v !== undefined,
-    ),
+    Object.entries(obj).filter(([, v]) => v !== "" && v !== undefined),
   );
 }
 
@@ -87,6 +85,7 @@ export function ProviderListPage() {
       slug: "",
       description: "",
       provider_type: "oauth2",
+      credential_mode: "admin",
       authorization_url: "",
       token_url: "",
       revocation_url: "",
@@ -105,6 +104,7 @@ export function ProviderListPage() {
   });
 
   const watchedProviderType = form.watch("provider_type");
+  const watchedCredentialMode = form.watch("credential_mode");
 
   async function onSubmit(data: CreateProviderFormData) {
     try {
@@ -221,7 +221,10 @@ export function ProviderListPage() {
                   render={({ field }) => (
                     <FormItem>
                       <FormLabel>Provider Type</FormLabel>
-                      <Select value={field.value} onValueChange={field.onChange}>
+                      <Select
+                        value={field.value}
+                        onValueChange={field.onChange}
+                      >
                         <FormControl>
                           <SelectTrigger>
                             <SelectValue placeholder="Select provider type" />
@@ -239,6 +242,39 @@ export function ProviderListPage() {
                     </FormItem>
                   )}
                 />
+
+                {(watchedProviderType === "oauth2" ||
+                  watchedProviderType === "device_code") && (
+                  <FormField
+                    control={form.control}
+                    name="credential_mode"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Credential Mode</FormLabel>
+                        <Select
+                          value={field.value ?? "admin"}
+                          onValueChange={field.onChange}
+                        >
+                          <FormControl>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            <SelectItem value="admin">Admin Only</SelectItem>
+                            <SelectItem value="user">User Provided</SelectItem>
+                            <SelectItem value="both">Admin or User</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          Choose whether users rely on admin-managed OAuth apps,
+                          bring their own, or can use either.
+                        </p>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                )}
 
                 <FormField
                   control={form.control}
@@ -362,11 +398,13 @@ export function ProviderListPage() {
                         <FormItem>
                           <FormLabel>Client ID</FormLabel>
                           <FormControl>
-                            <Input
-                              placeholder="OAuth client ID"
-                              {...field}
-                            />
+                            <Input placeholder="OAuth client ID" {...field} />
                           </FormControl>
+                          <p className="text-xs text-muted-foreground">
+                            {watchedCredentialMode === "admin"
+                              ? "Required in admin mode."
+                              : "Optional. Leave blank to require users to supply their own OAuth app credentials."}
+                          </p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -385,6 +423,11 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
+                          <p className="text-xs text-muted-foreground">
+                            {watchedCredentialMode === "admin"
+                              ? "Required for OAuth 2.0 admin credentials."
+                              : "Optional. Only set this when configuring an admin fallback OAuth app."}
+                          </p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -526,6 +569,11 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
+                          <p className="text-xs text-muted-foreground">
+                            {watchedCredentialMode === "admin"
+                              ? "Required in admin mode."
+                              : "Optional. Needed only when configuring an admin fallback client."}
+                          </p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -622,10 +670,7 @@ export function ProviderListPage() {
       {isLoading ? (
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }).map((_, i) => (
-            <Skeleton
-              key={`prov-skel-${String(i)}`}
-              className="h-36 w-full"
-            />
+            <Skeleton key={`prov-skel-${String(i)}`} className="h-36 w-full" />
           ))}
         </div>
       ) : !providers || providers.length === 0 ? (
@@ -654,9 +699,7 @@ export function ProviderListPage() {
                     <Plug className="h-5 w-5 text-primary" />
                   </div>
                   <div>
-                    <CardTitle className="text-base">
-                      {provider.name}
-                    </CardTitle>
+                    <CardTitle className="text-base">{provider.name}</CardTitle>
                     <CardDescription className="text-xs">
                       {provider.slug}
                     </CardDescription>

@@ -1,7 +1,21 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "provider_configs";
+
+fn default_credential_mode() -> String {
+    "admin".to_string()
+}
+
+fn default_token_endpoint_auth_method() -> String {
+    "client_secret_post".to_string()
+}
+
+fn default_device_code_format() -> String {
+    "rfc8628".to_string()
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -54,6 +68,29 @@ pub struct ProviderConfig {
     pub documentation_url: Option<String>,
 
     pub is_active: bool,
+    /// "admin" | "user" | "both" -- controls where OAuth client credentials come from
+    #[serde(default = "default_credential_mode")]
+    pub credential_mode: String,
+    /// How client credentials are sent to the token endpoint:
+    /// "client_secret_post" (form body, default) | "client_secret_basic" (HTTP Basic Auth)
+    #[serde(default = "default_token_endpoint_auth_method")]
+    pub token_endpoint_auth_method: String,
+
+    /// Provider-specific extra auth URL parameters (e.g., {"access_type": "offline"} for Google)
+    /// Blocklist: client_id, client_secret, redirect_uri, response_type, state, code,
+    ///            code_challenge, code_challenge_method, scope
+    #[serde(default)]
+    pub extra_auth_params: Option<HashMap<String, String>>,
+
+    /// "rfc8628" (standard, default) | "openai" (non-standard) - controls device code poll format
+    #[serde(default = "default_device_code_format")]
+    pub device_code_format: String,
+
+    /// Override the parameter name used instead of "client_id" across provider-facing
+    /// OAuth requests (e.g., TikTok uses "client_key"). Default is "client_id".
+    #[serde(default)]
+    pub client_id_param_name: Option<String>,
+
     pub created_by: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -94,6 +131,11 @@ mod tests {
             icon_url: None,
             documentation_url: None,
             is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -103,6 +145,7 @@ mod tests {
         assert_eq!(config.slug, restored.slug);
         assert_eq!(config.provider_type, restored.provider_type);
         assert!(restored.supports_pkce);
+        assert_eq!(restored.credential_mode, "admin");
     }
 
     #[test]
@@ -129,6 +172,11 @@ mod tests {
             icon_url: None,
             documentation_url: None,
             is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -137,5 +185,23 @@ mod tests {
         let restored: ProviderConfig = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.provider_type, "api_key");
         assert!(restored.api_key_instructions.is_some());
+    }
+
+    #[test]
+    fn credential_mode_defaults_to_admin() {
+        // Simulate a document without credential_mode (backward compat)
+        let doc = bson::doc! {
+            "_id": "test-id",
+            "slug": "test",
+            "name": "Test",
+            "provider_type": "api_key",
+            "supports_pkce": false,
+            "is_active": true,
+            "created_by": "admin",
+            "created_at": bson::DateTime::from_chrono(Utc::now()),
+            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        };
+        let restored: ProviderConfig = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.credential_mode, "admin");
     }
 }

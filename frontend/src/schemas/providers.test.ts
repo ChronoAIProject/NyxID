@@ -3,12 +3,80 @@ import {
   connectApiKeySchema,
   createProviderSchema,
   updateProviderSchema,
+  userCredentialsSchema,
   PROVIDER_TYPES,
+  CREDENTIAL_MODES,
 } from "./providers";
 
 describe("PROVIDER_TYPES", () => {
   it("contains expected types", () => {
     expect(PROVIDER_TYPES).toEqual(["oauth2", "api_key", "device_code"]);
+  });
+});
+
+describe("CREDENTIAL_MODES", () => {
+  it("contains expected modes", () => {
+    expect(CREDENTIAL_MODES).toEqual(["admin", "user", "both"]);
+  });
+});
+
+describe("userCredentialsSchema", () => {
+  it("accepts valid credentials", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "my-client-id",
+      client_secret: "my-client-secret",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts credentials with optional label", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "my-client-id",
+      client_secret: "my-client-secret",
+      label: "My Dev App",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects empty client_id", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "",
+      client_secret: "secret",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts empty client_secret for public clients", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "id",
+      client_secret: "",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects client_id over 500 characters", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "a".repeat(501),
+      client_secret: "secret",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects client_secret over 2000 characters", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "id",
+      client_secret: "a".repeat(2001),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects label over 200 characters", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "id",
+      client_secret: "secret",
+      label: "a".repeat(201),
+    });
+    expect(result.success).toBe(false);
   });
 });
 
@@ -73,6 +141,17 @@ describe("createProviderSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts user-mode oauth2 provider without admin credentials", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "oauth2",
+      credential_mode: "user",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+    });
+    expect(result.success).toBe(true);
+  });
+
   it("rejects oauth2 provider without authorization_url", () => {
     const result = createProviderSchema.safeParse({
       ...baseValid,
@@ -117,6 +196,18 @@ describe("createProviderSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects both-mode oauth2 provider with only one fallback credential", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "oauth2",
+      credential_mode: "both",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+      client_id: "my-client-id",
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("accepts valid device_code provider", () => {
     const result = createProviderSchema.safeParse({
       ...baseValid,
@@ -124,6 +215,19 @@ describe("createProviderSchema", () => {
       authorization_url: "https://auth.example.com/authorize",
       token_url: "https://auth.example.com/token",
       client_id: "my-client-id",
+      device_code_url: "https://auth.example.com/device/code",
+      device_token_url: "https://auth.example.com/device/token",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts user-mode device_code provider without admin client_id", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "device_code",
+      credential_mode: "user",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
       device_code_url: "https://auth.example.com/device/code",
       device_token_url: "https://auth.example.com/device/token",
     });

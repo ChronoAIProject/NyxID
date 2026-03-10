@@ -241,7 +241,7 @@ async fn execute_proxy(
         }
     }
 
-    // Resolve delegated credentials (non-fatal: proceed without on error)
+    // Resolve delegated credentials. Required provider connections must succeed.
     let delegated = delegation_service::resolve_delegated_credentials(
         &state.db,
         &encryption_key,
@@ -249,7 +249,7 @@ async fn execute_proxy(
         service_id,
     )
     .await
-    .unwrap_or_default();
+    .map_err(|e| AppError::BadRequest(format!("Provider credentials not available: {e}")))?;
 
     let method = request.method().clone();
     let query = request.uri().query().map(String::from);
