@@ -675,21 +675,19 @@ async fn send_to_chatgpt_with_api_url(
 
     let request = build_chatgpt_request(&client, &api_url, request_text, bearer_token)?;
 
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        client.execute(request),
-    )
-    .await
-    .map_err(|_| {
-        tracing::error!("ChatGPT HTTP request timed out waiting for response headers (30s)");
-        AppError::Internal(
-            "ChatGPT backend did not respond within 30 seconds".to_string(),
-        )
-    })?
-    .map_err(|e| {
-        tracing::error!("ChatGPT HTTP request failed: {e}");
-        AppError::Internal(format!("ChatGPT HTTP request failed: {e}"))
-    })?;
+    let response =
+        tokio::time::timeout(std::time::Duration::from_secs(30), client.execute(request))
+            .await
+            .map_err(|_| {
+                tracing::error!(
+                    "ChatGPT HTTP request timed out waiting for response headers (30s)"
+                );
+                AppError::Internal("ChatGPT backend did not respond within 30 seconds".to_string())
+            })?
+            .map_err(|e| {
+                tracing::error!("ChatGPT HTTP request failed: {e}");
+                AppError::Internal(format!("ChatGPT HTTP request failed: {e}"))
+            })?;
 
     let status = response.status();
     tracing::debug!("ChatGPT HTTP response status: {status}");

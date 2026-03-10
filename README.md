@@ -343,7 +343,7 @@ Expected response:
 
 All endpoints return JSON. Authenticated endpoints require either:
 - A `Bearer <token>` header, or
-- A valid `nyx_session` / `nyx_access_token` cookie
+- A valid `nyx_session` cookie for first-party browser sessions
 
 For the full API reference with request/response schemas and example curl commands, see **[docs/API.md](docs/API.md)**.
 
@@ -353,9 +353,9 @@ For the full API reference with request/response schemas and example curl comman
 |--------|--------------------------------------|----------|--------------------------------------|
 | GET    | `/health`                            | None     | Health check                         |
 | POST   | `/api/v1/auth/register`              | None     | Register a new user                  |
-| POST   | `/api/v1/auth/login`                 | None     | Log in (returns tokens + cookies)    |
+| POST   | `/api/v1/auth/login`                 | None     | Log in (web: session cookie, mobile/token clients: tokens) |
 | POST   | `/api/v1/auth/logout`                | Required | Log out and revoke session           |
-| POST   | `/api/v1/auth/refresh`               | Cookie   | Refresh access token                 |
+| POST   | `/api/v1/auth/refresh`               | None     | Refresh access token for token clients |
 | POST   | `/api/v1/auth/verify-email`          | None     | Verify email address with token      |
 | POST   | `/api/v1/auth/forgot-password`       | None     | Request a password reset email       |
 | POST   | `/api/v1/auth/reset-password`        | None     | Reset password with token            |
@@ -631,9 +631,9 @@ Every response includes:
 
 ### Cookie Security
 
-- All authentication cookies are `HttpOnly` and `SameSite=Lax`
+- Browser authentication uses an `HttpOnly`, `SameSite=Lax` `nyx_session` cookie
 - `Secure` flag is automatically set when not running on localhost
-- Refresh tokens are path-scoped to `/api/v1/auth/refresh`
+- Mobile and OAuth clients use bearer tokens and refresh tokens in explicit request bodies instead of browser auth cookies
 
 ### SSRF Protection
 

@@ -514,20 +514,23 @@ Consent endpoints use the authenticated user's ID from the `AuthUser` middleware
 | Cookie              | Flags                                             | Path                      |
 |---------------------|---------------------------------------------------|---------------------------|
 | `nyx_session`       | HttpOnly, SameSite=Lax, Secure*                   | `/`                       |
-| `nyx_access_token`  | HttpOnly, SameSite=Lax, Secure*                   | `/`                       |
-| `nyx_refresh_token` | HttpOnly, SameSite=Lax, Secure*                   | `/api/v1/auth/refresh`    |
 
 \* `Secure` flag is set when `BASE_URL` does not start with `http://localhost` or `http://127.0.0.1`.
+
+NyxID's first-party web app uses only the `nyx_session` cookie for browser authentication. Mobile apps and OAuth clients use bearer access tokens and explicit refresh-token request bodies instead of browser auth cookies.
 
 ### Authentication Chain
 
 Requests are authenticated in this order:
 1. `Authorization: Bearer <JWT>` header
 2. `nyx_session` cookie (hashed, looked up in DB)
-3. `nyx_access_token` cookie (JWT verified)
-4. `X-API-Key` header (hashed, looked up in DB)
+3. `X-API-Key` header (hashed, looked up in DB)
 
 All methods verify the user is active before granting access.
+
+### Browser CSRF Protection
+
+Unsafe private API requests that look browser-originated, or that carry browser auth cookies, must present an `Origin` or `Referer` matching either `FRONTEND_URL` or `BASE_URL`. This protects first-party cookie-authenticated browser sessions from cross-site request forgery while leaving bearer-token, API-key, and OAuth token endpoint traffic unaffected.
 
 ### API Key Scope Population
 

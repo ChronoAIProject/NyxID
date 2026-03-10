@@ -10,10 +10,9 @@ use crate::AppState;
 use crate::crypto::token::{constant_time_eq, generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{
-    build_cookie, build_cookie_with_same_site, clear_cookie, clear_cookie_with_same_site,
-    extract_ip, extract_user_agent,
+    apply_browser_session_cookies, build_cookie, build_cookie_with_same_site, clear_cookie,
+    clear_cookie_with_same_site, extract_ip, extract_user_agent,
 };
-use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, SESSION_COOKIE_NAME};
 use crate::services::{audit_service, social_auth_service, token_service};
 use social_auth_service::SocialProfile;
 
@@ -337,47 +336,82 @@ pub async fn callback(
             redirect_with_error(&redirect_target, error_key, secure, domain)
         })?;
 
-    // Issue session and tokens
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
 
-    let tokens = token_service::create_session_and_issue_tokens(
-        &state.db,
-        &state.config,
-        &state.jwt_keys,
-        &user.id,
-        ip.as_deref(),
-        ua.as_deref(),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "Social auth session creation failed");
-        redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
-    })?;
+    match &redirect_target {
+        SocialRedirectTarget::Web { .. } => {
+            let session =
+                token_service::create_session(&state.db, &user.id, ip.as_deref(), ua.as_deref())
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "Social auth session creation failed");
+                        redirect_with_error(
+                            &redirect_target,
+                            "social_auth_exchange",
+                            secure,
+                            domain,
+                        )
+                    })?;
 
-    // Audit log
-    audit_service::log_async(
-        state.db.clone(),
-        Some(user.id.clone()),
-        "social_login".to_string(),
-        Some(serde_json::json!({
-            "provider": provider.as_str(),
-            "session_id": tokens.session_id,
-        })),
-        ip,
-        ua,
-    );
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user.id.clone()),
+                "social_login".to_string(),
+                Some(serde_json::json!({
+                    "provider": provider.as_str(),
+                    "session_id": session.session_id,
+                })),
+                ip,
+                ua,
+            );
 
-    // Build response with auth cookies and redirect
-    build_auth_redirect(
-        &state.config,
-        &tokens,
-        &redirect_target,
-        provider.as_str(),
-        &user.id,
-        secure,
-        domain,
-    )
+            build_web_auth_redirect(
+                &session,
+                &redirect_target,
+                provider.as_str(),
+                &user.id,
+                secure,
+                domain,
+            )
+        }
+        SocialRedirectTarget::Mobile { .. } => {
+            let tokens = token_service::create_session_and_issue_tokens(
+                &state.db,
+                &state.config,
+                &state.jwt_keys,
+                &user.id,
+                ip.as_deref(),
+                ua.as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Social auth session creation failed");
+                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+            })?;
+
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user.id.clone()),
+                "social_login".to_string(),
+                Some(serde_json::json!({
+                    "provider": provider.as_str(),
+                    "session_id": tokens.session_id,
+                })),
+                ip,
+                ua,
+            );
+
+            build_mobile_auth_redirect(
+                &tokens,
+                &redirect_target,
+                provider.as_str(),
+                &user.id,
+                secure,
+                domain,
+            )
+        }
+    }
 }
 
 // --- Apple POST callback (response_mode=form_post) ---
@@ -570,109 +604,83 @@ pub async fn apple_callback(
             redirect_with_error(&redirect_target, error_key, secure, domain)
         })?;
 
-    // Issue session and tokens
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
 
-    let tokens = token_service::create_session_and_issue_tokens(
-        &state.db,
-        &state.config,
-        &state.jwt_keys,
-        &user.id,
-        ip.as_deref(),
-        ua.as_deref(),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "Apple auth session creation failed");
-        redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
-    })?;
+    match &redirect_target {
+        SocialRedirectTarget::Web { .. } => {
+            let session =
+                token_service::create_session(&state.db, &user.id, ip.as_deref(), ua.as_deref())
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "Apple auth session creation failed");
+                        redirect_with_error(
+                            &redirect_target,
+                            "social_auth_exchange",
+                            secure,
+                            domain,
+                        )
+                    })?;
 
-    // Audit log
-    audit_service::log_async(
-        state.db.clone(),
-        Some(user.id.clone()),
-        "social_login".to_string(),
-        Some(serde_json::json!({
-            "provider": "apple",
-            "session_id": tokens.session_id,
-        })),
-        ip,
-        ua,
-    );
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user.id.clone()),
+                "social_login".to_string(),
+                Some(serde_json::json!({
+                    "provider": "apple",
+                    "session_id": session.session_id,
+                })),
+                ip,
+                ua,
+            );
 
-    // Build response with auth cookies and redirect
-    build_auth_redirect(
-        &state.config,
-        &tokens,
-        &redirect_target,
-        "apple",
-        &user.id,
-        secure,
-        domain,
-    )
+            build_web_auth_redirect(
+                &session,
+                &redirect_target,
+                "apple",
+                &user.id,
+                secure,
+                domain,
+            )
+        }
+        SocialRedirectTarget::Mobile { .. } => {
+            let tokens = token_service::create_session_and_issue_tokens(
+                &state.db,
+                &state.config,
+                &state.jwt_keys,
+                &user.id,
+                ip.as_deref(),
+                ua.as_deref(),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Apple auth session creation failed");
+                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+            })?;
+
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user.id.clone()),
+                "social_login".to_string(),
+                Some(serde_json::json!({
+                    "provider": "apple",
+                    "session_id": tokens.session_id,
+                })),
+                ip,
+                ua,
+            );
+
+            build_mobile_auth_redirect(&tokens, &redirect_target, "apple", &user.id, secure, domain)
+        }
+    }
 }
 
-/// Build the auth cookie headers and redirect after social login.
-///
-/// Shared between the GET callback (Google/GitHub) and the POST callback (Apple).
-fn build_auth_redirect(
-    config: &crate::config::AppConfig,
-    tokens: &token_service::IssuedTokens,
+fn append_social_cleanup_cookies(
+    headers: &mut HeaderMap,
     target: &SocialRedirectTarget,
-    provider: &str,
-    user_id: &str,
     secure: bool,
     domain: Option<&str>,
-) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
-    let mut headers = HeaderMap::new();
-
-    // Session cookie (30 days)
-    headers.insert(
-        header::SET_COOKIE,
-        build_cookie(
-            SESSION_COOKIE_NAME,
-            &tokens.session_token,
-            30 * 24 * 3600,
-            "/",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| redirect_with_error(target, "social_auth_exchange", secure, domain))?,
-    );
-
-    // Access token cookie
-    headers.append(
-        header::SET_COOKIE,
-        build_cookie(
-            ACCESS_TOKEN_COOKIE_NAME,
-            &tokens.access_token,
-            tokens.access_expires_in,
-            "/",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| redirect_with_error(target, "social_auth_exchange", secure, domain))?,
-    );
-
-    // Refresh token cookie
-    headers.append(
-        header::SET_COOKIE,
-        build_cookie(
-            "nyx_refresh_token",
-            &tokens.refresh_token,
-            config.jwt_refresh_ttl_secs,
-            "/api/v1/auth/refresh",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| redirect_with_error(target, "social_auth_exchange", secure, domain))?,
-    );
-
-    // Clear social flow cookies (state + nonce, both SameSite variants)
+) -> Result<(), (StatusCode, HeaderMap, ())> {
     for cookie in social_clear_cookie_values(secure, domain) {
         headers.append(
             header::SET_COOKIE,
@@ -699,14 +707,51 @@ fn build_auth_redirect(
         headers.append(header::SET_COOKIE, cookie);
     }
 
-    let redirect_url = build_success_redirect_url(
-        target,
-        provider,
-        user_id,
-        &tokens.access_token,
-        tokens.access_expires_in,
-        &tokens.refresh_token,
+    Ok(())
+}
+
+/// Build the auth redirect for first-party web login. Only the session cookie
+/// is issued to the browser; legacy browser token cookies are cleared.
+fn build_web_auth_redirect(
+    session: &token_service::IssuedSession,
+    target: &SocialRedirectTarget,
+    provider: &str,
+    user_id: &str,
+    secure: bool,
+    domain: Option<&str>,
+) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
+    let mut headers = HeaderMap::new();
+
+    apply_browser_session_cookies(&mut headers, &session.session_token, secure, domain)
+        .map_err(|_| redirect_with_error(target, "social_auth_exchange", secure, domain))?;
+    append_social_cleanup_cookies(&mut headers, target, secure, domain)?;
+
+    let redirect_url = build_success_redirect_url(target, provider, user_id, None);
+    headers.insert(
+        header::LOCATION,
+        redirect_url
+            .parse()
+            .map_err(|_| redirect_with_error(target, "social_auth_exchange", secure, domain))?,
     );
+
+    Ok((StatusCode::FOUND, headers, ()))
+}
+
+/// Build the auth redirect for mobile deep-link login. Mobile receives tokens
+/// in the redirect URL and does not receive browser auth cookies.
+fn build_mobile_auth_redirect(
+    tokens: &token_service::IssuedTokens,
+    target: &SocialRedirectTarget,
+    provider: &str,
+    user_id: &str,
+    secure: bool,
+    domain: Option<&str>,
+) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
+    let mut headers = HeaderMap::new();
+
+    append_social_cleanup_cookies(&mut headers, target, secure, domain)?;
+
+    let redirect_url = build_success_redirect_url(target, provider, user_id, Some(tokens));
     headers.insert(
         header::LOCATION,
         redirect_url
@@ -749,15 +794,14 @@ fn build_success_redirect_url(
     target: &SocialRedirectTarget,
     provider: &str,
     user_id: &str,
-    access_token: &str,
-    expires_in: i64,
-    refresh_token: &str,
+    tokens: Option<&token_service::IssuedTokens>,
 ) -> String {
     match target {
         SocialRedirectTarget::Web { frontend_url } => {
             frontend_url.trim_end_matches('/').to_string() + "/"
         }
         SocialRedirectTarget::Mobile { redirect_uri } => {
+            let tokens = tokens.expect("mobile redirect requires issued tokens");
             let joiner = if redirect_uri.contains('?') { "&" } else { "?" };
             format!(
                 "{}{}status=success&provider={}&user_id={}&access_token={}&refresh_token={}&expires_in={}",
@@ -765,9 +809,9 @@ fn build_success_redirect_url(
                 joiner,
                 urlencoding::encode(provider),
                 urlencoding::encode(user_id),
-                urlencoding::encode(access_token),
-                urlencoding::encode(refresh_token),
-                expires_in
+                urlencoding::encode(&tokens.access_token),
+                urlencoding::encode(&tokens.refresh_token),
+                tokens.access_expires_in
             )
         }
     }

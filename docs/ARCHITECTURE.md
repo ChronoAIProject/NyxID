@@ -116,7 +116,7 @@ Responsibilities:
 
 | Module              | Responsibility                                        |
 |---------------------|-------------------------------------------------------|
-| `auth.rs`           | Extract `AuthUser` from Bearer token, session cookie, access token cookie, or API key header. Verify user/service account is active. Populate `acting_client_id` from delegated token `act.sub` claim. Service account tokens (`sa: true`) follow a dedicated verification path (active check + token revocation check). `reject_delegated_tokens` and `reject_service_account_tokens` middlewares enforce endpoint access control. |
+| `auth.rs`           | Extract `AuthUser` from Bearer token, session cookie, or API key header. Verify user/service account is active. Populate `acting_client_id` from delegated token `act.sub` claim. Service account tokens (`sa: true`) follow a dedicated verification path (active check + token revocation check). `reject_delegated_tokens` and `reject_service_account_tokens` middlewares enforce endpoint access control. Legacy access-token cookies are no longer accepted for browser auth. |
 | `rate_limit.rs`     | Per-IP sliding window rate limiter with global token-bucket fallback. Background cleanup prevents memory growth. |
 | `security_headers.rs` | Inject HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, X-XSS-Protection into every response. |
 
@@ -133,15 +133,14 @@ Request arrives
    |-- Found? --> Hash token --> Lookup session in DB --> Check not revoked/expired
    |             --> Check user is_active --> AuthUser
    |
-3. Check nyx_access_token cookie
-   |-- Found? --> Verify JWT --> Extract user_id --> Check user is_active --> AuthUser
-   |
-4. Check x-api-key header
+3. Check x-api-key header
    |-- Found? --> Hash key --> Lookup api_key in DB --> Check is_active, not expired
    |             --> Load user --> Check user is_active --> AuthUser
    |
-5. None found --> Reject with 401
+4. None found --> Reject with 401
 ```
+
+Browser-based first-party auth is session-cookie-only. Mobile apps, OAuth clients, delegated access, and service accounts use bearer tokens rather than browser token cookies.
 
 #### 3. Handler Layer (`handlers/`)
 

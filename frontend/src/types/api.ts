@@ -167,9 +167,9 @@ export interface RegisterCredentials {
 
 export interface LoginResponse {
   readonly user_id: string;
-  readonly access_token: string;
-  readonly expires_in: number;
-  readonly refresh_token: string;
+  readonly access_token?: string;
+  readonly expires_in?: number;
+  readonly refresh_token?: string;
 }
 
 export interface RegisterResponse {

@@ -367,7 +367,7 @@ async function requestRefreshAccessToken(
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ refresh_token: refreshToken }),
+      body: JSON.stringify({ refresh_token: refreshToken, client: "mobile" }),
       credentials: "include",
     });
 
@@ -540,7 +540,7 @@ export async function getNotificationSettingsRequest(): Promise<NotificationSett
 export async function loginWithPasswordRequest(payload: LoginRequest): Promise<LoginResponse> {
   return requestJson<LoginResponse>("/auth/login", {
     method: "POST",
-    body: payload,
+    body: { ...payload, client: "mobile" },
     requiresAuth: false,
   });
 }

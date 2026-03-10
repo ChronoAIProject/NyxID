@@ -103,13 +103,16 @@ describe("login", () => {
     const apiMock = await getApiMock();
     apiMock.post.mockResolvedValueOnce({
       user_id: "u1",
-      access_token: "token",
-      expires_in: 3600,
     });
 
     const result = await useAuthStore.getState().login("a@b.com", "pass");
     expect(result.mfaRequired).toBe(false);
     expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    expect(apiMock.post).toHaveBeenCalledWith("/auth/login", {
+      email: "a@b.com",
+      password: "pass",
+      client: "web",
+    });
   });
 
   it("sets MFA state on MFA required error", async () => {

@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use axum::{
     Json,
     extract::{ConnectInfo, State},
-    http::{HeaderMap, header},
+    http::HeaderMap,
 };
 use chrono::Utc;
 use mongodb::bson::{self, doc};
@@ -12,11 +12,14 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::auth::{LoginResponse, build_cookie, extract_ip, extract_user_agent};
+use crate::handlers::auth::{
+    AuthClientMode, LoginResponse, apply_browser_session_cookies, extract_ip, extract_user_agent,
+    resolve_auth_client_mode,
+};
 use crate::models::mfa_factor::{COLLECTION_NAME as MFA_FACTORS, MfaFactor};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
-use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
+use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, mfa_service, token_service};
 
 // --- Request / Response types ---
@@ -43,6 +46,7 @@ pub struct MfaConfirmResponse {
 pub struct MfaLoginVerifyRequest {
     pub code: String,
     pub mfa_token: String,
+    pub client: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,80 +197,74 @@ pub async fn verify(
     // Issue real session tokens
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
-
-    let tokens = token_service::create_session_and_issue_tokens(
-        &state.db,
-        &state.config,
-        &state.jwt_keys,
-        user_id,
-        ip.as_deref(),
-        ua.as_deref(),
-    )
-    .await?;
-
-    audit_service::log_async(
-        state.db.clone(),
-        Some(user_id.to_string()),
-        "login_mfa".to_string(),
-        Some(serde_json::json!({ "session_id": tokens.session_id })),
-        ip,
-        ua,
-    );
-
-    // Set auth cookies
+    let client_mode = resolve_auth_client_mode(&headers, body.client.as_deref());
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
-
     let mut response_headers = HeaderMap::new();
-    response_headers.insert(
-        header::SET_COOKIE,
-        build_cookie(
-            SESSION_COOKIE_NAME,
-            &tokens.session_token,
-            30 * 24 * 3600,
-            "/",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
-    );
-    response_headers.append(
-        header::SET_COOKIE,
-        build_cookie(
-            ACCESS_TOKEN_COOKIE_NAME,
-            &tokens.access_token,
-            tokens.access_expires_in,
-            "/",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
-    );
-    response_headers.append(
-        header::SET_COOKIE,
-        build_cookie(
-            "nyx_refresh_token",
-            &tokens.refresh_token,
-            state.config.jwt_refresh_ttl_secs,
-            "/api/v1/auth/refresh",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
-    );
 
-    Ok((
-        response_headers,
-        Json(LoginResponse {
-            user_id: user_id.to_string(),
-            access_token: tokens.access_token,
-            expires_in: tokens.access_expires_in,
-            refresh_token: tokens.refresh_token,
-        }),
-    ))
+    match client_mode {
+        AuthClientMode::BrowserSession => {
+            let session =
+                token_service::create_session(&state.db, user_id, ip.as_deref(), ua.as_deref())
+                    .await?;
+
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user_id.to_string()),
+                "login_mfa".to_string(),
+                Some(serde_json::json!({ "session_id": session.session_id })),
+                ip,
+                ua,
+            );
+
+            apply_browser_session_cookies(
+                &mut response_headers,
+                &session.session_token,
+                secure,
+                domain,
+            )?;
+
+            Ok((
+                response_headers,
+                Json(LoginResponse {
+                    user_id: user_id.to_string(),
+                    access_token: None,
+                    expires_in: None,
+                    refresh_token: None,
+                }),
+            ))
+        }
+        AuthClientMode::TokenClient => {
+            let tokens = token_service::create_session_and_issue_tokens(
+                &state.db,
+                &state.config,
+                &state.jwt_keys,
+                user_id,
+                ip.as_deref(),
+                ua.as_deref(),
+            )
+            .await?;
+
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user_id.to_string()),
+                "login_mfa".to_string(),
+                Some(serde_json::json!({ "session_id": tokens.session_id })),
+                ip,
+                ua,
+            );
+
+            Ok((
+                response_headers,
+                Json(LoginResponse {
+                    user_id: user_id.to_string(),
+                    access_token: Some(tokens.access_token),
+                    expires_in: Some(tokens.access_expires_in),
+                    refresh_token: Some(tokens.refresh_token),
+                }),
+            ))
+        }
+    }
 }
 
 /// POST /api/v1/auth/mfa/disable

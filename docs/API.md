@@ -48,17 +48,16 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 
 ## Authentication
 
-Most endpoints require authentication. NyxID supports four authentication methods, checked in the following order:
+Most endpoints require authentication. NyxID supports three active authentication methods, checked in the following order:
 
 1. **Bearer Token** -- `Authorization: Bearer <access_token>` header
-2. **Session Cookie** -- `nyx_session` HttpOnly cookie (set at login)
-3. **Access Token Cookie** -- `nyx_access_token` HttpOnly cookie (set at login)
-4. **API Key** -- `X-API-Key: <key>` header
+2. **Session Cookie** -- `nyx_session` HttpOnly cookie for first-party browser sessions
+3. **API Key** -- `X-API-Key: <key>` header
 
 Endpoints marked **Auth: None** do not require authentication.
 Endpoints marked **Auth: Required** require any of the above.
 Endpoints marked **Auth: Admin** require an authenticated user with `is_admin = true`.
-Endpoints marked **Auth: Cookie** use a specific cookie (e.g., the refresh token cookie).
+Endpoints marked **Auth: None** may still require a grant-specific credential in the request body, such as a refresh token.
 
 **Service accounts** authenticate via OAuth2 Client Credentials Grant at `POST /oauth/token` and receive a Bearer token. Service account tokens include an `sa: true` claim and are restricted to proxy, LLM gateway, connections, providers, and delegation endpoints.
 
@@ -202,7 +201,11 @@ curl -X POST http://localhost:3001/api/v1/auth/register \
 
 #### POST /api/v1/auth/login
 
-Authenticate with email and password. On success, sets three HttpOnly cookies (`nyx_session`, `nyx_access_token`, `nyx_refresh_token`) and returns the access token in the response body.
+Authenticate with email and password.
+
+For first-party browser requests, login creates a server-side session, sets the `nyx_session` cookie, clears legacy browser token cookies, and returns a minimal JSON body.
+
+For token clients such as native mobile apps, send `client: "mobile"` or `client: "token"`. Token clients receive `access_token` and `refresh_token` in the JSON response and should use bearer authentication on subsequent requests.
 
 If the user has MFA enabled and no `mfa_code` is provided, returns a `403` with error code `2002` and a `session_token` for the MFA verification step.
 
@@ -215,30 +218,41 @@ If the user has MFA enabled and no `mfa_code` is provided, returns a `403` with 
 | `email`    | string | Yes      | User email address                             |
 | `password` | string | Yes      | User password (max 128 chars)                  |
 | `mfa_code` | string | No       | 6-digit TOTP code (required if MFA is enabled) |
+| `client`   | string | No       | `"web"` for browser session mode, `"mobile"` / `"token"` for token response mode |
 
 ```json
 {
   "email": "user@example.com",
-  "password": "securepassword123"
+  "password": "securepassword123",
+  "client": "web"
 }
 ```
 
-**Response (200):**
+**Response (200, browser session):**
+
+```json
+{
+  "user_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Response Headers (Set-Cookie, browser session):**
+
+```
+Set-Cookie: nyx_session=<token>; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000
+Set-Cookie: nyx_access_token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0
+Set-Cookie: nyx_refresh_token=; HttpOnly; SameSite=Lax; Path=/api/v1/auth/refresh; Max-Age=0
+```
+
+**Response (200, token client):**
 
 ```json
 {
   "user_id": "550e8400-e29b-41d4-a716-446655440000",
   "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expires_in": 900
+  "expires_in": 900,
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
 }
-```
-
-**Response Headers (Set-Cookie):**
-
-```
-Set-Cookie: nyx_session=<token>; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000
-Set-Cookie: nyx_access_token=<jwt>; HttpOnly; SameSite=Lax; Path=/; Max-Age=900
-Set-Cookie: nyx_refresh_token=<jwt>; HttpOnly; SameSite=Lax; Path=/api/v1/auth/refresh; Max-Age=604800
 ```
 
 **MFA Challenge Response (403):**
@@ -262,23 +276,33 @@ To complete login with MFA, re-send the login request with the `mfa_code` field 
 **Example:**
 
 ```bash
-# Basic login
-curl -X POST http://localhost:3001/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -c cookies.txt \
-  -d '{
-    "email": "user@example.com",
-    "password": "securepassword123"
-  }'
-
-# Login with MFA
+# Browser session login
 curl -X POST http://localhost:3001/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -c cookies.txt \
   -d '{
     "email": "user@example.com",
     "password": "securepassword123",
-    "mfa_code": "123456"
+    "client": "web"
+  }'
+
+# Token-client login
+curl -X POST http://localhost:3001/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securepassword123",
+    "client": "mobile"
+  }'
+
+# Login with MFA
+curl -X POST http://localhost:3001/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securepassword123",
+    "mfa_code": "123456",
+    "client": "mobile"
   }'
 ```
 
@@ -311,31 +335,44 @@ curl -X POST http://localhost:3001/api/v1/auth/logout \
 
 #### POST /api/v1/auth/refresh
 
-Exchange a refresh token for a new access token. The refresh token is read from the `nyx_refresh_token` cookie. Implements token rotation: the old refresh token is invalidated and a new one is issued.
+Exchange a refresh token for a new access token. This endpoint is for token clients such as native mobile apps. The refresh token is supplied in the JSON body. Implements token rotation: the old refresh token is invalidated and a new one is issued.
 
-**Auth:** Cookie (`nyx_refresh_token`)
+**Auth:** None
+
+**Request Body:**
+
+| Field           | Type   | Required | Description                              |
+|-----------------|--------|----------|------------------------------------------|
+| `refresh_token` | string | Yes      | A valid refresh token                    |
+
+```json
+{
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
 
 **Response (200):**
 
 ```json
 {
   "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expires_in": 900
+  "expires_in": 900,
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
 }
 ```
 
-**Response Headers:** Sets new `nyx_access_token` and `nyx_refresh_token` cookies.
-
 **Errors:**
-- `1001 unauthorized` -- No refresh token cookie present
+- `1001 unauthorized` -- No refresh token provided or token revoked
 - `2001 token_expired` -- Refresh token has expired
 
 **Example:**
 
 ```bash
 curl -X POST http://localhost:3001/api/v1/auth/refresh \
-  -b cookies.txt \
-  -c cookies.txt
+  -H "Content-Type: application/json" \
+  -d '{
+    "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }'
 ```
 
 ---
@@ -509,7 +546,9 @@ curl -X POST http://localhost:3001/api/v1/auth/setup \
 
 ### Social Auth
 
-Social login allows users to authenticate via GitHub or Google OAuth 2.0. The flow is entirely browser-based: the frontend navigates to the authorize endpoint, the user authenticates with the provider, and the callback endpoint creates a session and redirects to the frontend dashboard.
+Social login supports two modes:
+- First-party web: browser redirect flow that creates a NyxID session and sets only the `nyx_session` cookie.
+- Native mobile: deep-link redirect flow via `?client=mobile&redirect_uri=...` that returns access and refresh tokens in the success redirect URL.
 
 **Flow:**
 
@@ -518,7 +557,7 @@ Social login allows users to authenticate via GitHub or Google OAuth 2.0. The fl
 3. User authorizes the application on the provider's site
 4. Provider redirects back to `GET /api/v1/auth/social/{provider}/callback` with `code` and `state` query parameters
 5. Backend validates the state token, exchanges the code for an access token, fetches the user's profile
-6. Backend finds or creates a user (matching by email), creates a session, sets auth cookies, and redirects to the frontend dashboard
+6. Backend finds or creates a user, then either creates a browser session and redirects to the frontend or returns tokens via a mobile deep link
 
 #### GET /api/v1/auth/social/{provider}
 
@@ -532,7 +571,14 @@ Initiate an OAuth 2.0 authorization flow with a social provider.
 |------------|--------|----------------------------------------|
 | `provider` | string | Social provider: `"github"` or `"google"` |
 
-**Response (302):** Redirects to the provider's authorization page. Sets a `social_auth_state` HttpOnly cookie containing the CSRF state token.
+**Response (302):** Redirects to the provider's authorization page. Sets the `nyx_social_state` HttpOnly cookie containing the CSRF state token.
+
+**Mobile Query Parameters:**
+
+| Parameter      | Type   | Description |
+|----------------|--------|-------------|
+| `client`       | string | Set to `"mobile"` for native mobile deep-link mode |
+| `redirect_uri` | string | Required for mobile mode. Must be an allowed `nyxid://` or `exp://` deep link |
 
 **Errors:**
 - `6000 social_auth_failed` -- Provider not configured (missing client ID/secret) or unsupported provider
@@ -564,10 +610,12 @@ OAuth callback handler. Called by the provider after user authorization.
 | Parameter | Type   | Description                                         |
 |-----------|--------|-----------------------------------------------------|
 | `code`    | string | Authorization code from the provider                |
-| `state`   | string | CSRF state token (must match the `social_auth_state` cookie) |
+| `state`   | string | CSRF state token (must match the `nyx_social_state` cookie) |
 | `error`   | string | Error code from the provider (if authorization was denied) |
 
-**Response (302 on success):** Redirects to the frontend dashboard (`{FRONTEND_URL}/dashboard`). Sets the same auth cookies as a regular login: `nyx_session`, `nyx_access_token`, `nyx_refresh_token`.
+**Response (302 on success, web):** Redirects to the frontend root and sets the `nyx_session` cookie.
+
+**Response (302 on success, mobile):** Redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters.
 
 **Response (302 on error):** Redirects to `{FRONTEND_URL}/login?error={error_key}`.
 

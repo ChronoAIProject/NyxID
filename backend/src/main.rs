@@ -303,8 +303,14 @@ async fn main() {
     // private API routes get restricted CORS (FRONTEND_URL only).
     let (public_oauth, private_api) = routes::build_router();
 
+    let csrf_state = state.clone();
+    let private_api = private_api.layer(cors).layer(axum_mw::from_fn_with_state(
+        csrf_state,
+        mw::csrf::browser_csrf_middleware,
+    ));
+
     let app = public_oauth
-        .merge(private_api.layer(cors))
+        .merge(private_api)
         .with_state(state)
         .layer(DefaultBodyLimit::max(1_048_576))
         .layer(axum_mw::from_fn(
