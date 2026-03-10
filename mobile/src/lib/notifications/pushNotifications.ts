@@ -46,13 +46,28 @@ function configureNotificationHandler() {
   if (isNotificationHandlerConfigured) return;
 
   Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowAlert: true,
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: true,
-      shouldSetBadge: false,
-    }),
+    handleNotification: async (notification) => {
+      const content = notification.request.content;
+      const isSilent = !content.title && !content.body;
+      if (isSilent) {
+        return {
+          shouldShowAlert: false,
+          shouldShowBanner: false,
+          shouldShowList: false,
+          shouldPlaySound: false,
+          shouldSetBadge: false,
+        };
+      }
+
+      const suppress = Platform.OS === "android";
+      return {
+        shouldShowAlert: !suppress,
+        shouldShowBanner: !suppress,
+        shouldShowList: !suppress,
+        shouldPlaySound: !suppress,
+        shouldSetBadge: false,
+      };
+    },
   });
 
   isNotificationHandlerConfigured = true;
@@ -85,7 +100,7 @@ async function ensureAndroidChannels() {
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 200, 200, 200],
     lightColor: "#8B5CF6",
-    sound: null,
+    sound: "default",
     enableVibrate: true,
     showBadge: true,
   });
@@ -96,7 +111,7 @@ async function ensureAndroidChannels() {
     importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 200, 200, 200],
     lightColor: "#8B5CF6",
-    sound: null,
+    sound: "default",
     enableVibrate: true,
     showBadge: true,
   });

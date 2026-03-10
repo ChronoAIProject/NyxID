@@ -184,6 +184,7 @@ struct FcmAndroidConfig {
 struct FcmAndroidNotification {
     channel_id: String,
     sound: String,
+    default_sound: bool,
     default_vibrate_timings: bool,
     notification_priority: String,
 }
@@ -231,6 +232,7 @@ pub async fn send_fcm_notification(
                 notification: FcmAndroidNotification {
                     channel_id: "approvals".to_string(),
                     sound: "default".to_string(),
+                    default_sound: true,
                     default_vibrate_timings: true,
                     notification_priority: "PRIORITY_MAX".to_string(),
                 },
@@ -655,6 +657,7 @@ mod tests {
                     notification: FcmAndroidNotification {
                         channel_id: "approvals".to_string(),
                         sound: "default".to_string(),
+                        default_sound: true,
                         default_vibrate_timings: true,
                         notification_priority: "PRIORITY_MAX".to_string(),
                     },
