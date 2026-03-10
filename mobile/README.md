@@ -26,6 +26,8 @@ npm run ios
 npm run android
 ```
 
+**Android 本地调试**（环境、模拟器/真机、API 地址）：见 [docs/ANDROID_DEBUG.md](docs/ANDROID_DEBUG.md)。
+
 ## 环境变量
 
 `.env` / `.env.example`：

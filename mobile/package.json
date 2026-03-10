@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "build:ios": "EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 expo run:ios --configuration Release",
     "bump:ios:build": "sh scripts/bump-ios-build.sh",
-    "build:ios:testflight": "pnpm run bump:ios:build && EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 xcodebuild -workspace ios/NyxIDMobile.xcworkspace -scheme NyxIDMobile -configuration Release -destination 'generic/platform=iOS' -archivePath ios/build/NyxIDMobile.xcarchive archive"
+    "build:ios:testflight": "pnpm run bump:ios:build && EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 xcodebuild -workspace ios/NyxIDMobile.xcworkspace -scheme NyxIDMobile -configuration Release -destination 'generic/platform=iOS' -archivePath ios/build/NyxIDMobile.xcarchive archive",
+    "eas-build-post-install": "node scripts/patch-android-build-gradle.js"
   },
   "dependencies": {
     "@babel/runtime": "^7.28.4",
@@ -22,12 +23,13 @@
     "@react-navigation/native-stack": "^7.3.16",
     "@tanstack/react-query": "^5.90.20",
     "expo": "~53.0.0",
+    "expo-dev-client": "~5.2.4",
     "expo-font": "~13.3.2",
     "expo-notifications": "~0.31.0",
     "expo-secure-store": "~14.2.0",
     "expo-status-bar": "~2.2.3",
-    "expo-task-manager": "~13.0.0",
-    "expo-web-browser": "^55.0.9",
+    "expo-task-manager": "~13.1.6",
+    "expo-web-browser": "~14.2.0",
     "react": "19.0.0",
     "react-hook-form": "^7.71.1",
     "react-native": "0.79.6",
