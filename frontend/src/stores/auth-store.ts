@@ -40,6 +40,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
       const response = await api.post<LoginResponse>("/auth/login", {
         email,
         password,
+        client: "web",
       });
 
       set({

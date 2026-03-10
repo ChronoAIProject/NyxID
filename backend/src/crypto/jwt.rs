@@ -278,6 +278,43 @@ pub fn generate_refresh_token(
     Ok((token, jti))
 }
 
+/// Rebuild an already-issued refresh token from persisted metadata.
+///
+/// This is used for post-rotation retries so concurrent refresh requests can
+/// converge on the same active token instead of rotating the chain again.
+pub fn reissue_refresh_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    jti: &str,
+    issued_at: i64,
+    expires_at: i64,
+) -> Result<String, AppError> {
+    let claims = Claims {
+        sub: user_id.to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.base_url.clone(),
+        exp: expires_at,
+        iat: issued_at,
+        jti: jti.to_string(),
+        scope: String::new(),
+        token_type: "refresh".to_string(),
+        roles: None,
+        groups: None,
+        permissions: None,
+        sid: None,
+        act: None,
+        delegated: None,
+        sa: None,
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
+
+    encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode refresh token: {e}")))
+}
+
 /// TTL for delegation tokens issued via Token Exchange (5 minutes).
 pub const DELEGATED_TOKEN_TTL_SECS: i64 = 300;
 
@@ -579,6 +616,19 @@ mod tests {
         assert_eq!(claims.token_type, "refresh");
         assert_eq!(claims.jti, jti);
         assert!(claims.scope.is_empty());
+    }
+
+    #[test]
+    fn reissue_refresh_token_recreates_original_jwt() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let (token, jti) = generate_refresh_token(&keys, &config, &user_id).unwrap();
+        let claims = verify_token(&keys, &config, &token).unwrap();
+
+        let reissued =
+            reissue_refresh_token(&keys, &config, &user_id, &jti, claims.iat, claims.exp).unwrap();
+
+        assert_eq!(reissued, token);
     }
 
     #[test]

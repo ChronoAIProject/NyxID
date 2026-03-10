@@ -30,32 +30,132 @@ const REUSE_GRACE_PERIOD_SECS: i64 = 120;
 /// number of DB round-trips for concurrent-rotation scenarios.
 const MAX_REPLACEMENT_CHAIN_DEPTH: usize = 5;
 
+/// Session lifetime for first-party sessions.
+pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
+
 /// Tokens issued after successful authentication.
 pub struct IssuedTokens {
     pub access_token: String,
     pub refresh_token: String,
-    pub session_token: String,
     pub session_id: String,
     pub access_expires_in: i64,
 }
 
-/// Create a new session and issue JWT tokens.
-pub async fn create_session_and_issue_tokens(
+/// Session issued for browser-based authentication flows.
+pub struct IssuedSession {
+    pub session_token: String,
+    pub session_id: String,
+}
+
+enum RefreshTokenDisposition {
+    Rotate(RefreshToken),
+    Reuse(RefreshToken),
+}
+
+async fn follow_active_replacement_chain(
     db: &mongodb::Database,
-    config: &AppConfig,
+    first_replacement_id: &str,
+    user_id: &str,
+    request_jti: &str,
+) -> AppResult<Option<RefreshToken>> {
+    let mut current_id = first_replacement_id.to_string();
+
+    for depth in 0..MAX_REPLACEMENT_CHAIN_DEPTH {
+        let candidate = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "_id": &current_id })
+            .await?;
+
+        match candidate {
+            Some(r) if !r.revoked && r.expires_at > Utc::now() => {
+                tracing::info!(
+                    user_id = %user_id,
+                    jti = %request_jti,
+                    replacement_id = %current_id,
+                    chain_depth = depth,
+                    "Refresh token retry resolved to active replacement token"
+                );
+                return Ok(Some(r));
+            }
+            Some(RefreshToken {
+                replaced_by: Some(next_id),
+                ..
+            }) => {
+                tracing::debug!(
+                    user_id = %user_id,
+                    replacement_id = %current_id,
+                    chain_depth = depth,
+                    "Following replacement chain (concurrent rotation)"
+                );
+                current_id = next_id;
+            }
+            _ => return Ok(None),
+        }
+    }
+
+    Ok(None)
+}
+
+async fn touch_session_last_active(
+    db: &mongodb::Database,
+    session_id: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    if let Some(sid) = session_id {
+        db.collection::<Session>(SESSIONS)
+            .update_one(
+                doc! { "_id": sid },
+                doc! { "$set": {
+                    "last_active_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
+fn build_reused_refresh_response(
     jwt_keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    active_token: &RefreshToken,
+    access_token: String,
+) -> AppResult<IssuedTokens> {
+    let refresh_token = jwt::reissue_refresh_token(
+        jwt_keys,
+        config,
+        user_id,
+        &active_token.jti,
+        active_token.created_at.timestamp(),
+        active_token.expires_at.timestamp(),
+    )?;
+
+    Ok(IssuedTokens {
+        access_token,
+        refresh_token,
+        session_id: active_token
+            .session_id
+            .clone()
+            .unwrap_or_else(|| Uuid::nil().to_string()),
+        access_expires_in: config.jwt_access_ttl_secs,
+    })
+}
+
+/// Create a new session and issue JWT tokens.
+pub async fn create_session(
+    db: &mongodb::Database,
     user_id: &str,
     ip_address: Option<&str>,
     user_agent: Option<&str>,
-) -> AppResult<IssuedTokens> {
-    let user_uuid = Uuid::parse_str(user_id)
-        .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
+) -> AppResult<IssuedSession> {
+    Uuid::parse_str(user_id).map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
     let session_token = generate_random_token();
     let session_token_hash = hash_token(&session_token);
     let session_id = Uuid::new_v4().to_string();
     let now = Utc::now();
-    let session_expires = now + Duration::days(30);
+    let session_expires = now + Duration::seconds(SESSION_TTL_SECS);
 
     // Create session record
     let new_session = Session {
@@ -73,6 +173,27 @@ pub async fn create_session_and_issue_tokens(
     db.collection::<Session>(SESSIONS)
         .insert_one(&new_session)
         .await?;
+
+    Ok(IssuedSession {
+        session_token,
+        session_id,
+    })
+}
+
+/// Create a new session and issue JWT tokens.
+pub async fn create_session_and_issue_tokens(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+) -> AppResult<IssuedTokens> {
+    let user_uuid = Uuid::parse_str(user_id)
+        .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
+
+    let session = create_session(db, user_id, ip_address, user_agent).await?;
+    let now = Utc::now();
 
     // Resolve RBAC data and inject into the access token based on scope
     let scope = "openid profile email";
@@ -94,7 +215,7 @@ pub async fn create_session_and_issue_tokens(
         jti: refresh_jti,
         client_id: Uuid::nil().to_string(), // first-party client
         user_id: user_id.to_string(),
-        session_id: Some(session_id.clone()),
+        session_id: Some(session.session_id.clone()),
         expires_at: refresh_expires,
         revoked: false,
         replaced_by: None,
@@ -109,8 +230,7 @@ pub async fn create_session_and_issue_tokens(
     Ok(IssuedTokens {
         access_token,
         refresh_token: refresh_token_jwt,
-        session_token,
-        session_id,
+        session_id: session.session_id,
         access_expires_in: config.jwt_access_ttl_secs,
     })
 }
@@ -189,11 +309,11 @@ pub async fn refresh_tokens(
     // we still check the replacement chain for a valid unused token.
     //
     // When multiple concurrent requests use the same old token, the first
-    // succeeds and rotates the replacement. Subsequent requests find the
-    // replacement already rotated (revoked with its own `replaced_by`).
-    // We follow the chain up to MAX_REPLACEMENT_CHAIN_DEPTH hops to find
-    // the current active token rather than wrongly treating this as theft.
-    let active_token = if stored.revoked {
+    // succeeds and rotates the replacement. Subsequent requests must converge
+    // on the already-active replacement token rather than rotate the chain
+    // again, otherwise stale responses can overwrite the browser cookie with
+    // an older token and eventually trigger false theft detection.
+    let disposition = if stored.revoked {
         let within_grace = stored
             .revoked_at
             .map(|ra| (Utc::now() - ra).num_seconds() <= REUSE_GRACE_PERIOD_SECS)
@@ -201,55 +321,15 @@ pub async fn refresh_tokens(
 
         match (&stored.replaced_by, within_grace) {
             (Some(first_replacement_id), true) => {
-                // Rotation-revoked token with a replacement -- follow the chain
-                // to find the current active token. This handles the case where
-                // concurrent requests each rotated the token further.
-                let mut current_id = first_replacement_id.clone();
-                let mut found_active: Option<RefreshToken> = None;
-
-                for depth in 0..MAX_REPLACEMENT_CHAIN_DEPTH {
-                    let candidate = db
-                        .collection::<RefreshToken>(REFRESH_TOKENS)
-                        .find_one(doc! { "_id": &current_id })
-                        .await?;
-
-                    match candidate {
-                        Some(r) if !r.revoked && r.expires_at > Utc::now() => {
-                            // Found a valid active token in the chain.
-                            tracing::info!(
-                                user_id = %stored.user_id,
-                                jti = %claims.jti,
-                                replacement_id = %current_id,
-                                chain_depth = depth,
-                                "Post-rotation retry detected, using replacement token"
-                            );
-                            found_active = Some(r);
-                            break;
-                        }
-                        Some(RefreshToken {
-                            replaced_by: Some(next_id),
-                            ..
-                        }) => {
-                            // This token was itself rotated by a concurrent request.
-                            // Follow the chain to the next replacement.
-                            tracing::debug!(
-                                user_id = %stored.user_id,
-                                replacement_id = %current_id,
-                                chain_depth = depth,
-                                "Following replacement chain (concurrent rotation)"
-                            );
-                            current_id = next_id;
-                        }
-                        _ => {
-                            // Dead end: token is revoked without a replacement,
-                            // expired, or missing. Stop searching.
-                            break;
-                        }
-                    }
-                }
-
-                match found_active {
-                    Some(token) => token,
+                match follow_active_replacement_chain(
+                    db,
+                    first_replacement_id,
+                    &stored.user_id,
+                    &claims.jti,
+                )
+                .await?
+                {
+                    Some(token) => RefreshTokenDisposition::Reuse(token),
                     None => {
                         // Chain exhausted without finding a valid token.
                         // This is actual token reuse -- revoke the session.
@@ -297,9 +377,13 @@ pub async fn refresh_tokens(
             }
         }
     } else {
-        stored
+        RefreshTokenDisposition::Rotate(stored)
     };
 
+    let (active_token, reuse_existing_refresh_token) = match disposition {
+        RefreshTokenDisposition::Rotate(token) => (token, false),
+        RefreshTokenDisposition::Reuse(token) => (token, true),
+    };
     let user_id_str = active_token.user_id.clone();
     let user_id = Uuid::parse_str(&user_id_str)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in refresh token: {e}")))?;
@@ -312,6 +396,17 @@ pub async fn refresh_tokens(
         crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
     let new_access =
         jwt::generate_access_token(jwt_keys, config, &user_id, scope, Some(&rbac_data))?;
+
+    if reuse_existing_refresh_token {
+        touch_session_last_active(db, session_id.as_deref(), now).await?;
+        return build_reused_refresh_response(
+            jwt_keys,
+            config,
+            &user_id,
+            &active_token,
+            new_access,
+        );
+    }
 
     // Issue new refresh token (rotation)
     let (new_refresh_jwt, new_jti) = jwt::generate_refresh_token(jwt_keys, config, &user_id)?;
@@ -334,8 +429,36 @@ pub async fn refresh_tokens(
         .await?;
 
     if revoked.is_none() {
-        // Another concurrent request already rotated this token.
-        // Ask the client to retry with the (now-current) refresh token.
+        // Another concurrent request rotated this token after we loaded it.
+        // Recover the new active replacement token and return it so clients
+        // converge on the same cookie value instead of logging out.
+        let current = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "_id": &active_token.id })
+            .await?;
+
+        if let Some(current_token) = current
+            && let Some(first_replacement_id) = current_token.replaced_by.as_deref()
+            && let Some(recovered) = follow_active_replacement_chain(
+                db,
+                first_replacement_id,
+                &active_token.user_id,
+                &active_token.jti,
+            )
+            .await?
+        {
+            tracing::info!(
+                user_id = %active_token.user_id,
+                jti = %active_token.jti,
+                replacement_id = %recovered.id,
+                "Concurrent refresh rotation resolved to active replacement token"
+            );
+            touch_session_last_active(db, session_id.as_deref(), now).await?;
+            return build_reused_refresh_response(
+                jwt_keys, config, &user_id, &recovered, new_access,
+            );
+        }
+
         return Err(AppError::Conflict(
             "Refresh token was concurrently rotated, please retry".to_string(),
         ));
@@ -359,17 +482,7 @@ pub async fn refresh_tokens(
         .insert_one(&new_refresh)
         .await?;
 
-    // Update session last_active_at
-    if let Some(ref sid) = session_id {
-        db.collection::<Session>(SESSIONS)
-            .update_one(
-                doc! { "_id": sid },
-                doc! { "$set": {
-                    "last_active_at": bson::DateTime::from_chrono(now),
-                }},
-            )
-            .await?;
-    }
+    touch_session_last_active(db, session_id.as_deref(), now).await?;
 
     // Reuse the existing session token rather than generating a new orphan token.
     // The session cookie does not need to change on token refresh.
@@ -377,7 +490,6 @@ pub async fn refresh_tokens(
     Ok(IssuedTokens {
         access_token: new_access,
         refresh_token: new_refresh_jwt,
-        session_token: String::new(), // Session token is not rotated on refresh
         session_id: session_id.unwrap_or_else(|| Uuid::nil().to_string()),
         access_expires_in: config.jwt_access_ttl_secs,
     })

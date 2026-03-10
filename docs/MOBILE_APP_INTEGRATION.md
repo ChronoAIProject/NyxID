@@ -142,7 +142,7 @@ At startup, the backend:
 
 ## Authentication
 
-The mobile app uses email/password login to obtain a JWT access token and a refresh token (stored as an HttpOnly cookie, but the access token is also returned in the JSON body for use in `Authorization` headers).
+The mobile app uses email/password login to obtain a JWT access token and refresh token in the JSON response. The app should store them securely and send the access token in the `Authorization` header on subsequent requests.
 
 ### Login
 
@@ -155,7 +155,8 @@ Content-Type: application/json
 ```json
 {
   "email": "user@example.com",
-  "password": "securepassword123"
+  "password": "securepassword123",
+  "client": "mobile"
 }
 ```
 
@@ -164,7 +165,8 @@ Content-Type: application/json
 {
   "user_id": "550e8400-e29b-41d4-a716-446655440000",
   "access_token": "eyJhbGciOiJSUzI1NiIs...",
-  "expires_in": 900
+  "expires_in": 900,
+  "refresh_token": "eyJhbGciOiJSUzI1NiIs..."
 }
 ```
 
@@ -188,26 +190,35 @@ Content-Type: application/json
 {
   "email": "user@example.com",
   "password": "securepassword123",
+  "client": "mobile",
   "mfa_code": "123456"
 }
 ```
 
-**Important:** The response also sets `nyx_session` and `nyx_access_token` cookies. For mobile, use the `access_token` from the JSON body in the `Authorization: Bearer <token>` header for all subsequent requests.
+**Important:** Mobile clients should always send `client: "mobile"` on login and MFA verification requests. Use the `access_token` from the JSON body in the `Authorization: Bearer <token>` header for all subsequent requests. Do not rely on browser auth cookies.
 
 ### Token Refresh
 
-Access tokens expire after 15 minutes (configurable). Use the refresh endpoint to obtain a new one. The refresh token is stored in the `nyx_refresh_token` cookie (automatically included if your HTTP client supports cookie jars).
+Access tokens expire after 15 minutes (configurable). Use the refresh endpoint to obtain a new one by sending the refresh token in the JSON body.
 
 ```
 POST /api/v1/auth/refresh
-Cookie: nyx_refresh_token=...
+Content-Type: application/json
+```
+
+```json
+{
+  "refresh_token": "eyJhbGciOiJSUzI1NiIs...",
+  "client": "mobile"
+}
 ```
 
 **Response (200):**
 ```json
 {
   "access_token": "eyJhbGciOiJSUzI1NiIs...",
-  "expires_in": 900
+  "expires_in": 900,
+  "refresh_token": "eyJhbGciOiJSUzI1NiIs..."
 }
 ```
 
@@ -805,8 +816,8 @@ Mobile App                          NyxID Backend
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/v1/auth/login` | Log in (email + password + optional MFA) |
-| `POST` | `/api/v1/auth/refresh` | Refresh access token (requires refresh cookie) |
+| `POST` | `/api/v1/auth/login` | Log in (email + password + optional MFA, send `client: "mobile"`) |
+| `POST` | `/api/v1/auth/refresh` | Refresh access token (send refresh token in JSON body) |
 | `POST` | `/api/v1/auth/logout` | Log out and revoke session |
 
 ### Push Device Management

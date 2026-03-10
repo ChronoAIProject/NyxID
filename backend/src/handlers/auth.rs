@@ -44,14 +44,18 @@ pub struct LoginRequest {
     #[validate(length(max = 128, message = "Password too long"))]
     pub password: String,
     pub mfa_code: Option<String>,
+    pub client: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct LoginResponse {
     pub user_id: String,
-    pub access_token: String,
-    pub expires_in: i64,
-    pub refresh_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,6 +68,18 @@ pub struct RefreshResponse {
 #[derive(Debug, Serialize)]
 pub struct LogoutResponse {
     pub message: String,
+}
+
+pub(crate) const REFRESH_TOKEN_COOKIE_NAME: &str = "nyx_refresh_token";
+
+const WEB_CLIENT_KIND: &str = "web";
+const MOBILE_CLIENT_KIND: &str = "mobile";
+const TOKEN_CLIENT_KIND: &str = "token";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthClientMode {
+    BrowserSession,
+    TokenClient,
 }
 
 // --- Helper functions ---
@@ -159,6 +175,91 @@ pub(crate) fn clear_cookie_with_same_site(
 /// Build a SameSite=Lax cookie-clearing header value.
 pub(crate) fn clear_cookie(name: &str, path: &str, secure: bool, domain: Option<&str>) -> String {
     clear_cookie_with_same_site(name, path, secure, domain, "Lax")
+}
+
+pub(crate) fn append_set_cookie(
+    response_headers: &mut HeaderMap,
+    cookie_value: String,
+) -> AppResult<()> {
+    response_headers.append(
+        header::SET_COOKIE,
+        cookie_value
+            .parse()
+            .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
+    );
+    Ok(())
+}
+
+pub(crate) fn clear_legacy_auth_cookies(
+    response_headers: &mut HeaderMap,
+    secure: bool,
+    domain: Option<&str>,
+) -> AppResult<()> {
+    append_set_cookie(
+        response_headers,
+        clear_cookie(ACCESS_TOKEN_COOKIE_NAME, "/", secure, domain),
+    )?;
+    append_set_cookie(
+        response_headers,
+        clear_cookie(
+            REFRESH_TOKEN_COOKIE_NAME,
+            "/api/v1/auth/refresh",
+            secure,
+            domain,
+        ),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn apply_browser_session_cookies(
+    response_headers: &mut HeaderMap,
+    session_token: &str,
+    secure: bool,
+    domain: Option<&str>,
+) -> AppResult<()> {
+    append_set_cookie(
+        response_headers,
+        build_cookie(
+            SESSION_COOKIE_NAME,
+            session_token,
+            token_service::SESSION_TTL_SECS,
+            "/",
+            secure,
+            domain,
+        ),
+    )?;
+    clear_legacy_auth_cookies(response_headers, secure, domain)
+}
+
+fn looks_like_browser_request(headers: &HeaderMap) -> bool {
+    headers.contains_key(header::ORIGIN)
+        || headers.contains_key(header::REFERER)
+        || headers.contains_key("sec-fetch-site")
+        || headers.contains_key("sec-fetch-mode")
+        || headers.contains_key("sec-fetch-dest")
+}
+
+pub(crate) fn resolve_auth_client_mode(
+    headers: &HeaderMap,
+    explicit_client: Option<&str>,
+) -> AuthClientMode {
+    let normalized_client = explicit_client
+        .map(str::trim)
+        .filter(|client| !client.is_empty());
+
+    match normalized_client {
+        Some(client) if client.eq_ignore_ascii_case(WEB_CLIENT_KIND) => {
+            AuthClientMode::BrowserSession
+        }
+        Some(client)
+            if client.eq_ignore_ascii_case(MOBILE_CLIENT_KIND)
+                || client.eq_ignore_ascii_case(TOKEN_CLIENT_KIND) =>
+        {
+            AuthClientMode::TokenClient
+        }
+        _ if looks_like_browser_request(headers) => AuthClientMode::BrowserSession,
+        _ => AuthClientMode::TokenClient,
+    }
 }
 
 // --- Handlers ---
@@ -268,79 +369,74 @@ pub async fn login(
 
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
-
-    let tokens = token_service::create_session_and_issue_tokens(
-        &state.db,
-        &state.config,
-        &state.jwt_keys,
-        &user.id,
-        ip.as_deref(),
-        ua.as_deref(),
-    )
-    .await?;
-
-    audit_service::log_async(
-        state.db.clone(),
-        Some(user.id.clone()),
-        "login".to_string(),
-        Some(serde_json::json!({ "session_id": tokens.session_id })),
-        ip,
-        ua,
-    );
-
+    let client_mode = resolve_auth_client_mode(&headers, body.client.as_deref());
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
-
     let mut response_headers = HeaderMap::new();
-    response_headers.insert(
-        header::SET_COOKIE,
-        build_cookie(
-            SESSION_COOKIE_NAME,
-            &tokens.session_token,
-            30 * 24 * 3600, // 30 days
-            "/",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
-    );
-    response_headers.append(
-        header::SET_COOKIE,
-        build_cookie(
-            ACCESS_TOKEN_COOKIE_NAME,
-            &tokens.access_token,
-            tokens.access_expires_in,
-            "/",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
-    );
-    response_headers.append(
-        header::SET_COOKIE,
-        build_cookie(
-            "nyx_refresh_token",
-            &tokens.refresh_token,
-            state.config.jwt_refresh_ttl_secs,
-            "/api/v1/auth/refresh",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
-    );
 
-    Ok((
-        response_headers,
-        Json(LoginResponse {
-            user_id: user.id.to_string(),
-            access_token: tokens.access_token,
-            expires_in: tokens.access_expires_in,
-            refresh_token: tokens.refresh_token,
-        }),
-    ))
+    match client_mode {
+        AuthClientMode::BrowserSession => {
+            let session =
+                token_service::create_session(&state.db, &user.id, ip.as_deref(), ua.as_deref())
+                    .await?;
+
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user.id.clone()),
+                "login".to_string(),
+                Some(serde_json::json!({ "session_id": session.session_id })),
+                ip,
+                ua,
+            );
+
+            apply_browser_session_cookies(
+                &mut response_headers,
+                &session.session_token,
+                secure,
+                domain,
+            )?;
+
+            Ok((
+                response_headers,
+                Json(LoginResponse {
+                    user_id: user.id.to_string(),
+                    access_token: None,
+                    expires_in: None,
+                    refresh_token: None,
+                }),
+            ))
+        }
+        AuthClientMode::TokenClient => {
+            let tokens = token_service::create_session_and_issue_tokens(
+                &state.db,
+                &state.config,
+                &state.jwt_keys,
+                &user.id,
+                ip.as_deref(),
+                ua.as_deref(),
+            )
+            .await?;
+
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user.id.clone()),
+                "login".to_string(),
+                Some(serde_json::json!({ "session_id": tokens.session_id })),
+                ip,
+                ua,
+            );
+
+            Ok((
+                response_headers,
+                Json(LoginResponse {
+                    user_id: user.id.to_string(),
+                    access_token: Some(tokens.access_token),
+                    expires_in: Some(tokens.access_expires_in),
+                    refresh_token: Some(tokens.refresh_token),
+                }),
+            ))
+        }
+    }
 }
 
 /// POST /api/v1/auth/logout
@@ -388,9 +484,14 @@ pub async fn logout(
     );
     response_headers.append(
         header::SET_COOKIE,
-        clear_cookie("nyx_refresh_token", "/api/v1/auth/refresh", secure, domain)
-            .parse()
-            .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
+        clear_cookie(
+            REFRESH_TOKEN_COOKIE_NAME,
+            "/api/v1/auth/refresh",
+            secure,
+            domain,
+        )
+        .parse()
+        .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
     );
 
     Ok((
@@ -410,83 +511,28 @@ pub struct RefreshRequest {
 
 /// POST /api/v1/auth/refresh
 ///
-/// Exchange a refresh token for a new access token.
-/// Accepts the refresh token from either the JSON body (mobile) or the
-/// `nyx_refresh_token` HttpOnly cookie (browser), with body taking priority.
-/// Implements token rotation for security.
+/// Exchange a refresh token for a new access token for token-based clients.
+/// Browser sessions do not use this endpoint.
 pub async fn refresh(
     State(state): State<AppState>,
-    headers: HeaderMap,
     body: Option<Json<RefreshRequest>>,
 ) -> AppResult<(HeaderMap, Json<RefreshResponse>)> {
-    let body_token = body.and_then(|b| b.0.refresh_token);
-
-    let refresh_token_owned: String;
-    let refresh_token_str: &str = if let Some(ref t) = body_token {
-        t.as_str()
-    } else {
-        let cookie_header = headers
-            .get("cookie")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        refresh_token_owned = cookie_header
-            .split(';')
-            .find_map(|pair| {
-                let pair = pair.trim();
-                let (key, value) = pair.split_once('=')?;
-                if key.trim() == "nyx_refresh_token" {
-                    Some(value.trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| AppError::Unauthorized("No refresh token provided".to_string()))?;
-        &refresh_token_owned
-    };
+    let refresh_token = body
+        .and_then(|payload| payload.0.refresh_token)
+        .filter(|token| !token.trim().is_empty())
+        .ok_or_else(|| AppError::Unauthorized("No refresh token provided".to_string()))?;
 
     let tokens = token_service::refresh_tokens(
         &state.db,
         &state.config,
         &state.jwt_keys,
-        refresh_token_str,
+        &refresh_token,
         Some(&state.mcp_sessions),
     )
     .await?;
 
-    let secure = state.config.use_secure_cookies();
-    let domain = state.config.cookie_domain();
-
-    let mut response_headers = HeaderMap::new();
-    response_headers.insert(
-        header::SET_COOKIE,
-        build_cookie(
-            ACCESS_TOKEN_COOKIE_NAME,
-            &tokens.access_token,
-            tokens.access_expires_in,
-            "/",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
-    );
-    response_headers.append(
-        header::SET_COOKIE,
-        build_cookie(
-            "nyx_refresh_token",
-            &tokens.refresh_token,
-            state.config.jwt_refresh_ttl_secs,
-            "/api/v1/auth/refresh",
-            secure,
-            domain,
-        )
-        .parse()
-        .map_err(|_| AppError::Internal("Failed to build cookie header".to_string()))?,
-    );
-
     Ok((
-        response_headers,
+        HeaderMap::new(),
         Json(RefreshResponse {
             access_token: tokens.access_token,
             expires_in: tokens.access_expires_in,
@@ -685,4 +731,49 @@ pub async fn setup(
         user_id: result.user_id,
         message: "Admin account created successfully.".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_mobile_client_uses_token_mode() {
+        let headers = HeaderMap::new();
+        assert_eq!(
+            resolve_auth_client_mode(&headers, Some("mobile")),
+            AuthClientMode::TokenClient
+        );
+    }
+
+    #[test]
+    fn browser_headers_default_to_session_mode() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, "https://app.example.com".parse().unwrap());
+
+        assert_eq!(
+            resolve_auth_client_mode(&headers, None),
+            AuthClientMode::BrowserSession
+        );
+    }
+
+    #[test]
+    fn non_browser_requests_default_to_token_mode() {
+        let headers = HeaderMap::new();
+        assert_eq!(
+            resolve_auth_client_mode(&headers, None),
+            AuthClientMode::TokenClient
+        );
+    }
+
+    #[test]
+    fn explicit_token_client_overrides_browser_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, "https://app.example.com".parse().unwrap());
+
+        assert_eq!(
+            resolve_auth_client_mode(&headers, Some("token")),
+            AuthClientMode::TokenClient
+        );
+    }
 }
