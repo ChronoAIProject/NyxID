@@ -4,5 +4,4 @@ dist
 build
 /android
 /.eas
-google-services.json
 GoogleService-Info.plist
