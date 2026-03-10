@@ -18,6 +18,7 @@
     },
     "android": {
       "package": "fun.chronoai.nyxid",
+      "versionCode": 10,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#10101A"
