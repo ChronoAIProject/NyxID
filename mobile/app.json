@@ -17,14 +17,25 @@
       }
     },
     "android": {
-      "package": "fun.chronoai.nyxid"
+      "package": "fun.chronoai.nyxid",
+      "googleServicesFile": "./google-services.json",
+      "adaptiveIcon": {
+        "backgroundColor": "#10101A"
+      }
+    },
+    "notification": {
+      "androidMode": "default",
+      "androidCollapsed": "NyxID",
+      "color": "#8B5CF6"
     },
     "plugins": [
       "expo-secure-store",
       [
         "expo-notifications",
         {
-          "enableBackgroundRemoteNotifications": true
+          "enableBackgroundRemoteNotifications": true,
+          "androidMode": "default",
+          "defaultChannel": "approvals"
         }
       ]
     ],

@@ -40,6 +40,7 @@ let pushSyncHandler: PushSyncHandler | null = null;
 
 let isNotificationHandlerConfigured = false;
 let isBackgroundTaskRegistered = false;
+let isBootstrapped = false;
 
 function configureNotificationHandler() {
   if (isNotificationHandlerConfigured) return;
@@ -57,22 +58,42 @@ function configureNotificationHandler() {
   isNotificationHandlerConfigured = true;
 }
 
+/**
+ * Must be called at module-load time (index.ts), BEFORE registerRootComponent.
+ * Sets up notification handler + background task + Android channels so that
+ * FCM messages arriving when the app is killed still produce visible alerts.
+ */
+export function bootstrapNotificationInfrastructure() {
+  if (isBootstrapped) return;
+  isBootstrapped = true;
+
+  configureNotificationHandler();
+  ensureBackgroundTaskDefined();
+  void ensureAndroidChannels();
+}
+
 async function ensureAndroidChannels() {
   if (Platform.OS !== "android") return;
 
   await Notifications.setNotificationChannelAsync("default", {
-    name: "default",
-    importance: Notifications.AndroidImportance.HIGH,
+    name: "Default",
+    importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 200, 200, 200],
     lightColor: "#8B5CF6",
+    sound: "default",
+    enableVibrate: true,
+    showBadge: true,
   });
 
-  // Must match backend FCM channel_id "approvals" so approval push shows in this channel
   await Notifications.setNotificationChannelAsync("approvals", {
     name: "Approvals",
-    importance: Notifications.AndroidImportance.HIGH,
+    description: "Approval requests and decisions",
+    importance: Notifications.AndroidImportance.MAX,
     vibrationPattern: [0, 200, 200, 200],
     lightColor: "#8B5CF6",
+    sound: "default",
+    enableVibrate: true,
+    showBadge: true,
   });
 }
 

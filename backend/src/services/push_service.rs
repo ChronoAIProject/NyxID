@@ -184,6 +184,8 @@ struct FcmAndroidConfig {
 struct FcmAndroidNotification {
     channel_id: String,
     sound: String,
+    default_vibrate_timings: bool,
+    notification_priority: String,
 }
 
 /// Parse a successful FCM response into an `FcmSendResult`.
@@ -229,6 +231,8 @@ pub async fn send_fcm_notification(
                 notification: FcmAndroidNotification {
                     channel_id: "approvals".to_string(),
                     sound: "default".to_string(),
+                    default_vibrate_timings: true,
+                    notification_priority: "PRIORITY_MAX".to_string(),
                 },
             }),
         },
@@ -651,6 +655,8 @@ mod tests {
                     notification: FcmAndroidNotification {
                         channel_id: "approvals".to_string(),
                         sound: "default".to_string(),
+                        default_vibrate_timings: true,
+                        notification_priority: "PRIORITY_MAX".to_string(),
                     },
                 }),
             },
@@ -664,6 +670,10 @@ mod tests {
         assert_eq!(
             json["message"]["android"]["notification"]["channel_id"],
             "approvals"
+        );
+        assert_eq!(
+            json["message"]["android"]["notification"]["notification_priority"],
+            "PRIORITY_MAX"
         );
         assert!(json["message"]["data"]["type"].is_string());
     }
