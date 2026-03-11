@@ -650,6 +650,7 @@ mod tests {
             smtp_password: None,
             smtp_from_address: None,
             encryption_key: "ab".repeat(32),
+            encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,

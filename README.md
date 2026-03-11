@@ -472,6 +472,12 @@ All configuration is loaded from environment variables. A `.env` file is support
 | `DATABASE_URL`   | MongoDB connection string                          | `mongodb://localhost:27017/nyxid`              |
 | `ENCRYPTION_KEY` | 32-byte hex-encoded AES-256 key (64 hex chars)     | Output of `openssl rand -hex 32`               |
 
+### Encryption
+
+| Variable                   | Default | Description                                                          |
+|----------------------------|---------|----------------------------------------------------------------------|
+| `ENCRYPTION_KEY_PREVIOUS`  | *(none)* | Previous encryption key for zero-downtime key rotation (64 hex chars). Set this to the old `ENCRYPTION_KEY` value when rotating keys. Phase 1 supports one previous key at a time; finish re-encrypting old-key data before rotating again. See [docs/SECURITY.md](docs/SECURITY.md#key-rotation) for the full procedure and `/health` decrypt counters. |
+
 ### Server
 
 | Variable       | Default                  | Description                          |

@@ -6,7 +6,7 @@ use mongodb::bson::{self, doc};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::crypto::aes;
+use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
@@ -62,7 +62,7 @@ fn ensure_oauth_provider_configured(provider: &ProviderConfig) -> AppResult<()> 
 /// Store an API key for a provider.
 pub async fn store_api_key(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_id: &str,
     api_key: &str,
@@ -98,7 +98,7 @@ pub async fn store_api_key(
         .await?;
 
     let now = Utc::now();
-    let encrypted = aes::encrypt(api_key.as_bytes(), encryption_key)?;
+    let encrypted = encryption_keys.encrypt(api_key.as_bytes())?;
 
     if let Some(existing_token) = existing {
         // Update existing token
@@ -167,7 +167,7 @@ pub async fn store_api_key(
 /// frontend callback path for the post-OAuth redirect.
 pub async fn initiate_oauth_connect(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     base_url: &str,
     user_id: &str,
     provider_id: &str,
@@ -193,9 +193,13 @@ pub async fn initiate_oauth_connect(
         .as_ref()
         .expect("OAuth provider configuration checked above");
 
-    let resolved =
-        user_credentials_service::resolve_oauth_credentials(db, encryption_key, &provider, user_id)
-            .await?;
+    let resolved = user_credentials_service::resolve_oauth_credentials(
+        db,
+        encryption_keys,
+        &provider,
+        user_id,
+    )
+    .await?;
     let client_id = resolved.client_id;
 
     // Create state for CSRF protection
@@ -214,7 +218,7 @@ pub async fn initiate_oauth_connect(
     let encrypted_verifier = code_verifier
         .as_ref()
         .map(|v| {
-            let encrypted = aes::encrypt(v.as_bytes(), encryption_key)?;
+            let encrypted = encryption_keys.encrypt(v.as_bytes())?;
             Ok::<_, AppError>(hex::encode(encrypted))
         })
         .transpose()?;
@@ -328,7 +332,7 @@ pub struct DeviceCodePollResult {
 /// under the SA's ID instead of the initiating user.
 pub async fn request_device_code(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_id: &str,
     on_behalf_of: Option<&str>,
@@ -349,9 +353,13 @@ pub async fn request_device_code(
         AppError::Internal("Device code provider missing device_code_url".to_string())
     })?;
 
-    let resolved =
-        user_credentials_service::resolve_oauth_credentials(db, encryption_key, &provider, user_id)
-            .await?;
+    let resolved = user_credentials_service::resolve_oauth_credentials(
+        db,
+        encryption_keys,
+        &provider,
+        user_id,
+    )
+    .await?;
     let client_id = resolved.client_id;
 
     // Branch on device_code_format: "openai" uses JSON, "rfc8628" uses form-urlencoded
@@ -440,9 +448,8 @@ pub async fn request_device_code(
     };
 
     // Encrypt device_auth_id and user_code before storing
-    let device_code_encrypted =
-        hex::encode(aes::encrypt(device_auth_id.as_bytes(), encryption_key)?);
-    let user_code_encrypted = hex::encode(aes::encrypt(user_code.as_bytes(), encryption_key)?);
+    let device_code_encrypted = hex::encode(encryption_keys.encrypt(device_auth_id.as_bytes())?);
+    let user_code_encrypted = hex::encode(encryption_keys.encrypt(user_code.as_bytes())?);
 
     // Create state document
     let state_id = Uuid::new_v4().to_string();
@@ -491,7 +498,7 @@ pub async fn request_device_code(
 /// then exchanges authorization_code at token_url for actual tokens.
 pub async fn poll_device_code(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_id: &str,
     state: &str,
@@ -538,7 +545,7 @@ pub async fn poll_device_code(
     let dc_bytes = hex::decode(device_code_hex).map_err(|e| {
         AppError::Internal(format!("Failed to decode encrypted device_auth_id: {e}"))
     })?;
-    let decrypted_dc = Zeroizing::new(aes::decrypt(&dc_bytes, encryption_key)?);
+    let decrypted_dc = Zeroizing::new(encryption_keys.decrypt(&dc_bytes)?);
     let device_auth_id = String::from_utf8((*decrypted_dc).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode device_auth_id: {e}")))?;
 
@@ -549,7 +556,7 @@ pub async fn poll_device_code(
         .ok_or_else(|| AppError::Internal("OAuth state missing user_code".to_string()))?;
     let uc_bytes = hex::decode(user_code_hex)
         .map_err(|e| AppError::Internal(format!("Failed to decode encrypted user_code: {e}")))?;
-    let decrypted_uc = Zeroizing::new(aes::decrypt(&uc_bytes, encryption_key)?);
+    let decrypted_uc = Zeroizing::new(encryption_keys.decrypt(&uc_bytes)?);
     let user_code = String::from_utf8((*decrypted_uc).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode user_code: {e}")))?;
 
@@ -566,7 +573,7 @@ pub async fn poll_device_code(
 
     let resolved = user_credentials_service::resolve_token_oauth_credentials(
         db,
-        encryption_key,
+        encryption_keys,
         &provider,
         oauth_state.credential_user_id.as_deref(),
     )
@@ -728,7 +735,7 @@ pub async fn poll_device_code(
 
         return store_device_code_tokens(
             db,
-            encryption_key,
+            encryption_keys,
             effective_user_id,
             provider_id,
             state,
@@ -742,7 +749,7 @@ pub async fn poll_device_code(
     // Standard flow: access_token directly in poll response
     store_device_code_tokens(
         db,
-        encryption_key,
+        encryption_keys,
         effective_user_id,
         provider_id,
         state,
@@ -756,7 +763,7 @@ pub async fn poll_device_code(
 /// Store tokens from a device code flow response (either direct or after code exchange).
 async fn store_device_code_tokens(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_id: &str,
     state: &str,
@@ -772,9 +779,9 @@ async fn store_device_code_tokens(
     let expires_in = token_data["expires_in"].as_i64();
     let scope = token_data["scope"].as_str();
 
-    let access_enc = aes::encrypt(access_token.as_bytes(), encryption_key)?;
+    let access_enc = encryption_keys.encrypt(access_token.as_bytes())?;
     let refresh_enc = match refresh_token {
-        Some(rt) => Some(aes::encrypt(rt.as_bytes(), encryption_key)?),
+        Some(rt) => Some(encryption_keys.encrypt(rt.as_bytes())?),
         None => None,
     };
 
@@ -842,7 +849,7 @@ pub async fn peek_oauth_state(db: &mongodb::Database, state_id: &str) -> AppResu
 /// Uses a dedicated no-redirect HTTP client (SEC-H2) for the token exchange.
 pub async fn handle_oauth_callback(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     base_url: &str,
     provider_id: &str,
     code: &str,
@@ -890,7 +897,7 @@ pub async fn handle_oauth_callback(
     // Reuse the same OAuth client that was selected during initiation.
     let resolved = user_credentials_service::resolve_token_oauth_credentials(
         db,
-        encryption_key,
+        encryption_keys,
         &provider,
         oauth_state.credential_user_id.as_deref(),
     )
@@ -927,7 +934,7 @@ pub async fn handle_oauth_callback(
     if let Some(ref encrypted_verifier) = oauth_state.code_verifier {
         let verifier_bytes = hex::decode(encrypted_verifier)
             .map_err(|e| AppError::Internal(format!("Failed to decode encrypted verifier: {e}")))?;
-        let decrypted = Zeroizing::new(aes::decrypt(&verifier_bytes, encryption_key)?);
+        let decrypted = Zeroizing::new(encryption_keys.decrypt(&verifier_bytes)?);
         let verifier = String::from_utf8((*decrypted).clone())
             .map_err(|e| AppError::Internal(format!("Failed to decode verifier: {e}")))?;
         params.push(("code_verifier".to_string(), verifier));
@@ -975,9 +982,9 @@ pub async fn handle_oauth_callback(
     let expires_in = token_data["expires_in"].as_i64();
     let scope = token_data["scope"].as_str();
 
-    let access_enc = aes::encrypt(access_token.as_bytes(), encryption_key)?;
+    let access_enc = encryption_keys.encrypt(access_token.as_bytes())?;
     let refresh_enc = match refresh_token {
-        Some(rt) => Some(aes::encrypt(rt.as_bytes(), encryption_key)?),
+        Some(rt) => Some(encryption_keys.encrypt(rt.as_bytes())?),
         None => None,
     };
 
@@ -1027,7 +1034,7 @@ pub async fn handle_oauth_callback(
 /// Get a user's decrypted token for a provider, with lazy refresh for OAuth tokens.
 pub async fn get_active_token(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_id: &str,
 ) -> AppResult<DecryptedProviderToken> {
@@ -1055,7 +1062,7 @@ pub async fn get_active_token(
             let encrypted = token.api_key_encrypted.ok_or_else(|| {
                 AppError::Internal("API key token missing encrypted key".to_string())
             })?;
-            let decrypted_bytes = Zeroizing::new(aes::decrypt(&encrypted, encryption_key)?);
+            let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&encrypted)?);
             let decrypted = String::from_utf8((*decrypted_bytes).clone())
                 .map_err(|e| AppError::Internal(format!("Failed to decode API key: {e}")))?;
 
@@ -1072,7 +1079,7 @@ pub async fn get_active_token(
                 .is_some_and(|exp| exp <= now + Duration::minutes(5));
 
             if needs_refresh && token.refresh_token_encrypted.is_some() {
-                match oauth_flow::refresh_oauth_token(db, encryption_key, &token).await {
+                match oauth_flow::refresh_oauth_token(db, encryption_keys, &token).await {
                     Ok(new_access_token) => {
                         return Ok(DecryptedProviderToken {
                             token_type: "oauth2".to_string(),
@@ -1095,7 +1102,7 @@ pub async fn get_active_token(
             let encrypted = token.access_token_encrypted.ok_or_else(|| {
                 AppError::Internal("OAuth token missing encrypted access_token".to_string())
             })?;
-            let decrypted_bytes = Zeroizing::new(aes::decrypt(&encrypted, encryption_key)?);
+            let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&encrypted)?);
             let decrypted = String::from_utf8((*decrypted_bytes).clone())
                 .map_err(|e| AppError::Internal(format!("Failed to decode access token: {e}")))?;
 
@@ -1114,7 +1121,7 @@ pub async fn get_active_token(
 /// Attempts best-effort remote token revocation before clearing local state.
 pub async fn disconnect_provider(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_id: &str,
 ) -> AppResult<()> {
@@ -1139,7 +1146,7 @@ pub async fn disconnect_provider(
                 .await?;
             if let Some(ref provider) = provider {
                 if provider.revocation_url.is_some() {
-                    let _ = try_revoke_token_remote(db, encryption_key, provider, tok).await;
+                    let _ = try_revoke_token_remote(db, encryption_keys, provider, tok).await;
                 }
             }
         }
@@ -1185,7 +1192,7 @@ pub async fn disconnect_provider(
 /// If credential resolution fails, revocation is silently skipped.
 async fn try_revoke_token_remote(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     provider: &ProviderConfig,
     token: &UserProviderToken,
 ) {
@@ -1198,7 +1205,7 @@ async fn try_revoke_token_remote(
     // If resolution fails (e.g. credentials deleted), skip revocation silently.
     let creds = match user_credentials_service::resolve_token_oauth_credentials(
         db,
-        encryption_key,
+        encryption_keys,
         provider,
         token.credential_user_id.as_deref(),
     )
@@ -1212,7 +1219,7 @@ async fn try_revoke_token_remote(
 
     // Try revoking access token
     if let Some(ref enc) = token.access_token_encrypted {
-        if let Ok(decrypted) = aes::decrypt(enc, encryption_key) {
+        if let Ok(decrypted) = encryption_keys.decrypt(enc) {
             if let Ok(access_token) = String::from_utf8(decrypted) {
                 let _ = send_revocation_request(
                     revocation_url,
@@ -1230,7 +1237,7 @@ async fn try_revoke_token_remote(
 
     // Try revoking refresh token
     if let Some(ref enc) = token.refresh_token_encrypted {
-        if let Ok(decrypted) = aes::decrypt(enc, encryption_key) {
+        if let Ok(decrypted) = encryption_keys.decrypt(enc) {
             if let Ok(refresh_token) = String::from_utf8(decrypted) {
                 let _ = send_revocation_request(
                     revocation_url,

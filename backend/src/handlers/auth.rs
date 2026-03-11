@@ -333,11 +333,9 @@ pub async fn login(
                     ));
                 }
 
-                let encryption_key =
-                    crate::crypto::aes::parse_hex_key(&state.config.encryption_key)?;
                 let valid = crate::services::mfa_service::verify_totp(
                     &state.db,
-                    &encryption_key,
+                    &state.encryption_keys,
                     &user.id,
                     code,
                 )

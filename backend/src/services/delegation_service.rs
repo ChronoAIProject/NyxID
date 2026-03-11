@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 
+use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::service_provider_requirement::{
@@ -26,7 +27,7 @@ pub struct DelegatedCredential {
 /// Uses batch queries for provider lookups (CR-4/5/6: fix N+1).
 pub async fn resolve_delegated_credentials(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     service_id: &str,
 ) -> AppResult<Vec<DelegatedCredential>> {
@@ -75,7 +76,7 @@ pub async fn resolve_delegated_credentials(
         // Try to get the user's active token for this provider
         let token_result = user_token_service::get_active_token(
             db,
-            encryption_key,
+            encryption_keys,
             user_id,
             &req.provider_config_id,
         )

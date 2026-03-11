@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::crypto::aes;
 use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
@@ -298,13 +297,13 @@ pub async fn create_service(
         .await?;
 
         let secret_to_encrypt = raw_secret.unwrap_or_default();
-        let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-        let enc = aes::encrypt(secret_to_encrypt.as_bytes(), &encryption_key)?;
+        let enc = state
+            .encryption_keys
+            .encrypt(secret_to_encrypt.as_bytes())?;
 
         (enc, Some(client.id))
     } else {
-        let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-        let enc = aes::encrypt(credential.as_bytes(), &encryption_key)?;
+        let enc = state.encryption_keys.encrypt(credential.as_bytes())?;
         (enc, None)
     };
 
@@ -632,8 +631,9 @@ pub async fn get_oidc_credentials(
         .ok_or_else(|| AppError::Internal("OIDC service missing oauth_client_id".to_string()))?;
 
     // Decrypt the client secret from credential_encrypted
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-    let decrypted_bytes = aes::decrypt(&service.credential_encrypted, &encryption_key)?;
+    let decrypted_bytes = state
+        .encryption_keys
+        .decrypt(&service.credential_encrypted)?;
     let client_secret = String::from_utf8(decrypted_bytes)
         .map_err(|e| AppError::Internal(format!("Failed to decode decrypted secret: {e}")))?;
 
@@ -812,8 +812,7 @@ pub async fn regenerate_oidc_secret(
         .await?;
 
     // Encrypt the new secret and update credential_encrypted on the service
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-    let encrypted = aes::encrypt(new_secret.as_bytes(), &encryption_key)?;
+    let encrypted = state.encryption_keys.encrypt(new_secret.as_bytes())?;
 
     state
         .db

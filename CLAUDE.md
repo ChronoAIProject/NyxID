@@ -114,6 +114,7 @@ Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`
 # Required
 DATABASE_URL=mongodb://...          # MongoDB connection string
 ENCRYPTION_KEY=                     # 64 hex chars (32 bytes AES-256)
+ENCRYPTION_KEY_PREVIOUS=            # Optional: previous key for zero-downtime rotation (64 hex chars)
 
 # Defaults provided
 PORT=3001

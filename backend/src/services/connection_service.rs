@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use mongodb::bson::doc;
 use uuid::Uuid;
 
-use crate::crypto::aes;
+use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -26,7 +26,7 @@ pub struct ConnectionResult {
 /// For "provider" category services: returns error (not connectable).
 pub async fn connect_user(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     service_id: &str,
     credential: Option<&str>,
@@ -109,7 +109,7 @@ pub async fn connect_user(
 
     // Encrypt credential if provided
     let credential_encrypted = match credential {
-        Some(cred) => Some(aes::encrypt(cred.as_bytes(), encryption_key)?),
+        Some(cred) => Some(encryption_keys.encrypt(cred.as_bytes())?),
         None => None,
     };
 
@@ -194,7 +194,7 @@ pub async fn connect_user(
 /// Update the credential on an existing connection.
 pub async fn update_credential(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     service_id: &str,
     credential: &str,
@@ -233,7 +233,7 @@ pub async fn update_credential(
         ));
     }
 
-    let encrypted = aes::encrypt(credential.as_bytes(), encryption_key)?;
+    let encrypted = encryption_keys.encrypt(credential.as_bytes())?;
     let now = Utc::now();
 
     let mut set_doc = doc! {

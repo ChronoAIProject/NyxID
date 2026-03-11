@@ -51,6 +51,8 @@ pub struct AppConfig {
     // Encryption
     /// 32-byte hex-encoded AES-256 key for encrypting stored credentials
     pub encryption_key: String,
+    /// Optional previous encryption key for key rotation (same format as encryption_key)
+    pub encryption_key_previous: Option<String>,
 
     // Rate limiting
     /// Max requests per second per IP for general endpoints
@@ -166,6 +168,9 @@ impl AppConfig {
 
             encryption_key: env::var("ENCRYPTION_KEY")
                 .expect("ENCRYPTION_KEY must be set (64 hex chars = 32 bytes)"),
+            encryption_key_previous: env::var("ENCRYPTION_KEY_PREVIOUS")
+                .ok()
+                .filter(|s| !s.is_empty()),
 
             rate_limit_per_second: env::var("RATE_LIMIT_PER_SECOND")
                 .ok()
@@ -251,6 +256,37 @@ impl AppConfig {
                 "ENCRYPTION_KEY is all zeros. This is insecure. \
                  Generate a proper key with: openssl rand -hex 32"
             );
+        }
+
+        // Validate previous key if present
+        if let Some(ref prev_key) = self.encryption_key_previous {
+            if prev_key.len() != 64 {
+                panic!(
+                    "ENCRYPTION_KEY_PREVIOUS must be exactly 64 hex characters (32 bytes), got {} characters",
+                    prev_key.len()
+                );
+            }
+
+            let prev_bytes =
+                hex::decode(prev_key).expect("ENCRYPTION_KEY_PREVIOUS is not valid hexadecimal");
+
+            if prev_bytes.len() != 32 {
+                panic!("ENCRYPTION_KEY_PREVIOUS must decode to exactly 32 bytes");
+            }
+
+            if prev_bytes.iter().all(|&b| b == 0) {
+                panic!(
+                    "ENCRYPTION_KEY_PREVIOUS is all zeros. This is insecure. \
+                     Generate a proper key with: openssl rand -hex 32"
+                );
+            }
+
+            if prev_key == &self.encryption_key {
+                tracing::warn!(
+                    "ENCRYPTION_KEY_PREVIOUS is the same as ENCRYPTION_KEY. \
+                     This is valid but means no rotation is in progress."
+                );
+            }
         }
     }
 
@@ -381,6 +417,7 @@ mod tests {
             smtp_password: None,
             smtp_from_address: None,
             encryption_key: encryption_key.to_string(),
+            encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
@@ -500,6 +537,41 @@ mod tests {
     fn validate_encryption_key_all_zeros() {
         let key = "00".repeat(32);
         let cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.validate_encryption_key();
+    }
+
+    #[test]
+    fn validate_encryption_key_with_valid_previous() {
+        let key = "ab".repeat(32);
+        let mut cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.encryption_key_previous = Some("cd".repeat(32));
+        cfg.validate_encryption_key(); // should not panic
+    }
+
+    #[test]
+    #[should_panic(expected = "ENCRYPTION_KEY_PREVIOUS must be exactly 64 hex characters")]
+    fn validate_previous_key_too_short() {
+        let key = "ab".repeat(32);
+        let mut cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.encryption_key_previous = Some("abcd".to_string());
+        cfg.validate_encryption_key();
+    }
+
+    #[test]
+    #[should_panic(expected = "ENCRYPTION_KEY_PREVIOUS is not valid hexadecimal")]
+    fn validate_previous_key_not_hex() {
+        let key = "ab".repeat(32);
+        let mut cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.encryption_key_previous = Some("zz".repeat(32));
+        cfg.validate_encryption_key();
+    }
+
+    #[test]
+    #[should_panic(expected = "ENCRYPTION_KEY_PREVIOUS is all zeros")]
+    fn validate_previous_key_all_zeros() {
+        let key = "ab".repeat(32);
+        let mut cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.encryption_key_previous = Some("00".repeat(32));
         cfg.validate_encryption_key();
     }
 }

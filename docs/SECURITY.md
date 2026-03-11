@@ -35,8 +35,41 @@ All sensitive data is encrypted using **AES-256-GCM** (Galois/Counter Mode):
 
 - **Key size:** 256 bits (32 bytes), provided via `ENCRYPTION_KEY` environment variable (64 hex characters)
 - **Nonce:** Random 96-bit (12-byte) nonce generated per encryption operation via `OsRng`
-- **Storage format:** `nonce(12 bytes) || ciphertext || authentication_tag(16 bytes)`
 - **Authentication:** GCM provides authenticated encryption -- tampering is detected on decryption
+
+### Ciphertext Formats
+
+NyxID supports two ciphertext formats. All new encryptions use v1. Decryption transparently handles both.
+
+**v0 (legacy):**
+
+```
+nonce(12) || ciphertext || tag(16)
+```
+
+**v1 (current):**
+
+```
+0x01 || key_id(1) || nonce(12) || ciphertext || tag(16)
+```
+
+- `0x01` -- version byte
+- `key_id` -- a stable 1-byte identifier derived from `SHA-256(key)[0]`
+- NyxID also accepts the earlier draft Phase 1 header (`0x00` / `0x01`) for local backward compatibility during rollout
+- Detection: a ciphertext is treated as v1 if its length is >= 30 bytes and the first byte is `0x01`
+
+### Decrypt Fallback Chain
+
+When decrypting, the system tries keys in this order:
+
+1. If data looks like v1 and the `key_id` matches the configured current key: try v1 payload with current key
+2. If data looks like v1 and the `key_id` matches the configured previous key: try v1 payload with previous key
+3. If data uses the draft Phase 1 header (`0x00` / `0x01`): try current key, then previous key for compatibility
+4. Try v0 (full data as `nonce || ciphertext || tag`) with current key
+5. Try v0 with previous key
+6. Return error if all attempts fail
+
+Error messages do not reveal which key was tried or which format was detected.
 
 ### What Is Encrypted
 
@@ -48,14 +81,50 @@ All sensitive data is encrypted using **AES-256-GCM** (Galois/Counter Mode):
 | Provider OAuth client credentials   | `provider_configs`       | `client_id_encrypted`, `client_secret_encrypted` |
 | User provider OAuth tokens          | `user_provider_tokens`   | `access_token_encrypted`, `refresh_token_encrypted` |
 | User provider API keys              | `user_provider_tokens`   | `api_key_encrypted`                            |
+| User provider OAuth app credentials | `user_provider_credentials` | `client_id_encrypted`, `client_secret_encrypted` |
+| OAuth state secrets                 | `oauth_states`           | `code_verifier`, `device_code_encrypted`, `user_code_encrypted` |
 
 ### Key Management
 
 - The encryption key must be generated using a cryptographically secure RNG: `openssl rand -hex 32`
 - Never reuse the development key in production
-- All instances in a horizontal scaling setup must share the same key
-- Key rotation requires re-encrypting all stored data (not yet automated)
+- All instances in a horizontal scaling setup must share the same `ENCRYPTION_KEY` and `ENCRYPTION_KEY_PREVIOUS`
+- Only one previous key is supported at a time in Phase 1
 - The key is validated at startup -- all-zero keys are rejected
+- The `EncryptionKeys` struct redacts key material in `Debug` output to prevent accidental logging
+- `/health` exposes decrypt counters so operators can confirm whether traffic still depends on `v1_previous`, `v0_current`, or `v0_previous`
+
+### Key Rotation
+
+NyxID supports zero-downtime key rotation via the `ENCRYPTION_KEY_PREVIOUS` environment variable. Existing ciphertexts continue to decrypt during the rotation window, and all new writes use the new key immediately.
+
+**Rotation procedure:**
+
+1. Generate a new key:
+   ```bash
+   openssl rand -hex 32
+   ```
+2. Set `ENCRYPTION_KEY_PREVIOUS` to the current value of `ENCRYPTION_KEY`
+3. Set `ENCRYPTION_KEY` to the newly generated key
+4. Restart all NyxID instances
+5. Verify the service is healthy: `curl /health`
+6. All new encryptions now use the new key (v1 format). Existing data decrypts via the fallback chain.
+7. Re-encrypt all data that still depends on the old key, including legacy `v0` ciphertexts and any `v1` ciphertexts written before the rotation.
+8. Watch `/health` and wait until `decrypt_stats.v1_previous`, `decrypt_stats.v0_current`, and `decrypt_stats.v0_previous` remain at zero for your normal workload window.
+9. Remove `ENCRYPTION_KEY_PREVIOUS` and restart once you have confirmed the old key is no longer needed.
+
+**Important:** Do not automate repeated key rotation with Phase 1 alone. Only one previous key is supported, so you must finish re-encrypting old-key data before rotating again.
+
+### Key Rotation Rollback
+
+If a key rotation causes issues, you can roll back:
+
+1. Set `ENCRYPTION_KEY` back to the old key value
+2. Set `ENCRYPTION_KEY_PREVIOUS` to the new key (so any v1 data encrypted with the new key during the rotation window still decrypts)
+3. Restart all NyxID instances
+4. Verify the service is healthy: `curl /health`
+
+Both old (v0 and v1) ciphertexts encrypted with the original key and new v1 ciphertexts encrypted during the rotation window will decrypt correctly, as long as the old key remains configured as `ENCRYPTION_KEY_PREVIOUS`.
 
 ### Memory Protection
 
@@ -78,7 +147,7 @@ NyxID enforces PKCE on two distinct OAuth flows:
 - PKCE is used when `supports_pkce = true` on the provider configuration
 - Code verifier: 32 random bytes, base64url-encoded (43 characters)
 - Code challenge: SHA-256 of the verifier, base64url-encoded
-- The code verifier is stored in the `oauth_states` collection (not encrypted, but short-lived)
+- The code verifier is stored encrypted in the `oauth_states` collection
 
 ### OAuth State / CSRF Protection
 
@@ -634,11 +703,12 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 ### If ENCRYPTION_KEY Is Compromised
 
 1. Generate a new key: `openssl rand -hex 32`
-2. Stop all NyxID instances
-3. Run a re-encryption migration (decrypt all data with old key, re-encrypt with new key)
-4. Update the `ENCRYPTION_KEY` environment variable
-5. Restart all instances
-6. Audit all access logs for the compromise window
+2. Set `ENCRYPTION_KEY_PREVIOUS` to the compromised key value
+3. Set `ENCRYPTION_KEY` to the new key
+4. Restart all NyxID instances (zero-downtime rotation -- existing data decrypts via the fallback chain)
+5. Run a re-encryption job to migrate all data to the new key (removes dependency on the compromised key)
+6. Once all data is re-encrypted, remove `ENCRYPTION_KEY_PREVIOUS` and restart
+7. Audit all access logs for the compromise window
 
 ### If RSA Private Key Is Compromised
 

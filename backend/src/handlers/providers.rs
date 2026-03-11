@@ -5,7 +5,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, provider_service, user_credentials_service};
@@ -298,7 +297,6 @@ pub async fn create_provider(
         }
     }
 
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
     let user_id_str = auth_user.user_id.to_string();
 
     let oauth_config = if body.provider_type == "oauth2" {
@@ -425,7 +423,7 @@ pub async fn create_provider(
 
     let provider = provider_service::create_provider(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &body.name,
         &body.slug,
         &body.provider_type,
@@ -501,8 +499,6 @@ pub async fn update_provider(
         validate_base_url(url, state.config.is_development())?;
     }
 
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-
     let updates = provider_service::ProviderUpdateInput {
         name: body.name,
         description: body.description,
@@ -530,7 +526,7 @@ pub async fn update_provider(
     };
 
     let updated =
-        provider_service::update_provider(&state.db, &encryption_key, &provider_id, updates)
+        provider_service::update_provider(&state.db, &state.encryption_keys, &provider_id, updates)
             .await?;
 
     audit_service::log_async(

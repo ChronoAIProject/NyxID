@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::AppState;
-use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -84,14 +83,12 @@ async fn execute_proxy(
     path: &str,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-
     let user_id_str = auth_user.user_id.to_string();
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
 
     let target = match proxy_service::resolve_proxy_target(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &user_id_str,
         service_id,
     )
@@ -244,7 +241,7 @@ async fn execute_proxy(
     // Resolve delegated credentials. Required provider connections must succeed.
     let delegated = delegation_service::resolve_delegated_credentials(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &user_id_str,
         service_id,
     )

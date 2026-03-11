@@ -3,7 +3,7 @@ use mongodb::bson::{self, doc};
 use totp_rs::{Algorithm, Secret, TOTP};
 use uuid::Uuid;
 
-use crate::crypto::aes;
+use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::password;
 use crate::crypto::token::generate_random_token;
 use crate::errors::{AppError, AppResult};
@@ -36,7 +36,7 @@ fn create_totp(secret_bytes: Vec<u8>, issuer: &str, account_name: &str) -> Resul
 /// factor. Returns the secret and QR code URL for the authenticator app.
 pub async fn setup_totp(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     user_email: &str,
 ) -> AppResult<TotpSetupResult> {
@@ -70,7 +70,7 @@ pub async fn setup_totp(
     let qr_code_url = totp.get_url();
 
     // Encrypt the secret for storage
-    let encrypted_secret = aes::encrypt(secret_base32.as_bytes(), encryption_key)?;
+    let encrypted_secret = encryption_keys.encrypt(secret_base32.as_bytes())?;
 
     let factor_id = Uuid::new_v4().to_string();
     let now = Utc::now();
@@ -101,7 +101,7 @@ pub async fn setup_totp(
 /// Verify a TOTP code to complete enrollment.
 pub async fn verify_totp_setup(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     factor_id: &str,
     user_id: &str,
     code: &str,
@@ -125,7 +125,7 @@ pub async fn verify_totp_setup(
         .as_ref()
         .ok_or_else(|| AppError::Internal("Missing encrypted secret".to_string()))?;
 
-    let secret_bytes = aes::decrypt(encrypted_secret, encryption_key)?;
+    let secret_bytes = encryption_keys.decrypt(encrypted_secret)?;
     let secret_str = String::from_utf8(secret_bytes)
         .map_err(|e| AppError::Internal(format!("Invalid secret encoding: {e}")))?;
 
@@ -187,7 +187,7 @@ pub async fn verify_totp_setup(
 /// Verify a TOTP code during login.
 pub async fn verify_totp(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     code: &str,
 ) -> AppResult<bool> {
@@ -207,7 +207,7 @@ pub async fn verify_totp(
         .as_ref()
         .ok_or_else(|| AppError::Internal("Missing encrypted secret".to_string()))?;
 
-    let secret_bytes = aes::decrypt(encrypted_secret, encryption_key)?;
+    let secret_bytes = encryption_keys.decrypt(encrypted_secret)?;
     let secret_str = String::from_utf8(secret_bytes)
         .map_err(|e| AppError::Internal(format!("Invalid secret encoding: {e}")))?;
 

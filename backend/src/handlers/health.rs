@@ -3,20 +3,32 @@ use axum::extract::State;
 use serde::Serialize;
 
 use crate::AppState;
+use crate::crypto::aes::EncryptionDecryptStats;
 
 #[derive(Serialize)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    pub encryption: EncryptionHealthResponse,
+}
+
+#[derive(Serialize)]
+pub struct EncryptionHealthResponse {
+    pub previous_key_configured: bool,
+    pub decrypt_stats: EncryptionDecryptStats,
 }
 
 /// GET /health
 ///
 /// Returns service health status. Used by load balancers and monitoring.
-pub async fn health_check() -> Json<HealthResponse> {
+pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        encryption: EncryptionHealthResponse {
+            previous_key_configured: state.encryption_keys.has_previous(),
+            decrypt_stats: state.encryption_keys.decrypt_stats(),
+        },
     })
 }
 

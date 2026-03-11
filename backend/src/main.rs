@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use crate::db::DbHandle;
 use config::AppConfig;
+use crypto::aes::EncryptionKeys;
 use crypto::jwks::JwksCache;
 use crypto::jwt::JwtKeys;
 use models::mcp_session::McpSessionStore;
@@ -43,6 +44,8 @@ pub struct AppState {
     pub fcm_auth: Option<Arc<FcmAuth>>,
     /// APNs push notification auth (None if not configured)
     pub apns_auth: Option<Arc<ApnsAuth>>,
+    /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
+    pub encryption_keys: Arc<EncryptionKeys>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -84,18 +87,29 @@ async fn main() {
         return;
     }
 
+    // Validate encryption key(s) at startup (before any seed calls that use them)
+    config.validate_encryption_key();
+
+    // Build versioned encryption keys from config
+    let encryption_keys = Arc::new(EncryptionKeys::from_config(&config));
+    if encryption_keys.has_previous() {
+        tracing::warn!(
+            "ENCRYPTION_KEY_PREVIOUS is configured. Phase 1 supports only one previous key; do not rotate again until all old-key ciphertexts have been re-encrypted."
+        );
+    }
+
     // Seed default OAuth clients (idempotent)
     services::oauth_client_service::seed_default_clients(&db)
         .await
         .expect("Failed to seed default OAuth clients");
 
     // Seed default AI provider configurations (idempotent)
-    services::provider_service::seed_default_providers(&db, &config.encryption_key)
+    services::provider_service::seed_default_providers(&db, encryption_keys.as_ref())
         .await
         .expect("Failed to seed default providers");
 
     // Seed downstream services for default providers (idempotent)
-    services::provider_service::seed_default_services(&db, &config.encryption_key)
+    services::provider_service::seed_default_services(&db, encryption_keys.as_ref())
         .await
         .expect("Failed to seed default services");
 
@@ -108,9 +122,6 @@ async fn main() {
     tracing::info!("Starting NyxID authentication server");
     tracing::info!(port = config.port, issuer = %config.jwt_issuer, "Configuration loaded");
     config.warn_if_non_url_issuer();
-
-    // Validate encryption key at startup
-    config.validate_encryption_key();
 
     // Validate and initialize push notification config (reads FCM JSON, verifies APNs key)
     config.validate_push_config();
@@ -192,6 +203,7 @@ async fn main() {
         jwks_cache,
         fcm_auth: fcm_auth.clone(),
         apns_auth: apns_auth.clone(),
+        encryption_keys: encryption_keys.clone(),
     };
 
     // Create rate limiters

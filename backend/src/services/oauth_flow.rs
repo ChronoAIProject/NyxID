@@ -3,7 +3,7 @@ use mongodb::bson::{self, doc};
 use std::sync::LazyLock;
 use zeroize::Zeroizing;
 
-use crate::crypto::aes;
+use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::user_provider_token::{COLLECTION_NAME, UserProviderToken};
@@ -65,7 +65,7 @@ pub fn generate_code_challenge(verifier: &str) -> String {
 /// bodies before storing (SEC-M5).
 pub async fn refresh_oauth_token(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     token: &UserProviderToken,
 ) -> AppResult<String> {
     let provider = db
@@ -80,7 +80,7 @@ pub async fn refresh_oauth_token(
 
     let resolved = user_credentials_service::resolve_token_oauth_credentials(
         db,
-        encryption_key,
+        encryption_keys,
         &provider,
         token.credential_user_id.as_deref(),
     )
@@ -88,13 +88,14 @@ pub async fn refresh_oauth_token(
     let client_id = resolved.client_id;
     let client_secret = resolved.client_secret;
 
-    let decrypted_rt = Zeroizing::new(aes::decrypt(
-        token
-            .refresh_token_encrypted
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("Token missing refresh_token".to_string()))?,
-        encryption_key,
-    )?);
+    let decrypted_rt = Zeroizing::new(
+        encryption_keys.decrypt(
+            token
+                .refresh_token_encrypted
+                .as_ref()
+                .ok_or_else(|| AppError::Internal("Token missing refresh_token".to_string()))?,
+        )?,
+    );
     let refresh_token = String::from_utf8((*decrypted_rt).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode refresh_token: {e}")))?;
 
@@ -158,7 +159,7 @@ pub async fn refresh_oauth_token(
     let expires_in = token_data["expires_in"].as_i64();
     let now = Utc::now();
 
-    let access_enc = aes::encrypt(new_access_token.as_bytes(), encryption_key)?;
+    let access_enc = encryption_keys.encrypt(new_access_token.as_bytes())?;
 
     let mut set_doc = doc! {
         "access_token_encrypted": bson::Binary {
@@ -177,7 +178,7 @@ pub async fn refresh_oauth_token(
     }
 
     if let Some(rt) = new_refresh_token {
-        let rt_enc = aes::encrypt(rt.as_bytes(), encryption_key)?;
+        let rt_enc = encryption_keys.encrypt(rt.as_bytes())?;
         set_doc.insert(
             "refresh_token_encrypted",
             bson::Binary {

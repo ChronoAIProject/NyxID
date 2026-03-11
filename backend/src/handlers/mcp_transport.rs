@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use crate::AppState;
-use crate::crypto::{aes, jwt};
+use crate::crypto::jwt;
 use crate::models::mcp_session;
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -633,18 +633,10 @@ async fn handle_tools_call(
         );
     }
 
-    let encryption_key = match aes::parse_hex_key(&state.config.encryption_key) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::error!("Failed to parse encryption key: {e}");
-            return tool_result(request.id.clone(), "Internal server error", true);
-        }
-    };
-
     let (status, body) = match mcp_service::execute_tool(
         &state.http_client,
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         user_id,
         service,
         endpoint,
@@ -781,18 +773,10 @@ async fn handle_meta_call_tool(
     }
 
     // Execute
-    let encryption_key = match aes::parse_hex_key(&state.config.encryption_key) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::error!("Failed to parse encryption key: {e}");
-            return tool_result(request_id, "Internal server error", true);
-        }
-    };
-
     let (status, body) = match mcp_service::execute_tool(
         &state.http_client,
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         user_id,
         service,
         endpoint,
@@ -990,17 +974,9 @@ async fn handle_meta_connect(
     let credential = arguments.get("credential").and_then(|c| c.as_str());
     let credential_label = arguments.get("credential_label").and_then(|l| l.as_str());
 
-    let encryption_key = match aes::parse_hex_key(&state.config.encryption_key) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::error!("Failed to parse encryption key: {e}");
-            return tool_result(request_id, "Internal server error", true);
-        }
-    };
-
     match mcp_service::connect_service(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         user_id,
         service_id,
         credential,

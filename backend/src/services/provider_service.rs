@@ -5,7 +5,7 @@ use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
-use crate::crypto::aes;
+use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -37,10 +37,9 @@ const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
 /// The OpenAI Codex `client_id` is encrypted before storage.
 pub async fn seed_default_providers(
     db: &mongodb::Database,
-    encryption_key_hex: &str,
+    encryption_keys: &EncryptionKeys,
 ) -> AppResult<()> {
     let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
-    let encryption_key = aes::parse_hex_key(encryption_key_hex)?;
     let now = Utc::now();
 
     let mut seeded_count: u32 = 0;
@@ -136,7 +135,7 @@ pub async fn seed_default_providers(
 
     // 2. OpenAI Codex (Device Code - ChatGPT subscription)
     if !slug_exists!("openai-codex") {
-        let client_id_enc = aes::encrypt(b"app_EMoamEEZ73f0CkXaXp7hrann", &encryption_key)?;
+        let client_id_enc = encryption_keys.encrypt(b"app_EMoamEEZ73f0CkXaXp7hrann")?;
 
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1113,9 +1112,8 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
 /// seeded provider that does not yet have a corresponding downstream service.
 pub async fn seed_default_services(
     db: &mongodb::Database,
-    encryption_key_hex: &str,
+    encryption_keys: &EncryptionKeys,
 ) -> AppResult<()> {
-    let encryption_key = aes::parse_hex_key(encryption_key_hex)?;
     let provider_col = db.collection::<ProviderConfig>(COLLECTION_NAME);
     let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
     let req_col = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
@@ -1168,7 +1166,7 @@ pub async fn seed_default_services(
         }
 
         // Create an empty encrypted credential (field is required)
-        let empty_credential = aes::encrypt(b"", &encryption_key)?;
+        let empty_credential = encryption_keys.encrypt(b"")?;
 
         let service_id = Uuid::new_v4().to_string();
         let is_llm_service = seed.service_slug.starts_with("llm-");
@@ -1308,7 +1306,7 @@ pub struct ProviderUpdateInput {
 #[allow(clippy::too_many_arguments)]
 pub async fn create_provider(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     name: &str,
     slug: &str,
     provider_type: &str,
@@ -1360,24 +1358,24 @@ pub async fn create_provider(
         let cid = oauth
             .client_id
             .as_ref()
-            .map(|value| aes::encrypt(value.as_bytes(), encryption_key))
+            .map(|value| encryption_keys.encrypt(value.as_bytes()))
             .transpose()?;
         let csec = oauth
             .client_secret
             .as_ref()
-            .map(|value| aes::encrypt(value.as_bytes(), encryption_key))
+            .map(|value| encryption_keys.encrypt(value.as_bytes()))
             .transpose()?;
         (cid, csec)
     } else if let Some(ref dc) = device_code_config {
         let cid = dc
             .client_id
             .as_ref()
-            .map(|value| aes::encrypt(value.as_bytes(), encryption_key))
+            .map(|value| encryption_keys.encrypt(value.as_bytes()))
             .transpose()?;
         let csec = dc
             .client_secret
             .as_ref()
-            .map(|value| aes::encrypt(value.as_bytes(), encryption_key))
+            .map(|value| encryption_keys.encrypt(value.as_bytes()))
             .transpose()?;
         (cid, csec)
     } else {
@@ -1489,7 +1487,7 @@ pub async fn get_provider_by_slug(db: &mongodb::Database, slug: &str) -> AppResu
 /// extra read query (CR-14).
 pub async fn update_provider(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     provider_id: &str,
     updates: ProviderUpdateInput,
 ) -> AppResult<ProviderConfig> {
@@ -1523,7 +1521,7 @@ pub async fn update_provider(
         set_doc.insert("default_scopes", scopes);
     }
     if let Some(ref cid) = updates.client_id {
-        let enc = aes::encrypt(cid.as_bytes(), encryption_key)?;
+        let enc = encryption_keys.encrypt(cid.as_bytes())?;
         set_doc.insert(
             "client_id_encrypted",
             bson::Binary {
@@ -1533,7 +1531,7 @@ pub async fn update_provider(
         );
     }
     if let Some(ref csec) = updates.client_secret {
-        let enc = aes::encrypt(csec.as_bytes(), encryption_key)?;
+        let enc = encryption_keys.encrypt(csec.as_bytes())?;
         set_doc.insert(
             "client_secret_encrypted",
             bson::Binary {
