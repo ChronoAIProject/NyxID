@@ -5,3 +5,4 @@ build
 /android
 /.eas
 GoogleService-Info.plist
+build-android-release.sh
