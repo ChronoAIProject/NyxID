@@ -42,17 +42,53 @@ let isNotificationHandlerConfigured = false;
 let isBackgroundTaskRegistered = false;
 let isBootstrapped = false;
 
+const NOTIFICATION_DEDUPE_WINDOW_MS = 2000;
+const lastShownAtByNotificationKey = new Map<string, number>();
+
 function configureNotificationHandler() {
   if (isNotificationHandlerConfigured) return;
 
   Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowAlert: true,
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: true,
-      shouldSetBadge: false,
-    }),
+    handleNotification: async (notification) => {
+      const content = notification.request.content;
+      const isSilent = !content.title && !content.body;
+      if (isSilent) {
+        return {
+          shouldShowAlert: false,
+          shouldShowBanner: false,
+          shouldShowList: false,
+          shouldPlaySound: false,
+          shouldSetBadge: false,
+        };
+      }
+
+      const signal = parsePushSyncSignalFromData(content.data, "foreground");
+      const notificationKey =
+        (signal ? `${signal.type}:${signal.requestId}` : null) ??
+        (notification.request.identifier ? `id:${notification.request.identifier}` : null) ??
+        "unknown";
+
+      const now = Date.now();
+      const lastShownAt = lastShownAtByNotificationKey.get(notificationKey);
+      if (lastShownAt && now - lastShownAt < NOTIFICATION_DEDUPE_WINDOW_MS) {
+        return {
+          shouldShowAlert: false,
+          shouldShowBanner: false,
+          shouldShowList: false,
+          shouldPlaySound: false,
+          shouldSetBadge: false,
+        };
+      }
+      lastShownAtByNotificationKey.set(notificationKey, now);
+
+      return {
+        shouldShowAlert: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: true,
+        shouldSetBadge: false,
+      };
+    },
   });
 
   isNotificationHandlerConfigured = true;
