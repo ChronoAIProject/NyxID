@@ -9,6 +9,8 @@ pub struct AppConfig {
     pub base_url: String,
     /// Frontend URL for CORS and redirects (e.g. https://nyxid.dev)
     pub frontend_url: String,
+    /// Additional CORS allowed origins (comma-separated, e.g. "http://localhost:5847,http://localhost:3000")
+    pub cors_allowed_origins: Vec<String>,
     /// MongoDB connection string
     pub database_url: String,
     /// Maximum database connection pool size
@@ -122,6 +124,12 @@ impl AppConfig {
                 .unwrap_or(3001),
             frontend_url: env::var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
+            cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             database_max_connections: env::var("DATABASE_MAX_CONNECTIONS")
                 .ok()
@@ -359,6 +367,7 @@ mod tests {
             port: 3001,
             base_url: base_url.to_string(),
             frontend_url: "http://localhost:3000".to_string(),
+            cors_allowed_origins: vec![],
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
             database_max_connections: 10,
             environment: environment.to_string(),

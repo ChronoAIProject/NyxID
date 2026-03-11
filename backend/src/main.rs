@@ -278,10 +278,31 @@ async fn main() {
         });
     }
 
+    // Build set of allowed CORS origins: frontend_url + any extra from CORS_ALLOWED_ORIGINS
+    let mut allowed_origins: std::collections::HashSet<axum::http::HeaderValue> =
+        std::collections::HashSet::new();
+    allowed_origins.insert(
+        config
+            .frontend_url
+            .parse()
+            .expect("Invalid FRONTEND_URL"),
+    );
+    for origin in &config.cors_allowed_origins {
+        if let Ok(hv) = origin.parse() {
+            allowed_origins.insert(hv);
+        } else {
+            tracing::warn!(origin, "Ignoring invalid CORS_ALLOWED_ORIGINS entry");
+        }
+    }
+    tracing::info!(
+        origins = ?allowed_origins.iter().map(|h| h.to_str().unwrap_or("?")).collect::<Vec<_>>(),
+        "CORS allowed origins"
+    );
+
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::exact(
-            config.frontend_url.parse().expect("Invalid FRONTEND_URL"),
-        ))
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            allowed_origins.contains(origin)
+        }))
         .allow_methods(AllowMethods::list([
             axum::http::Method::GET,
             axum::http::Method::POST,
@@ -296,6 +317,9 @@ async fn main() {
             axum::http::header::ACCEPT,
             axum::http::header::ORIGIN,
             axum::http::header::COOKIE,
+            "X-User-Email".parse().unwrap(),
+            "X-User-Display-Name".parse().unwrap(),
+            "X-API-Key".parse().unwrap(),
         ]))
         .allow_credentials(true);
 

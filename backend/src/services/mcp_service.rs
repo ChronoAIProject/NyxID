@@ -619,43 +619,35 @@ pub async fn execute_tool(
                 }
             }
         }
-    }
 
-    // Generate delegation token if configured on the service
-    if target.service.inject_delegation_token {
-        let user_uuid = uuid::Uuid::parse_str(user_id)
-            .map_err(|_| crate::errors::AppError::Internal("Invalid user_id".to_string()))?;
-
-        match crate::crypto::jwt::generate_delegated_access_token(
-            jwt_keys,
-            config,
-            &user_uuid,
-            &target.service.delegation_token_scope,
-            &service.service_slug,
-            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
-        ) {
-            Ok(delegation_token) => {
-                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
-
-                // M1: Audit log for MCP delegation token generation
-                crate::services::audit_service::log_async(
-                    db.clone(),
-                    Some(user_id.to_string()),
-                    "mcp_delegation_token_generated".to_string(),
-                    Some(serde_json::json!({
-                        "service_id": &service.service_id,
-                        "service_slug": &service.service_slug,
-                        "scope": &target.service.delegation_token_scope,
-                    })),
-                    None,
-                    None,
-                );
+        // Resolve user RBAC and inject as headers so downstream services can
+        // enforce permission checks without needing JWT verification.
+        match crate::services::rbac_helpers::resolve_user_rbac(db, user_id).await {
+            Ok(rbac) => {
+                if !rbac.role_slugs.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Roles".to_string(),
+                        rbac.role_slugs.join(","),
+                    ));
+                }
+                if !rbac.permissions.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Permissions".to_string(),
+                        rbac.permissions.join(","),
+                    ));
+                }
+                if !rbac.group_slugs.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Groups".to_string(),
+                        rbac.group_slugs.join(","),
+                    ));
+                }
             }
             Err(e) => {
                 tracing::warn!(
-                    service_id = %service.service_id,
+                    user_id = %user_id,
                     error = %e,
-                    "Failed to generate delegation token for MCP tool"
+                    "Failed to resolve RBAC for delegation headers"
                 );
             }
         }
