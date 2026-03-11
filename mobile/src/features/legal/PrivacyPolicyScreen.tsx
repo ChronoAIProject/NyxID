@@ -17,7 +17,7 @@ type LegalSection = {
   bullets?: string[];
 };
 
-const EFFECTIVE_DATE = "2026-03-04";
+const EFFECTIVE_DATE = "2026-03-11";
 
 const PRIVACY_SECTIONS: LegalSection[] = [
   {
@@ -32,8 +32,8 @@ const PRIVACY_SECTIONS: LegalSection[] = [
     paragraphs: ["We collect the minimum data necessary to provide secure authentication and approval services."],
     bullets: [
       "Account identity: email address (or Apple private relay address), display name, and user ID from your chosen sign-in provider (Google, GitHub, or Apple)",
-      "Authentication tokens: access tokens and refresh tokens stored securely in the iOS Keychain via Secure Store",
-      "Device information: push notification token (APNs), device platform, and app identifier for delivering approval challenges",
+      "Authentication tokens: access tokens and refresh tokens stored securely using Expo Secure Store and the protected storage provided by your device platform",
+      "Device information: push notification token (such as FCM on Android or APNs on iOS), device platform, and app identifier for delivering approval challenges",
       "Usage data: approval decisions (approve/deny/revoke), timestamps, and idempotency keys for security audit trails",
       "Server-side only: our servers may receive IP address and request headers (e.g. user-agent) as part of normal HTTPS requests. The app does not collect, store, or share this technical metadata.",
     ],
@@ -59,14 +59,14 @@ const PRIVACY_SECTIONS: LegalSection[] = [
   {
     title: "5. Push Notifications",
     paragraphs: [
-      "We use Apple Push Notification service (APNs) to deliver approval challenges to your device. Your device push token is registered with our server upon login and removed upon sign-out or account deletion.",
+      "We use the push notification services supported by your device platform (such as FCM on Android or APNs on iOS) to deliver approval challenges. Your device push token is registered with our server upon login and removed upon sign-out or account deletion.",
       "Push notification payloads contain only minimal identifiers (challenge ID). Sensitive details are fetched separately over an authenticated API connection.",
     ],
   },
   {
     title: "6. Data Storage and Security",
     paragraphs: [
-      "Authentication tokens are stored in the iOS Keychain (via Expo Secure Store), which is encrypted at rest by the operating system.",
+      "Authentication tokens are stored using Expo Secure Store and the secure storage protections provided by your operating system.",
       "All network communication uses TLS encryption. Sensitive server-side fields are encrypted with AES-256.",
       "Access tokens have scoped expiry. Refresh tokens are rotated and can be revoked at any time.",
     ],
@@ -97,13 +97,13 @@ const PRIVACY_SECTIONS: LegalSection[] = [
       "Delete your account and all server-side data permanently from within the App",
       "Revoke any active approval grants at any time",
       "Disconnect third-party sign-in providers",
-      "Disable push notifications through iOS Settings",
+      "Disable push notifications through your device settings",
     ],
   },
   {
     title: "10. Local Storage",
     paragraphs: [
-      "The App stores authentication tokens in the iOS Keychain and push token references in Secure Store. No tracking cookies, advertising identifiers, or analytics SDKs are used. The App does not use App Tracking Transparency because it performs no cross-app tracking.",
+      "The App stores authentication tokens and push token references using Expo Secure Store and platform-protected local storage. No tracking cookies, advertising identifiers, or analytics SDKs are used. The App does not perform cross-app tracking.",
     ],
   },
   {

@@ -9,10 +9,23 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
+    "bump:android:build": "sh scripts/bump-android-build.sh",
     "build:ios": "EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 expo run:ios --configuration Release",
     "bump:ios:build": "sh scripts/bump-ios-build.sh",
     "build:ios:testflight": "pnpm run bump:ios:build && EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 xcodebuild -workspace ios/NyxIDMobile.xcworkspace -scheme NyxIDMobile -configuration Release -destination 'generic/platform=iOS' -archivePath ios/build/NyxIDMobile.xcarchive archive",
     "eas-build-post-install": "node scripts/patch-android-build-gradle.js"
+  },
+  "expo": {
+    "autolinking": {
+      "android": {
+        "exclude": [
+          "expo-dev-client",
+          "expo-dev-launcher",
+          "expo-dev-menu",
+          "expo-dev-menu-interface"
+        ]
+      }
+    }
   },
   "dependencies": {
     "@babel/runtime": "^7.28.4",

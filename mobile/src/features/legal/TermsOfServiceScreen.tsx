@@ -17,7 +17,7 @@ type TermsSection = {
   bullets?: string[];
 };
 
-const EFFECTIVE_DATE = "2026-03-04";
+const EFFECTIVE_DATE = "2026-03-11";
 
 const TERMS_SECTIONS: TermsSection[] = [
   {
@@ -59,7 +59,7 @@ const TERMS_SECTIONS: TermsSection[] = [
   {
     title: "5. Push Notifications",
     paragraphs: [
-      "The App uses push notifications (APNs) to deliver time-sensitive approval requests. You may disable notifications in iOS Settings, but this may prevent you from receiving approval challenges in real time.",
+      "The App uses the push notification services supported by your device platform (such as FCM on Android or APNs on iOS) to deliver time-sensitive approval requests. You may disable notifications in your device settings, but this may prevent you from receiving approval challenges in real time.",
     ],
   },
   {
