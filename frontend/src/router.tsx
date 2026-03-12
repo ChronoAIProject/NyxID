@@ -48,6 +48,9 @@ import {
   NotificationSettingsPage,
   ApprovalHistoryPage,
   ApprovalGrantsPage,
+  NodesPage,
+  NodeDetailPage,
+  AdminNodesPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
@@ -267,6 +270,18 @@ const approvalGrantsRoute = createRoute({
   component: ApprovalGrantsPage,
 });
 
+const nodesRoute = createRoute({
+  path: "/nodes",
+  getParentRoute: () => dashboardLayout,
+  component: NodesPage,
+});
+
+const nodeDetailRoute = createRoute({
+  path: "/nodes/$nodeId",
+  getParentRoute: () => dashboardLayout,
+  component: NodeDetailPage,
+});
+
 const adminLayout = createRoute({
   path: "/admin",
   getParentRoute: () => dashboardLayout,
@@ -330,6 +345,12 @@ const adminServiceAccountDetailRoute = createRoute({
   component: AdminServiceAccountDetailPage,
 });
 
+const adminNodesRoute = createRoute({
+  path: "nodes",
+  getParentRoute: () => adminLayout,
+  component: AdminNodesPage,
+});
+
 const routeTree = rootRoute.addChildren([
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
@@ -360,6 +381,8 @@ const routeTree = rootRoute.addChildren([
     notificationSettingsRoute,
     approvalHistoryRoute,
     approvalGrantsRoute,
+    nodesRoute,
+    nodeDetailRoute,
     adminLayout.addChildren([
       adminUsersRoute,
       adminUserDetailRoute,
@@ -369,6 +392,7 @@ const routeTree = rootRoute.addChildren([
       adminGroupDetailRoute,
       adminServiceAccountsRoute,
       adminServiceAccountDetailRoute,
+      adminNodesRoute,
     ]),
   ]),
 ]);

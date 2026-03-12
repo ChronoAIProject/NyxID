@@ -127,6 +127,18 @@ pub enum AppError {
 
     #[error("External provider not configured: {0}")]
     ExternalProviderNotConfigured(String),
+
+    #[error("Node not found: {0}")]
+    NodeNotFound(String),
+
+    #[error("Node offline: {0}")]
+    NodeOffline(String),
+
+    #[error("Node proxy timeout")]
+    NodeProxyTimeout,
+
+    #[error("Node registration failed: {0}")]
+    NodeRegistrationFailed(String),
 }
 
 impl AppError {
@@ -162,6 +174,10 @@ impl AppError {
             Self::ExternalTokenInvalid(_) | Self::ExternalProviderNotConfigured(_) => {
                 StatusCode::BAD_REQUEST
             }
+            Self::NodeNotFound(_) => StatusCode::NOT_FOUND,
+            Self::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
+            Self::NodeRegistrationFailed(_) => StatusCode::BAD_REQUEST,
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -202,6 +218,10 @@ impl AppError {
             Self::ApprovalRequired { .. } => 7000,
             Self::ExternalTokenInvalid(_) => 6004,
             Self::ExternalProviderNotConfigured(_) => 6005,
+            Self::NodeNotFound(_) => 8000,
+            Self::NodeOffline(_) => 8001,
+            Self::NodeProxyTimeout => 8002,
+            Self::NodeRegistrationFailed(_) => 8003,
         }
     }
 
@@ -272,6 +292,10 @@ impl AppError {
             Self::ApprovalRequired { .. } => "approval_required",
             Self::ExternalTokenInvalid(_) => "external_token_invalid",
             Self::ExternalProviderNotConfigured(_) => "external_provider_not_configured",
+            Self::NodeNotFound(_) => "node_not_found",
+            Self::NodeOffline(_) => "node_offline",
+            Self::NodeProxyTimeout => "node_proxy_timeout",
+            Self::NodeRegistrationFailed(_) => "node_registration_failed",
         }
     }
 }
@@ -471,6 +495,22 @@ mod tests {
             AppError::ExternalProviderNotConfigured("x".into()).status_code(),
             StatusCode::BAD_REQUEST
         );
+        assert_eq!(
+            AppError::NodeNotFound("x".into()).status_code(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppError::NodeOffline("x".into()).status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            AppError::NodeProxyTimeout.status_code(),
+            StatusCode::GATEWAY_TIMEOUT
+        );
+        assert_eq!(
+            AppError::NodeRegistrationFailed("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
@@ -514,6 +554,10 @@ mod tests {
             .error_code(),
             AppError::ExternalTokenInvalid("".into()).error_code(),
             AppError::ExternalProviderNotConfigured("".into()).error_code(),
+            AppError::NodeNotFound("".into()).error_code(),
+            AppError::NodeOffline("".into()).error_code(),
+            AppError::NodeProxyTimeout.error_code(),
+            AppError::NodeRegistrationFailed("".into()).error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(
@@ -634,6 +678,19 @@ mod tests {
         assert_eq!(
             AppError::ExternalProviderNotConfigured("".into()).error_key(),
             "external_provider_not_configured"
+        );
+        assert_eq!(
+            AppError::NodeNotFound("".into()).error_key(),
+            "node_not_found"
+        );
+        assert_eq!(
+            AppError::NodeOffline("".into()).error_key(),
+            "node_offline"
+        );
+        assert_eq!(AppError::NodeProxyTimeout.error_key(), "node_proxy_timeout");
+        assert_eq!(
+            AppError::NodeRegistrationFailed("".into()).error_key(),
+            "node_registration_failed"
         );
     }
 

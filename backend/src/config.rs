@@ -128,6 +128,24 @@ pub struct AppConfig {
     pub gcp_kms_key_name: Option<String>,
     /// Optional previous GCP KMS key name for multi-key migration.
     pub gcp_kms_key_name_previous: Option<String>,
+
+    // Node Proxy
+    /// Heartbeat ping interval in seconds (default: 30)
+    pub node_heartbeat_interval_secs: u64,
+    /// Mark node offline after this many seconds without heartbeat (default: 90)
+    pub node_heartbeat_timeout_secs: u64,
+    /// Timeout for proxy requests routed through nodes (default: 30)
+    pub node_proxy_timeout_secs: u64,
+    /// Registration token validity in seconds (default: 3600 = 1 hour)
+    pub node_registration_token_ttl_secs: i64,
+    /// Maximum nodes per user (default: 10)
+    pub node_max_per_user: u32,
+    /// Maximum concurrent WebSocket connections (default: 100)
+    pub node_max_ws_connections: usize,
+    /// Maximum duration for streaming proxy responses in seconds (default: 300)
+    pub node_max_stream_duration_secs: u64,
+    /// Enable HMAC request signing for node proxy requests (default: true)
+    pub node_hmac_signing_enabled: bool,
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -224,6 +242,29 @@ impl std::fmt::Debug for AppConfig {
                 } else {
                     &"None"
                 },
+            )
+            .field(
+                "node_heartbeat_interval_secs",
+                &self.node_heartbeat_interval_secs,
+            )
+            .field(
+                "node_heartbeat_timeout_secs",
+                &self.node_heartbeat_timeout_secs,
+            )
+            .field("node_proxy_timeout_secs", &self.node_proxy_timeout_secs)
+            .field(
+                "node_registration_token_ttl_secs",
+                &self.node_registration_token_ttl_secs,
+            )
+            .field("node_max_per_user", &self.node_max_per_user)
+            .field("node_max_ws_connections", &self.node_max_ws_connections)
+            .field(
+                "node_max_stream_duration_secs",
+                &self.node_max_stream_duration_secs,
+            )
+            .field(
+                "node_hmac_signing_enabled",
+                &self.node_hmac_signing_enabled,
             )
             .finish()
     }
@@ -357,6 +398,39 @@ impl AppConfig {
             gcp_kms_key_name_previous: env::var("GCP_KMS_KEY_NAME_PREVIOUS")
                 .ok()
                 .filter(|s| !s.is_empty()),
+
+            node_heartbeat_interval_secs: env::var("NODE_HEARTBEAT_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            node_heartbeat_timeout_secs: env::var("NODE_HEARTBEAT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(90),
+            node_proxy_timeout_secs: env::var("NODE_PROXY_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            node_registration_token_ttl_secs: env::var("NODE_REGISTRATION_TOKEN_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3600),
+            node_max_per_user: env::var("NODE_MAX_PER_USER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+            node_max_ws_connections: env::var("NODE_MAX_WS_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100),
+            node_max_stream_duration_secs: env::var("NODE_MAX_STREAM_DURATION_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+            node_hmac_signing_enabled: env::var("NODE_HMAC_SIGNING_ENABLED")
+                .ok()
+                .map(|v| v != "false" && v != "0")
+                .unwrap_or(true),
         }
     }
 
@@ -621,6 +695,14 @@ mod tests {
             aws_kms_key_arn_previous: None,
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
+            node_heartbeat_interval_secs: 30,
+            node_heartbeat_timeout_secs: 90,
+            node_proxy_timeout_secs: 30,
+            node_registration_token_ttl_secs: 3600,
+            node_max_per_user: 10,
+            node_max_ws_connections: 100,
+            node_max_stream_duration_secs: 300,
+            node_hmac_signing_enabled: true,
         }
     }
 

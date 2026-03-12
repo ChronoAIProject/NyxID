@@ -34,7 +34,7 @@ fn my_handler() -> AppResult<Json<MyResponse>> {
     // AppResult<T> = Result<T, AppError>
 }
 ```
-Error variants map to HTTP status codes and numeric error codes (1000-3002). Internal/database errors never leak details to clients.
+Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000, 8000-8003). Internal/database errors never leak details to clients.
 
 ### 4. Frontend Patterns
 
@@ -59,29 +59,56 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002). Int
 - PKCE for OAuth flows
 - Input validation on all endpoints
 
+### 6. Node Proxy Conventions
+
+- `NodeWsManager` is an in-memory connection pool shared via `Arc` in `AppState`; uses `DashMap` for lock-free concurrent access
+- Node auth tokens (`nyx_nauth_...`) and registration tokens (`nyx_nreg_...`) are 32-byte random values; only SHA-256 hashes are stored
+- HMAC signing secrets are generated at registration; stored as SHA-256 hashes on server, encrypted locally on the node agent
+- WebSocket handler (`handlers/node_ws.rs`) authenticates in the first message, not via HTTP middleware
+- Proxy routing check (`node_routing_service::resolve_node_route`) runs before credential resolution in `execute_proxy()`; returns `NodeRoute` with `fallback_node_ids` for multi-node failover
+- Streaming proxy uses `proxy_response_start` / `proxy_response_chunk` / `proxy_response_end` messages; `PendingRequest` upgrades from `OneShot` to `Streaming` on first chunk
+- Node metrics (`node_metrics_service`) are recorded asynchronously (fire-and-forget) after each proxy request; stored as embedded `NodeMetrics` document on the Node model
+- Node-routed audit events include `"routed_via": "node"` and `"node_id"` in event data
+- Error codes 8000-8003 are reserved for node errors (`NodeNotFound`, `NodeOffline`, `NodeProxyTimeout`, `NodeRegistrationFailed`)
+- `NodeStatus` is an enum (`Online`/`Offline`/`Draining`) -- not a bare string
+- WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
+- Admin node endpoints (`handlers/admin_nodes.rs`) require admin role and have no ownership check
+
 ## File Structure
 
 ```
+node-agent/src/
+|-- main.rs              # CLI entry point, command dispatch (register, start, status, credentials, version)
+|-- cli.rs               # Clap subcommand definitions
+|-- config.rs            # TOML config (server url, node id, encrypted auth token, signing secret, credentials)
+|-- ws_client.rs         # WebSocket connection loop, exponential backoff reconnection, graceful shutdown
+|-- proxy_executor.rs    # HTTP request execution, credential injection, SSE streaming detection
+|-- credential_store.rs  # In-memory decrypted credential store (header or query_param injection)
+|-- signing.rs           # HMAC-SHA256 verification, replay guard (5min skew, 10k nonce cap)
+|-- metrics.rs           # Local atomic counters (total_requests, success_count, error_count)
+|-- encryption.rs        # AES-256-GCM local encryption, keyfile management (0600 mode)
+|-- error.rs             # Error enum with thiserror
+
 backend/src/
 |-- config.rs            # AppConfig from env vars
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (26 models, 24 collections)
-|-- services/            # Business logic (29 services, incl. approval_service, notification_service, push_service, telegram_service)
-|-- handlers/            # HTTP handlers (30 handler modules, incl. approvals, notifications, device_tokens, webhooks)
+|-- models/              # MongoDB document structs (29 models, 27 collections, incl. node, node_service_binding, node_registration_token)
+|-- services/            # Business logic (33 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service)
+|-- handlers/            # HTTP handlers (34 handler modules, incl. node_admin, admin_nodes, node_ws)
 |-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
 frontend/src/
-|-- pages/               # Route pages (23 pages, incl. approval-history, approval-grants, notification-settings)
+|-- pages/               # Route pages (27 pages, incl. nodes, node-detail, admin-nodes)
 |-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/)
-|-- hooks/               # TanStack Query hooks (9 hooks, incl. use-approvals)
-|-- schemas/             # Zod validation schemas (7 schema files + tests)
+|-- hooks/               # TanStack Query hooks (12 hooks, incl. use-nodes, use-admin-nodes)
+|-- schemas/             # Zod validation schemas (8 schema files + tests, incl. nodes.ts)
 |-- stores/              # Zustand stores (auth-store)
 |-- lib/                 # API client, constants, utils
-|-- types/               # TypeScript type definitions
+|-- types/               # TypeScript type definitions (incl. AdminNodeInfo, NodeMetricsInfo)
 |-- router.tsx           # TanStack Router config
 ```
 
@@ -105,6 +132,9 @@ All API routes under `/api/v1`:
 - `/notifications` -- notification settings CRUD, Telegram link/disconnect, device token management (register/list/remove)
 - `/approvals` -- approval request history, grants, decide, status polling, per-service approval configs
 - `/webhooks/telegram` -- Telegram webhook (unauthenticated, secret-verified)
+- `/nodes` -- node management (register-token, list, get, delete, rotate-token, bindings CRUD + priority update)
+- `/nodes/ws` -- WebSocket upgrade for node agent connections (auth via WS protocol, not middleware)
+- `/admin/nodes` -- admin node management (list all, get, disconnect, delete -- no ownership check)
 
 - `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation, provider management (connect via API key/OAuth redirect/device-code, list, disconnect providers on behalf of SAs)
 
@@ -158,6 +188,16 @@ APNS_TEAM_ID=                           # APNs Team ID (Apple Developer portal)
 APNS_TOPIC=                             # APNs topic / iOS bundle ID (e.g. dev.nyxid.app)
 APNS_SANDBOX=true                       # Use APNs sandbox (default: true in dev)
 
+# Credential Nodes (optional, all have defaults)
+NODE_HEARTBEAT_INTERVAL_SECS=30        # Heartbeat ping interval (default: 30)
+NODE_HEARTBEAT_TIMEOUT_SECS=90         # Mark offline after N seconds without heartbeat (default: 90)
+NODE_PROXY_TIMEOUT_SECS=30             # Timeout for proxy requests through nodes (default: 30)
+NODE_REGISTRATION_TOKEN_TTL_SECS=3600  # Registration token validity (default: 1 hour)
+NODE_MAX_PER_USER=10                   # Maximum nodes per user (default: 10)
+NODE_MAX_WS_CONNECTIONS=100            # Maximum concurrent node WebSocket connections (default: 100)
+NODE_MAX_STREAM_DURATION_SECS=300      # Maximum duration for streaming proxy responses (default: 300)
+NODE_HMAC_SIGNING_ENABLED=true         # Enable HMAC request signing for node proxy (default: true)
+
 # Optional
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
 GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET
@@ -176,6 +216,14 @@ cargo build --features aws-kms,gcp-kms  # Build with both KMS providers
 cargo test                              # Run backend tests
 cargo test --all-features               # Run all tests including KMS provider tests
 cargo run                               # Start backend (port 3001)
+
+# Node Agent (from project root)
+cargo build -p nyxid-node               # Build node agent binary
+cargo test -p nyxid-node                # Run node agent tests
+cargo run -p nyxid-node -- register --token nyx_nreg_... --url ws://localhost:3001/api/v1/nodes/ws
+cargo run -p nyxid-node -- start        # Start node agent
+cargo run -p nyxid-node -- status       # Show node status
+cargo run -p nyxid-node -- credentials list  # List configured credentials
 
 # Frontend (from frontend/)
 npm run dev                             # Dev server (port 3000)
