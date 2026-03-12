@@ -109,13 +109,26 @@ function RegisterNodeDialog() {
             </DialogHeader>
             <div className="space-y-3">
               <CopyableField label="Registration Token" value={createdToken.token} />
-              <div className="rounded-md bg-muted p-3">
-                <p className="mb-1 text-xs font-medium text-text-tertiary">
+              <div className="rounded-md bg-muted p-3 space-y-2">
+                <p className="text-xs font-medium text-text-tertiary">
                   Run on your node
                 </p>
-                <code className="text-xs text-foreground break-all">
-                  nyxid-node register --token {createdToken.token}
-                </code>
+                <div>
+                  <p className="text-[10px] text-muted-foreground mb-0.5">
+                    File-based storage (default, works on servers)
+                  </p>
+                  <code className="text-xs text-foreground break-all">
+                    nyxid-node register --token {createdToken.token}
+                  </code>
+                </div>
+                <div>
+                  <p className="text-[10px] text-muted-foreground mb-0.5">
+                    OS keychain storage (macOS Keychain, Windows Credential Manager)
+                  </p>
+                  <code className="text-xs text-foreground break-all">
+                    nyxid-node register --token {createdToken.token} --keychain
+                  </code>
+                </div>
               </div>
             </div>
             <DialogFooter>

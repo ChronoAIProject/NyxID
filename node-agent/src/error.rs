@@ -36,4 +36,7 @@ pub enum Error {
 
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
+
+    #[error("Keychain error: {0}")]
+    Keychain(String),
 }

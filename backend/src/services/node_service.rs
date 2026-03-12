@@ -126,7 +126,11 @@ pub async fn register_node(
 
     // Generate HMAC signing secret
     let raw_signing_secret = hex::encode(rand::random::<[u8; 32]>());
-    let signing_secret_encrypted = Some(encryption_keys.encrypt(raw_signing_secret.as_bytes()).await?);
+    let signing_secret_encrypted = Some(
+        encryption_keys
+            .encrypt(raw_signing_secret.as_bytes())
+            .await?,
+    );
     let signing_secret_hash = hash_token(&raw_signing_secret);
 
     let node = Node {
@@ -160,10 +164,7 @@ pub async fn register_node(
 
 /// Get a single node by ID without ownership check.
 /// Used internally (e.g., heartbeat sweep).
-pub async fn get_node_by_id(
-    db: &mongodb::Database,
-    node_id: &str,
-) -> AppResult<Option<Node>> {
+pub async fn get_node_by_id(db: &mongodb::Database, node_id: &str) -> AppResult<Option<Node>> {
     let node = db
         .collection::<Node>(NODES)
         .find_one(doc! { "_id": node_id, "is_active": true })
@@ -172,11 +173,7 @@ pub async fn get_node_by_id(
 }
 
 /// Get a single node by ID, verifying ownership.
-pub async fn get_node(
-    db: &mongodb::Database,
-    user_id: &str,
-    node_id: &str,
-) -> AppResult<Node> {
+pub async fn get_node(db: &mongodb::Database, user_id: &str, node_id: &str) -> AppResult<Node> {
     db.collection::<Node>(NODES)
         .find_one(doc! { "_id": node_id, "user_id": user_id, "is_active": true })
         .await?
@@ -184,10 +181,7 @@ pub async fn get_node(
 }
 
 /// List all active nodes for a user.
-pub async fn list_user_nodes(
-    db: &mongodb::Database,
-    user_id: &str,
-) -> AppResult<Vec<Node>> {
+pub async fn list_user_nodes(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<Node>> {
     let nodes: Vec<Node> = db
         .collection::<Node>(NODES)
         .find(doc! { "user_id": user_id, "is_active": true })
@@ -199,11 +193,7 @@ pub async fn list_user_nodes(
 }
 
 /// Soft-delete a node and its bindings.
-pub async fn delete_node(
-    db: &mongodb::Database,
-    user_id: &str,
-    node_id: &str,
-) -> AppResult<()> {
+pub async fn delete_node(db: &mongodb::Database, user_id: &str, node_id: &str) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
     let result = db
@@ -233,17 +223,29 @@ pub async fn delete_node(
 /// Validate NodeMetadata string field lengths (M4).
 fn validate_node_metadata(meta: &NodeMetadata) -> AppResult<()> {
     const MAX_METADATA_FIELD_LEN: usize = 64;
-    if meta.agent_version.as_ref().is_some_and(|v| v.len() > MAX_METADATA_FIELD_LEN) {
+    if meta
+        .agent_version
+        .as_ref()
+        .is_some_and(|v| v.len() > MAX_METADATA_FIELD_LEN)
+    {
         return Err(AppError::ValidationError(
             "agent_version must be 64 characters or fewer".to_string(),
         ));
     }
-    if meta.os.as_ref().is_some_and(|v| v.len() > MAX_METADATA_FIELD_LEN) {
+    if meta
+        .os
+        .as_ref()
+        .is_some_and(|v| v.len() > MAX_METADATA_FIELD_LEN)
+    {
         return Err(AppError::ValidationError(
             "os must be 64 characters or fewer".to_string(),
         ));
     }
-    if meta.arch.as_ref().is_some_and(|v| v.len() > MAX_METADATA_FIELD_LEN) {
+    if meta
+        .arch
+        .as_ref()
+        .is_some_and(|v| v.len() > MAX_METADATA_FIELD_LEN)
+    {
         return Err(AppError::ValidationError(
             "arch must be 64 characters or fewer".to_string(),
         ));
@@ -278,9 +280,8 @@ pub async fn update_heartbeat(
     }
 
     if let Some(meta) = metadata {
-        let meta_doc = bson::to_document(&meta).map_err(|e| {
-            AppError::Internal(format!("Failed to serialize metadata: {e}"))
-        })?;
+        let meta_doc = bson::to_document(&meta)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize metadata: {e}")))?;
         update
             .get_document_mut("$set")
             .unwrap()
@@ -332,7 +333,9 @@ pub async fn rotate_auth_token(
     let raw_token = format!("nyx_nauth_{}", hex::encode(rand::random::<[u8; 32]>()));
     let token_hash = hash_token(&raw_token);
     let raw_signing_secret = hex::encode(rand::random::<[u8; 32]>());
-    let signing_secret_encrypted = encryption_keys.encrypt(raw_signing_secret.as_bytes()).await?;
+    let signing_secret_encrypted = encryption_keys
+        .encrypt(raw_signing_secret.as_bytes())
+        .await?;
     let signing_secret_hash = hash_token(&raw_signing_secret);
     let now = bson::DateTime::from_chrono(Utc::now());
 
@@ -424,10 +427,7 @@ pub async fn list_all_nodes(
 }
 
 /// Admin: soft-delete a node without ownership check.
-pub async fn admin_delete_node(
-    db: &mongodb::Database,
-    node_id: &str,
-) -> AppResult<()> {
+pub async fn admin_delete_node(db: &mongodb::Database, node_id: &str) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
     let result = db
@@ -455,10 +455,7 @@ pub async fn admin_delete_node(
 }
 
 /// Validate a raw auth token. Returns the Node if valid.
-pub async fn validate_auth_token(
-    db: &mongodb::Database,
-    raw_token: &str,
-) -> AppResult<Node> {
+pub async fn validate_auth_token(db: &mongodb::Database, raw_token: &str) -> AppResult<Node> {
     let token_hash = hash_token(raw_token);
 
     db.collection::<Node>(NODES)

@@ -116,8 +116,7 @@ pub async fn execute_proxy_request(
         url = format!("{url}{separator}{param_name}={param_value}");
     }
 
-    let method = reqwest::Method::from_bytes(method_str.as_bytes())
-        .unwrap_or(reqwest::Method::GET);
+    let method = reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
 
     let client = reqwest::Client::new();
     let mut req_builder = client.request(method, &url);
@@ -159,8 +158,7 @@ pub async fn execute_proxy_request(
                 let headers = extract_response_headers(&response);
                 match response.bytes().await {
                     Ok(body) => {
-                        let body_b64 =
-                            base64::engine::general_purpose::STANDARD.encode(&body);
+                        let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body);
                         metrics.record_success();
                         let _ = tx.send(
                             serde_json::json!({
@@ -273,7 +271,10 @@ fn extract_response_headers(response: &reqwest::Response) -> serde_json::Value {
     let mut headers = serde_json::Map::new();
     for (name, value) in response.headers() {
         if let Ok(v) = value.to_str() {
-            headers.insert(name.as_str().to_string(), serde_json::Value::String(v.to_string()));
+            headers.insert(
+                name.as_str().to_string(),
+                serde_json::Value::String(v.to_string()),
+            );
         }
     }
     serde_json::Value::Object(headers)

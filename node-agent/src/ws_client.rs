@@ -68,7 +68,9 @@ pub async fn register_node(
     // Wait for response
     let response = tokio::time::timeout(Duration::from_secs(10), ws_stream.next())
         .await
-        .map_err(|_| Error::RegistrationFailed("Timed out waiting for server response".to_string()))?
+        .map_err(|_| {
+            Error::RegistrationFailed("Timed out waiting for server response".to_string())
+        })?
         .ok_or_else(|| Error::RegistrationFailed("Connection closed".to_string()))?
         .map_err(|e| Error::WebSocket(format!("Read error: {e}")))?;
 
@@ -77,7 +79,7 @@ pub async fn register_node(
         _ => {
             return Err(Error::RegistrationFailed(
                 "Unexpected message type".to_string(),
-            ))
+            ));
         }
     };
 
@@ -101,9 +103,7 @@ pub async fn register_node(
             Ok((node_id, auth_token, signing_secret))
         }
         Some("auth_error") => {
-            let msg = parsed["message"]
-                .as_str()
-                .unwrap_or("Unknown error");
+            let msg = parsed["message"].as_str().unwrap_or("Unknown error");
             Err(Error::RegistrationFailed(msg.to_string()))
         }
         _ => Err(Error::RegistrationFailed(format!(
@@ -149,15 +149,18 @@ async fn run_connection_loop(
     credentials: &CredentialStore,
     in_flight: Arc<AtomicUsize>,
 ) {
-    let mut backoff = ExponentialBackoff::new(
-        Duration::from_millis(100),
-        Duration::from_secs(60),
-        2.0,
-    );
+    let mut backoff =
+        ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
 
     loop {
-        match connect_and_serve(config, auth_token, signing_secret, credentials, in_flight.clone())
-            .await
+        match connect_and_serve(
+            config,
+            auth_token,
+            signing_secret,
+            credentials,
+            in_flight.clone(),
+        )
+        .await
         {
             Ok(()) => {
                 tracing::info!("Disconnected cleanly, reconnecting...");
@@ -316,9 +319,8 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to install SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => {},
             _ = sigterm.recv() => {},

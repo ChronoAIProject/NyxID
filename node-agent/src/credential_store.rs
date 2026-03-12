@@ -4,8 +4,10 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 use crate::config::NodeConfig;
+#[cfg(test)]
 use crate::encryption::LocalEncryption;
 use crate::error::{Error, Result};
+use crate::secret_backend::SecretBackend;
 
 /// Type-safe credential injection, avoiding empty-string placeholders.
 #[derive(Clone)]
@@ -68,14 +70,18 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
-    /// Load credentials from config, decrypting each encrypted value.
+    /// Load credentials from config, decrypting each encrypted value (file backend only).
+    #[cfg(test)]
     pub fn from_config(config: &NodeConfig, enc: &LocalEncryption) -> Result<Self> {
         let mut map = HashMap::new();
 
         for (slug, cred_config) in &config.credentials {
             match cred_config.injection_method.as_str() {
                 "header" => {
-                    let header_name = cred_config.header_name.as_deref().unwrap_or("Authorization");
+                    let header_name = cred_config
+                        .header_name
+                        .as_deref()
+                        .unwrap_or("Authorization");
                     let encrypted = cred_config.header_value_encrypted.as_deref().ok_or_else(|| {
                         Error::Config(format!(
                             "Credential '{slug}' has header injection but no header_value_encrypted"
@@ -129,6 +135,64 @@ impl CredentialStore {
         })
     }
 
+    /// Load credentials using the unified secret backend.
+    pub fn from_config_with_backend(config: &NodeConfig, backend: &SecretBackend) -> Result<Self> {
+        let mut map = HashMap::new();
+
+        for (slug, cred_config) in &config.credentials {
+            match cred_config.injection_method.as_str() {
+                "header" => {
+                    let header_name = cred_config
+                        .header_name
+                        .as_deref()
+                        .unwrap_or("Authorization");
+                    let value = backend.load_credential_value(
+                        slug,
+                        cred_config.header_value_encrypted.as_deref(),
+                    )?;
+                    map.insert(
+                        slug.clone(),
+                        ServiceCredential {
+                            injection: CredentialInjection::Header {
+                                name: header_name.to_string(),
+                                value: Zeroizing::new(value),
+                            },
+                        },
+                    );
+                }
+                "query_param" => {
+                    let param_name = cred_config.param_name.as_deref().ok_or_else(|| {
+                        Error::Config(format!(
+                            "Credential '{slug}' has query_param injection but no param_name"
+                        ))
+                    })?;
+                    let value = backend.load_credential_value(
+                        slug,
+                        cred_config.param_value_encrypted.as_deref(),
+                    )?;
+                    map.insert(
+                        slug.clone(),
+                        ServiceCredential {
+                            injection: CredentialInjection::QueryParam {
+                                name: param_name.to_string(),
+                                value: Zeroizing::new(value),
+                            },
+                        },
+                    );
+                }
+                other => {
+                    return Err(Error::Config(format!(
+                        "Unknown injection method '{other}' for credential '{slug}'"
+                    )));
+                }
+            }
+        }
+
+        Ok(Self {
+            credentials: Arc::new(map),
+        })
+    }
+
     /// Get credential for a service slug.
     pub fn get(&self, service_slug: &str) -> Option<&ServiceCredential> {
         self.credentials.get(service_slug)
@@ -157,7 +221,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let enc = LocalEncryption::load_or_generate(dir.path()).unwrap();
 
-        let mut config = NodeConfig::new("wss://x".to_string(), "n".to_string());
+        let mut config =
+            NodeConfig::new("wss://x".to_string(), "n".to_string(), "file".to_string());
         config.set_auth_token("tok", &enc).unwrap();
         config
             .add_header_credential("openai", "Authorization", "Bearer sk-test", &enc)
@@ -187,7 +252,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let enc = LocalEncryption::load_or_generate(dir.path()).unwrap();
 
-        let mut config = NodeConfig::new("wss://x".to_string(), "n".to_string());
+        let mut config =
+            NodeConfig::new("wss://x".to_string(), "n".to_string(), "file".to_string());
         config.set_auth_token("tok", &enc).unwrap();
 
         let store = CredentialStore::from_config(&config, &enc).unwrap();

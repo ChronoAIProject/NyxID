@@ -262,10 +262,7 @@ impl std::fmt::Debug for AppConfig {
                 "node_max_stream_duration_secs",
                 &self.node_max_stream_duration_secs,
             )
-            .field(
-                "node_hmac_signing_enabled",
-                &self.node_hmac_signing_enabled,
-            )
+            .field("node_hmac_signing_enabled", &self.node_hmac_signing_enabled)
             .finish()
     }
 }

@@ -77,7 +77,11 @@ The registration token is shown **only once** and expires after the configured T
 Configure the node agent with the registration token:
 
 ```bash
+# File-based storage (default, works on all platforms)
 nyxid-node register --token nyx_nreg_<64_hex_chars>
+
+# OS keychain storage (macOS Keychain, Windows Credential Manager, Linux Secret Service)
+nyxid-node register --token nyx_nreg_<64_hex_chars> --keychain
 ```
 
 The node agent will:
@@ -85,9 +89,11 @@ The node agent will:
 1. Open a WebSocket connection to `wss://your-nyxid-server/api/v1/nodes/ws`
 2. Send a `register` message with the token and optional metadata (agent version, OS, architecture)
 3. Receive a `register_ok` response containing the permanent `node_id` and `auth_token`
-4. Store the auth token locally for future reconnections
+4. Store the auth token locally using the selected storage backend (encrypted file or OS keychain)
 
 The auth token (`nyx_nauth_...`) is the node's long-lived credential for reconnecting. The signing secret is the HMAC shared secret for request integrity verification. Both are shown only once during registration. Store them securely.
+
+To migrate an existing node between storage backends later, use `nyxid-node migrate --to keychain` (or `--to file`).
 
 ### Reconnecting
 

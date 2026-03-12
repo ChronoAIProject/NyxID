@@ -52,8 +52,7 @@ impl ReplayGuard {
     /// Always runs time-based eviction, then enforces a hard cap to prevent
     /// unbounded memory growth under high request rates.
     fn evict_old_nonces(&mut self) {
-        let cutoff =
-            chrono::Utc::now() - chrono::Duration::seconds(MAX_TIMESTAMP_SKEW_SECS);
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(MAX_TIMESTAMP_SKEW_SECS);
         self.seen.retain(|_, ts| *ts > cutoff);
 
         // Hard cap: if still over max after time-based eviction, drop oldest entries

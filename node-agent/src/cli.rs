@@ -26,6 +26,10 @@ pub enum Commands {
         /// Path to config directory
         #[arg(long)]
         config: Option<String>,
+
+        /// Store secrets in the OS keychain instead of encrypted file
+        #[arg(long)]
+        keychain: bool,
     },
 
     /// Start the node agent (connect and serve)
@@ -61,6 +65,17 @@ pub enum Commands {
     Credentials {
         #[command(subcommand)]
         command: CredentialCommands,
+
+        /// Path to config directory
+        #[arg(long)]
+        config: Option<String>,
+    },
+
+    /// Migrate secret storage from file to OS keychain (or vice versa)
+    Migrate {
+        /// Target backend: "keychain" or "file"
+        #[arg(long)]
+        to: String,
 
         /// Path to config directory
         #[arg(long)]

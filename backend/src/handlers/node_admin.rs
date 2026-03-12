@@ -147,14 +147,15 @@ pub async fn create_registration_token(
 ) -> AppResult<Json<CreateRegistrationTokenResponse>> {
     let user_id_str = auth_user.user_id.to_string();
 
-    let (token_id, raw_token, expires_at): (String, String, chrono::DateTime<chrono::Utc>) = node_service::create_registration_token(
-        &state.db,
-        &user_id_str,
-        &body.name,
-        state.config.node_max_per_user,
-        state.config.node_registration_token_ttl_secs,
-    )
-    .await?;
+    let (token_id, raw_token, expires_at): (String, String, chrono::DateTime<chrono::Utc>) =
+        node_service::create_registration_token(
+            &state.db,
+            &user_id_str,
+            &body.name,
+            state.config.node_max_per_user,
+            state.config.node_registration_token_ttl_secs,
+        )
+        .await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -203,10 +204,17 @@ pub async fn list_nodes(
             .await?;
         let mut counts = HashMap::new();
         while let Some(result) = cursor.try_next().await? {
-            if let (Some(node_id), Some(count)) =
-                (result.get_str("_id").ok(), result.get_i64("count").ok())
-            {
-                counts.insert(node_id.to_string(), count as u64);
+            if let Some(node_id) = result.get_str("_id").ok() {
+                // $sum may return Int32 or Int64 depending on value size
+                let count = result
+                    .get("count")
+                    .and_then(|v| match v {
+                        bson::Bson::Int32(n) => Some(*n as u64),
+                        bson::Bson::Int64(n) => Some(*n as u64),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                counts.insert(node_id.to_string(), count);
             }
         }
         counts
@@ -299,13 +307,8 @@ pub async fn rotate_token(
     let user_id_str = auth_user.user_id.to_string();
 
     let (raw_token, raw_signing_secret) =
-        node_service::rotate_auth_token(
-            &state.db,
-            &state.encryption_keys,
-            &user_id_str,
-            &node_id,
-        )
-        .await?;
+        node_service::rotate_auth_token(&state.db, &state.encryption_keys, &user_id_str, &node_id)
+            .await?;
 
     // Disconnect the node since its old token is now invalid
     if state.node_ws_manager.is_connected(&node_id) {
@@ -333,7 +336,9 @@ pub async fn rotate_token(
     Ok(Json(RotateTokenResponse {
         auth_token: raw_token,
         signing_secret: raw_signing_secret,
-        message: "Auth token and signing secret rotated. The node must reconnect with the new token.".to_string(),
+        message:
+            "Auth token and signing secret rotated. The node must reconnect with the new token."
+                .to_string(),
     }))
 }
 

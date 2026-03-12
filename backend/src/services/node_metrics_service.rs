@@ -37,11 +37,7 @@ pub async fn record_success(
 }
 
 /// Record a failed proxy request.
-pub async fn record_error(
-    db: mongodb::Database,
-    node_id: String,
-    error: String,
-) -> AppResult<()> {
+pub async fn record_error(db: mongodb::Database, node_id: String, error: String) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
     // Truncate error message to prevent unbounded storage

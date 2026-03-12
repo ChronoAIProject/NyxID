@@ -5,32 +5,40 @@ use serde::{Deserialize, Serialize};
 
 use crate::encryption::LocalEncryption;
 use crate::error::{Error, Result};
+use crate::secret_backend::SecretBackend;
 
 /// Top-level configuration structure, serialized as TOML.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub server: ServerConfig,
     pub node: NodeSection,
     #[serde(default)]
     pub signing: SigningConfig,
+    /// "file" (default, AES-GCM encrypted) or "keychain" (OS keychain)
+    #[serde(default = "default_storage_backend")]
+    pub storage_backend: String,
     /// Map of service_slug -> credential config
     #[serde(default)]
     pub credentials: BTreeMap<String, CredentialConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+fn default_storage_backend() -> String {
+    "file".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub url: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeSection {
     pub id: String,
     /// AES-GCM encrypted auth token (base64)
     pub auth_token_encrypted: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SigningConfig {
     /// AES-GCM encrypted HMAC shared secret (base64)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,7 +65,7 @@ pub struct CredentialConfig {
 
 impl NodeConfig {
     /// Create a new config after registration (no credentials yet).
-    pub fn new(server_url: String, node_id: String) -> Self {
+    pub fn new(server_url: String, node_id: String, storage_backend: String) -> Self {
         Self {
             server: ServerConfig { url: server_url },
             node: NodeSection {
@@ -65,6 +73,7 @@ impl NodeConfig {
                 auth_token_encrypted: String::new(),
             },
             signing: SigningConfig::default(),
+            storage_backend,
             credentials: BTreeMap::new(),
         }
     }
@@ -131,7 +140,8 @@ impl NodeConfig {
         }
     }
 
-    /// Add a header-based credential for a service.
+    /// Add a header-based credential for a service (file backend only).
+    #[cfg(test)]
     pub fn add_header_credential(
         &mut self,
         service_slug: &str,
@@ -153,7 +163,8 @@ impl NodeConfig {
         Ok(())
     }
 
-    /// Add a query-param-based credential for a service.
+    /// Add a query-param-based credential for a service (file backend only).
+    #[cfg(test)]
     pub fn add_query_param_credential(
         &mut self,
         service_slug: &str,
@@ -175,13 +186,73 @@ impl NodeConfig {
         Ok(())
     }
 
-    /// Remove a credential for a service.
+    /// Remove a credential for a service (file backend only).
+    #[cfg(test)]
     pub fn remove_credential(&mut self, service_slug: &str) -> Result<()> {
         if self.credentials.remove(service_slug).is_none() {
             return Err(Error::Config(format!(
                 "No credential found for service '{service_slug}'"
             )));
         }
+        Ok(())
+    }
+
+    /// Add a header credential using the configured secret backend.
+    pub fn add_header_credential_via(
+        &mut self,
+        service_slug: &str,
+        header_name: &str,
+        header_value: &str,
+        backend: &SecretBackend,
+    ) -> Result<()> {
+        let encrypted = backend.store_credential_value(service_slug, header_value)?;
+        self.credentials.insert(
+            service_slug.to_string(),
+            CredentialConfig {
+                injection_method: "header".to_string(),
+                header_name: Some(header_name.to_string()),
+                header_value_encrypted: encrypted,
+                param_name: None,
+                param_value_encrypted: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// Add a query-param credential using the configured secret backend.
+    pub fn add_query_param_credential_via(
+        &mut self,
+        service_slug: &str,
+        param_name: &str,
+        param_value: &str,
+        backend: &SecretBackend,
+    ) -> Result<()> {
+        let encrypted = backend.store_credential_value(service_slug, param_value)?;
+        self.credentials.insert(
+            service_slug.to_string(),
+            CredentialConfig {
+                injection_method: "query_param".to_string(),
+                header_name: None,
+                header_value_encrypted: None,
+                param_name: Some(param_name.to_string()),
+                param_value_encrypted: encrypted,
+            },
+        );
+        Ok(())
+    }
+
+    /// Remove a credential, also cleaning up from the secret backend.
+    pub fn remove_credential_via(
+        &mut self,
+        service_slug: &str,
+        backend: &SecretBackend,
+    ) -> Result<()> {
+        if self.credentials.remove(service_slug).is_none() {
+            return Err(Error::Config(format!(
+                "No credential found for service '{service_slug}'"
+            )));
+        }
+        backend.delete_credential(service_slug)?;
         Ok(())
     }
 }
@@ -211,6 +282,7 @@ mod tests {
         let mut config = NodeConfig::new(
             "wss://example.com/api/v1/nodes/ws".to_string(),
             "test-node-id".to_string(),
+            "file".to_string(),
         );
         config.set_auth_token("nyx_nauth_abc123", &enc).unwrap();
         config
@@ -234,7 +306,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let enc = LocalEncryption::load_or_generate(dir.path()).unwrap();
 
-        let mut config = NodeConfig::new("wss://x".to_string(), "n".to_string());
+        let mut config =
+            NodeConfig::new("wss://x".to_string(), "n".to_string(), "file".to_string());
         config.set_auth_token("tok", &enc).unwrap();
         config
             .add_header_credential("svc", "Auth", "val", &enc)

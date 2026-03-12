@@ -96,10 +96,7 @@ pub async fn admin_list_nodes(
             .await?
             .try_collect()
             .await?;
-        users
-            .into_iter()
-            .map(|u| (u.id, u.email))
-            .collect()
+        users.into_iter().map(|u| (u.id, u.email)).collect()
     };
 
     // Batch-fetch binding counts
@@ -121,10 +118,17 @@ pub async fn admin_list_nodes(
             .await?;
         let mut counts = HashMap::new();
         while let Some(result) = cursor.try_next().await? {
-            if let (Some(node_id), Some(count)) =
-                (result.get_str("_id").ok(), result.get_i64("count").ok())
-            {
-                counts.insert(node_id.to_string(), count as u64);
+            if let Some(node_id) = result.get_str("_id").ok() {
+                // $sum may return Int32 or Int64 depending on value size
+                let count = result
+                    .get("count")
+                    .and_then(|v| match v {
+                        bson::Bson::Int32(n) => Some(*n as u64),
+                        bson::Bson::Int64(n) => Some(*n as u64),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                counts.insert(node_id.to_string(), count);
             }
         }
         counts

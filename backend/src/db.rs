@@ -631,12 +631,8 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
 
     // ── node_registration_tokens ──
     let nrt = db.collection::<mongodb::bson::Document>("node_registration_tokens");
-    nrt.create_index(
-        IndexModel::builder()
-            .keys(doc! { "token_hash": 1 })
-            .build(),
-    )
-    .await?;
+    nrt.create_index(IndexModel::builder().keys(doc! { "token_hash": 1 }).build())
+        .await?;
     nrt.create_index(
         IndexModel::builder()
             .keys(doc! { "expires_at": 1 })

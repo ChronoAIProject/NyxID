@@ -683,10 +683,7 @@ mod tests {
             AppError::NodeNotFound("".into()).error_key(),
             "node_not_found"
         );
-        assert_eq!(
-            AppError::NodeOffline("".into()).error_key(),
-            "node_offline"
-        );
+        assert_eq!(AppError::NodeOffline("".into()).error_key(), "node_offline");
         assert_eq!(AppError::NodeProxyTimeout.error_key(), "node_proxy_timeout");
         assert_eq!(
             AppError::NodeRegistrationFailed("".into()).error_key(),

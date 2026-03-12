@@ -20,11 +20,11 @@ use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
 use crate::mw::auth::AuthUser;
+use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
 use crate::services::{
     approval_service, audit_service, chatgpt_translator, delegation_service, identity_service,
     node_metrics_service, node_routing_service, node_service, notification_service, proxy_service,
 };
-use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
 
 /// Response headers that are safe to forward back to the client.
 /// Uses an allowlist to prevent leaking internal headers from downstream services.
@@ -272,11 +272,15 @@ async fn execute_proxy(
                 };
 
                 let secret_hex = String::from_utf8(
-                    state.encryption_keys.decrypt(encrypted_secret).await.map_err(|e| {
-                        AppError::Internal(format!(
-                            "Failed to decrypt node signing secret for {node_id}: {e}"
-                        ))
-                    })?,
+                    state
+                        .encryption_keys
+                        .decrypt(encrypted_secret)
+                        .await
+                        .map_err(|e| {
+                            AppError::Internal(format!(
+                                "Failed to decrypt node signing secret for {node_id}: {e}"
+                            ))
+                        })?,
                 )
                 .map_err(|e| {
                     AppError::Internal(format!(
@@ -306,7 +310,8 @@ async fn execute_proxy(
                     let db_clone = state.db.clone();
                     let nid = node_id.to_string();
                     tokio::spawn(async move {
-                        let _ = node_metrics_service::record_success(db_clone, nid, latency_ms).await;
+                        let _ =
+                            node_metrics_service::record_success(db_clone, nid, latency_ms).await;
                     });
 
                     let response = match proxy_response {
@@ -319,7 +324,9 @@ async fn execute_proxy(
                                 if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str()) {
                                     if let (Ok(hn), Ok(hv)) = (
                                         axum::http::header::HeaderName::from_bytes(name.as_bytes()),
-                                        axum::http::header::HeaderValue::from_bytes(value.as_bytes()),
+                                        axum::http::header::HeaderValue::from_bytes(
+                                            value.as_bytes(),
+                                        ),
                                     ) {
                                         response_builder = response_builder.header(hn, hv);
                                     }
@@ -327,7 +334,9 @@ async fn execute_proxy(
                             }
                             response_builder
                                 .body(Body::from(node_response.body))
-                                .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
+                                .map_err(|e| {
+                                    AppError::Internal(format!("Failed to build response: {e}"))
+                                })?
                         }
                         ProxyResponseType::Streaming(mut rx) => {
                             // Wait for the Start chunk
@@ -347,8 +356,8 @@ async fn execute_proxy(
                                 }
                             };
 
-                            let http_status = StatusCode::from_u16(status)
-                                .unwrap_or(StatusCode::BAD_GATEWAY);
+                            let http_status =
+                                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
                             let mut response_builder = Response::builder().status(http_status);
 
                             for (name, value) in &resp_headers {
@@ -360,7 +369,9 @@ async fn execute_proxy(
                                 if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str()) {
                                     if let (Ok(hn), Ok(hv)) = (
                                         axum::http::header::HeaderName::from_bytes(name.as_bytes()),
-                                        axum::http::header::HeaderValue::from_bytes(value.as_bytes()),
+                                        axum::http::header::HeaderValue::from_bytes(
+                                            value.as_bytes(),
+                                        ),
                                     ) {
                                         response_builder = response_builder.header(hn, hv);
                                     }
@@ -388,7 +399,9 @@ async fn execute_proxy(
 
                             response_builder
                                 .body(Body::from_stream(stream))
-                                .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
+                                .map_err(|e| {
+                                    AppError::Internal(format!("Failed to build response: {e}"))
+                                })?
                         }
                     };
 
@@ -421,9 +434,7 @@ async fn execute_proxy(
                         let _ = node_metrics_service::record_error(db_clone, nid, err_msg).await;
                     });
 
-                    last_error = Some(AppError::NodeOffline(format!(
-                        "Node {node_id} failed"
-                    )));
+                    last_error = Some(AppError::NodeOffline(format!("Node {node_id} failed")));
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -491,10 +502,8 @@ async fn execute_proxy(
         match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id_str).await {
             Ok(rbac) => {
                 if !rbac.role_slugs.is_empty() {
-                    identity_headers.push((
-                        "X-NyxID-User-Roles".to_string(),
-                        rbac.role_slugs.join(","),
-                    ));
+                    identity_headers
+                        .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
                 }
                 if !rbac.permissions.is_empty() {
                     identity_headers.push((

@@ -338,10 +338,7 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/groups/{group_id}/members/{user_id}",
             post(handlers::admin_groups::add_member).delete(handlers::admin_groups::remove_member),
         )
-        .route(
-            "/nodes",
-            get(handlers::admin_nodes::admin_list_nodes),
-        )
+        .route("/nodes", get(handlers::admin_nodes::admin_list_nodes))
         .route(
             "/nodes/{node_id}",
             get(handlers::admin_nodes::admin_get_node)

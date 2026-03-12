@@ -34,7 +34,10 @@ pub struct NodeProxyResponse {
 #[derive(Debug)]
 pub enum StreamChunk {
     /// Beginning of stream: status code and headers
-    Start { status: u16, headers: Vec<(String, String)> },
+    Start {
+        status: u16,
+        headers: Vec<(String, String)>,
+    },
     /// A chunk of response data
     Data(Vec<u8>),
     /// End of stream
@@ -194,8 +197,7 @@ pub fn compute_hmac_signature(
         body_b64,
     );
 
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
     mac.update(message.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }
@@ -240,10 +242,8 @@ impl NodeWsManager {
         let pending = Arc::new(DashMap::new());
         let return_pending = pending.clone();
 
-        self.connections.insert(
-            node_id.to_string(),
-            NodeConnection { tx, pending },
-        );
+        self.connections
+            .insert(node_id.to_string(), NodeConnection { tx, pending });
 
         return_pending
     }
@@ -297,9 +297,10 @@ impl NodeWsManager {
         request: NodeProxyRequest,
         signing_secret: Option<&[u8]>,
     ) -> AppResult<ProxyResponseType> {
-        let conn = self.connections.get(node_id).ok_or_else(|| {
-            AppError::NodeOffline(format!("Node {node_id} is not connected"))
-        })?;
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
         let request_id = request.request_id.clone();
 
         // Create oneshot channel for response correlation. The response may be a
@@ -400,18 +401,18 @@ impl NodeWsManager {
 
     /// Send a heartbeat ping to a node. Non-blocking.
     pub fn send_heartbeat_ping(&self, node_id: &str) -> AppResult<()> {
-        let conn = self.connections.get(node_id).ok_or_else(|| {
-            AppError::NodeOffline(format!("Node {node_id} is not connected"))
-        })?;
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
 
         let ping = WsHeartbeatPing {
             msg_type: "heartbeat_ping",
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
 
-        let msg = serde_json::to_string(&ping).map_err(|e| {
-            AppError::Internal(format!("Failed to serialize heartbeat: {e}"))
-        })?;
+        let msg = serde_json::to_string(&ping)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize heartbeat: {e}")))?;
 
         conn.tx
             .try_send(NodeOutboundMessage::Text(msg))
@@ -645,10 +646,7 @@ mod tests {
             };
             let parsed: Value = serde_json::from_str(&msg).expect("valid json");
             let request_id = parsed["request_id"].as_str().expect("request id");
-            assert_eq!(
-                parsed["base_url"].as_str(),
-                Some("https://api.example.com")
-            );
+            assert_eq!(parsed["base_url"].as_str(), Some("https://api.example.com"));
 
             assert!(mgr_clone.deliver_stream_start(
                 "node-1",
@@ -703,9 +701,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(256);
         mgr.register_connection("node-1", tx);
 
-        assert!(mgr
-            .disconnect_connection("node-1", 4000, "admin disconnected node")
-            .await);
+        assert!(
+            mgr.disconnect_connection("node-1", 4000, "admin disconnected node")
+                .await
+        );
         assert!(!mgr.is_connected("node-1"));
 
         match rx.recv().await {

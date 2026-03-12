@@ -626,10 +626,8 @@ pub async fn execute_tool(
         match crate::services::rbac_helpers::resolve_user_rbac(db, user_id).await {
             Ok(rbac) => {
                 if !rbac.role_slugs.is_empty() {
-                    identity_headers.push((
-                        "X-NyxID-User-Roles".to_string(),
-                        rbac.role_slugs.join(","),
-                    ));
+                    identity_headers
+                        .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
                 }
                 if !rbac.permissions.is_empty() {
                     identity_headers.push((

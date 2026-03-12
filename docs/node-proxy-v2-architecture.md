@@ -80,10 +80,10 @@ SUBCOMMANDS:
 
 #### `register`
 ```
-nyxid-node register --token <nyx_nreg_...> [--url <wss://server/api/v1/nodes/ws>] [--name <node-name>] [--config <path>]
+nyxid-node register --token <nyx_nreg_...> [--url <wss://server/api/v1/nodes/ws>] [--name <node-name>] [--config <path>] [--keychain]
 ```
 
-Connects to the NyxID server via WebSocket, sends the `register` message with the one-time token, receives `register_ok` with `node_id` and `auth_token`, and writes them to the config file. Exits after registration completes.
+Connects to the NyxID server via WebSocket, sends the `register` message with the one-time token, receives `register_ok` with `node_id` and `auth_token`, and writes them to the configured storage backend. Pass `--keychain` to store secrets in the OS keychain instead of AES-GCM encrypted file. Exits after registration completes.
 
 #### `start`
 ```
@@ -107,27 +107,36 @@ nyxid-node credentials list [--config <path>]
 nyxid-node credentials remove --service <slug>
 ```
 
+#### `migrate`
+```
+nyxid-node migrate --to <keychain|file> [--config <path>]
+```
+
+Migrates secrets between storage backends. Reads all secrets from the current backend, writes them to the target, saves the updated config, then removes the old secrets from the previous backend. Restart the agent after migration. If old-backend cleanup fails after the config has been saved, the command prints warnings and continues using the new backend.
+
 ### 1.4 Configuration File
 
 Default path: `~/.nyxid-node/config.toml` (overridable with `--config`).
 
-Created by `register`, updated by `credentials` commands.
+Created by `register`, updated by `credentials` commands. The `storage_backend` field selects the secret storage mechanism (`"file"` or `"keychain"`; defaults to `"file"` for backwards compatibility).
 
 ```toml
+storage_backend = "file"  # or "keychain"
+
 [server]
 url = "wss://auth.nyxid.dev/api/v1/nodes/ws"
 
 [node]
 id = "uuid-string"
 name = "my-home-server"
-# Auth token is stored encrypted; plaintext only in memory
+# Auth token is stored encrypted (file backend) or empty marker (keychain backend)
 auth_token_encrypted = "base64-of-aes-gcm-ciphertext"
 
 [credentials.openai]
 # service_slug = injection rules
 injection_method = "header"
 header_name = "Authorization"
-header_value_encrypted = "base64-of-aes-gcm-ciphertext"
+header_value_encrypted = "base64-of-aes-gcm-ciphertext"  # omitted in keychain mode
 
 [credentials.github-api]
 injection_method = "header"
@@ -140,9 +149,15 @@ header_value_encrypted = "base64-of-aes-gcm-ciphertext"
 shared_secret_encrypted = "base64-of-aes-gcm-ciphertext"
 ```
 
-#### Local Encryption
+#### Secret Storage Backends
 
-Credentials in the config file are encrypted at rest using AES-256-GCM. The encryption key is derived from a passphrase using Argon2id, or from a machine-specific key stored in the OS keychain (platform-dependent). For v2 MVP, we use a file-based key at `~/.nyxid-node/.keyfile` (a 32-byte random key generated on first `register`, permissions 0600). The `directories` crate provides platform-appropriate paths.
+The agent supports two storage backends, selected at registration time:
+
+**File backend** (default): Secrets are encrypted with AES-256-GCM using a file-based key at `~/.nyxid-node/.keyfile` (32-byte random key, permissions 0600). Works on all platforms including headless servers and containers.
+
+**Keychain backend** (`--keychain`): Secrets are stored in the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service). The config file contains only non-secret metadata. Requires an active keychain daemon.
+
+Migration between backends: `nyxid-node migrate --to keychain` or `nyxid-node migrate --to file`.
 
 ```rust
 /// Encryption for local credential storage.

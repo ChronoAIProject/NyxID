@@ -11,6 +11,8 @@
 - [Starting the Agent](#starting-the-agent)
 - [Managing Credentials](#managing-credentials)
 - [Checking Status](#checking-status)
+- [Secret Storage Backends](#secret-storage-backends)
+- [Migrating Storage Backends](#migrating-storage-backends)
 - [Configuration File](#configuration-file)
 - [HMAC Request Signing](#hmac-request-signing)
 - [Streaming Proxy Responses](#streaming-proxy-responses)
@@ -73,6 +75,7 @@ The agent connects to the NyxID server via WebSocket, exchanges the registration
 | `--token` | (required) | One-time registration token |
 | `--url` | `ws://localhost:3001/api/v1/nodes/ws` | WebSocket URL of the NyxID server |
 | `--config` | `~/.nyxid-node` | Path to config directory |
+| `--keychain` | `false` | Store secrets in the OS keychain instead of encrypted file |
 
 For production, use WSS:
 
@@ -82,12 +85,22 @@ nyxid-node register \
   --url wss://auth.example.com/api/v1/nodes/ws
 ```
 
-On success, the agent prints the node ID and config file path:
+To use the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service) instead of file-based encryption:
+
+```bash
+nyxid-node register \
+  --token nyx_nreg_... \
+  --url wss://auth.example.com/api/v1/nodes/ws \
+  --keychain
+```
+
+On success, the agent prints the node ID, storage backend, and config file path:
 
 ```
 Node registered successfully.
-  Node ID: a1b2c3d4-...
-  Config:  /home/user/.nyxid-node/config.toml
+  Node ID:  a1b2c3d4-...
+  Storage:  file
+  Config:   /home/user/.nyxid-node/config.toml
 
 Start the agent with:
   nyxid-node start
@@ -104,8 +117,8 @@ nyxid-node start
 The agent:
 
 1. Loads the configuration from `~/.nyxid-node/config.toml`
-2. Decrypts the auth token and signing secret using the local keyfile
-3. Decrypts all stored credentials
+2. Loads the auth token and signing secret from the configured storage backend (file or OS keychain)
+3. Loads all stored credentials from the configured backend
 4. Connects to the NyxID server via WebSocket
 5. Authenticates with its node ID and auth token
 6. Begins serving proxy requests and responding to heartbeats
@@ -123,7 +136,7 @@ The agent runs until terminated. Use `--log-level debug` for detailed connection
 
 ## Managing Credentials
 
-Credentials are stored locally in the config file, encrypted with AES-256-GCM. The agent decrypts them at startup and holds them in memory.
+Credentials are stored locally using the configured storage backend -- either AES-256-GCM encrypted in the config file (default) or in the OS keychain. The agent loads them at startup and holds decrypted values in memory.
 
 ### Add a Credential (Header Injection)
 
@@ -179,6 +192,7 @@ Output:
 Node Status
   Node ID:     a1b2c3d4-...
   Server:      wss://auth.example.com/api/v1/nodes/ws
+  Storage:     file
   Credentials: 2 configured
     - openai
     - stripe
@@ -188,13 +202,73 @@ This is a local check only -- it reads the config file but does not connect to t
 
 ---
 
+## Secret Storage Backends
+
+The agent supports two backends for storing secrets (auth token, signing secret, credential values):
+
+### File Backend (default)
+
+Secrets are encrypted with AES-256-GCM and stored in `config.toml`. A 32-byte encryption key is generated at `~/.nyxid-node/.keyfile` (mode `0600`). This works on all platforms including headless servers and Docker containers.
+
+```bash
+nyxid-node register --token nyx_nreg_...
+```
+
+### Keychain Backend
+
+Secrets are stored in the OS keychain:
+
+- **macOS**: Keychain (via Security Framework)
+- **Windows**: Credential Manager
+- **Linux**: Secret Service D-Bus API (GNOME Keyring, KDE Wallet)
+
+The TOML config file retains only non-secret metadata (server URL, node ID, injection method, header/param names). No encrypted values are written to disk.
+
+```bash
+nyxid-node register --token nyx_nreg_... --keychain
+```
+
+Keychain entries use `nyxid-node` as the service name, with `{node_id}/auth_token`, `{node_id}/signing_secret`, and `{node_id}/cred/{service_slug}` as account identifiers. Multiple nodes on the same machine do not collide.
+
+> **Note:** The keychain backend requires an active keychain daemon. On headless Linux servers without GNOME Keyring or KDE Wallet, use the file backend (the default).
+
+---
+
+## Migrating Storage Backends
+
+To migrate an existing node from file-based storage to OS keychain (or vice versa):
+
+```bash
+# Migrate from file to keychain
+nyxid-node migrate --to keychain
+
+# Migrate from keychain back to file
+nyxid-node migrate --to file
+```
+
+The `migrate` command:
+
+1. Reads all secrets (auth token, signing secret, all credential values) from the current backend
+2. Writes them to the target backend
+3. Updates `storage_backend` in the config file
+4. Saves the updated config
+5. Removes the old secrets from the previous backend
+
+After migration, restart the agent to use the new backend. If saving the updated config fails, the agent keeps using the source backend and does not delete the source secrets. If cleanup of the previous backend fails after the save succeeds, the migration still completes and prints warnings so you can remove the stale secrets manually.
+
+---
+
 ## Configuration File
 
 The agent stores its configuration at `~/.nyxid-node/config.toml` (or the path specified by `--config`). The file is created during registration and updated when credentials are added or removed.
 
 ### Structure
 
+#### File Backend
+
 ```toml
+storage_backend = "file"
+
 [server]
 url = "wss://auth.example.com/api/v1/nodes/ws"
 
@@ -216,9 +290,37 @@ param_name = "api_key"
 param_value_encrypted = "<base64>"
 ```
 
-### Encryption
+#### Keychain Backend
 
-All sensitive values (auth token, signing secret, credential values) are encrypted with AES-256-GCM using a locally generated 32-byte key stored at `~/.nyxid-node/.keyfile`. The keyfile is created with mode `0600` on Unix systems.
+When using the keychain backend, encrypted values are omitted from the config. Only non-secret metadata is stored:
+
+```toml
+storage_backend = "keychain"
+
+[server]
+url = "wss://auth.example.com/api/v1/nodes/ws"
+
+[node]
+id = "a1b2c3d4-..."
+auth_token_encrypted = ""
+
+[signing]
+shared_secret_encrypted = ""
+
+[credentials.openai]
+injection_method = "header"
+header_name = "Authorization"
+
+[credentials.stripe]
+injection_method = "query_param"
+param_name = "api_key"
+```
+
+> **Backwards compatibility:** Existing config files without a `storage_backend` field default to `"file"`.
+
+### File-Backend Encryption
+
+When using the file backend, all sensitive values are encrypted with AES-256-GCM using a locally generated 32-byte key stored at `~/.nyxid-node/.keyfile`. The keyfile is created with mode `0600` on Unix systems.
 
 Each encrypted value is stored as base64-encoded `nonce (12 bytes) || ciphertext`. Different nonces are used for each encryption operation, so the same plaintext produces different ciphertext.
 
@@ -312,13 +414,11 @@ In-flight requests are tracked with an atomic counter that increments when a req
 
 ## Security
 
-### Local Encryption
+### Secret Storage
 
-- All secrets are encrypted with AES-256-GCM before writing to disk
-- The encryption key is a 32-byte random value stored in `~/.nyxid-node/.keyfile`
-- The keyfile is created with `O_CREAT | O_EXCL` and mode `0600` (Unix) to prevent race conditions
-- Source byte arrays are zeroized after copying to prevent memory leakage
-- Decrypted credential values are held in `Zeroizing<String>` wrappers
+- **File backend:** All secrets are encrypted with AES-256-GCM before writing to disk. The encryption key is a 32-byte random value stored in `~/.nyxid-node/.keyfile`, created with `O_CREAT | O_EXCL` and mode `0600` (Unix) to prevent race conditions. Source byte arrays are zeroized after copying.
+- **Keychain backend:** Secrets are stored in the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service). No encrypted values or keyfile are written to disk.
+- Decrypted credential values are held in `Zeroizing<String>` wrappers regardless of backend
 
 ### Token Security
 
@@ -350,7 +450,9 @@ COMMANDS:
   register      Register this node with a NyxID server
   start         Start the node agent (connect and serve)
   status        Show node connection status
+  rekey         Update auth token and signing secret after server-side rotation
   credentials   Manage local credentials
+  migrate       Migrate secret storage between backends
   version       Show version information
 
 GLOBAL OPTIONS:
@@ -360,12 +462,18 @@ REGISTER OPTIONS:
   --token <TOKEN>       One-time registration token (nyx_nreg_...)
   --url <URL>           WebSocket URL of the NyxID server
   --config <PATH>       Path to config directory
+  --keychain            Store secrets in OS keychain instead of encrypted file
 
 START OPTIONS:
   --config <PATH>       Path to config directory
 
 STATUS OPTIONS:
   --config <PATH>       Path to config directory
+
+REKEY OPTIONS:
+  --auth-token <TOKEN>      New auth token (nyx_nauth_...)
+  --signing-secret <HEX>    New HMAC signing secret (64 hex chars)
+  --config <PATH>           Path to config directory
 
 CREDENTIALS SUBCOMMANDS:
   add     Add a credential for a service
@@ -380,6 +488,10 @@ CREDENTIALS ADD OPTIONS:
 
 CREDENTIALS REMOVE OPTIONS:
   --service <SLUG>          Service slug to remove
+  --config <PATH>           Path to config directory
+
+MIGRATE OPTIONS:
+  --to <BACKEND>            Target backend: "keychain" or "file"
   --config <PATH>           Path to config directory
 ```
 

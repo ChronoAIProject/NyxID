@@ -377,12 +377,7 @@ async fn main() {
     // Build set of allowed CORS origins: frontend_url + any extra from CORS_ALLOWED_ORIGINS
     let mut allowed_origins: std::collections::HashSet<axum::http::HeaderValue> =
         std::collections::HashSet::new();
-    allowed_origins.insert(
-        config
-            .frontend_url
-            .parse()
-            .expect("Invalid FRONTEND_URL"),
-    );
+    allowed_origins.insert(config.frontend_url.parse().expect("Invalid FRONTEND_URL"));
     for origin in &config.cors_allowed_origins {
         if let Ok(hv) = origin.parse() {
             allowed_origins.insert(hv);
