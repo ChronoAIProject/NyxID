@@ -35,8 +35,68 @@ All sensitive data is encrypted using **AES-256-GCM** (Galois/Counter Mode):
 
 - **Key size:** 256 bits (32 bytes), provided via `ENCRYPTION_KEY` environment variable (64 hex characters)
 - **Nonce:** Random 96-bit (12-byte) nonce generated per encryption operation via `OsRng`
-- **Storage format:** `nonce(12 bytes) || ciphertext || authentication_tag(16 bytes)`
 - **Authentication:** GCM provides authenticated encryption -- tampering is detected on decryption
+
+### Ciphertext Formats
+
+NyxID supports three ciphertext formats. All new encryptions use v2 (envelope encryption). Decryption transparently handles all formats via a fallback chain.
+
+**v0 (legacy):**
+
+```
+nonce(12) || ciphertext || tag(16)
+```
+
+**v1 (Phase 1):**
+
+```
+0x01 || key_id(1) || nonce(12) || ciphertext || tag(16)
+```
+
+- `0x01` -- version byte
+- `key_id` -- a stable 1-byte identifier derived from `SHA-256(key)[0]`
+- NyxID also accepts the earlier draft Phase 1 header (`0x00` / `0x01`) for local backward compatibility during rollout
+
+**v2 (current -- envelope encryption):**
+
+```
+0x02 || kek_id(1) || wrapped_dek_len(2 BE) || wrapped_dek(60) || data_nonce(12) || data_ciphertext || data_tag(16)
+```
+
+- `0x02` -- version byte for envelope encryption
+- `kek_id` -- stable 1-byte identifier of the KEK that wrapped the DEK, derived from `SHA-256(kek)[0]`
+- `wrapped_dek_len` -- big-endian u16, length of the wrapped DEK blob (currently always 60)
+- `wrapped_dek` -- `dek_nonce(12) || encrypted_dek(32) || dek_tag(16)` -- the per-record DEK encrypted with the KEK
+- `data_nonce` -- random 12-byte nonce for data encryption (separate from the DEK-wrapping nonce)
+- `data_ciphertext || data_tag` -- the actual credential encrypted with the per-record DEK
+
+Each v2 encryption generates a fresh random 32-byte DEK that is used once and immediately zeroized. The KEK never directly touches plaintext data.
+
+### Decrypt Fallback Chain
+
+When decrypting, the system tries formats and keys in this order:
+
+1. If data looks like v2 (len >= 92 and byte 0 == `0x02`): unwrap DEK with current KEK, decrypt data with DEK
+2. If v2 and `kek_id` matches the previous KEK: unwrap DEK with previous KEK, decrypt data with DEK
+3. If data looks like v1 (len >= 30 and byte 0 == `0x01`) and `key_id` matches current key: try v1 payload with current key
+4. If v1 and `key_id` matches previous key: try v1 payload with previous key
+5. If v1 uses the draft Phase 1 header (`0x00` / `0x01`): try current key, then previous key for compatibility
+6. Try v0 (full data as `nonce || ciphertext || tag`) with current key
+7. Try v0 with previous key
+8. Return error if all attempts fail
+
+Error messages do not reveal which key was tried or which format was detected.
+
+### Rewrap Capability
+
+The `rewrap()` method enables efficient KEK rotation for v2 ciphertexts without full re-encryption:
+
+1. Unwraps the per-record DEK with the previous KEK
+2. Re-wraps the DEK with the current KEK using a fresh random nonce
+3. Replaces only the header and wrapped DEK portion (first 64 bytes)
+4. The data nonce, ciphertext, and authentication tag are byte-for-byte unchanged
+
+`rewrap()` is idempotent: if the ciphertext is already wrapped with the current KEK, it returns the input unchanged. It only operates on v2 envelopes; v0 and v1 data must be fully re-encrypted via `decrypt()` + `encrypt()`.
 
 ### What Is Encrypted
 
@@ -48,14 +108,51 @@ All sensitive data is encrypted using **AES-256-GCM** (Galois/Counter Mode):
 | Provider OAuth client credentials   | `provider_configs`       | `client_id_encrypted`, `client_secret_encrypted` |
 | User provider OAuth tokens          | `user_provider_tokens`   | `access_token_encrypted`, `refresh_token_encrypted` |
 | User provider API keys              | `user_provider_tokens`   | `api_key_encrypted`                            |
+| User provider OAuth app credentials | `user_provider_credentials` | `client_id_encrypted`, `client_secret_encrypted` |
+| OAuth state secrets                 | `oauth_states`           | `code_verifier`, `device_code_encrypted`, `user_code_encrypted` |
 
 ### Key Management
 
 - The encryption key must be generated using a cryptographically secure RNG: `openssl rand -hex 32`
 - Never reuse the development key in production
-- All instances in a horizontal scaling setup must share the same key
-- Key rotation requires re-encrypting all stored data (not yet automated)
+- All instances in a horizontal scaling setup must share the same `ENCRYPTION_KEY` and `ENCRYPTION_KEY_PREVIOUS`
+- Only one previous key is supported at a time
 - The key is validated at startup -- all-zero keys are rejected
+- The `EncryptionKeys` struct redacts key material in `Debug` output to prevent accidental logging
+- `/health` exposes decrypt counters so operators can confirm whether traffic still depends on `v2_previous`, `v1_current`, `v1_previous`, `v0_current`, or `v0_previous`
+- v2 envelope encryption ensures the KEK never directly touches plaintext data -- only per-record DEKs encrypt data
+
+### Key Rotation
+
+NyxID supports zero-downtime key rotation via the `ENCRYPTION_KEY_PREVIOUS` environment variable. Existing ciphertexts continue to decrypt during the rotation window, and all new writes use the new key immediately.
+
+**Rotation procedure:**
+
+1. Generate a new key:
+   ```bash
+   openssl rand -hex 32
+   ```
+2. Set `ENCRYPTION_KEY_PREVIOUS` to the current value of `ENCRYPTION_KEY`
+3. Set `ENCRYPTION_KEY` to the newly generated key
+4. Restart all NyxID instances
+5. Verify the service is healthy: `curl /health`
+6. All new encryptions now use the new key (v2 envelope format). Existing data decrypts via the fallback chain.
+7. For v2 ciphertexts: run a background job calling `rewrap()` on each record (re-wraps only the 60-byte DEK blob, data untouched). For v0/v1 ciphertexts: re-encrypt via `decrypt()` + `encrypt()`.
+8. Watch `/health` and wait until `decrypt_stats.v2_previous`, `decrypt_stats.v1_current`, `decrypt_stats.v1_previous`, `decrypt_stats.v0_current`, and `decrypt_stats.v0_previous` remain at zero for your normal workload window.
+9. Remove `ENCRYPTION_KEY_PREVIOUS` and restart once you have confirmed the old key is no longer needed.
+
+**Important:** Only one previous key is supported, so you must finish re-wrapping/re-encrypting old-key data before rotating again.
+
+### Key Rotation Rollback
+
+If a key rotation causes issues, you can roll back:
+
+1. Set `ENCRYPTION_KEY` back to the old key value
+2. Set `ENCRYPTION_KEY_PREVIOUS` to the new key (so any v1 data encrypted with the new key during the rotation window still decrypts)
+3. Restart all NyxID instances
+4. Verify the service is healthy: `curl /health`
+
+Both old (v0 and v1) ciphertexts encrypted with the original key and new v1 ciphertexts encrypted during the rotation window will decrypt correctly, as long as the old key remains configured as `ENCRYPTION_KEY_PREVIOUS`.
 
 ### Memory Protection
 
@@ -78,7 +175,7 @@ NyxID enforces PKCE on two distinct OAuth flows:
 - PKCE is used when `supports_pkce = true` on the provider configuration
 - Code verifier: 32 random bytes, base64url-encoded (43 characters)
 - Code challenge: SHA-256 of the verifier, base64url-encoded
-- The code verifier is stored in the `oauth_states` collection (not encrypted, but short-lived)
+- The code verifier is stored encrypted in the `oauth_states` collection
 
 ### OAuth State / CSRF Protection
 
@@ -584,7 +681,7 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 | Per-user service credentials   | Critical    | AES-256-GCM encryption              |
 | MFA secrets                    | Critical    | AES-256-GCM encryption              |
 | RSA private key                | Critical    | File permissions (0600)              |
-| Encryption key                 | Critical    | Environment variable                 |
+| Encryption key (KEK)           | Critical    | Environment variable, wraps per-record DEKs |
 | Session tokens                 | High        | SHA-256 hashed in DB                 |
 | API keys                       | High        | SHA-256 hashed, prefix-only display  |
 | User PII (email, name)         | Medium      | Access control, audit logging        |
@@ -595,7 +692,7 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 
 | Threat                          | Mitigation                                          |
 |---------------------------------|-----------------------------------------------------|
-| Credential theft (DB breach)    | AES-256-GCM encryption at rest                      |
+| Credential theft (DB breach)    | AES-256-GCM envelope encryption (per-record DEKs)   |
 | Password brute force            | Argon2id cost parameters, rate limiting              |
 | Session hijacking               | HttpOnly cookies, SameSite, short JWT TTL            |
 | CSRF                            | SameSite cookies, OAuth state parameter              |
@@ -634,11 +731,12 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 ### If ENCRYPTION_KEY Is Compromised
 
 1. Generate a new key: `openssl rand -hex 32`
-2. Stop all NyxID instances
-3. Run a re-encryption migration (decrypt all data with old key, re-encrypt with new key)
-4. Update the `ENCRYPTION_KEY` environment variable
-5. Restart all instances
-6. Audit all access logs for the compromise window
+2. Set `ENCRYPTION_KEY_PREVIOUS` to the compromised key value
+3. Set `ENCRYPTION_KEY` to the new key
+4. Restart all NyxID instances (zero-downtime rotation -- existing data decrypts via the fallback chain)
+5. Run a re-encryption job to migrate all data to the new key (removes dependency on the compromised key)
+6. Once all data is re-encrypted, remove `ENCRYPTION_KEY_PREVIOUS` and restart
+7. Audit all access logs for the compromise window
 
 ### If RSA Private Key Is Compromised
 

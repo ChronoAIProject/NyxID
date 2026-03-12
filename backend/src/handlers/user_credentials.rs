@@ -5,7 +5,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, provider_service, user_credentials_service};
@@ -120,11 +119,9 @@ pub async fn set_my_credentials(
         .as_deref()
         .filter(|value| !value.is_empty());
 
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-
     let cred = user_credentials_service::upsert_user_credentials(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &user_id_str,
         &provider_id,
         &body.client_id,

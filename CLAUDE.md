@@ -48,7 +48,11 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002). Int
 ### 5. Security
 
 - No hardcoded secrets -- environment variables for all sensitive data
-- AES-256 encryption for stored credentials (`crypto/aes.rs`)
+- AES-256 envelope encryption with pluggable async `KeyProvider` trait (`crypto/aes.rs`, `crypto/key_provider.rs`)
+- Cloud KMS support: AWS KMS (`crypto/aws_kms_provider.rs`, feature `aws-kms`) and GCP Cloud KMS (`crypto/gcp_kms_provider.rs`, feature `gcp-kms`) behind feature flags
+- Fallback provider for zero-downtime migration between encryption backends
+- All key material in `Zeroizing` wrappers; all Debug impls redact secrets and key identifiers
+- `MAX_WRAPPED_DEK_SIZE = 1024` enforced on encrypt and decrypt paths
 - Rate limiting middleware (`mw/rate_limit.rs`)
 - Security headers middleware (`mw/security_headers.rs`)
 - JWT auth middleware (`mw/auth.rs`)
@@ -66,7 +70,7 @@ backend/src/
 |-- models/              # MongoDB document structs (26 models, 24 collections)
 |-- services/            # Business logic (29 services, incl. approval_service, notification_service, push_service, telegram_service)
 |-- handlers/            # HTTP handlers (30 handler modules, incl. approvals, notifications, device_tokens, webhooks)
-|-- crypto/              # JWT, AES, password hashing, token generation
+|-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
@@ -113,7 +117,17 @@ Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`
 ```bash
 # Required
 DATABASE_URL=mongodb://...          # MongoDB connection string
-ENCRYPTION_KEY=                     # 64 hex chars (32 bytes AES-256)
+ENCRYPTION_KEY=                     # 64 hex chars (32 bytes AES-256); required for local, optional for KMS (enables fallback)
+ENCRYPTION_KEY_PREVIOUS=            # Optional: previous key for zero-downtime rotation (64 hex chars)
+KEY_PROVIDER=local                  # Key provider backend: "local" (default), "aws-kms" (feature aws-kms), "gcp-kms" (feature gcp-kms)
+
+# AWS KMS (optional, requires --features aws-kms)
+AWS_KMS_KEY_ARN=                    # Full ARN of AWS KMS key (required when KEY_PROVIDER=aws-kms)
+AWS_KMS_KEY_ARN_PREVIOUS=           # Optional: previous AWS KMS key ARN for rotation
+
+# GCP Cloud KMS (optional, requires --features gcp-kms)
+GCP_KMS_KEY_NAME=                   # Full GCP KMS key resource name (required when KEY_PROVIDER=gcp-kms)
+GCP_KMS_KEY_NAME_PREVIOUS=          # Optional: previous GCP KMS key name for rotation
 
 # Defaults provided
 PORT=3001
@@ -155,8 +169,12 @@ SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_ADDRESS
 ```bash
 # Backend (from project root)
 source "$HOME/.cargo/env" 2>/dev/null  # Ensure cargo is available
-cargo build                             # Build backend
+cargo build                             # Build backend (local provider only)
+cargo build --features aws-kms          # Build with AWS KMS support
+cargo build --features gcp-kms          # Build with GCP Cloud KMS support
+cargo build --features aws-kms,gcp-kms  # Build with both KMS providers
 cargo test                              # Run backend tests
+cargo test --all-features               # Run all tests including KMS provider tests
 cargo run                               # Start backend (port 3001)
 
 # Frontend (from frontend/)

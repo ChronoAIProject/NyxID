@@ -10,7 +10,6 @@ use mongodb::bson::doc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::AppState;
-use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{
@@ -66,7 +65,6 @@ pub async fn llm_proxy_request(
     Path((provider_slug, path)): Path<(String, String)>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
     let user_id_str = auth_user.user_id.to_string();
 
     // Resolve the downstream service for this provider slug
@@ -76,9 +74,13 @@ pub async fn llm_proxy_request(
     let service_id = service.id.clone();
 
     // Use existing proxy_service to resolve the proxy target
-    let target =
-        proxy_service::resolve_proxy_target(&state.db, &encryption_key, &user_id_str, &service_id)
-            .await?;
+    let target = proxy_service::resolve_proxy_target(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &service_id,
+    )
+    .await?;
 
     // Check approval if user has it enabled
     let request_method_str = request.method().as_str().to_string();
@@ -95,7 +97,7 @@ pub async fn llm_proxy_request(
     // Resolve delegated credentials (provider tokens)
     let delegated = delegation_service::resolve_delegated_credentials(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &user_id_str,
         &service_id,
     )
@@ -195,7 +197,6 @@ pub async fn gateway_request(
     Path(path): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
     let user_id_str = auth_user.user_id.to_string();
 
     let method = request.method().clone();
@@ -248,9 +249,13 @@ pub async fn gateway_request(
     let translator = llm_gateway_service::get_translator(&provider_slug);
 
     // Resolve proxy target
-    let target =
-        proxy_service::resolve_proxy_target(&state.db, &encryption_key, &user_id_str, &service_id)
-            .await?;
+    let target = proxy_service::resolve_proxy_target(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &service_id,
+    )
+    .await?;
 
     // Check approval if user has it enabled
     check_llm_approval(&state, &auth_user, &service_id, &service, &path, "POST").await?;
@@ -258,7 +263,7 @@ pub async fn gateway_request(
     // Resolve delegated credentials
     let delegated = delegation_service::resolve_delegated_credentials(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &user_id_str,
         &service_id,
     )
@@ -400,7 +405,6 @@ pub async fn gateway_request(
 /// Try primary slug, then fall back to openai-codex for OpenAI models.
 async fn resolve_provider_slug_with_fallback(
     db: &mongodb::Database,
-    // M-1: removed unused _encryption_key parameter
     user_id: &str,
     primary_slug: &str,
 ) -> AppResult<String> {

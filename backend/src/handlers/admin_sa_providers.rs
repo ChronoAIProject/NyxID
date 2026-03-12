@@ -6,7 +6,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
 use crate::mw::auth::AuthUser;
@@ -143,12 +142,10 @@ pub async fn connect_api_key_for_sa(
         ));
     }
 
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-
     // Reuse existing service -- pass sa.id as user_id
     user_token_service::store_api_key(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &sa_id,
         &provider_id,
         &body.api_key,
@@ -187,9 +184,13 @@ pub async fn disconnect_sa_provider(
     // Verify SA exists
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
 
-    let encryption_key = crate::crypto::aes::parse_hex_key(&state.config.encryption_key)?;
-    user_token_service::disconnect_provider(&state.db, &encryption_key, &sa_id, &provider_id)
-        .await?;
+    user_token_service::disconnect_provider(
+        &state.db,
+        &state.encryption_keys,
+        &sa_id,
+        &provider_id,
+    )
+    .await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -229,12 +230,11 @@ pub async fn initiate_oauth_for_sa(
     }
 
     let admin_id = auth_user.user_id.to_string();
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
     let redirect_path = format!("/admin/service-accounts/{}", &sa_id);
 
     let auth_url = user_token_service::initiate_oauth_connect(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &state.config.base_url,
         &admin_id,
         &provider_id,
@@ -280,11 +280,10 @@ pub async fn initiate_device_code_for_sa(
     }
 
     let admin_id = auth_user.user_id.to_string();
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     let result = user_token_service::request_device_code(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &admin_id,
         &provider_id,
         Some(&sa_id),
@@ -329,11 +328,10 @@ pub async fn poll_device_code_for_sa(
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
 
     let admin_id = auth_user.user_id.to_string();
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     let result = user_token_service::poll_device_code(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &admin_id,
         &provider_id,
         &body.state,

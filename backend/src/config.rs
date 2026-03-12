@@ -1,7 +1,7 @@
 use std::env;
 
 /// Application configuration loaded from environment variables.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppConfig {
     /// Server port (default: 3001)
     pub port: u16,
@@ -49,8 +49,14 @@ pub struct AppConfig {
     pub smtp_from_address: Option<String>,
 
     // Encryption
-    /// 32-byte hex-encoded AES-256 key for encrypting stored credentials
-    pub encryption_key: String,
+    /// 32-byte hex-encoded AES-256 key for local envelope encryption and
+    /// legacy v0/v1 decrypt fallback.
+    ///
+    /// Required when `KEY_PROVIDER=local`. Optional for other providers.
+    pub encryption_key: Option<String>,
+    /// Optional previous encryption key for key rotation (same format as
+    /// `encryption_key`).
+    pub encryption_key_previous: Option<String>,
 
     // Rate limiting
     /// Max requests per second per IP for general endpoints
@@ -104,6 +110,121 @@ pub struct AppConfig {
     /// Use APNs sandbox instead of production.
     /// Default: true in development, false otherwise.
     pub apns_sandbox: bool,
+
+    /// Key provider type for envelope encryption KEK operations.
+    /// Supported: "local", "aws-kms" (feature aws-kms), "gcp-kms" (feature gcp-kms).
+    pub key_provider: String,
+
+    // AWS KMS (Phase 4)
+    /// AWS KMS key ARN for DEK wrapping. Required when KEY_PROVIDER=aws-kms.
+    pub aws_kms_key_arn: Option<String>,
+    /// Optional previous AWS KMS key ARN for multi-key migration.
+    pub aws_kms_key_arn_previous: Option<String>,
+
+    // GCP KMS (Phase 4)
+    /// GCP Cloud KMS key resource name. Required when KEY_PROVIDER=gcp-kms.
+    pub gcp_kms_key_name: Option<String>,
+    /// Optional previous GCP KMS key name for multi-key migration.
+    pub gcp_kms_key_name_previous: Option<String>,
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("port", &self.port)
+            .field("base_url", &self.base_url)
+            .field("frontend_url", &self.frontend_url)
+            .field("database_url", &self.database_url)
+            .field("database_max_connections", &self.database_max_connections)
+            .field("environment", &self.environment)
+            .field("jwt_private_key_path", &self.jwt_private_key_path)
+            .field("jwt_public_key_path", &self.jwt_public_key_path)
+            .field("jwt_issuer", &self.jwt_issuer)
+            .field("jwt_access_ttl_secs", &self.jwt_access_ttl_secs)
+            .field("jwt_refresh_ttl_secs", &self.jwt_refresh_ttl_secs)
+            .field("google_client_id", &self.google_client_id)
+            .field("google_client_secret", &"[REDACTED]")
+            .field("github_client_id", &self.github_client_id)
+            .field("github_client_secret", &"[REDACTED]")
+            .field("apple_client_id", &self.apple_client_id)
+            .field("apple_team_id", &self.apple_team_id)
+            .field("apple_key_id", &self.apple_key_id)
+            .field("apple_private_key_path", &self.apple_private_key_path)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_username", &self.smtp_username)
+            .field("smtp_password", &"[REDACTED]")
+            .field("smtp_from_address", &self.smtp_from_address)
+            .field(
+                "encryption_key",
+                if self.encryption_key.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "encryption_key_previous",
+                if self.encryption_key_previous.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field("rate_limit_per_second", &self.rate_limit_per_second)
+            .field("rate_limit_burst", &self.rate_limit_burst)
+            .field("sa_token_ttl_secs", &self.sa_token_ttl_secs)
+            .field("cookie_domain", &self.cookie_domain)
+            .field("telegram_bot_token", &"[REDACTED]")
+            .field("telegram_webhook_secret", &"[REDACTED]")
+            .field("telegram_webhook_url", &self.telegram_webhook_url)
+            .field("telegram_bot_username", &self.telegram_bot_username)
+            .field(
+                "approval_expiry_interval_secs",
+                &self.approval_expiry_interval_secs,
+            )
+            .field("fcm_service_account_path", &self.fcm_service_account_path)
+            .field("fcm_project_id", &self.fcm_project_id)
+            .field("apns_key_path", &self.apns_key_path)
+            .field("apns_key_id", &self.apns_key_id)
+            .field("apns_team_id", &self.apns_team_id)
+            .field("apns_topic", &self.apns_topic)
+            .field("apns_sandbox", &self.apns_sandbox)
+            .field("key_provider", &self.key_provider)
+            .field(
+                "aws_kms_key_arn",
+                if self.aws_kms_key_arn.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "aws_kms_key_arn_previous",
+                if self.aws_kms_key_arn_previous.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "gcp_kms_key_name",
+                if self.gcp_kms_key_name.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "gcp_kms_key_name_previous",
+                if self.gcp_kms_key_name_previous.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .finish()
+    }
 }
 
 impl AppConfig {
@@ -164,8 +285,10 @@ impl AppConfig {
             smtp_password: env::var("SMTP_PASSWORD").ok(),
             smtp_from_address: env::var("SMTP_FROM_ADDRESS").ok(),
 
-            encryption_key: env::var("ENCRYPTION_KEY")
-                .expect("ENCRYPTION_KEY must be set (64 hex chars = 32 bytes)"),
+            encryption_key: env::var("ENCRYPTION_KEY").ok().filter(|s| !s.is_empty()),
+            encryption_key_previous: env::var("ENCRYPTION_KEY_PREVIOUS")
+                .ok()
+                .filter(|s| !s.is_empty()),
 
             rate_limit_per_second: env::var("RATE_LIMIT_PER_SECOND")
                 .ok()
@@ -215,6 +338,17 @@ impl AppConfig {
                 .ok()
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(is_dev),
+
+            key_provider: env::var("KEY_PROVIDER").unwrap_or_else(|_| "local".to_string()),
+
+            aws_kms_key_arn: env::var("AWS_KMS_KEY_ARN").ok().filter(|s| !s.is_empty()),
+            aws_kms_key_arn_previous: env::var("AWS_KMS_KEY_ARN_PREVIOUS")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            gcp_kms_key_name: env::var("GCP_KMS_KEY_NAME").ok().filter(|s| !s.is_empty()),
+            gcp_kms_key_name_previous: env::var("GCP_KMS_KEY_NAME_PREVIOUS")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 
@@ -228,18 +362,23 @@ impl AppConfig {
         self.environment == "production"
     }
 
-    /// Validate the encryption key at startup.
-    /// Panics if the key is invalid, all-zeros, or the wrong length.
+    /// Validate the local encryption key at startup.
+    /// Panics if the key is missing, invalid, all-zeros, or the wrong length.
     pub fn validate_encryption_key(&self) {
-        if self.encryption_key.len() != 64 {
+        let encryption_key = self
+            .encryption_key
+            .as_ref()
+            .expect("ENCRYPTION_KEY must be set when KEY_PROVIDER=local");
+
+        if encryption_key.len() != 64 {
             panic!(
                 "ENCRYPTION_KEY must be exactly 64 hex characters (32 bytes), got {} characters",
-                self.encryption_key.len()
+                encryption_key.len()
             );
         }
 
         let key_bytes =
-            hex::decode(&self.encryption_key).expect("ENCRYPTION_KEY is not valid hexadecimal");
+            hex::decode(encryption_key).expect("ENCRYPTION_KEY is not valid hexadecimal");
 
         if key_bytes.len() != 32 {
             panic!("ENCRYPTION_KEY must decode to exactly 32 bytes");
@@ -251,6 +390,76 @@ impl AppConfig {
                 "ENCRYPTION_KEY is all zeros. This is insecure. \
                  Generate a proper key with: openssl rand -hex 32"
             );
+        }
+
+        // Validate previous key if present
+        if let Some(ref prev_key) = self.encryption_key_previous {
+            if prev_key.len() != 64 {
+                panic!(
+                    "ENCRYPTION_KEY_PREVIOUS must be exactly 64 hex characters (32 bytes), got {} characters",
+                    prev_key.len()
+                );
+            }
+
+            let prev_bytes =
+                hex::decode(prev_key).expect("ENCRYPTION_KEY_PREVIOUS is not valid hexadecimal");
+
+            if prev_bytes.len() != 32 {
+                panic!("ENCRYPTION_KEY_PREVIOUS must decode to exactly 32 bytes");
+            }
+
+            if prev_bytes.iter().all(|&b| b == 0) {
+                panic!(
+                    "ENCRYPTION_KEY_PREVIOUS is all zeros. This is insecure. \
+                     Generate a proper key with: openssl rand -hex 32"
+                );
+            }
+
+            if prev_key == encryption_key {
+                tracing::warn!(
+                    "ENCRYPTION_KEY_PREVIOUS is the same as ENCRYPTION_KEY. \
+                     This is valid but means no rotation is in progress."
+                );
+            }
+        }
+    }
+
+    /// Validate the configured key provider at startup.
+    /// Panics if an unsupported provider is specified.
+    pub fn validate_key_provider(&self) {
+        match self.key_provider.as_str() {
+            "local" => self.validate_encryption_key(),
+            #[cfg(feature = "aws-kms")]
+            "aws-kms" => {
+                self.aws_kms_key_arn.as_ref().unwrap_or_else(|| {
+                    panic!("AWS_KMS_KEY_ARN must be set when KEY_PROVIDER=aws-kms")
+                });
+                // ENCRYPTION_KEY is optional (for migration fallback)
+                if self.encryption_key.is_some() {
+                    self.validate_encryption_key();
+                }
+            }
+            #[cfg(feature = "gcp-kms")]
+            "gcp-kms" => {
+                self.gcp_kms_key_name.as_ref().unwrap_or_else(|| {
+                    panic!("GCP_KMS_KEY_NAME must be set when KEY_PROVIDER=gcp-kms")
+                });
+                if self.encryption_key.is_some() {
+                    self.validate_encryption_key();
+                }
+            }
+            other => {
+                #[allow(unused_mut)]
+                let mut supported = vec!["local"];
+                #[cfg(feature = "aws-kms")]
+                supported.push("aws-kms");
+                #[cfg(feature = "gcp-kms")]
+                supported.push("gcp-kms");
+                panic!(
+                    "Unsupported KEY_PROVIDER: {other}. Supported providers: {}",
+                    supported.join(", ")
+                );
+            }
         }
     }
 
@@ -380,7 +589,8 @@ mod tests {
             smtp_username: None,
             smtp_password: None,
             smtp_from_address: None,
-            encryption_key: encryption_key.to_string(),
+            encryption_key: Some(encryption_key.to_string()),
+            encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
@@ -397,6 +607,11 @@ mod tests {
             apns_team_id: None,
             apns_topic: None,
             apns_sandbox: true,
+            key_provider: "local".to_string(),
+            aws_kms_key_arn: None,
+            aws_kms_key_arn_previous: None,
+            gcp_kms_key_name: None,
+            gcp_kms_key_name_previous: None,
         }
     }
 
@@ -481,6 +696,14 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "ENCRYPTION_KEY must be set when KEY_PROVIDER=local")]
+    fn validate_encryption_key_missing() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        cfg.encryption_key = None;
+        cfg.validate_encryption_key();
+    }
+
+    #[test]
     #[should_panic(expected = "must be exactly 64 hex characters")]
     fn validate_encryption_key_too_short() {
         let cfg = make_config("http://localhost:3001", "dev", "abcd");
@@ -500,6 +723,41 @@ mod tests {
     fn validate_encryption_key_all_zeros() {
         let key = "00".repeat(32);
         let cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.validate_encryption_key();
+    }
+
+    #[test]
+    fn validate_encryption_key_with_valid_previous() {
+        let key = "ab".repeat(32);
+        let mut cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.encryption_key_previous = Some("cd".repeat(32));
+        cfg.validate_encryption_key(); // should not panic
+    }
+
+    #[test]
+    #[should_panic(expected = "ENCRYPTION_KEY_PREVIOUS must be exactly 64 hex characters")]
+    fn validate_previous_key_too_short() {
+        let key = "ab".repeat(32);
+        let mut cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.encryption_key_previous = Some("abcd".to_string());
+        cfg.validate_encryption_key();
+    }
+
+    #[test]
+    #[should_panic(expected = "ENCRYPTION_KEY_PREVIOUS is not valid hexadecimal")]
+    fn validate_previous_key_not_hex() {
+        let key = "ab".repeat(32);
+        let mut cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.encryption_key_previous = Some("zz".repeat(32));
+        cfg.validate_encryption_key();
+    }
+
+    #[test]
+    #[should_panic(expected = "ENCRYPTION_KEY_PREVIOUS is all zeros")]
+    fn validate_previous_key_all_zeros() {
+        let key = "ab".repeat(32);
+        let mut cfg = make_config("http://localhost:3001", "dev", &key);
+        cfg.encryption_key_previous = Some("00".repeat(32));
         cfg.validate_encryption_key();
     }
 }

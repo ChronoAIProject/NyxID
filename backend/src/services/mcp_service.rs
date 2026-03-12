@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 
+use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -562,7 +563,7 @@ pub fn build_proxy_args(
 pub async fn execute_tool(
     http_client: &reqwest::Client,
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
@@ -577,7 +578,7 @@ pub async fn execute_tool(
     let (method, path, query, body) = build_proxy_args(endpoint, arguments);
 
     let target =
-        proxy_service::resolve_proxy_target(db, encryption_key, user_id, &service.service_id)
+        proxy_service::resolve_proxy_target(db, encryption_keys, user_id, &service.service_id)
             .await?;
 
     // Build identity headers if configured on the service (CR-8)
@@ -664,7 +665,7 @@ pub async fn execute_tool(
     // Resolve delegated credentials. Required provider connections must succeed.
     let delegated = delegation_service::resolve_delegated_credentials(
         db,
-        encryption_key,
+        encryption_keys,
         user_id,
         &service.service_id,
     )
@@ -841,7 +842,7 @@ pub async fn discover_services(
 /// Connect the user to a service from within the MCP client.
 pub async fn connect_service(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     service_id: &str,
     credential: Option<&str>,
@@ -849,7 +850,7 @@ pub async fn connect_service(
 ) -> AppResult<serde_json::Value> {
     let result = connection_service::connect_user(
         db,
-        encryption_key,
+        encryption_keys,
         user_id,
         service_id,
         credential,

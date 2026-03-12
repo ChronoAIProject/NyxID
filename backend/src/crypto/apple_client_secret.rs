@@ -147,7 +147,8 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             smtp_username: None,
             smtp_password: None,
             smtp_from_address: None,
-            encryption_key: "ab".repeat(32),
+            encryption_key: Some("ab".repeat(32)),
+            encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
@@ -164,6 +165,11 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             apns_team_id: None,
             apns_topic: None,
             apns_sandbox: true,
+            key_provider: "local".to_string(),
+            aws_kms_key_arn: None,
+            aws_kms_key_arn_previous: None,
+            gcp_kms_key_name: None,
+            gcp_kms_key_name_previous: None,
         }
     }
 

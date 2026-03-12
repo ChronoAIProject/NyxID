@@ -10,7 +10,6 @@ use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{
     AuthClientMode, LoginResponse, apply_browser_session_cookies, extract_ip, extract_user_agent,
@@ -68,7 +67,6 @@ pub async fn setup(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<MfaSetupResponse>> {
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
     let user_id_str = auth_user.user_id.to_string();
 
     let user = state
@@ -79,7 +77,8 @@ pub async fn setup(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let result =
-        mfa_service::setup_totp(&state.db, &encryption_key, &user_id_str, &user.email).await?;
+        mfa_service::setup_totp(&state.db, &state.encryption_keys, &user_id_str, &user.email)
+            .await?;
 
     Ok(Json(MfaSetupResponse {
         factor_id: result.factor_id,
@@ -97,7 +96,6 @@ pub async fn confirm(
     auth_user: AuthUser,
     Json(body): Json<MfaConfirmRequest>,
 ) -> AppResult<Json<MfaConfirmResponse>> {
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
     let user_id_str = auth_user.user_id.to_string();
 
     // Find the pending (unverified, active) TOTP factor for this user
@@ -117,7 +115,7 @@ pub async fn confirm(
 
     let recovery_codes = mfa_service::verify_totp_setup(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &factor.id,
         &user_id_str,
         &body.code,
@@ -175,8 +173,8 @@ pub async fn verify(
     let user_id = &pending_session.user_id;
 
     // Verify TOTP code
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-    let valid = mfa_service::verify_totp(&state.db, &encryption_key, user_id, &body.code).await?;
+    let valid =
+        mfa_service::verify_totp(&state.db, &state.encryption_keys, user_id, &body.code).await?;
 
     if !valid {
         return Err(AppError::AuthenticationFailed(

@@ -7,7 +7,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{audit_service, user_token_service};
@@ -134,7 +133,6 @@ pub async fn connect_api_key(
     Json(body): Json<ConnectApiKeyRequest>,
 ) -> AppResult<Json<ConnectResponse>> {
     let user_id_str = auth_user.user_id.to_string();
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     if body.api_key.is_empty() {
         return Err(AppError::ValidationError(
@@ -150,7 +148,7 @@ pub async fn connect_api_key(
 
     user_token_service::store_api_key(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &user_id_str,
         &provider_id,
         &body.api_key,
@@ -183,11 +181,10 @@ pub async fn initiate_oauth_connect(
     Path(provider_id): Path<String>,
 ) -> AppResult<Json<OAuthInitiateResponse>> {
     let user_id_str = auth_user.user_id.to_string();
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     let auth_url = user_token_service::initiate_oauth_connect(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &state.config.base_url,
         &user_id_str,
         &provider_id,
@@ -216,11 +213,9 @@ pub async fn oauth_callback(
     Path(provider_id): Path<String>,
     Query(query): Query<OAuthCallbackQuery>,
 ) -> AppResult<Json<ConnectResponse>> {
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-
     let token = user_token_service::handle_oauth_callback(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &state.config.base_url,
         &provider_id,
         &query.code,
@@ -296,13 +291,6 @@ async fn generic_oauth_callback_impl(
         }
     };
 
-    let encryption_key = match aes::parse_hex_key(&state.config.encryption_key) {
-        Ok(k) => k,
-        Err(_) => {
-            return redirect_callback(frontend_url, "error", Some("Internal server error"));
-        }
-    };
-
     // Peek at the OAuth state to find the provider_id and verify user ownership
     let oauth_state = match user_token_service::peek_oauth_state(&state.db, state_param).await {
         Ok(s) => s,
@@ -340,7 +328,7 @@ async fn generic_oauth_callback_impl(
 
     match user_token_service::handle_oauth_callback(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &state.config.base_url,
         provider_id,
         code,
@@ -449,10 +437,14 @@ pub async fn disconnect_provider(
     Path(provider_id): Path<String>,
 ) -> AppResult<Json<ConnectResponse>> {
     let user_id_str = auth_user.user_id.to_string();
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
-    user_token_service::disconnect_provider(&state.db, &encryption_key, &user_id_str, &provider_id)
-        .await?;
+    user_token_service::disconnect_provider(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &provider_id,
+    )
+    .await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -476,11 +468,15 @@ pub async fn manual_refresh(
     Path(provider_id): Path<String>,
 ) -> AppResult<Json<ConnectResponse>> {
     let user_id_str = auth_user.user_id.to_string();
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     // Attempt to get active token (which triggers lazy refresh for expired OAuth tokens)
-    user_token_service::get_active_token(&state.db, &encryption_key, &user_id_str, &provider_id)
-        .await?;
+    user_token_service::get_active_token(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &provider_id,
+    )
+    .await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -507,11 +503,10 @@ pub async fn request_device_code(
     Path(provider_id): Path<String>,
 ) -> AppResult<Json<DeviceCodeInitiateResponse>> {
     let user_id_str = auth_user.user_id.to_string();
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     let result = user_token_service::request_device_code(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &user_id_str,
         &provider_id,
         None,
@@ -547,11 +542,10 @@ pub async fn poll_device_code(
     Json(body): Json<DeviceCodePollRequest>,
 ) -> AppResult<Json<DeviceCodePollResponse>> {
     let user_id_str = auth_user.user_id.to_string();
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     let result = user_token_service::poll_device_code(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &user_id_str,
         &provider_id,
         &body.state,

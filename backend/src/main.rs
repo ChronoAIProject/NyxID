@@ -20,8 +20,11 @@ use std::sync::Arc;
 
 use crate::db::DbHandle;
 use config::AppConfig;
+use crypto::aes::EncryptionKeys;
 use crypto::jwks::JwksCache;
 use crypto::jwt::JwtKeys;
+use crypto::key_provider::KeyProvider;
+use crypto::local_key_provider::LocalKeyProvider;
 use models::mcp_session::McpSessionStore;
 
 use services::push_service::{ApnsAuth, FcmAuth};
@@ -43,6 +46,8 @@ pub struct AppState {
     pub fcm_auth: Option<Arc<FcmAuth>>,
     /// APNs push notification auth (None if not configured)
     pub apns_auth: Option<Arc<ApnsAuth>>,
+    /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
+    pub encryption_keys: Arc<EncryptionKeys>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -84,18 +89,82 @@ async fn main() {
         return;
     }
 
+    // Validate provider-specific encryption config before any seed calls that use it.
+    config.validate_key_provider();
+
+    // Build key provider(s)
+    let (provider, fallback_provider): (Arc<dyn KeyProvider>, Option<Arc<dyn KeyProvider>>) =
+        match config.key_provider.as_str() {
+            "local" => {
+                let local = Arc::new(LocalKeyProvider::from_config(&config));
+                (local, None)
+            }
+            #[cfg(feature = "aws-kms")]
+            "aws-kms" => {
+                let kms =
+                    Arc::new(crypto::aws_kms_provider::AwsKmsProvider::from_config(&config).await);
+                let fallback = config.encryption_key.as_ref().map(|_| {
+                    Arc::new(LocalKeyProvider::from_config(&config)) as Arc<dyn KeyProvider>
+                });
+                (kms, fallback)
+            }
+            #[cfg(feature = "gcp-kms")]
+            "gcp-kms" => {
+                let kms =
+                    Arc::new(crypto::gcp_kms_provider::GcpKmsProvider::from_config(&config).await);
+                let fallback = config.encryption_key.as_ref().map(|_| {
+                    Arc::new(LocalKeyProvider::from_config(&config)) as Arc<dyn KeyProvider>
+                });
+                (kms, fallback)
+            }
+            other => panic!("Unsupported KEY_PROVIDER: {other}"),
+        };
+
+    // Cross-provider key_id collision check (H2): during migration, the primary
+    // KMS provider and fallback local provider derive key_ids from different
+    // inputs. A collision (1-in-256 chance) would cause decrypt failures.
+    if let Some(ref fallback) = fallback_provider
+        && fallback.has_key_id(provider.current_key_id())
+    {
+        panic!(
+            "Primary and fallback providers have colliding key IDs (0x{:02x}). \
+             This is a 1-in-256 hash collision. Use a different KMS key.",
+            provider.current_key_id()
+        );
+    }
+
+    // Build EncryptionKeys with provider and optional fallback
+    let legacy = if config.encryption_key.is_some() {
+        Some(crypto::aes::LegacyKeys::from_config(&config))
+    } else {
+        None
+    };
+
+    let encryption_keys = Arc::new({
+        let mut ek = EncryptionKeys::with_provider_and_fallback(provider, fallback_provider);
+        if let Some(l) = legacy {
+            ek.set_legacy(l);
+        }
+        ek
+    });
+    if encryption_keys.has_previous() {
+        tracing::warn!(
+            "ENCRYPTION_KEY_PREVIOUS is configured. Only one previous key is supported; do not rotate again until all old-key ciphertexts have been re-wrapped or re-encrypted."
+        );
+    }
+
     // Seed default OAuth clients (idempotent)
     services::oauth_client_service::seed_default_clients(&db)
         .await
         .expect("Failed to seed default OAuth clients");
 
     // Seed default AI provider configurations (idempotent)
-    services::provider_service::seed_default_providers(&db, &config.encryption_key)
+    services::provider_service::seed_default_providers(&db, encryption_keys.as_ref())
         .await
         .expect("Failed to seed default providers");
 
     // Seed downstream services for default providers (idempotent)
-    services::provider_service::seed_default_services(&db, &config.encryption_key)
+    services::provider_service::seed_default_services(&db, encryption_keys.as_ref())
         .await
         .expect("Failed to seed default services");
 
@@ -108,9 +177,6 @@ async fn main() {
     tracing::info!("Starting NyxID authentication server");
     tracing::info!(port = config.port, issuer = %config.jwt_issuer, "Configuration loaded");
     config.warn_if_non_url_issuer();
-
-    // Validate encryption key at startup
-    config.validate_encryption_key();
 
     // Validate and initialize push notification config (reads FCM JSON, verifies APNs key)
     config.validate_push_config();
@@ -192,6 +258,7 @@ async fn main() {
         jwks_cache,
         fcm_auth: fcm_auth.clone(),
         apns_auth: apns_auth.clone(),
+        encryption_keys: encryption_keys.clone(),
     };
 
     // Create rate limiters
