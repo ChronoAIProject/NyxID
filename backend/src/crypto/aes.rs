@@ -4,12 +4,15 @@ use aes_gcm::{
 };
 use rand::RngCore;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use zeroize::Zeroizing;
 
 use crate::config::AppConfig;
 use crate::errors::AppError;
+
+use super::key_provider::{KeyProvider, WrappedKey, derive_key_id};
+use super::local_key_provider::LocalKeyProvider;
 
 /// Nonce size for AES-256-GCM (96 bits / 12 bytes).
 const NONCE_SIZE: usize = 12;
@@ -39,10 +42,13 @@ const V1_MIN_SIZE: usize = V1_HEADER_SIZE + NONCE_SIZE + TAG_SIZE;
 const V2_HEADER_SIZE: usize = 4;
 
 /// Size of a wrapped DEK: dek_nonce(12) + encrypted_dek(32) + dek_tag(16) = 60 bytes.
+///
+/// This is the current size produced by [`LocalKeyProvider`]. Other providers
+/// may use a different wrapped-DEK size.
 const WRAPPED_DEK_SIZE: usize = NONCE_SIZE + 32 + TAG_SIZE;
 
-/// Minimum v2 ciphertext: header(4) + wrapped_dek(60) + data_nonce(12) + tag(16) = 92 bytes.
-const V2_MIN_SIZE: usize = V2_HEADER_SIZE + WRAPPED_DEK_SIZE + NONCE_SIZE + TAG_SIZE;
+/// Minimum v2 ciphertext: header(4) + wrapped_dek(1+) + data_nonce(12) + tag(16).
+const V2_MIN_SIZE: usize = V2_HEADER_SIZE + 1 + NONCE_SIZE + TAG_SIZE;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct EncryptionDecryptStats {
@@ -88,26 +94,91 @@ impl DecryptCounters {
     }
 }
 
+#[derive(Clone)]
+struct LegacyKeys {
+    current: Zeroizing<[u8; 32]>,
+    current_id: u8,
+    previous: Option<Zeroizing<[u8; 32]>>,
+    previous_id: Option<u8>,
+}
+
+impl LegacyKeys {
+    fn from_config(config: &AppConfig) -> Self {
+        let current_hex = config
+            .encryption_key
+            .as_deref()
+            .expect("ENCRYPTION_KEY must be set when KEY_PROVIDER=local");
+        let current_bytes: Zeroizing<[u8; 32]> = Zeroizing::new(
+            hex::decode(current_hex)
+                .expect(
+                    "ENCRYPTION_KEY is not valid hex (should have been caught by validate_encryption_key)",
+                )
+                .try_into()
+                .expect("ENCRYPTION_KEY must decode to 32 bytes"),
+        );
+        let current_id = derive_key_id(current_bytes.as_ref());
+
+        let previous = config
+            .encryption_key_previous
+            .as_ref()
+            .filter(|prev| prev.as_str() != current_hex)
+            .map(|hex_str| {
+                let bytes: Zeroizing<[u8; 32]> = Zeroizing::new(
+                    hex::decode(hex_str)
+                        .expect(
+                            "ENCRYPTION_KEY_PREVIOUS is not valid hex (should have been caught by validate_encryption_key)",
+                        )
+                        .try_into()
+                        .expect("ENCRYPTION_KEY_PREVIOUS must decode to 32 bytes"),
+                );
+                let id = derive_key_id(bytes.as_ref());
+                (bytes, id)
+            });
+
+        if let Some((_, previous_id)) = previous.as_ref()
+            && current_id == *previous_id
+        {
+            panic!(
+                "ENCRYPTION_KEY and ENCRYPTION_KEY_PREVIOUS produce the same key id (0x{:02x}). \
+                 This is a 1-in-256 hash collision. Generate a different key with: openssl rand -hex 32",
+                current_id
+            );
+        }
+
+        Self {
+            current: Zeroizing::new(*current_bytes),
+            current_id,
+            previous: previous.as_ref().map(|(bytes, _)| Zeroizing::new(**bytes)),
+            previous_id: previous.as_ref().map(|(_, key_id)| *key_id),
+        }
+    }
+}
+
 /// Holds the current and (optionally) previous encryption keys for AES-256-GCM.
 ///
 /// New encryptions always use `current` and stamp the ciphertext with a stable
 /// key id derived from the key material itself. Decryption supports the
 /// currently configured key plus a single previous key.
+///
+/// The `provider` field delegates DEK wrap/unwrap to a [`KeyProvider`]
+/// implementation (e.g. [`LocalKeyProvider`] for in-process AES-256-GCM,
+/// or a KMS backend in Phase 4+). Optional raw legacy keys are retained only
+/// for v0/v1 decryption fallback.
 pub struct EncryptionKeys {
-    current: Zeroizing<[u8; 32]>,
-    current_id: u8,
-    previous: Option<Zeroizing<[u8; 32]>>,
-    previous_id: Option<u8>,
+    /// KeyProvider for v2 envelope DEK wrap/unwrap operations.
+    provider: Arc<dyn KeyProvider>,
+    /// Raw key material used only for legacy v0/v1 decrypt fallback.
+    legacy: Option<LegacyKeys>,
     counters: DecryptCounters,
 }
 
 impl std::fmt::Debug for EncryptionKeys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptionKeys")
-            .field("current", &"[REDACTED]")
+            .field("provider", &self.provider)
             .field(
-                "previous",
-                if self.previous.is_some() {
+                "legacy",
+                if self.legacy.is_some() {
                     &"Some([REDACTED])"
                 } else {
                     &"None"
@@ -118,52 +189,33 @@ impl std::fmt::Debug for EncryptionKeys {
 }
 
 impl EncryptionKeys {
-    /// Build from validated AppConfig. Panics on invalid keys (startup-only).
-    pub fn from_config(config: &AppConfig) -> Self {
-        let current_bytes: [u8; 32] = hex::decode(&config.encryption_key)
-            .expect(
-                "ENCRYPTION_KEY is not valid hex (should have been caught by validate_encryption_key)",
-            )
-            .try_into()
-            .expect("ENCRYPTION_KEY must decode to 32 bytes");
-        let current_id = derive_key_id(&current_bytes);
-
-        let previous = config
-            .encryption_key_previous
-            .as_ref()
-            .map(|hex_str| {
-                let bytes: [u8; 32] = hex::decode(hex_str)
-                    .expect(
-                        "ENCRYPTION_KEY_PREVIOUS is not valid hex (should have been caught by validate_encryption_key)",
-                    )
-                    .try_into()
-                    .expect("ENCRYPTION_KEY_PREVIOUS must decode to 32 bytes");
-                (Zeroizing::new(bytes), derive_key_id(&bytes))
-            });
-
-        if let Some((_, previous_id)) = previous.as_ref() {
-            assert_ne!(
-                current_id, *previous_id,
-                "ENCRYPTION_KEY and ENCRYPTION_KEY_PREVIOUS produced the same key id. Generate a different previous key."
-            );
-        }
-
+    /// Build from a [`KeyProvider`].
+    ///
+    /// This constructor is provider-agnostic: only v2 envelope operations are
+    /// available unless legacy raw keys are attached separately.
+    pub fn with_provider(provider: Arc<dyn KeyProvider>) -> Self {
         Self {
-            current: Zeroizing::new(current_bytes),
-            current_id,
-            previous: previous.as_ref().map(|(bytes, _)| {
-                let mut copied = [0u8; 32];
-                copied.copy_from_slice(bytes.as_ref());
-                Zeroizing::new(copied)
-            }),
-            previous_id: previous.as_ref().map(|(_, key_id)| *key_id),
+            provider,
+            legacy: None,
             counters: DecryptCounters::default(),
         }
     }
 
+    /// Build from validated AppConfig using a [`LocalKeyProvider`].
+    ///
+    /// This is a convenience constructor for the common case where keys
+    /// are stored in environment variables.
+    pub fn from_config(config: &AppConfig) -> Self {
+        let provider = Arc::new(LocalKeyProvider::from_config(config));
+        let legacy = LegacyKeys::from_config(config);
+        let mut keys = Self::with_provider(provider);
+        keys.legacy = Some(legacy);
+        keys
+    }
+
     /// Returns true if a previous key is configured.
     pub fn has_previous(&self) -> bool {
-        self.previous.is_some()
+        self.provider.has_previous_key()
     }
 
     /// Returns counters for each decrypt path. Useful during rotation to verify
@@ -175,9 +227,10 @@ impl EncryptionKeys {
     /// Encrypt plaintext using the v2 envelope encryption format.
     ///
     /// A fresh random DEK encrypts the data, then the DEK is wrapped by the
-    /// current KEK. The DEK is zeroized after use.
+    /// current KEK via the configured [`KeyProvider`]. The DEK is zeroized
+    /// after use.
     ///
-    /// Output: `0x02 || kek_id(1) || wrapped_dek_len(2 BE) || wrapped_dek(60) || data_nonce(12) || data_ciphertext || data_tag(16)`
+    /// Output: `0x02 || kek_id(1) || wrapped_dek_len(2 BE) || wrapped_dek(N) || data_nonce(12) || data_ciphertext || data_tag(16)`
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, AppError> {
         // Generate random 32-byte DEK
         let mut dek = Zeroizing::new([0u8; 32]);
@@ -193,28 +246,18 @@ impl EncryptionKeys {
             .encrypt(data_nonce, plaintext)
             .map_err(|e| AppError::Internal(format!("AES data encryption failed: {e}")))?;
 
-        // Wrap DEK with current KEK (AES-256-GCM, separate nonce)
-        let kek_cipher = Aes256Gcm::new_from_slice(self.current.as_ref())
-            .map_err(|e| AppError::Internal(format!("Failed to create KEK cipher: {e}")))?;
-        let mut dek_nonce_bytes = [0u8; NONCE_SIZE];
-        rand::thread_rng().fill_bytes(&mut dek_nonce_bytes);
-        let dek_nonce = Nonce::from_slice(&dek_nonce_bytes);
-        let wrapped_dek_ct = kek_cipher
-            .encrypt(dek_nonce, dek.as_ref().as_ref())
-            .map_err(|e| AppError::Internal(format!("AES DEK wrapping failed: {e}")))?;
-
-        // wrapped_dek = dek_nonce(12) + encrypted_dek(32) + dek_tag(16) = 60 bytes
-        let wrapped_dek_len = (NONCE_SIZE + wrapped_dek_ct.len()) as u16;
+        // Wrap DEK with current KEK via provider
+        let wrapped = self.provider.wrap_dek(dek.as_ref())?;
+        let wrapped_dek_len = wrapped.ciphertext.len() as u16;
 
         // Assemble v2 envelope
         let total_size =
             V2_HEADER_SIZE + wrapped_dek_len as usize + NONCE_SIZE + data_ciphertext.len();
         let mut result = Vec::with_capacity(total_size);
         result.push(VERSION_V2);
-        result.push(self.current_id);
+        result.push(wrapped.key_id);
         result.extend_from_slice(&wrapped_dek_len.to_be_bytes());
-        result.extend_from_slice(&dek_nonce_bytes);
-        result.extend_from_slice(&wrapped_dek_ct);
+        result.extend_from_slice(&wrapped.ciphertext);
         result.extend_from_slice(&data_nonce_bytes);
         result.extend_from_slice(&data_ciphertext);
 
@@ -231,38 +274,55 @@ impl EncryptionKeys {
     /// 5. Return error if all fail
     pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
         let mut unknown_key_id = None;
+        let current_key_id = self.provider.current_key_id();
 
         // -- v2 envelope encryption --
         if looks_like_v2(ciphertext) {
             let kek_id = ciphertext[1];
             let wrapped_dek_len = u16::from_be_bytes([ciphertext[2], ciphertext[3]]) as usize;
-            let required_len = V2_HEADER_SIZE + WRAPPED_DEK_SIZE + NONCE_SIZE + TAG_SIZE;
+            let required_len = V2_HEADER_SIZE + wrapped_dek_len + NONCE_SIZE + TAG_SIZE;
 
-            if wrapped_dek_len == WRAPPED_DEK_SIZE && ciphertext.len() >= required_len {
+            if wrapped_dek_len > 0 && ciphertext.len() >= required_len {
                 let wrapped_dek = &ciphertext[V2_HEADER_SIZE..V2_HEADER_SIZE + wrapped_dek_len];
                 let data_payload = &ciphertext[V2_HEADER_SIZE + wrapped_dek_len..];
 
-                if kek_id == self.current_id {
-                    if let Ok(plain) =
-                        decrypt_v2_payload(wrapped_dek, data_payload, self.current.as_ref())
-                    {
-                        self.counters.v2_current.fetch_add(1, Ordering::Relaxed);
-                        return Ok(plain);
+                let wrapped = WrappedKey {
+                    key_id: kek_id,
+                    ciphertext: wrapped_dek.to_vec(),
+                };
+
+                match self.provider.unwrap_dek(&wrapped) {
+                    Ok(dek_bytes) => {
+                        // dek_bytes is Zeroizing<Vec<u8>> -- automatically
+                        // scrubbed from memory when this scope exits.
+
+                        // Track which counter to bump based on kek_id
+                        if kek_id == current_key_id {
+                            self.counters.v2_current.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            self.counters.v2_previous.fetch_add(1, Ordering::Relaxed);
+                            self.log_once(
+                                &self.counters.logged_v2_previous,
+                                "Decrypted v2 envelope with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
+                            );
+                        }
+
+                        // Decrypt data with DEK
+                        let dek =
+                            Zeroizing::new(<[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(
+                                |_| AppError::Internal("Unwrapped DEK is not 32 bytes".to_string()),
+                            )?);
+                        return decrypt_raw(data_payload, dek.as_ref());
                     }
-                } else if self.previous_id == Some(kek_id) {
-                    if let Some(ref prev) = self.previous
-                        && let Ok(plain) =
-                            decrypt_v2_payload(wrapped_dek, data_payload, prev.as_ref())
-                    {
-                        self.counters.v2_previous.fetch_add(1, Ordering::Relaxed);
-                        self.log_once(
-                            &self.counters.logged_v2_previous,
-                            "Decrypted v2 envelope with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-                        );
-                        return Ok(plain);
+                    Err(_) => {
+                        // Provider could not unwrap; if it is not the current or
+                        // previous key, record the unknown key id for the error
+                        // message later.
+                        if !self.provider.has_key_id(kek_id) {
+                            unknown_key_id = Some(kek_id);
+                        }
+                        // Fall through to v1/v0 fallback
                     }
-                } else {
-                    unknown_key_id = Some(kek_id);
                 }
             }
         }
@@ -272,63 +332,69 @@ impl EncryptionKeys {
             let key_id = ciphertext[1];
             let payload = &ciphertext[V1_HEADER_SIZE..];
 
-            if key_id == self.current_id {
-                if let Ok(plain) = decrypt_raw(payload, self.current.as_ref()) {
-                    self.counters.v1_current.fetch_add(1, Ordering::Relaxed);
-                    return Ok(plain);
-                }
-            } else if self.previous_id == Some(key_id) {
-                if let Some(ref prev) = self.previous
-                    && let Ok(plain) = decrypt_raw(payload, prev.as_ref())
-                {
-                    self.counters.v1_previous.fetch_add(1, Ordering::Relaxed);
-                    self.log_once(
-                        &self.counters.logged_v1_previous,
-                        "Decrypted ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-                    );
-                    return Ok(plain);
-                }
-            } else if key_id == DRAFT_KEY_ID_CURRENT || key_id == DRAFT_KEY_ID_PREVIOUS {
-                if let Ok(plain) = decrypt_raw(payload, self.current.as_ref()) {
-                    self.counters.v1_current.fetch_add(1, Ordering::Relaxed);
-                    return Ok(plain);
-                }
+            if let Some(legacy) = self.legacy.as_ref() {
+                if key_id == legacy.current_id {
+                    if let Ok(plain) = decrypt_raw(payload, legacy.current.as_ref()) {
+                        self.counters.v1_current.fetch_add(1, Ordering::Relaxed);
+                        return Ok(plain);
+                    }
+                } else if legacy.previous_id == Some(key_id) {
+                    if let Some(ref prev) = legacy.previous
+                        && let Ok(plain) = decrypt_raw(payload, prev.as_ref())
+                    {
+                        self.counters.v1_previous.fetch_add(1, Ordering::Relaxed);
+                        self.log_once(
+                            &self.counters.logged_v1_previous,
+                            "Decrypted ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
+                        );
+                        return Ok(plain);
+                    }
+                } else if key_id == DRAFT_KEY_ID_CURRENT || key_id == DRAFT_KEY_ID_PREVIOUS {
+                    if let Ok(plain) = decrypt_raw(payload, legacy.current.as_ref()) {
+                        self.counters.v1_current.fetch_add(1, Ordering::Relaxed);
+                        return Ok(plain);
+                    }
 
-                if let Some(ref prev) = self.previous
-                    && let Ok(plain) = decrypt_raw(payload, prev.as_ref())
-                {
-                    self.counters.v1_previous.fetch_add(1, Ordering::Relaxed);
-                    self.log_once(
-                        &self.counters.logged_v1_previous,
-                        "Decrypted draft Phase 1 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-                    );
-                    return Ok(plain);
+                    if let Some(ref prev) = legacy.previous
+                        && let Ok(plain) = decrypt_raw(payload, prev.as_ref())
+                    {
+                        self.counters.v1_previous.fetch_add(1, Ordering::Relaxed);
+                        self.log_once(
+                            &self.counters.logged_v1_previous,
+                            "Decrypted draft Phase 1 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
+                        );
+                        return Ok(plain);
+                    }
+                } else {
+                    unknown_key_id = Some(key_id);
                 }
             } else {
                 unknown_key_id = Some(key_id);
             }
         }
 
-        // Try v0 format (full ciphertext is nonce || encrypted || tag) with current key
-        if let Ok(plain) = decrypt_raw(ciphertext, self.current.as_ref()) {
-            self.counters.v0_current.fetch_add(1, Ordering::Relaxed);
-            self.log_once(
-                &self.counters.logged_v0_current,
-                "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY; re-encryption is still pending",
-            );
-            return Ok(plain);
-        }
+        if let Some(legacy) = self.legacy.as_ref() {
+            // Try v0 format (full ciphertext is nonce || encrypted || tag) with current key
+            if let Ok(plain) = decrypt_raw(ciphertext, legacy.current.as_ref()) {
+                self.counters.v0_current.fetch_add(1, Ordering::Relaxed);
+                self.log_once(
+                    &self.counters.logged_v0_current,
+                    "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY; re-encryption is still pending",
+                );
+                return Ok(plain);
+            }
 
-        // Try v0 with previous key
-        if let Some(ref prev) = self.previous
-            && let Ok(plain) = decrypt_raw(ciphertext, prev.as_ref())
-        {
-            self.counters.v0_previous.fetch_add(1, Ordering::Relaxed);
-            self.log_once(
-                &self.counters.logged_v0_previous,
-                "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-            );
-            return Ok(plain);
+            // Try v0 with previous key
+            if let Some(ref prev) = legacy.previous
+                && let Ok(plain) = decrypt_raw(ciphertext, prev.as_ref())
+            {
+                self.counters.v0_previous.fetch_add(1, Ordering::Relaxed);
+                self.log_once(
+                    &self.counters.logged_v0_previous,
+                    "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
+                );
+                return Ok(plain);
+            }
         }
 
         if let Some(key_id) = unknown_key_id {
@@ -365,76 +431,41 @@ impl EncryptionKeys {
 
         let kek_id = ciphertext[1];
         let wrapped_dek_len = u16::from_be_bytes([ciphertext[2], ciphertext[3]]) as usize;
-        if wrapped_dek_len != WRAPPED_DEK_SIZE {
-            return Err(AppError::Internal(format!(
-                "Malformed v2 ciphertext: wrapped_dek_len must be {WRAPPED_DEK_SIZE} bytes",
-            )));
-        }
-
-        let required_len = V2_HEADER_SIZE + WRAPPED_DEK_SIZE + NONCE_SIZE + TAG_SIZE;
-        if ciphertext.len() < required_len {
+        let required_len = V2_HEADER_SIZE + wrapped_dek_len + NONCE_SIZE + TAG_SIZE;
+        if wrapped_dek_len == 0 || ciphertext.len() < required_len {
             return Err(AppError::Internal(
                 "Malformed v2 ciphertext: too short".to_string(),
             ));
         }
 
         // Already wrapped with current KEK -- return as-is.
-        if kek_id == self.current_id {
+        if kek_id == self.provider.current_key_id() {
             return Ok(ciphertext.to_vec());
-        }
-
-        // Must have a previous key to unwrap.
-        let prev = self.previous.as_ref().ok_or_else(|| {
-            AppError::Internal("No previous key configured for rewrap".to_string())
-        })?;
-
-        if self.previous_id != Some(kek_id) {
-            return Err(AppError::Internal(
-                "Ciphertext kek_id does not match current or previous key".to_string(),
-            ));
         }
 
         let wrapped_dek = &ciphertext[V2_HEADER_SIZE..V2_HEADER_SIZE + wrapped_dek_len];
         let data_portion = &ciphertext[V2_HEADER_SIZE + wrapped_dek_len..];
 
-        // Unwrap DEK with previous KEK.
-        let (dek_nonce_bytes, dek_ciphertext) = wrapped_dek.split_at(NONCE_SIZE);
-        let dek_nonce = Nonce::from_slice(dek_nonce_bytes);
-        let prev_cipher = Aes256Gcm::new_from_slice(prev.as_ref())
-            .map_err(|e| AppError::Internal(format!("Failed to create KEK cipher: {e}")))?;
-        let dek_bytes = Zeroizing::new(
-            prev_cipher
-                .decrypt(dek_nonce, dek_ciphertext)
-                .map_err(|e| AppError::Internal(format!("DEK unwrap failed during rewrap: {e}")))?,
-        );
-        let dek = Zeroizing::new(
-            <[u8; 32]>::try_from(dek_bytes.as_slice())
-                .map_err(|_| AppError::Internal("Unwrapped DEK is not 32 bytes".to_string()))?,
-        );
+        // Unwrap DEK with previous key via provider.
+        let old_wrapped = WrappedKey {
+            key_id: kek_id,
+            ciphertext: wrapped_dek.to_vec(),
+        };
+        let plaintext_dek = self.provider.unwrap_dek(&old_wrapped)?;
 
-        // Re-wrap DEK with current KEK.
-        let new_cipher = Aes256Gcm::new_from_slice(self.current.as_ref())
-            .map_err(|e| AppError::Internal(format!("Failed to create KEK cipher: {e}")))?;
-        let mut new_nonce_bytes = [0u8; NONCE_SIZE];
-        rand::thread_rng().fill_bytes(&mut new_nonce_bytes);
-        let new_nonce = Nonce::from_slice(&new_nonce_bytes);
-        let new_wrapped_ct = new_cipher
-            .encrypt(new_nonce, dek.as_ref().as_ref())
-            .map_err(|e| AppError::Internal(format!("DEK re-wrapping failed: {e}")))?;
-
-        let new_wrapped_len = (NONCE_SIZE + new_wrapped_ct.len()) as u16;
+        // Wrap with current key via provider (plaintext_dek is Zeroizing<Vec<u8>>).
+        let new_wrapped = self.provider.wrap_dek(&plaintext_dek)?;
+        let new_wrapped_len = new_wrapped.ciphertext.len() as u16;
 
         // Assemble new v2 envelope with current KEK.
         let total = V2_HEADER_SIZE + new_wrapped_len as usize + data_portion.len();
         let mut result = Vec::with_capacity(total);
         result.push(VERSION_V2);
-        result.push(self.current_id);
+        result.push(new_wrapped.key_id);
         result.extend_from_slice(&new_wrapped_len.to_be_bytes());
-        result.extend_from_slice(&new_nonce_bytes);
-        result.extend_from_slice(&new_wrapped_ct);
+        result.extend_from_slice(&new_wrapped.ciphertext);
         result.extend_from_slice(data_portion);
 
-        // DEK is automatically zeroized when `dek` drops
         Ok(result)
     }
 
@@ -453,43 +484,6 @@ fn looks_like_v2(data: &[u8]) -> bool {
 /// Check if data looks like a v1 envelope.
 fn looks_like_v1(data: &[u8]) -> bool {
     data.len() >= V1_MIN_SIZE && data[0] == VERSION_V1
-}
-
-fn derive_key_id(key: &[u8]) -> u8 {
-    let digest = Sha256::digest(key);
-    digest[0]
-}
-
-/// Unwrap a DEK from the wrapped blob and decrypt the data payload.
-///
-/// `wrapped_dek` = `dek_nonce(12) || encrypted_dek(32) || dek_tag(16)`
-/// `data_payload` = `data_nonce(12) || data_ciphertext || data_tag(16)`
-fn decrypt_v2_payload(
-    wrapped_dek: &[u8],
-    data_payload: &[u8],
-    kek: &[u8],
-) -> Result<Vec<u8>, AppError> {
-    if wrapped_dek.len() < NONCE_SIZE + TAG_SIZE {
-        return Err(AppError::Internal("Wrapped DEK too short".to_string()));
-    }
-
-    // Unwrap DEK
-    let (dek_nonce_bytes, dek_ciphertext) = wrapped_dek.split_at(NONCE_SIZE);
-    let dek_nonce = Nonce::from_slice(dek_nonce_bytes);
-    let kek_cipher = Aes256Gcm::new_from_slice(kek)
-        .map_err(|e| AppError::Internal(format!("Failed to create KEK cipher: {e}")))?;
-    let dek_bytes = Zeroizing::new(
-        kek_cipher
-            .decrypt(dek_nonce, dek_ciphertext)
-            .map_err(|e| AppError::Internal(format!("DEK unwrap failed: {e}")))?,
-    );
-    let dek = Zeroizing::new(
-        <[u8; 32]>::try_from(dek_bytes.as_slice())
-            .map_err(|_| AppError::Internal("Unwrapped DEK is not 32 bytes".to_string()))?,
-    );
-
-    // Decrypt data with DEK
-    decrypt_raw(data_payload, dek.as_ref())
 }
 
 /// Low-level AES-256-GCM decryption: expects `nonce(12) || ciphertext || tag`.
@@ -608,6 +602,7 @@ pub fn parse_hex_key(hex_key: &str) -> Result<Vec<u8>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroize::Zeroizing;
 
     fn test_config(key_hex: &str, prev_hex: Option<&str>) -> AppConfig {
         AppConfig {
@@ -635,7 +630,7 @@ mod tests {
             smtp_username: None,
             smtp_password: None,
             smtp_from_address: None,
-            encryption_key: key_hex.to_string(),
+            encryption_key: Some(key_hex.to_string()),
             encryption_key_previous: prev_hex.map(String::from),
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
@@ -653,6 +648,91 @@ mod tests {
             apns_team_id: None,
             apns_topic: None,
             apns_sandbox: true,
+            key_provider: "local".to_string(),
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockKeyProvider {
+        current_key_id: u8,
+        current_mask: u8,
+        previous: Option<(u8, u8)>,
+    }
+
+    impl MockKeyProvider {
+        fn new(current_key_id: u8, current_mask: u8, previous: Option<(u8, u8)>) -> Self {
+            Self {
+                current_key_id,
+                current_mask,
+                previous,
+            }
+        }
+    }
+
+    impl KeyProvider for MockKeyProvider {
+        fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError> {
+            let mut ciphertext = Vec::with_capacity(3 + plaintext_dek.len());
+            ciphertext.push(self.current_mask);
+            ciphertext.push(0xA5);
+            ciphertext.push(plaintext_dek.len() as u8);
+            ciphertext.extend(plaintext_dek.iter().map(|byte| byte ^ self.current_mask));
+
+            Ok(WrappedKey {
+                key_id: self.current_key_id,
+                ciphertext,
+            })
+        }
+
+        fn unwrap_dek(&self, wrapped: &WrappedKey) -> Result<Zeroizing<Vec<u8>>, AppError> {
+            let mask = if wrapped.key_id == self.current_key_id {
+                self.current_mask
+            } else if let Some((previous_key_id, previous_mask)) = self.previous {
+                if wrapped.key_id == previous_key_id {
+                    previous_mask
+                } else {
+                    return Err(AppError::Internal(
+                        "No key available for key id".to_string(),
+                    ));
+                }
+            } else {
+                return Err(AppError::Internal(
+                    "No key available for key id".to_string(),
+                ));
+            };
+
+            if wrapped.ciphertext.len() < 3
+                || wrapped.ciphertext[0] != mask
+                || wrapped.ciphertext[1] != 0xA5
+            {
+                return Err(AppError::Internal("Mock unwrap failed".to_string()));
+            }
+
+            let dek_len = wrapped.ciphertext[2] as usize;
+            if wrapped.ciphertext.len() != 3 + dek_len {
+                return Err(AppError::Internal(
+                    "Mock wrapped DEK length mismatch".to_string(),
+                ));
+            }
+
+            Ok(Zeroizing::new(
+                wrapped.ciphertext[3..]
+                    .iter()
+                    .map(|byte| byte ^ mask)
+                    .collect(),
+            ))
+        }
+
+        fn current_key_id(&self) -> u8 {
+            self.current_key_id
+        }
+
+        fn has_key_id(&self, key_id: u8) -> bool {
+            key_id == self.current_key_id
+                || self.previous.map(|(previous_key_id, _)| previous_key_id) == Some(key_id)
+        }
+
+        fn has_previous_key(&self) -> bool {
+            self.previous.is_some()
         }
     }
 
@@ -776,7 +856,7 @@ mod tests {
 
         // Verify v2 header (encrypt now produces v2 format)
         assert_eq!(encrypted[0], VERSION_V2);
-        assert_eq!(encrypted[1], derive_key_id(keys.current.as_ref()));
+        assert_eq!(encrypted[1], keys.provider.current_key_id());
 
         let decrypted = keys.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, plaintext);
@@ -1060,7 +1140,7 @@ mod tests {
         let encrypted = keys.encrypt(plaintext).unwrap();
 
         assert_eq!(encrypted[0], VERSION_V2);
-        assert_eq!(encrypted[1], keys.current_id);
+        assert_eq!(encrypted[1], keys.provider.current_key_id());
 
         let wrapped_dek_len = u16::from_be_bytes([encrypted[2], encrypted[3]]) as usize;
         assert_eq!(wrapped_dek_len, WRAPPED_DEK_SIZE);
@@ -1383,6 +1463,48 @@ mod tests {
         // Second rotation without rewrap: C current, B previous -- KEK-A gone
         let keys_c = EncryptionKeys::from_config(&test_config(&key_c_hex, Some(&key_b_hex)));
         assert!(keys_c.decrypt(&encrypted).is_err());
+    }
+
+    #[test]
+    fn v2_provider_only_roundtrip_without_legacy_keys() {
+        let keys = EncryptionKeys::with_provider(Arc::new(MockKeyProvider::new(0x7A, 0x55, None)));
+
+        let encrypted = keys.encrypt(b"provider only").unwrap();
+        let wrapped_dek_len = u16::from_be_bytes([encrypted[2], encrypted[3]]) as usize;
+
+        assert_eq!(encrypted[0], VERSION_V2);
+        assert_eq!(encrypted[1], 0x7A);
+        assert_eq!(wrapped_dek_len, 35);
+        assert_eq!(keys.decrypt(&encrypted).unwrap(), b"provider only");
+    }
+
+    #[test]
+    fn v2_provider_only_rewrap_with_non_local_key_ids() {
+        let old_keys =
+            EncryptionKeys::with_provider(Arc::new(MockKeyProvider::new(0x11, 0x33, None)));
+        let encrypted = old_keys.encrypt(b"provider rewrap").unwrap();
+
+        let rotated_keys = EncryptionKeys::with_provider(Arc::new(MockKeyProvider::new(
+            0x9C,
+            0x77,
+            Some((0x11, 0x33)),
+        )));
+
+        let decrypted = rotated_keys.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, b"provider rewrap");
+
+        let rewrapped = rotated_keys.rewrap(&encrypted).unwrap();
+        let wrapped_dek_len = u16::from_be_bytes([rewrapped[2], rewrapped[3]]) as usize;
+
+        assert_eq!(rewrapped[1], 0x9C);
+        assert_eq!(wrapped_dek_len, 35);
+
+        let current_only =
+            EncryptionKeys::with_provider(Arc::new(MockKeyProvider::new(0x9C, 0x77, None)));
+        assert_eq!(
+            current_only.decrypt(&rewrapped).unwrap(),
+            b"provider rewrap"
+        );
     }
 
     #[test]

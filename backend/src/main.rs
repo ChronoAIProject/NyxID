@@ -87,14 +87,17 @@ async fn main() {
         return;
     }
 
-    // Validate encryption key(s) at startup (before any seed calls that use them)
-    config.validate_encryption_key();
+    // Validate provider-specific encryption config before any seed calls that use it.
+    config.validate_key_provider();
 
-    // Build versioned encryption keys from config
-    let encryption_keys = Arc::new(EncryptionKeys::from_config(&config));
+    // Build versioned encryption keys
+    let encryption_keys = Arc::new(match config.key_provider.as_str() {
+        "local" => EncryptionKeys::from_config(&config),
+        other => panic!("Unsupported KEY_PROVIDER: {other}"),
+    });
     if encryption_keys.has_previous() {
         tracing::warn!(
-            "ENCRYPTION_KEY_PREVIOUS is configured. Phase 2 supports only one previous key; do not rotate again until all old-key ciphertexts have been re-wrapped or re-encrypted."
+            "ENCRYPTION_KEY_PREVIOUS is configured. Only one previous key is supported; do not rotate again until all old-key ciphertexts have been re-wrapped or re-encrypted."
         );
     }
 

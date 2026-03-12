@@ -147,7 +147,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             smtp_username: None,
             smtp_password: None,
             smtp_from_address: None,
-            encryption_key: "ab".repeat(32),
+            encryption_key: Some("ab".repeat(32)),
             encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
@@ -165,6 +165,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             apns_team_id: None,
             apns_topic: None,
             apns_sandbox: true,
+            key_provider: "local".to_string(),
         }
     }
 

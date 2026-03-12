@@ -48,7 +48,7 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002). Int
 ### 5. Security
 
 - No hardcoded secrets -- environment variables for all sensitive data
-- AES-256 encryption for stored credentials (`crypto/aes.rs`)
+- AES-256 envelope encryption with pluggable `KeyProvider` trait (`crypto/aes.rs`, `crypto/key_provider.rs`)
 - Rate limiting middleware (`mw/rate_limit.rs`)
 - Security headers middleware (`mw/security_headers.rs`)
 - JWT auth middleware (`mw/auth.rs`)
@@ -66,7 +66,7 @@ backend/src/
 |-- models/              # MongoDB document structs (26 models, 24 collections)
 |-- services/            # Business logic (29 services, incl. approval_service, notification_service, push_service, telegram_service)
 |-- handlers/            # HTTP handlers (30 handler modules, incl. approvals, notifications, device_tokens, webhooks)
-|-- crypto/              # JWT, AES, password hashing, token generation
+|-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
@@ -115,6 +115,7 @@ Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`
 DATABASE_URL=mongodb://...          # MongoDB connection string
 ENCRYPTION_KEY=                     # 64 hex chars (32 bytes AES-256)
 ENCRYPTION_KEY_PREVIOUS=            # Optional: previous key for zero-downtime rotation (64 hex chars)
+KEY_PROVIDER=local                  # Key provider backend: "local" (default). Phase 4+ adds "aws-kms", "gcp-kms", etc.
 
 # Defaults provided
 PORT=3001
