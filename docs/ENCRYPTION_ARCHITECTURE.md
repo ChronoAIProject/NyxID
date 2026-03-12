@@ -20,45 +20,79 @@ This document describes NyxID's encryption architecture from its current impleme
 
 ---
 
-## Current Architecture (Phase 1)
+## Current Architecture (Phase 2)
 
-Phase 1 provides **key versioning with rotation support**. A single platform-wide AES-256-GCM key encrypts all sensitive credentials, with support for a previous key during rotation.
+Phase 2 provides **envelope encryption with per-record DEKs**. Each encryption operation generates a fresh random Data Encryption Key (DEK), encrypts data with the DEK, then wraps the DEK with the platform-wide Key Encryption Key (KEK). This builds on Phase 1's key versioning and rotation support.
 
-### Key Hierarchy (Phase 1)
+### Key Hierarchy (Phase 2)
 
 ```mermaid
 graph TD
-    EK["ENCRYPTION_KEY<br/>(AES-256, 32 bytes)<br/>+ optional PREVIOUS"]
-    EK -->|direct encryption| OT["OAuth tokens<br/>(encrypted)"]
-    EK -->|direct encryption| AK["API keys<br/>(encrypted)"]
-    EK -->|direct encryption| MFA["MFA secrets<br/>(encrypted)"]
-    EK -->|direct encryption| SC["Service credentials<br/>(encrypted)"]
+    KEK["KEK - ENCRYPTION_KEY<br/>(AES-256, 32 bytes)<br/>+ optional PREVIOUS"]
 
-    style EK fill:#e74c3c,color:#fff,stroke:#c0392b
+    KEK -->|wraps| DEK1["DEK #1<br/>(random AES-256)"]
+    KEK -->|wraps| DEK2["DEK #2<br/>(random AES-256)"]
+    KEK -->|wraps| DEK3["DEK #3<br/>(random AES-256)"]
+    KEK -->|wraps| DEK4["DEK #4<br/>(random AES-256)"]
+
+    DEK1 -->|encrypts| OT["OAuth tokens"]
+    DEK2 -->|encrypts| AK["API keys"]
+    DEK3 -->|encrypts| MFA["MFA secrets"]
+    DEK4 -->|encrypts| SC["Service credentials"]
+
+    style KEK fill:#e74c3c,color:#fff,stroke:#c0392b
+    style DEK1 fill:#e67e22,color:#fff
+    style DEK2 fill:#e67e22,color:#fff
+    style DEK3 fill:#e67e22,color:#fff
+    style DEK4 fill:#e67e22,color:#fff
     style OT fill:#3498db,color:#fff
     style AK fill:#3498db,color:#fff
     style MFA fill:#3498db,color:#fff
     style SC fill:#3498db,color:#fff
 ```
 
-### Ciphertext Format
+### Ciphertext Formats
 
 ```
 v0 (legacy):   [nonce: 12B] [ciphertext] [tag: 16B]
 
-v1 (current):  [0x01] [key_id: 1B] [nonce: 12B] [ciphertext] [tag: 16B]
+v1 (Phase 1):  [0x01] [key_id: 1B] [nonce: 12B] [ciphertext] [tag: 16B]
                  ^        ^
                  |        +-- SHA-256(key)[0] -- stable identifier
                  +-- version byte
+
+v2 (CURRENT):  [0x02] [kek_id: 1B] [wrapped_dek_len: 2B BE] [wrapped_dek: 60B] [data_nonce: 12B] [data_ciphertext] [data_tag: 16B]
+                 ^        ^               ^                        ^
+                 |        |               |                        +-- dek_nonce(12) || encrypted_dek(32) || dek_tag(16)
+                 |        |               +-- big-endian u16, currently always 60
+                 |        +-- SHA-256(kek)[0] -- identifies which KEK wrapped the DEK
+                 +-- version byte (envelope encryption)
 ```
+
+Total overhead: v0 = 28 bytes, v1 = 30 bytes, v2 = 92 bytes (+62 bytes over v1 per record).
 
 ### Decrypt Fallback Chain
 
 ```mermaid
 flowchart TD
-    A[Ciphertext input] --> B{Looks like v1?<br/>len >= 30 AND<br/>byte 0 == 0x01}
+    A[Ciphertext input] --> V2{Looks like v2?<br/>len >= 92 AND<br/>byte 0 == 0x02}
 
-    B -->|Yes| C{key_id matches<br/>current key?}
+    V2 -->|Yes| V2K{kek_id matches<br/>current KEK?}
+    V2 -->|No| B
+
+    V2K -->|Yes| V2D[Unwrap DEK with CURRENT KEK<br/>Decrypt data with DEK]
+    V2K -->|No| V2P{kek_id matches<br/>previous KEK?}
+
+    V2D -->|Success| R0[Return plaintext]
+    V2D -->|Fail| B
+
+    V2P -->|Yes| V2PD[Unwrap DEK with PREVIOUS KEK<br/>Decrypt data with DEK]
+    V2P -->|No| B
+
+    V2PD -->|Success| R0B[Return plaintext]
+    V2PD -->|Fail| B
+
+    B{Looks like v1?<br/>len >= 30 AND<br/>byte 0 == 0x01} -->|Yes| C{key_id matches<br/>current key?}
     B -->|No| G
 
     C -->|Yes| D[Decrypt v1 payload<br/>with CURRENT key]
@@ -82,6 +116,8 @@ flowchart TD
     H -->|Fail| ERR[Return error:<br/>no key could decrypt]
 
     style A fill:#34495e,color:#fff
+    style R0 fill:#27ae60,color:#fff
+    style R0B fill:#27ae60,color:#fff
     style R1 fill:#27ae60,color:#fff
     style R2 fill:#27ae60,color:#fff
     style R3 fill:#27ae60,color:#fff
@@ -104,7 +140,7 @@ graph LR
     end
 
     subgraph Encryption Engine
-        EK["EncryptionKeys struct<br/>AES-256-GCM<br/>current + previous key"]
+        EK["EncryptionKeys struct<br/>v2 envelope encryption<br/>per-record DEKs wrapped by KEK"]
     end
 
     DS --> EK
@@ -118,13 +154,17 @@ graph LR
     style EK fill:#e74c3c,color:#fff,stroke:#c0392b
 ```
 
-### Phase 1 Limitations
+### Remaining Limitations (Phase 2)
 
-- Single platform-wide key -- all tenants share one key
-- No envelope encryption -- the master key directly touches all data
-- Key lives in app process memory (env var)
-- Only one previous key supported at a time
-- No KMS integration
+- Single platform-wide KEK -- all tenants share one KEK
+- KEK lives in app process memory (env var)
+- Only one previous KEK supported at a time
+- No KMS integration (KEK wrapping/unwrapping is local)
+
+Phase 2 resolved these former Phase 1 limitations:
+- ~~No envelope encryption~~ -- per-record DEKs now isolate each encrypted field
+- ~~Master key directly touches all data~~ -- KEK only wraps DEKs, never touches plaintext
+- ~~Full re-encryption on key rotation~~ -- `rewrap()` re-wraps only the 60-byte DEK blob per record
 
 ---
 
@@ -133,7 +173,7 @@ graph LR
 ```mermaid
 graph LR
     P1["Phase 1<br/>KEY VERSIONING<br/>+ rotation<br/>DONE"]
-    P2["Phase 2<br/>ENVELOPE ENCRYPTION<br/>per-record DEKs"]
+    P2["Phase 2<br/>ENVELOPE ENCRYPTION<br/>per-record DEKs<br/>DONE"]
     P3["Phase 3<br/>KEYPROVIDER TRAIT<br/>pluggable backend"]
     P4["Phase 4<br/>CLOUD KMS<br/>AWS / GCP / Azure"]
     P5["Phase 5<br/>PER-TENANT KEYS<br/>blast radius = 1"]
@@ -142,7 +182,7 @@ graph LR
     P1 --> P2 --> P3 --> P4 --> P5 --> P6
 
     style P1 fill:#27ae60,color:#fff
-    style P2 fill:#2980b9,color:#fff
+    style P2 fill:#27ae60,color:#fff
     style P3 fill:#2980b9,color:#fff
     style P4 fill:#8e44ad,color:#fff
     style P5 fill:#8e44ad,color:#fff
@@ -151,15 +191,15 @@ graph LR
 
 ---
 
-## Phase 2: Envelope Encryption
+## Phase 2: Envelope Encryption (COMPLETED)
 
-Envelope encryption introduces a two-tier key hierarchy: a Key Encryption Key (KEK) wraps per-record Data Encryption Keys (DEKs).
+Envelope encryption introduces a two-tier key hierarchy: a Key Encryption Key (KEK) wraps per-record Data Encryption Keys (DEKs). This phase is fully implemented in `backend/src/crypto/aes.rs`.
 
 ### Architecture
 
 ```mermaid
 graph TD
-    KEK["KEK (Key Encryption Key)<br/>From ENCRYPTION_KEY or KMS"]
+    KEK["KEK - Key Encryption Key<br/>From ENCRYPTION_KEY env var"]
 
     KEK -->|wraps| DEK1["DEK #1<br/>(random AES-256)"]
     KEK -->|wraps| DEK2["DEK #2<br/>(random AES-256)"]
@@ -178,15 +218,82 @@ graph TD
     style D3 fill:#3498db,color:#fff
 ```
 
+### v2 Encrypt Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant EK as EncryptionKeys
+    participant RNG as OsRng
+
+    C->>EK: encrypt(plaintext)
+    EK->>RNG: Generate 32-byte DEK
+    RNG-->>EK: Random DEK
+
+    EK->>RNG: Generate data nonce (12 bytes)
+    RNG-->>EK: Random nonce
+    EK->>EK: AES-256-GCM encrypt plaintext with DEK
+
+    EK->>RNG: Generate DEK nonce (12 bytes)
+    RNG-->>EK: Random nonce
+    EK->>EK: AES-256-GCM wrap DEK with current KEK
+
+    EK->>EK: Assemble v2 envelope
+    EK->>EK: Zeroize DEK from memory
+
+    EK-->>C: v2 ciphertext blob
+```
+
+### v2 Decrypt Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant EK as EncryptionKeys
+
+    C->>EK: decrypt(ciphertext)
+    EK->>EK: Parse version byte (0x02)
+    EK->>EK: Extract kek_id, select KEK
+
+    EK->>EK: AES-256-GCM unwrap DEK with matched KEK
+    EK->>EK: AES-256-GCM decrypt data with DEK
+    EK->>EK: Zeroize DEK from memory
+
+    EK-->>C: plaintext
+```
+
+### Rewrap Flow (KEK Rotation Optimization)
+
+```mermaid
+sequenceDiagram
+    participant J as Background Job
+    participant EK as EncryptionKeys
+
+    J->>EK: rewrap(v2_ciphertext)
+    EK->>EK: Parse v2 envelope
+    EK->>EK: Unwrap DEK with PREVIOUS KEK
+    EK->>EK: Re-wrap DEK with CURRENT KEK (fresh nonce)
+    EK->>EK: Replace header + wrapped_dek
+    Note over EK: Data portion UNCHANGED
+    EK->>EK: Zeroize DEK from memory
+    EK-->>J: Updated v2 ciphertext
+```
+
+The `rewrap()` method re-wraps only the 60-byte DEK blob per record. For 1M records, this takes ~1 second (vs minutes/hours for full re-encryption).
+
 ### Storage Format per Record
 
 ```mermaid
 graph LR
-    subgraph "Encrypted Record in MongoDB"
-        WD["wrapped_dek<br/>(KEK-encrypted DEK)<br/>Re-wrappable without<br/>touching encrypted_data"]
-        ED["encrypted_data<br/>(DEK-encrypted credential)<br/>Unchanged during<br/>KEK rotation"]
+    subgraph "v2 Encrypted Record in MongoDB"
+        HD["Header<br/>version + kek_id +<br/>wrapped_dek_len"]
+        WD["Wrapped DEK<br/>(KEK-encrypted DEK, 60 bytes)<br/>Re-wrappable without<br/>touching encrypted data"]
+        ED["Encrypted Data<br/>(DEK-encrypted credential)<br/>Unchanged during<br/>KEK rotation"]
     end
 
+    HD --- WD --- ED
+
+    style HD fill:#34495e,color:#fff
     style WD fill:#e67e22,color:#fff
     style ED fill:#3498db,color:#fff
 ```
@@ -205,7 +312,7 @@ graph TD
         D3A --> DATA3A["Encrypted data"]
     end
 
-    subgraph "After KEK Rotation"
+    subgraph "After KEK Rotation via rewrap"
         K2["KEK v2 (new)"]
         K2 -->|re-wraps| D1B["DEK #1"]
         K2 -->|re-wraps| D2B["DEK #2"]
@@ -222,7 +329,16 @@ graph TD
     style DATA3B fill:#27ae60,color:#fff
 ```
 
-Only the small DEK blobs need re-wrapping, not the actual data. With 1M records, you re-wrap 1M x 32-byte DEKs, not 1M x (variable) credentials.
+Only the small DEK blobs need re-wrapping, not the actual data. With 1M records, you re-wrap 1M x 60-byte wrapped DEKs (~1 second), not 1M x (variable) credentials.
+
+### Implementation Details
+
+- **Change scope**: Entirely contained in `backend/src/crypto/aes.rs` -- zero changes to models, services, handlers, or config
+- **Public API**: `encrypt()`, `decrypt()`, `from_config()`, `has_previous()`, `decrypt_stats()` signatures unchanged; `rewrap()` added as new public method
+- **Backward compatibility**: v0 (legacy) and v1 (Phase 1) ciphertexts remain fully decryptable via the fallback chain
+- **DEK security**: Each DEK is held in `Zeroizing<[u8; 32]>`, which overwrites memory on drop
+- **Nonce separation**: DEK-wrapping nonce and data-encryption nonce are independently random, serving different AES-256-GCM instances with different keys
+- **No new dependencies**: Uses existing `aes-gcm`, `rand`, `zeroize`, `sha2` crates
 
 ---
 
@@ -709,15 +825,15 @@ graph LR
 
 ## Comparison: Key Management Approaches
 
-| Aspect | Phase 1 (Current) | Phase 2-3 (Envelope + Trait) | Phase 4 (Cloud KMS) | Phase 5-6 (Per-tenant + BYOK) |
+| Aspect | Phase 1-2 (Current) | Phase 3 (Trait) | Phase 4 (Cloud KMS) | Phase 5-6 (Per-tenant + BYOK) |
 |--------|-------------------|------------------------------|---------------------|-------------------------------|
-| **Key storage** | Env var (process memory) | Env var (wraps DEKs) | HSM-backed (FIPS 140-2 Level 3) | Customer KMS/HSM |
-| **Key rotation** | Static + manual previous | KEK rotation re-wraps DEKs only | KMS auto-rotation (annual + on-demand) | Customer controlled |
-| **Blast radius** | Total (all data exposed) | Per-record DEK isolation | Per-record DEK + HSM protection | Per-tenant (isolated) |
-| **Re-encrypt on rotate** | All data (future job) | Only DEKs (small) | Only DEKs (small) | Only DEKs (small) |
+| **Key storage** | Env var (wraps DEKs) | Pluggable backend | HSM-backed (FIPS 140-2 Level 3) | Customer KMS/HSM |
+| **Key rotation** | KEK rotation re-wraps DEKs via `rewrap()` | Same + pluggable providers | KMS auto-rotation (annual + on-demand) | Customer controlled |
+| **Blast radius** | Per-record DEK isolation | Per-record DEK isolation | Per-record DEK + HSM protection | Per-tenant (isolated) |
+| **Re-encrypt on rotate** | Only DEKs (60 bytes each) | Only DEKs (small) | Only DEKs (small) | Only DEKs (small) |
 | **Customer key control** | None | None | None | Full root key control + BYOK |
 | **Crypto-shredding** | No | No | No (NyxID key) | Yes (customer deletes their key) |
-| **Complexity** | Low | Medium | Medium | High |
+| **Complexity** | Medium | Medium | Medium | High |
 
 ---
 

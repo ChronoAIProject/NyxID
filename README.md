@@ -476,7 +476,7 @@ All configuration is loaded from environment variables. A `.env` file is support
 
 | Variable                   | Default | Description                                                          |
 |----------------------------|---------|----------------------------------------------------------------------|
-| `ENCRYPTION_KEY_PREVIOUS`  | *(none)* | Previous encryption key for zero-downtime key rotation (64 hex chars). Set this to the old `ENCRYPTION_KEY` value when rotating keys. Phase 1 supports one previous key at a time; finish re-encrypting old-key data before rotating again. See [docs/SECURITY.md](docs/SECURITY.md#key-rotation) for the full procedure and `/health` decrypt counters. |
+| `ENCRYPTION_KEY_PREVIOUS`  | *(none)* | Previous encryption key for zero-downtime key rotation (64 hex chars). Set this to the old `ENCRYPTION_KEY` value when rotating keys. With Phase 2 envelope encryption, KEK rotation only re-wraps per-record DEK blobs (via `rewrap()`) without re-encrypting data. One previous key supported at a time; finish re-wrapping before rotating again. See [docs/SECURITY.md](docs/SECURITY.md#key-rotation) for the full procedure and `/health` decrypt counters. |
 
 ### Server
 
@@ -620,7 +620,7 @@ For the full schema with fields and relationships, see **[docs/ARCHITECTURE.md](
 |----------------------|------------------------------------------------|
 | Password hashing     | Argon2id (m=64MiB, t=3, p=4)                  |
 | JWT signing          | RS256 with 4096-bit RSA keys                   |
-| Encryption at rest   | AES-256-GCM with random 96-bit nonces          |
+| Encryption at rest   | AES-256-GCM envelope encryption (per-record DEKs wrapped by KEK) |
 | Token hashing        | SHA-256                                         |
 | PKCE                 | S256 (SHA-256 code challenge)                   |
 

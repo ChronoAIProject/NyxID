@@ -182,7 +182,7 @@ Phase 1 has been implemented with two important clarifications:
 
 ## Future Phases (out of scope for Phase 1)
 
-- **Phase 2**: Envelope encryption (per-record DEKs wrapped by KEK)
+- **Phase 2**: COMPLETED -- Envelope encryption (per-record DEKs wrapped by KEK). Implemented in `backend/src/crypto/aes.rs` with v2 ciphertext format, `rewrap()` for efficient KEK rotation, and full backward compatibility with v0/v1 ciphertexts. See `docs/ENVELOPE_ENCRYPTION_PLAN.md` and `docs/ENCRYPTION_ARCHITECTURE.md` for details.
 - **Phase 3**: `KeyProvider` trait (pluggable KMS backends)
 - **Phase 4**: AWS KMS / GCP Cloud KMS integration
 - **Phase 5**: Background re-encryption job

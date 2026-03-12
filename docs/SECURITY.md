@@ -39,7 +39,7 @@ All sensitive data is encrypted using **AES-256-GCM** (Galois/Counter Mode):
 
 ### Ciphertext Formats
 
-NyxID supports two ciphertext formats. All new encryptions use v1. Decryption transparently handles both.
+NyxID supports three ciphertext formats. All new encryptions use v2 (envelope encryption). Decryption transparently handles all formats via a fallback chain.
 
 **v0 (legacy):**
 
@@ -47,7 +47,7 @@ NyxID supports two ciphertext formats. All new encryptions use v1. Decryption tr
 nonce(12) || ciphertext || tag(16)
 ```
 
-**v1 (current):**
+**v1 (Phase 1):**
 
 ```
 0x01 || key_id(1) || nonce(12) || ciphertext || tag(16)
@@ -56,20 +56,47 @@ nonce(12) || ciphertext || tag(16)
 - `0x01` -- version byte
 - `key_id` -- a stable 1-byte identifier derived from `SHA-256(key)[0]`
 - NyxID also accepts the earlier draft Phase 1 header (`0x00` / `0x01`) for local backward compatibility during rollout
-- Detection: a ciphertext is treated as v1 if its length is >= 30 bytes and the first byte is `0x01`
+
+**v2 (current -- envelope encryption):**
+
+```
+0x02 || kek_id(1) || wrapped_dek_len(2 BE) || wrapped_dek(60) || data_nonce(12) || data_ciphertext || data_tag(16)
+```
+
+- `0x02` -- version byte for envelope encryption
+- `kek_id` -- stable 1-byte identifier of the KEK that wrapped the DEK, derived from `SHA-256(kek)[0]`
+- `wrapped_dek_len` -- big-endian u16, length of the wrapped DEK blob (currently always 60)
+- `wrapped_dek` -- `dek_nonce(12) || encrypted_dek(32) || dek_tag(16)` -- the per-record DEK encrypted with the KEK
+- `data_nonce` -- random 12-byte nonce for data encryption (separate from the DEK-wrapping nonce)
+- `data_ciphertext || data_tag` -- the actual credential encrypted with the per-record DEK
+
+Each v2 encryption generates a fresh random 32-byte DEK that is used once and immediately zeroized. The KEK never directly touches plaintext data.
 
 ### Decrypt Fallback Chain
 
-When decrypting, the system tries keys in this order:
+When decrypting, the system tries formats and keys in this order:
 
-1. If data looks like v1 and the `key_id` matches the configured current key: try v1 payload with current key
-2. If data looks like v1 and the `key_id` matches the configured previous key: try v1 payload with previous key
-3. If data uses the draft Phase 1 header (`0x00` / `0x01`): try current key, then previous key for compatibility
-4. Try v0 (full data as `nonce || ciphertext || tag`) with current key
-5. Try v0 with previous key
-6. Return error if all attempts fail
+1. If data looks like v2 (len >= 92 and byte 0 == `0x02`): unwrap DEK with current KEK, decrypt data with DEK
+2. If v2 and `kek_id` matches the previous KEK: unwrap DEK with previous KEK, decrypt data with DEK
+3. If data looks like v1 (len >= 30 and byte 0 == `0x01`) and `key_id` matches current key: try v1 payload with current key
+4. If v1 and `key_id` matches previous key: try v1 payload with previous key
+5. If v1 uses the draft Phase 1 header (`0x00` / `0x01`): try current key, then previous key for compatibility
+6. Try v0 (full data as `nonce || ciphertext || tag`) with current key
+7. Try v0 with previous key
+8. Return error if all attempts fail
 
 Error messages do not reveal which key was tried or which format was detected.
+
+### Rewrap Capability
+
+The `rewrap()` method enables efficient KEK rotation for v2 ciphertexts without full re-encryption:
+
+1. Unwraps the per-record DEK with the previous KEK
+2. Re-wraps the DEK with the current KEK using a fresh random nonce
+3. Replaces only the header and wrapped DEK portion (first 64 bytes)
+4. The data nonce, ciphertext, and authentication tag are byte-for-byte unchanged
+
+`rewrap()` is idempotent: if the ciphertext is already wrapped with the current KEK, it returns the input unchanged. It only operates on v2 envelopes; v0 and v1 data must be fully re-encrypted via `decrypt()` + `encrypt()`.
 
 ### What Is Encrypted
 
@@ -89,10 +116,11 @@ Error messages do not reveal which key was tried or which format was detected.
 - The encryption key must be generated using a cryptographically secure RNG: `openssl rand -hex 32`
 - Never reuse the development key in production
 - All instances in a horizontal scaling setup must share the same `ENCRYPTION_KEY` and `ENCRYPTION_KEY_PREVIOUS`
-- Only one previous key is supported at a time in Phase 1
+- Only one previous key is supported at a time
 - The key is validated at startup -- all-zero keys are rejected
 - The `EncryptionKeys` struct redacts key material in `Debug` output to prevent accidental logging
-- `/health` exposes decrypt counters so operators can confirm whether traffic still depends on `v1_previous`, `v0_current`, or `v0_previous`
+- `/health` exposes decrypt counters so operators can confirm whether traffic still depends on `v2_previous`, `v1_current`, `v1_previous`, `v0_current`, or `v0_previous`
+- v2 envelope encryption ensures the KEK never directly touches plaintext data -- only per-record DEKs encrypt data
 
 ### Key Rotation
 
@@ -108,12 +136,12 @@ NyxID supports zero-downtime key rotation via the `ENCRYPTION_KEY_PREVIOUS` envi
 3. Set `ENCRYPTION_KEY` to the newly generated key
 4. Restart all NyxID instances
 5. Verify the service is healthy: `curl /health`
-6. All new encryptions now use the new key (v1 format). Existing data decrypts via the fallback chain.
-7. Re-encrypt all data that still depends on the old key, including legacy `v0` ciphertexts and any `v1` ciphertexts written before the rotation.
-8. Watch `/health` and wait until `decrypt_stats.v1_previous`, `decrypt_stats.v0_current`, and `decrypt_stats.v0_previous` remain at zero for your normal workload window.
+6. All new encryptions now use the new key (v2 envelope format). Existing data decrypts via the fallback chain.
+7. For v2 ciphertexts: run a background job calling `rewrap()` on each record (re-wraps only the 60-byte DEK blob, data untouched). For v0/v1 ciphertexts: re-encrypt via `decrypt()` + `encrypt()`.
+8. Watch `/health` and wait until `decrypt_stats.v2_previous`, `decrypt_stats.v1_current`, `decrypt_stats.v1_previous`, `decrypt_stats.v0_current`, and `decrypt_stats.v0_previous` remain at zero for your normal workload window.
 9. Remove `ENCRYPTION_KEY_PREVIOUS` and restart once you have confirmed the old key is no longer needed.
 
-**Important:** Do not automate repeated key rotation with Phase 1 alone. Only one previous key is supported, so you must finish re-encrypting old-key data before rotating again.
+**Important:** Only one previous key is supported, so you must finish re-wrapping/re-encrypting old-key data before rotating again.
 
 ### Key Rotation Rollback
 
@@ -653,7 +681,7 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 | Per-user service credentials   | Critical    | AES-256-GCM encryption              |
 | MFA secrets                    | Critical    | AES-256-GCM encryption              |
 | RSA private key                | Critical    | File permissions (0600)              |
-| Encryption key                 | Critical    | Environment variable                 |
+| Encryption key (KEK)           | Critical    | Environment variable, wraps per-record DEKs |
 | Session tokens                 | High        | SHA-256 hashed in DB                 |
 | API keys                       | High        | SHA-256 hashed, prefix-only display  |
 | User PII (email, name)         | Medium      | Access control, audit logging        |
@@ -664,7 +692,7 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 
 | Threat                          | Mitigation                                          |
 |---------------------------------|-----------------------------------------------------|
-| Credential theft (DB breach)    | AES-256-GCM encryption at rest                      |
+| Credential theft (DB breach)    | AES-256-GCM envelope encryption (per-record DEKs)   |
 | Password brute force            | Argon2id cost parameters, rate limiting              |
 | Session hijacking               | HttpOnly cookies, SameSite, short JWT TTL            |
 | CSRF                            | SameSite cookies, OAuth state parameter              |

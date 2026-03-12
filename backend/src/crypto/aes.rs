@@ -14,8 +14,14 @@ use crate::errors::AppError;
 /// Nonce size for AES-256-GCM (96 bits / 12 bytes).
 const NONCE_SIZE: usize = 12;
 
+/// AES-256-GCM authentication tag size (128 bits / 16 bytes).
+const TAG_SIZE: usize = 16;
+
 /// Version byte for the v1 envelope format.
 const VERSION_V1: u8 = 0x01;
+
+/// Version byte for the v2 envelope encryption format (per-record DEK).
+const VERSION_V2: u8 = 0x02;
 
 /// Draft key IDs used by the initial uncommitted Phase 1 implementation.
 /// We keep support for these so locally written draft ciphertexts still decrypt
@@ -27,10 +33,21 @@ const DRAFT_KEY_ID_PREVIOUS: u8 = 0x01;
 const V1_HEADER_SIZE: usize = 2;
 
 /// Minimum v1 ciphertext: header(2) + nonce(12) + tag(16) = 30 bytes.
-const V1_MIN_SIZE: usize = V1_HEADER_SIZE + NONCE_SIZE + 16;
+const V1_MIN_SIZE: usize = V1_HEADER_SIZE + NONCE_SIZE + TAG_SIZE;
+
+/// Size of the v2 header: version(1) + kek_id(1) + wrapped_dek_len(2 BE) = 4 bytes.
+const V2_HEADER_SIZE: usize = 4;
+
+/// Size of a wrapped DEK: dek_nonce(12) + encrypted_dek(32) + dek_tag(16) = 60 bytes.
+const WRAPPED_DEK_SIZE: usize = NONCE_SIZE + 32 + TAG_SIZE;
+
+/// Minimum v2 ciphertext: header(4) + wrapped_dek(60) + data_nonce(12) + tag(16) = 92 bytes.
+const V2_MIN_SIZE: usize = V2_HEADER_SIZE + WRAPPED_DEK_SIZE + NONCE_SIZE + TAG_SIZE;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct EncryptionDecryptStats {
+    pub v2_current: u64,
+    pub v2_previous: u64,
     pub v1_current: u64,
     pub v1_previous: u64,
     pub v0_current: u64,
@@ -41,12 +58,15 @@ pub struct EncryptionDecryptStats {
 
 #[derive(Default)]
 struct DecryptCounters {
+    v2_current: AtomicU64,
+    v2_previous: AtomicU64,
     v1_current: AtomicU64,
     v1_previous: AtomicU64,
     v0_current: AtomicU64,
     v0_previous: AtomicU64,
     unknown_key_id_failures: AtomicU64,
     decrypt_failures: AtomicU64,
+    logged_v2_previous: AtomicBool,
     logged_v1_previous: AtomicBool,
     logged_v0_current: AtomicBool,
     logged_v0_previous: AtomicBool,
@@ -56,6 +76,8 @@ struct DecryptCounters {
 impl DecryptCounters {
     fn snapshot(&self) -> EncryptionDecryptStats {
         EncryptionDecryptStats {
+            v2_current: self.v2_current.load(Ordering::Relaxed),
+            v2_previous: self.v2_previous.load(Ordering::Relaxed),
             v1_current: self.v1_current.load(Ordering::Relaxed),
             v1_previous: self.v1_previous.load(Ordering::Relaxed),
             v0_current: self.v0_current.load(Ordering::Relaxed),
@@ -150,38 +172,102 @@ impl EncryptionKeys {
         self.counters.snapshot()
     }
 
-    /// Encrypt plaintext using AES-256-GCM with the v1 envelope format.
+    /// Encrypt plaintext using the v2 envelope encryption format.
     ///
-    /// Output: `0x01 || stable_key_id(1) || nonce(12) || ciphertext || tag(16)`
+    /// A fresh random DEK encrypts the data, then the DEK is wrapped by the
+    /// current KEK. The DEK is zeroized after use.
+    ///
+    /// Output: `0x02 || kek_id(1) || wrapped_dek_len(2 BE) || wrapped_dek(60) || data_nonce(12) || data_ciphertext || data_tag(16)`
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, AppError> {
-        let cipher = Aes256Gcm::new_from_slice(self.current.as_ref())
-            .map_err(|e| AppError::Internal(format!("Failed to create AES cipher: {e}")))?;
+        // Generate random 32-byte DEK
+        let mut dek = Zeroizing::new([0u8; 32]);
+        rand::thread_rng().fill_bytes(dek.as_mut());
 
-        let mut nonce_bytes = [0u8; NONCE_SIZE];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        // Encrypt plaintext with DEK (AES-256-GCM)
+        let data_cipher = Aes256Gcm::new_from_slice(dek.as_ref())
+            .map_err(|e| AppError::Internal(format!("Failed to create DEK cipher: {e}")))?;
+        let mut data_nonce_bytes = [0u8; NONCE_SIZE];
+        rand::thread_rng().fill_bytes(&mut data_nonce_bytes);
+        let data_nonce = Nonce::from_slice(&data_nonce_bytes);
+        let data_ciphertext = data_cipher
+            .encrypt(data_nonce, plaintext)
+            .map_err(|e| AppError::Internal(format!("AES data encryption failed: {e}")))?;
 
-        let ciphertext = cipher
-            .encrypt(nonce, plaintext)
-            .map_err(|e| AppError::Internal(format!("AES encryption failed: {e}")))?;
+        // Wrap DEK with current KEK (AES-256-GCM, separate nonce)
+        let kek_cipher = Aes256Gcm::new_from_slice(self.current.as_ref())
+            .map_err(|e| AppError::Internal(format!("Failed to create KEK cipher: {e}")))?;
+        let mut dek_nonce_bytes = [0u8; NONCE_SIZE];
+        rand::thread_rng().fill_bytes(&mut dek_nonce_bytes);
+        let dek_nonce = Nonce::from_slice(&dek_nonce_bytes);
+        let wrapped_dek_ct = kek_cipher
+            .encrypt(dek_nonce, dek.as_ref().as_ref())
+            .map_err(|e| AppError::Internal(format!("AES DEK wrapping failed: {e}")))?;
 
-        let mut result = Vec::with_capacity(V1_HEADER_SIZE + NONCE_SIZE + ciphertext.len());
-        result.push(VERSION_V1);
+        // wrapped_dek = dek_nonce(12) + encrypted_dek(32) + dek_tag(16) = 60 bytes
+        let wrapped_dek_len = (NONCE_SIZE + wrapped_dek_ct.len()) as u16;
+
+        // Assemble v2 envelope
+        let total_size =
+            V2_HEADER_SIZE + wrapped_dek_len as usize + NONCE_SIZE + data_ciphertext.len();
+        let mut result = Vec::with_capacity(total_size);
+        result.push(VERSION_V2);
         result.push(self.current_id);
-        result.extend_from_slice(&nonce_bytes);
-        result.extend_from_slice(&ciphertext);
+        result.extend_from_slice(&wrapped_dek_len.to_be_bytes());
+        result.extend_from_slice(&dek_nonce_bytes);
+        result.extend_from_slice(&wrapped_dek_ct);
+        result.extend_from_slice(&data_nonce_bytes);
+        result.extend_from_slice(&data_ciphertext);
 
+        // DEK is automatically zeroized when `dek` drops
         Ok(result)
     }
 
     /// Decrypt ciphertext, trying the fallback chain:
     ///
-    /// 1. If it looks like v1: try v1 payload with current key, then previous key
-    /// 2. Try v0 (raw `nonce || ciphertext || tag`) with current key
-    /// 3. Try v0 with previous key
-    /// 4. Return error if all fail
+    /// 1. If it looks like v2: try v2 envelope with current KEK, then previous KEK
+    /// 2. If it looks like v1: try v1 payload with current key, then previous key
+    /// 3. Try v0 (raw `nonce || ciphertext || tag`) with current key
+    /// 4. Try v0 with previous key
+    /// 5. Return error if all fail
     pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
         let mut unknown_key_id = None;
+
+        // -- v2 envelope encryption --
+        if looks_like_v2(ciphertext) {
+            let kek_id = ciphertext[1];
+            let wrapped_dek_len = u16::from_be_bytes([ciphertext[2], ciphertext[3]]) as usize;
+            let required_len = V2_HEADER_SIZE + WRAPPED_DEK_SIZE + NONCE_SIZE + TAG_SIZE;
+
+            if wrapped_dek_len == WRAPPED_DEK_SIZE && ciphertext.len() >= required_len {
+                let wrapped_dek = &ciphertext[V2_HEADER_SIZE..V2_HEADER_SIZE + wrapped_dek_len];
+                let data_payload = &ciphertext[V2_HEADER_SIZE + wrapped_dek_len..];
+
+                if kek_id == self.current_id {
+                    if let Ok(plain) =
+                        decrypt_v2_payload(wrapped_dek, data_payload, self.current.as_ref())
+                    {
+                        self.counters.v2_current.fetch_add(1, Ordering::Relaxed);
+                        return Ok(plain);
+                    }
+                } else if self.previous_id == Some(kek_id) {
+                    if let Some(ref prev) = self.previous
+                        && let Ok(plain) =
+                            decrypt_v2_payload(wrapped_dek, data_payload, prev.as_ref())
+                    {
+                        self.counters.v2_previous.fetch_add(1, Ordering::Relaxed);
+                        self.log_once(
+                            &self.counters.logged_v2_previous,
+                            "Decrypted v2 envelope with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
+                        );
+                        return Ok(plain);
+                    }
+                } else {
+                    unknown_key_id = Some(kek_id);
+                }
+            }
+        }
+
+        // -- v1 versioned format --
         if looks_like_v1(ciphertext) {
             let key_id = ciphertext[1];
             let payload = &ciphertext[V1_HEADER_SIZE..];
@@ -265,11 +351,103 @@ impl EncryptionKeys {
         ))
     }
 
+    /// Re-wrap a v2 ciphertext's DEK from the previous KEK to the current KEK.
+    ///
+    /// Only the wrapped DEK portion changes; the encrypted data is untouched.
+    /// Returns the original ciphertext unchanged if it is already wrapped with
+    /// the current KEK.
+    pub fn rewrap(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
+        if !looks_like_v2(ciphertext) {
+            return Err(AppError::Internal(
+                "rewrap() only supports v2 envelope format".to_string(),
+            ));
+        }
+
+        let kek_id = ciphertext[1];
+        let wrapped_dek_len = u16::from_be_bytes([ciphertext[2], ciphertext[3]]) as usize;
+        if wrapped_dek_len != WRAPPED_DEK_SIZE {
+            return Err(AppError::Internal(format!(
+                "Malformed v2 ciphertext: wrapped_dek_len must be {WRAPPED_DEK_SIZE} bytes",
+            )));
+        }
+
+        let required_len = V2_HEADER_SIZE + WRAPPED_DEK_SIZE + NONCE_SIZE + TAG_SIZE;
+        if ciphertext.len() < required_len {
+            return Err(AppError::Internal(
+                "Malformed v2 ciphertext: too short".to_string(),
+            ));
+        }
+
+        // Already wrapped with current KEK -- return as-is.
+        if kek_id == self.current_id {
+            return Ok(ciphertext.to_vec());
+        }
+
+        // Must have a previous key to unwrap.
+        let prev = self.previous.as_ref().ok_or_else(|| {
+            AppError::Internal("No previous key configured for rewrap".to_string())
+        })?;
+
+        if self.previous_id != Some(kek_id) {
+            return Err(AppError::Internal(
+                "Ciphertext kek_id does not match current or previous key".to_string(),
+            ));
+        }
+
+        let wrapped_dek = &ciphertext[V2_HEADER_SIZE..V2_HEADER_SIZE + wrapped_dek_len];
+        let data_portion = &ciphertext[V2_HEADER_SIZE + wrapped_dek_len..];
+
+        // Unwrap DEK with previous KEK.
+        let (dek_nonce_bytes, dek_ciphertext) = wrapped_dek.split_at(NONCE_SIZE);
+        let dek_nonce = Nonce::from_slice(dek_nonce_bytes);
+        let prev_cipher = Aes256Gcm::new_from_slice(prev.as_ref())
+            .map_err(|e| AppError::Internal(format!("Failed to create KEK cipher: {e}")))?;
+        let dek_bytes = Zeroizing::new(
+            prev_cipher
+                .decrypt(dek_nonce, dek_ciphertext)
+                .map_err(|e| AppError::Internal(format!("DEK unwrap failed during rewrap: {e}")))?,
+        );
+        let dek = Zeroizing::new(
+            <[u8; 32]>::try_from(dek_bytes.as_slice())
+                .map_err(|_| AppError::Internal("Unwrapped DEK is not 32 bytes".to_string()))?,
+        );
+
+        // Re-wrap DEK with current KEK.
+        let new_cipher = Aes256Gcm::new_from_slice(self.current.as_ref())
+            .map_err(|e| AppError::Internal(format!("Failed to create KEK cipher: {e}")))?;
+        let mut new_nonce_bytes = [0u8; NONCE_SIZE];
+        rand::thread_rng().fill_bytes(&mut new_nonce_bytes);
+        let new_nonce = Nonce::from_slice(&new_nonce_bytes);
+        let new_wrapped_ct = new_cipher
+            .encrypt(new_nonce, dek.as_ref().as_ref())
+            .map_err(|e| AppError::Internal(format!("DEK re-wrapping failed: {e}")))?;
+
+        let new_wrapped_len = (NONCE_SIZE + new_wrapped_ct.len()) as u16;
+
+        // Assemble new v2 envelope with current KEK.
+        let total = V2_HEADER_SIZE + new_wrapped_len as usize + data_portion.len();
+        let mut result = Vec::with_capacity(total);
+        result.push(VERSION_V2);
+        result.push(self.current_id);
+        result.extend_from_slice(&new_wrapped_len.to_be_bytes());
+        result.extend_from_slice(&new_nonce_bytes);
+        result.extend_from_slice(&new_wrapped_ct);
+        result.extend_from_slice(data_portion);
+
+        // DEK is automatically zeroized when `dek` drops
+        Ok(result)
+    }
+
     fn log_once(&self, flag: &AtomicBool, message: &str) {
         if !flag.swap(true, Ordering::Relaxed) {
             tracing::warn!("{message}");
         }
     }
+}
+
+/// Check if data looks like a v2 envelope.
+fn looks_like_v2(data: &[u8]) -> bool {
+    data.len() >= V2_MIN_SIZE && data[0] == VERSION_V2
 }
 
 /// Check if data looks like a v1 envelope.
@@ -280,6 +458,38 @@ fn looks_like_v1(data: &[u8]) -> bool {
 fn derive_key_id(key: &[u8]) -> u8 {
     let digest = Sha256::digest(key);
     digest[0]
+}
+
+/// Unwrap a DEK from the wrapped blob and decrypt the data payload.
+///
+/// `wrapped_dek` = `dek_nonce(12) || encrypted_dek(32) || dek_tag(16)`
+/// `data_payload` = `data_nonce(12) || data_ciphertext || data_tag(16)`
+fn decrypt_v2_payload(
+    wrapped_dek: &[u8],
+    data_payload: &[u8],
+    kek: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    if wrapped_dek.len() < NONCE_SIZE + TAG_SIZE {
+        return Err(AppError::Internal("Wrapped DEK too short".to_string()));
+    }
+
+    // Unwrap DEK
+    let (dek_nonce_bytes, dek_ciphertext) = wrapped_dek.split_at(NONCE_SIZE);
+    let dek_nonce = Nonce::from_slice(dek_nonce_bytes);
+    let kek_cipher = Aes256Gcm::new_from_slice(kek)
+        .map_err(|e| AppError::Internal(format!("Failed to create KEK cipher: {e}")))?;
+    let dek_bytes = Zeroizing::new(
+        kek_cipher
+            .decrypt(dek_nonce, dek_ciphertext)
+            .map_err(|e| AppError::Internal(format!("DEK unwrap failed: {e}")))?,
+    );
+    let dek = Zeroizing::new(
+        <[u8; 32]>::try_from(dek_bytes.as_slice())
+            .map_err(|_| AppError::Internal("Unwrapped DEK is not 32 bytes".to_string()))?,
+    );
+
+    // Decrypt data with DEK
+    decrypt_raw(data_payload, dek.as_ref())
 }
 
 /// Low-level AES-256-GCM decryption: expects `nonce(12) || ciphertext || tag`.
@@ -360,6 +570,32 @@ pub fn decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, AppError> {
     cipher
         .decrypt(nonce, encrypted)
         .map_err(|e| AppError::Internal(format!("AES decryption failed: {e}")))
+}
+
+/// Encrypt plaintext using AES-256-GCM with the v1 format (kept for tests).
+///
+/// Output: `0x01 || key_id(1) || nonce(12) || ciphertext || tag(16)`
+#[cfg(test)]
+fn encrypt_v1(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, AppError> {
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|e| AppError::Internal(format!("Failed to create AES cipher: {e}")))?;
+
+    let mut nonce_bytes = [0u8; NONCE_SIZE];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|e| AppError::Internal(format!("AES encryption failed: {e}")))?;
+
+    let key_id = derive_key_id(key);
+    let mut result = Vec::with_capacity(V1_HEADER_SIZE + NONCE_SIZE + ciphertext.len());
+    result.push(VERSION_V1);
+    result.push(key_id);
+    result.extend_from_slice(&nonce_bytes);
+    result.extend_from_slice(&ciphertext);
+
+    Ok(result)
 }
 
 /// Parse a hex-encoded encryption key into raw bytes (kept for tests).
@@ -524,7 +760,11 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // -- EncryptionKeys v1 tests --
+    // -- EncryptionKeys API tests --
+    // These tests exercise the EncryptionKeys public API (encrypt/decrypt).
+    // Originally written for v1, they now verify v2 output from encrypt() while
+    // continuing to test v0/v1 backward-compatible decrypt paths. Tests named
+    // "v1_decrypt_*" specifically test decryption of legacy v1 ciphertexts.
 
     #[test]
     fn v1_roundtrip() {
@@ -534,8 +774,8 @@ mod tests {
         let plaintext = b"v1 encrypted data";
         let encrypted = keys.encrypt(plaintext).unwrap();
 
-        // Verify v1 header
-        assert_eq!(encrypted[0], VERSION_V1);
+        // Verify v2 header (encrypt now produces v2 format)
+        assert_eq!(encrypted[0], VERSION_V2);
         assert_eq!(encrypted[1], derive_key_id(keys.current.as_ref()));
 
         let decrypted = keys.decrypt(&encrypted).unwrap();
@@ -629,7 +869,7 @@ mod tests {
         let key_b_hex = "bb".repeat(32);
         let key_a_id = derive_key_id(&hex::decode(&key_a_hex).unwrap());
 
-        // Phase 1: encrypt with key A
+        // Phase 1: encrypt with key A (now produces v2)
         let config_a = test_config(&key_a_hex, None);
         let keys_a = EncryptionKeys::from_config(&config_a);
         let encrypted = keys_a.encrypt(b"rotation test").unwrap();
@@ -733,6 +973,8 @@ mod tests {
         assert_eq!(
             stats,
             EncryptionDecryptStats {
+                v2_current: 0,
+                v2_previous: 0,
                 v1_current: 0,
                 v1_previous: 0,
                 v0_current: 0,
@@ -770,12 +1012,459 @@ mod tests {
         let decrypted = keys.decrypt(&v0_encrypted).unwrap();
         assert_eq!(decrypted, plaintext);
 
-        // EncryptionKeys encrypt -> verify it's v1
-        let v1_encrypted = keys.encrypt(plaintext).unwrap();
+        // EncryptionKeys encrypt -> verify it's v2
+        let v2_encrypted = keys.encrypt(plaintext).unwrap();
+        assert_eq!(v2_encrypted[0], VERSION_V2);
+
+        // v2 -> EncryptionKeys decrypt
+        let decrypted2 = keys.decrypt(&v2_encrypted).unwrap();
+        assert_eq!(decrypted2, plaintext);
+    }
+
+    // -- v1 backward compatibility: decrypt v1-formatted ciphertexts --
+
+    #[test]
+    fn v1_decrypt_v1_format_ciphertext() {
+        let key_hex = "ab".repeat(32);
+        let key_bytes = hex::decode(&key_hex).unwrap();
+        let keys = EncryptionKeys::from_config(&test_config(&key_hex, None));
+
+        // Manually produce a v1-format ciphertext
+        let v1_encrypted = encrypt_v1(b"v1 format data", &key_bytes).unwrap();
         assert_eq!(v1_encrypted[0], VERSION_V1);
 
-        // v1 -> EncryptionKeys decrypt
-        let decrypted2 = keys.decrypt(&v1_encrypted).unwrap();
-        assert_eq!(decrypted2, plaintext);
+        let decrypted = keys.decrypt(&v1_encrypted).unwrap();
+        assert_eq!(decrypted, b"v1 format data");
+    }
+
+    #[test]
+    fn v1_decrypt_v1_format_with_previous_key() {
+        let current_hex = "ab".repeat(32);
+        let previous_hex = "cd".repeat(32);
+        let previous_bytes = hex::decode(&previous_hex).unwrap();
+        let keys = EncryptionKeys::from_config(&test_config(&current_hex, Some(&previous_hex)));
+
+        let v1_encrypted = encrypt_v1(b"v1 previous key", &previous_bytes).unwrap();
+        let decrypted = keys.decrypt(&v1_encrypted).unwrap();
+        assert_eq!(decrypted, b"v1 previous key");
+    }
+
+    // -- v2 envelope encryption tests --
+
+    #[test]
+    fn v2_roundtrip() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let plaintext = b"v2 envelope encrypted data";
+        let encrypted = keys.encrypt(plaintext).unwrap();
+
+        assert_eq!(encrypted[0], VERSION_V2);
+        assert_eq!(encrypted[1], keys.current_id);
+
+        let wrapped_dek_len = u16::from_be_bytes([encrypted[2], encrypted[3]]) as usize;
+        assert_eq!(wrapped_dek_len, WRAPPED_DEK_SIZE);
+
+        let decrypted = keys.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn v2_different_deks() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let plaintext = b"same data";
+        let enc1 = keys.encrypt(plaintext).unwrap();
+        let enc2 = keys.encrypt(plaintext).unwrap();
+
+        // Different DEKs and nonces means completely different output
+        assert_ne!(enc1, enc2);
+
+        assert_eq!(keys.decrypt(&enc1).unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&enc2).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn v2_empty_plaintext() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let encrypted = keys.encrypt(b"").unwrap();
+        assert_eq!(encrypted[0], VERSION_V2);
+
+        let decrypted = keys.decrypt(&encrypted).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn v2_large_plaintext() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let plaintext = vec![0x42u8; 100_000];
+        let encrypted = keys.encrypt(&plaintext).unwrap();
+        let decrypted = keys.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn v2_tamper_wrapped_dek() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let mut encrypted = keys.encrypt(b"tamper dek test").unwrap();
+        // Flip a byte inside the wrapped DEK region (after header)
+        encrypted[V2_HEADER_SIZE + 5] ^= 0xFF;
+
+        assert!(keys.decrypt(&encrypted).is_err());
+    }
+
+    #[test]
+    fn v2_tamper_data() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let mut encrypted = keys.encrypt(b"tamper data test").unwrap();
+        // Flip the last byte (in the data tag region)
+        let last = encrypted.len() - 1;
+        encrypted[last] ^= 0xFF;
+
+        assert!(keys.decrypt(&encrypted).is_err());
+    }
+
+    #[test]
+    fn v2_tamper_kek_id() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let mut encrypted = keys.encrypt(b"tamper kek_id test").unwrap();
+        // Corrupt the kek_id byte
+        encrypted[1] ^= 0xFF;
+
+        assert!(keys.decrypt(&encrypted).is_err());
+    }
+
+    #[test]
+    fn v2_kek_rotation() {
+        let key_a_hex = "aa".repeat(32);
+        let key_b_hex = "bb".repeat(32);
+
+        // Encrypt with KEK-A
+        let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
+        let encrypted = keys_a.encrypt(b"kek rotation test").unwrap();
+
+        // Rotate: KEK-B current, KEK-A previous
+        let keys_rotated = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
+        let decrypted = keys_rotated.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, b"kek rotation test");
+
+        // Verify stats show v2_previous
+        let stats = keys_rotated.decrypt_stats();
+        assert_eq!(stats.v2_previous, 1);
+        assert_eq!(stats.v2_current, 0);
+    }
+
+    #[test]
+    fn v2_rewrap_roundtrip() {
+        let key_a_hex = "aa".repeat(32);
+        let key_b_hex = "bb".repeat(32);
+
+        // Encrypt with KEK-A
+        let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
+        let encrypted = keys_a.encrypt(b"rewrap test").unwrap();
+
+        // Rotate: KEK-B current, KEK-A previous
+        let keys_rotated = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
+
+        // Rewrap: unwrap DEK with KEK-A, re-wrap with KEK-B
+        let rewrapped = keys_rotated.rewrap(&encrypted).unwrap();
+
+        // Verify rewrapped ciphertext has KEK-B's id
+        let key_b_id = derive_key_id(&hex::decode(&key_b_hex).unwrap());
+        assert_eq!(rewrapped[0], VERSION_V2);
+        assert_eq!(rewrapped[1], key_b_id);
+
+        // Decrypt rewrapped ciphertext with KEK-B only (no previous)
+        let keys_b_only = EncryptionKeys::from_config(&test_config(&key_b_hex, None));
+        let decrypted = keys_b_only.decrypt(&rewrapped).unwrap();
+        assert_eq!(decrypted, b"rewrap test");
+    }
+
+    #[test]
+    fn v2_rewrap_already_current() {
+        let key_hex = "ab".repeat(32);
+        let keys = EncryptionKeys::from_config(&test_config(&key_hex, None));
+
+        let encrypted = keys.encrypt(b"already current").unwrap();
+        let rewrapped = keys.rewrap(&encrypted).unwrap();
+
+        // Should be identical (no-op)
+        assert_eq!(encrypted, rewrapped);
+    }
+
+    #[test]
+    fn v2_rewrap_non_v2_fails() {
+        let key_hex = "ab".repeat(32);
+        let key_bytes = hex::decode(&key_hex).unwrap();
+        let keys = EncryptionKeys::from_config(&test_config(&key_hex, None));
+
+        // Try to rewrap v0 data
+        let v0_data = encrypt(b"v0 data", &key_bytes).unwrap();
+        assert!(keys.rewrap(&v0_data).is_err());
+
+        // Try to rewrap v1 data
+        let v1_data = encrypt_v1(b"v1 data", &key_bytes).unwrap();
+        assert!(keys.rewrap(&v1_data).is_err());
+    }
+
+    #[test]
+    fn v2_rewrap_preserves_data() {
+        let key_a_hex = "aa".repeat(32);
+        let key_b_hex = "bb".repeat(32);
+
+        let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
+        let encrypted = keys_a.encrypt(b"data must survive rewrap").unwrap();
+
+        // Extract the data portion (after header + wrapped_dek)
+        let wrapped_dek_len = u16::from_be_bytes([encrypted[2], encrypted[3]]) as usize;
+        let data_before = &encrypted[V2_HEADER_SIZE + wrapped_dek_len..];
+
+        // Rewrap
+        let keys_rotated = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
+        let rewrapped = keys_rotated.rewrap(&encrypted).unwrap();
+
+        // Data portion must be identical
+        let new_wrapped_dek_len = u16::from_be_bytes([rewrapped[2], rewrapped[3]]) as usize;
+        let data_after = &rewrapped[V2_HEADER_SIZE + new_wrapped_dek_len..];
+        assert_eq!(data_before, data_after);
+    }
+
+    #[test]
+    fn v2_rollback() {
+        let key_a_hex = "aa".repeat(32);
+        let key_b_hex = "bb".repeat(32);
+
+        // Encrypt with KEK-B
+        let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
+        let encrypted = keys_b.encrypt(b"rollback v2 test").unwrap();
+
+        // Rollback: KEK-A current, KEK-B previous
+        let keys_rollback = EncryptionKeys::from_config(&test_config(&key_a_hex, Some(&key_b_hex)));
+        let decrypted = keys_rollback.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, b"rollback v2 test");
+    }
+
+    #[test]
+    fn v2_decrypt_stats() {
+        let current_hex = "ab".repeat(32);
+        let previous_hex = "cd".repeat(32);
+        let keys = EncryptionKeys::from_config(&test_config(&current_hex, Some(&previous_hex)));
+
+        // Encrypt and decrypt with current key (v2)
+        let encrypted = keys.encrypt(b"current key data").unwrap();
+        keys.decrypt(&encrypted).unwrap();
+
+        let stats = keys.decrypt_stats();
+        assert_eq!(stats.v2_current, 1);
+        assert_eq!(stats.v2_previous, 0);
+        assert_eq!(stats.v1_current, 0);
+        assert_eq!(stats.v0_current, 0);
+    }
+
+    #[test]
+    fn v2_decrypt_stats_previous() {
+        let key_a_hex = "aa".repeat(32);
+        let key_b_hex = "bb".repeat(32);
+
+        // Encrypt with KEK-A
+        let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
+        let encrypted = keys_a.encrypt(b"stats previous test").unwrap();
+
+        // Rotate, decrypt with KEK-B (previous = KEK-A)
+        let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
+        keys_b.decrypt(&encrypted).unwrap();
+
+        let stats = keys_b.decrypt_stats();
+        assert_eq!(stats.v2_current, 0);
+        assert_eq!(stats.v2_previous, 1);
+    }
+
+    #[test]
+    fn v2_cross_version_all_formats() {
+        let key_hex = "dd".repeat(32);
+        let key_bytes = hex::decode(&key_hex).unwrap();
+        let keys = EncryptionKeys::from_config(&test_config(&key_hex, None));
+
+        let plaintext = b"cross format data";
+
+        // v0 decrypt
+        let v0 = encrypt(plaintext, &key_bytes).unwrap();
+        assert_eq!(keys.decrypt(&v0).unwrap(), plaintext);
+
+        // v1 decrypt
+        let v1 = encrypt_v1(plaintext, &key_bytes).unwrap();
+        assert_eq!(keys.decrypt(&v1).unwrap(), plaintext);
+
+        // v2 decrypt (via encrypt)
+        let v2 = keys.encrypt(plaintext).unwrap();
+        assert_eq!(keys.decrypt(&v2).unwrap(), plaintext);
+
+        // Verify stats
+        let stats = keys.decrypt_stats();
+        assert_eq!(stats.v2_current, 1);
+        assert_eq!(stats.v1_current, 1);
+        assert_eq!(stats.v0_current, 1);
+    }
+
+    #[test]
+    fn v2_size_overhead() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let plaintext = b"measure overhead";
+        let encrypted = keys.encrypt(plaintext).unwrap();
+
+        // v2 overhead = header(4) + wrapped_dek(60) + data_nonce(12) + tag(16) = 92
+        // Total = plaintext.len() + 92
+        let expected_size =
+            plaintext.len() + V2_HEADER_SIZE + WRAPPED_DEK_SIZE + NONCE_SIZE + TAG_SIZE;
+        assert_eq!(encrypted.len(), expected_size);
+    }
+
+    #[test]
+    fn v2_rewrap_unknown_kek_id_fails() {
+        let key_a_hex = "aa".repeat(32);
+        let key_b_hex = "bb".repeat(32);
+        let key_c_hex = "cc".repeat(32);
+
+        // Encrypt with KEK-A
+        let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
+        let encrypted = keys_a.encrypt(b"unknown kek test").unwrap();
+
+        // Try to rewrap with KEK-C (current) + KEK-B (previous) -- neither matches KEK-A
+        let keys_c = EncryptionKeys::from_config(&test_config(&key_c_hex, Some(&key_b_hex)));
+        assert!(keys_c.rewrap(&encrypted).is_err());
+    }
+
+    #[test]
+    fn v2_rewrap_rejects_short_wrapped_dek_len() {
+        let key_a_hex = "aa".repeat(32);
+        let key_b_hex = "bb".repeat(32);
+
+        let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
+        let mut encrypted = keys_a.encrypt(b"bad wrapped_dek_len").unwrap();
+
+        // Rotate to KEK-B so rewrap() will use KEK-A as the previous key.
+        let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
+
+        // A wrapped DEK shorter than the nonce length previously panicked in
+        // split_at(); it must now fail closed.
+        encrypted[2] = 0x00;
+        encrypted[3] = (NONCE_SIZE - 1) as u8;
+
+        assert!(keys_b.rewrap(&encrypted).is_err());
+    }
+
+    #[test]
+    fn v2_second_rotation_without_rewrap_fails() {
+        let key_a_hex = "aa".repeat(32);
+        let key_b_hex = "bb".repeat(32);
+        let key_c_hex = "cc".repeat(32);
+
+        // Encrypt with KEK-A
+        let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
+        let encrypted = keys_a.encrypt(b"needs rewrap").unwrap();
+
+        // First rotation: B current, A previous -- still decryptable
+        let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
+        assert_eq!(keys_b.decrypt(&encrypted).unwrap(), b"needs rewrap");
+
+        // Second rotation without rewrap: C current, B previous -- KEK-A gone
+        let keys_c = EncryptionKeys::from_config(&test_config(&key_c_hex, Some(&key_b_hex)));
+        assert!(keys_c.decrypt(&encrypted).is_err());
+    }
+
+    #[test]
+    fn v2_rewrap_then_drop_old_key() {
+        let key_a_hex = "aa".repeat(32);
+        let key_b_hex = "bb".repeat(32);
+        let key_c_hex = "cc".repeat(32);
+
+        // Encrypt with KEK-A
+        let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
+        let encrypted = keys_a.encrypt(b"rewrap chain").unwrap();
+
+        // Rotate to KEK-B, rewrap
+        let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
+        let rewrapped = keys_b.rewrap(&encrypted).unwrap();
+
+        // Second rotation: C current, B previous -- rewrapped data still works
+        let keys_c = EncryptionKeys::from_config(&test_config(&key_c_hex, Some(&key_b_hex)));
+        let decrypted = keys_c.decrypt(&rewrapped).unwrap();
+        assert_eq!(decrypted, b"rewrap chain");
+    }
+
+    #[test]
+    fn v2_v0_collision_fallback() {
+        // A valid v0 ciphertext can still look like v2 if its nonce starts
+        // with 0x02 and the next bytes resemble a v2 header.
+        let key_hex = "ab".repeat(32);
+        let key_bytes = hex::decode(&key_hex).unwrap();
+        let keys = EncryptionKeys::from_config(&test_config(&key_hex, None));
+
+        let plaintext = vec![0x42; 80];
+        let nonce_bytes = [
+            VERSION_V2,
+            derive_key_id(&key_bytes),
+            0x00,
+            WRAPPED_DEK_SIZE as u8,
+            0x10,
+            0x20,
+            0x30,
+            0x40,
+            0x50,
+            0x60,
+            0x70,
+            0x80,
+        ];
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes).unwrap();
+        let encrypted = cipher.encrypt(nonce, plaintext.as_slice()).unwrap();
+
+        let mut v0 = Vec::with_capacity(NONCE_SIZE + encrypted.len());
+        v0.extend_from_slice(&nonce_bytes);
+        v0.extend_from_slice(&encrypted);
+
+        assert!(looks_like_v2(&v0));
+        assert_eq!(keys.decrypt(&v0).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn v2_tamper_version_byte() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let mut encrypted = keys.encrypt(b"version byte test").unwrap();
+        // Change version from 0x02 to 0x03
+        encrypted[0] = 0x03;
+
+        // Should fail: 0x03 is not recognized as v2 or v1, falls through to v0
+        // which will also fail since the data has extra header bytes.
+        assert!(keys.decrypt(&encrypted).is_err());
+    }
+
+    #[test]
+    fn v2_invalid_wrapped_dek_len() {
+        let config = test_config(&"ab".repeat(32), None);
+        let keys = EncryptionKeys::from_config(&config);
+
+        let mut encrypted = keys.encrypt(b"bad length test").unwrap();
+        // Set wrapped_dek_len to a value larger than the remaining ciphertext
+        encrypted[2] = 0xFF;
+        encrypted[3] = 0xFF;
+
+        // Should fail: declared length exceeds actual data
+        assert!(keys.decrypt(&encrypted).is_err());
     }
 }
