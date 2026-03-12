@@ -27,6 +27,11 @@ use crate::services::{
 
 /// Response headers that are safe to forward back to the client.
 /// Uses an allowlist to prevent leaking internal headers from downstream services.
+/// Response headers that are safe to forward back to the client.
+/// Uses an allowlist to prevent leaking internal headers from downstream services.
+/// NOTE: CORS headers (access-control-*) are intentionally excluded — the NyxID
+/// CorsLayer handles CORS for all responses. Forwarding downstream CORS headers
+/// would cause duplicate headers and browser CORS failures.
 const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
     "content-type",
     "content-length",
@@ -38,11 +43,6 @@ const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
     "last-modified",
     "x-request-id",
     "x-correlation-id",
-    "vary",
-    "access-control-allow-origin",
-    "access-control-allow-methods",
-    "access-control-allow-headers",
-    "access-control-expose-headers",
 ];
 
 /// ANY /api/v1/proxy/:service_id/*path
@@ -209,6 +209,38 @@ async fn execute_proxy(
                         );
                     }
                 }
+            }
+        }
+
+        // Resolve user RBAC and inject as headers so downstream services can
+        // enforce permission checks without needing JWT verification.
+        match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id_str).await {
+            Ok(rbac) => {
+                if !rbac.role_slugs.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Roles".to_string(),
+                        rbac.role_slugs.join(","),
+                    ));
+                }
+                if !rbac.permissions.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Permissions".to_string(),
+                        rbac.permissions.join(","),
+                    ));
+                }
+                if !rbac.group_slugs.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Groups".to_string(),
+                        rbac.group_slugs.join(","),
+                    ));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    user_id = %user_id_str,
+                    error = %e,
+                    "Failed to resolve RBAC for identity headers"
+                );
             }
         }
     }
