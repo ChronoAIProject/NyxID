@@ -299,11 +299,12 @@ pub async fn create_service(
         let secret_to_encrypt = raw_secret.unwrap_or_default();
         let enc = state
             .encryption_keys
-            .encrypt(secret_to_encrypt.as_bytes())?;
+            .encrypt(secret_to_encrypt.as_bytes())
+            .await?;
 
         (enc, Some(client.id))
     } else {
-        let enc = state.encryption_keys.encrypt(credential.as_bytes())?;
+        let enc = state.encryption_keys.encrypt(credential.as_bytes()).await?;
         (enc, None)
     };
 
@@ -633,7 +634,8 @@ pub async fn get_oidc_credentials(
     // Decrypt the client secret from credential_encrypted
     let decrypted_bytes = state
         .encryption_keys
-        .decrypt(&service.credential_encrypted)?;
+        .decrypt(&service.credential_encrypted)
+        .await?;
     let client_secret = String::from_utf8(decrypted_bytes)
         .map_err(|e| AppError::Internal(format!("Failed to decode decrypted secret: {e}")))?;
 
@@ -812,7 +814,7 @@ pub async fn regenerate_oidc_secret(
         .await?;
 
     // Encrypt the new secret and update credential_encrypted on the service
-    let encrypted = state.encryption_keys.encrypt(new_secret.as_bytes())?;
+    let encrypted = state.encryption_keys.encrypt(new_secret.as_bytes()).await?;
 
     state
         .db

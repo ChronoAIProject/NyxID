@@ -2,6 +2,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
 };
+use async_trait::async_trait;
 use rand::RngCore;
 use zeroize::Zeroizing;
 
@@ -104,8 +105,9 @@ impl LocalKeyProvider {
     }
 }
 
+#[async_trait]
 impl KeyProvider for LocalKeyProvider {
-    fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError> {
+    async fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError> {
         let cipher = Aes256Gcm::new_from_slice(self.current.as_ref())
             .map_err(|e| AppError::Internal(format!("Failed to create KEK cipher: {e}")))?;
 
@@ -124,11 +126,11 @@ impl KeyProvider for LocalKeyProvider {
 
         Ok(WrappedKey {
             key_id: self.current_id,
-            ciphertext,
+            ciphertext: Zeroizing::new(ciphertext),
         })
     }
 
-    fn unwrap_dek(&self, wrapped: &WrappedKey) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    async fn unwrap_dek(&self, wrapped: &WrappedKey) -> Result<Zeroizing<Vec<u8>>, AppError> {
         // Find the matching key for the version
         let key = if wrapped.key_id == self.current_id {
             &self.current
@@ -185,56 +187,62 @@ mod tests {
         [0xBBu8; 32]
     }
 
-    #[test]
-    fn roundtrip_wrap_unwrap() {
+    #[tokio::test]
+    async fn roundtrip_wrap_unwrap() {
         let provider = LocalKeyProvider::new(test_key_a(), None);
         let dek = [0x42u8; 32];
 
-        let wrapped = provider.wrap_dek(&dek).unwrap();
+        let wrapped = provider.wrap_dek(&dek).await.unwrap();
         assert_eq!(wrapped.key_id, provider.current_key_id());
 
-        let unwrapped = provider.unwrap_dek(&wrapped).unwrap();
+        let unwrapped = provider.unwrap_dek(&wrapped).await.unwrap();
         assert_eq!(unwrapped.as_slice(), &dek);
     }
 
-    #[test]
-    fn different_ciphertext_on_same_dek() {
+    #[tokio::test]
+    async fn different_ciphertext_on_same_dek() {
         let provider = LocalKeyProvider::new(test_key_a(), None);
         let dek = [0x42u8; 32];
 
-        let wrapped1 = provider.wrap_dek(&dek).unwrap();
-        let wrapped2 = provider.wrap_dek(&dek).unwrap();
+        let wrapped1 = provider.wrap_dek(&dek).await.unwrap();
+        let wrapped2 = provider.wrap_dek(&dek).await.unwrap();
 
         // Different nonces produce different ciphertexts
         assert_ne!(wrapped1.ciphertext, wrapped2.ciphertext);
 
         // Both unwrap to same DEK
-        assert_eq!(provider.unwrap_dek(&wrapped1).unwrap().as_slice(), &dek);
-        assert_eq!(provider.unwrap_dek(&wrapped2).unwrap().as_slice(), &dek);
+        assert_eq!(
+            provider.unwrap_dek(&wrapped1).await.unwrap().as_slice(),
+            &dek
+        );
+        assert_eq!(
+            provider.unwrap_dek(&wrapped2).await.unwrap().as_slice(),
+            &dek
+        );
     }
 
-    #[test]
-    fn wrong_version_fails() {
+    #[tokio::test]
+    async fn wrong_version_fails() {
         let provider = LocalKeyProvider::new(test_key_a(), None);
         let dek = [0x42u8; 32];
 
-        let mut wrapped = provider.wrap_dek(&dek).unwrap();
+        let mut wrapped = provider.wrap_dek(&dek).await.unwrap();
         wrapped.key_id = 0xFF; // nonexistent key id
 
-        assert!(provider.unwrap_dek(&wrapped).is_err());
+        assert!(provider.unwrap_dek(&wrapped).await.is_err());
     }
 
-    #[test]
-    fn previous_key_unwrap() {
+    #[tokio::test]
+    async fn previous_key_unwrap() {
         let provider = LocalKeyProvider::new(test_key_b(), Some(test_key_a()));
         let dek = [0x42u8; 32];
 
         // Wrap with key A (simulate old data)
         let provider_a = LocalKeyProvider::new(test_key_a(), None);
-        let wrapped = provider_a.wrap_dek(&dek).unwrap();
+        let wrapped = provider_a.wrap_dek(&dek).await.unwrap();
 
         // Unwrap with provider that has key A as previous
-        let unwrapped = provider.unwrap_dek(&wrapped).unwrap();
+        let unwrapped = provider.unwrap_dek(&wrapped).await.unwrap();
         assert_eq!(unwrapped.as_slice(), &dek);
     }
 
@@ -257,8 +265,8 @@ mod tests {
         assert!(!debug_str.contains("bb"));
     }
 
-    #[test]
-    fn from_config_builds_correctly() {
+    #[tokio::test]
+    async fn from_config_builds_correctly() {
         let config = crate::config::AppConfig {
             port: 3001,
             base_url: "http://localhost:3001".to_string(),
@@ -303,6 +311,10 @@ mod tests {
             apns_topic: None,
             apns_sandbox: true,
             key_provider: "local".to_string(),
+            aws_kms_key_arn: None,
+            aws_kms_key_arn_previous: None,
+            gcp_kms_key_name: None,
+            gcp_kms_key_name_previous: None,
         };
 
         let provider = LocalKeyProvider::from_config(&config);
@@ -310,17 +322,17 @@ mod tests {
 
         // Verify roundtrip works
         let dek = [0x42u8; 32];
-        let wrapped = provider.wrap_dek(&dek).unwrap();
-        let unwrapped = provider.unwrap_dek(&wrapped).unwrap();
+        let wrapped = provider.wrap_dek(&dek).await.unwrap();
+        let unwrapped = provider.unwrap_dek(&wrapped).await.unwrap();
         assert_eq!(unwrapped.as_slice(), &dek);
     }
 
-    #[test]
-    fn wrapped_dek_size() {
+    #[tokio::test]
+    async fn wrapped_dek_size() {
         let provider = LocalKeyProvider::new(test_key_a(), None);
         let dek = [0x42u8; 32];
 
-        let wrapped = provider.wrap_dek(&dek).unwrap();
+        let wrapped = provider.wrap_dek(&dek).await.unwrap();
         // nonce(12) + encrypted_dek(32) + tag(16) = 60 bytes
         assert_eq!(wrapped.ciphertext.len(), 60);
     }

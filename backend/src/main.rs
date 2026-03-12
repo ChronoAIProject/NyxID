@@ -23,6 +23,8 @@ use config::AppConfig;
 use crypto::aes::EncryptionKeys;
 use crypto::jwks::JwksCache;
 use crypto::jwt::JwtKeys;
+use crypto::key_provider::KeyProvider;
+use crypto::local_key_provider::LocalKeyProvider;
 use models::mcp_session::McpSessionStore;
 
 use services::push_service::{ApnsAuth, FcmAuth};
@@ -90,10 +92,60 @@ async fn main() {
     // Validate provider-specific encryption config before any seed calls that use it.
     config.validate_key_provider();
 
-    // Build versioned encryption keys
-    let encryption_keys = Arc::new(match config.key_provider.as_str() {
-        "local" => EncryptionKeys::from_config(&config),
-        other => panic!("Unsupported KEY_PROVIDER: {other}"),
+    // Build key provider(s)
+    let (provider, fallback_provider): (Arc<dyn KeyProvider>, Option<Arc<dyn KeyProvider>>) =
+        match config.key_provider.as_str() {
+            "local" => {
+                let local = Arc::new(LocalKeyProvider::from_config(&config));
+                (local, None)
+            }
+            #[cfg(feature = "aws-kms")]
+            "aws-kms" => {
+                let kms =
+                    Arc::new(crypto::aws_kms_provider::AwsKmsProvider::from_config(&config).await);
+                let fallback = config.encryption_key.as_ref().map(|_| {
+                    Arc::new(LocalKeyProvider::from_config(&config)) as Arc<dyn KeyProvider>
+                });
+                (kms, fallback)
+            }
+            #[cfg(feature = "gcp-kms")]
+            "gcp-kms" => {
+                let kms =
+                    Arc::new(crypto::gcp_kms_provider::GcpKmsProvider::from_config(&config).await);
+                let fallback = config.encryption_key.as_ref().map(|_| {
+                    Arc::new(LocalKeyProvider::from_config(&config)) as Arc<dyn KeyProvider>
+                });
+                (kms, fallback)
+            }
+            other => panic!("Unsupported KEY_PROVIDER: {other}"),
+        };
+
+    // Cross-provider key_id collision check (H2): during migration, the primary
+    // KMS provider and fallback local provider derive key_ids from different
+    // inputs. A collision (1-in-256 chance) would cause decrypt failures.
+    if let Some(ref fallback) = fallback_provider
+        && fallback.has_key_id(provider.current_key_id())
+    {
+        panic!(
+            "Primary and fallback providers have colliding key IDs (0x{:02x}). \
+             This is a 1-in-256 hash collision. Use a different KMS key.",
+            provider.current_key_id()
+        );
+    }
+
+    // Build EncryptionKeys with provider and optional fallback
+    let legacy = if config.encryption_key.is_some() {
+        Some(crypto::aes::LegacyKeys::from_config(&config))
+    } else {
+        None
+    };
+
+    let encryption_keys = Arc::new({
+        let mut ek = EncryptionKeys::with_provider_and_fallback(provider, fallback_provider);
+        if let Some(l) = legacy {
+            ek.set_legacy(l);
+        }
+        ek
     });
     if encryption_keys.has_previous() {
         tracing::warn!(

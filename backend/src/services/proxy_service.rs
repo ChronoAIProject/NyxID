@@ -130,7 +130,7 @@ pub async fn resolve_proxy_target(
     };
 
     // SEC-M3: Wrap raw decrypted bytes in Zeroizing so they are zeroed on drop
-    let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&credential_encrypted)?);
+    let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&credential_encrypted).await?);
     let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
         tracing::error!("Credential UTF-8 decode failed: {e}");
         AppError::Internal("Failed to decode credential".to_string())

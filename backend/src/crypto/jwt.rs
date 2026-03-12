@@ -588,6 +588,10 @@ mod tests {
             apns_topic: None,
             apns_sandbox: true,
             key_provider: "local".to_string(),
+            aws_kms_key_arn: None,
+            aws_kms_key_arn_previous: None,
+            gcp_kms_key_name: None,
+            gcp_kms_key_name_previous: None,
         };
 
         (keys, config)

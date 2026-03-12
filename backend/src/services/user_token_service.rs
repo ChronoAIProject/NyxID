@@ -98,7 +98,7 @@ pub async fn store_api_key(
         .await?;
 
     let now = Utc::now();
-    let encrypted = encryption_keys.encrypt(api_key.as_bytes())?;
+    let encrypted = encryption_keys.encrypt(api_key.as_bytes()).await?;
 
     if let Some(existing_token) = existing {
         // Update existing token
@@ -215,13 +215,13 @@ pub async fn initiate_oauth_connect(
     };
 
     // SEC-M2: Encrypt code_verifier before storing
-    let encrypted_verifier = code_verifier
-        .as_ref()
-        .map(|v| {
-            let encrypted = encryption_keys.encrypt(v.as_bytes())?;
-            Ok::<_, AppError>(hex::encode(encrypted))
-        })
-        .transpose()?;
+    let encrypted_verifier = match code_verifier.as_ref() {
+        Some(v) => {
+            let encrypted = encryption_keys.encrypt(v.as_bytes()).await?;
+            Some(hex::encode(encrypted))
+        }
+        None => None,
+    };
 
     let oauth_state = OAuthState {
         id: state_id.clone(),
@@ -448,8 +448,9 @@ pub async fn request_device_code(
     };
 
     // Encrypt device_auth_id and user_code before storing
-    let device_code_encrypted = hex::encode(encryption_keys.encrypt(device_auth_id.as_bytes())?);
-    let user_code_encrypted = hex::encode(encryption_keys.encrypt(user_code.as_bytes())?);
+    let device_code_encrypted =
+        hex::encode(encryption_keys.encrypt(device_auth_id.as_bytes()).await?);
+    let user_code_encrypted = hex::encode(encryption_keys.encrypt(user_code.as_bytes()).await?);
 
     // Create state document
     let state_id = Uuid::new_v4().to_string();
@@ -545,7 +546,7 @@ pub async fn poll_device_code(
     let dc_bytes = hex::decode(device_code_hex).map_err(|e| {
         AppError::Internal(format!("Failed to decode encrypted device_auth_id: {e}"))
     })?;
-    let decrypted_dc = Zeroizing::new(encryption_keys.decrypt(&dc_bytes)?);
+    let decrypted_dc = Zeroizing::new(encryption_keys.decrypt(&dc_bytes).await?);
     let device_auth_id = String::from_utf8((*decrypted_dc).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode device_auth_id: {e}")))?;
 
@@ -556,7 +557,7 @@ pub async fn poll_device_code(
         .ok_or_else(|| AppError::Internal("OAuth state missing user_code".to_string()))?;
     let uc_bytes = hex::decode(user_code_hex)
         .map_err(|e| AppError::Internal(format!("Failed to decode encrypted user_code: {e}")))?;
-    let decrypted_uc = Zeroizing::new(encryption_keys.decrypt(&uc_bytes)?);
+    let decrypted_uc = Zeroizing::new(encryption_keys.decrypt(&uc_bytes).await?);
     let user_code = String::from_utf8((*decrypted_uc).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode user_code: {e}")))?;
 
@@ -779,9 +780,9 @@ async fn store_device_code_tokens(
     let expires_in = token_data["expires_in"].as_i64();
     let scope = token_data["scope"].as_str();
 
-    let access_enc = encryption_keys.encrypt(access_token.as_bytes())?;
+    let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
     let refresh_enc = match refresh_token {
-        Some(rt) => Some(encryption_keys.encrypt(rt.as_bytes())?),
+        Some(rt) => Some(encryption_keys.encrypt(rt.as_bytes()).await?),
         None => None,
     };
 
@@ -934,7 +935,7 @@ pub async fn handle_oauth_callback(
     if let Some(ref encrypted_verifier) = oauth_state.code_verifier {
         let verifier_bytes = hex::decode(encrypted_verifier)
             .map_err(|e| AppError::Internal(format!("Failed to decode encrypted verifier: {e}")))?;
-        let decrypted = Zeroizing::new(encryption_keys.decrypt(&verifier_bytes)?);
+        let decrypted = Zeroizing::new(encryption_keys.decrypt(&verifier_bytes).await?);
         let verifier = String::from_utf8((*decrypted).clone())
             .map_err(|e| AppError::Internal(format!("Failed to decode verifier: {e}")))?;
         params.push(("code_verifier".to_string(), verifier));
@@ -982,9 +983,9 @@ pub async fn handle_oauth_callback(
     let expires_in = token_data["expires_in"].as_i64();
     let scope = token_data["scope"].as_str();
 
-    let access_enc = encryption_keys.encrypt(access_token.as_bytes())?;
+    let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
     let refresh_enc = match refresh_token {
-        Some(rt) => Some(encryption_keys.encrypt(rt.as_bytes())?),
+        Some(rt) => Some(encryption_keys.encrypt(rt.as_bytes()).await?),
         None => None,
     };
 
@@ -1062,7 +1063,7 @@ pub async fn get_active_token(
             let encrypted = token.api_key_encrypted.ok_or_else(|| {
                 AppError::Internal("API key token missing encrypted key".to_string())
             })?;
-            let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&encrypted)?);
+            let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&encrypted).await?);
             let decrypted = String::from_utf8((*decrypted_bytes).clone())
                 .map_err(|e| AppError::Internal(format!("Failed to decode API key: {e}")))?;
 
@@ -1102,7 +1103,7 @@ pub async fn get_active_token(
             let encrypted = token.access_token_encrypted.ok_or_else(|| {
                 AppError::Internal("OAuth token missing encrypted access_token".to_string())
             })?;
-            let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&encrypted)?);
+            let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&encrypted).await?);
             let decrypted = String::from_utf8((*decrypted_bytes).clone())
                 .map_err(|e| AppError::Internal(format!("Failed to decode access token: {e}")))?;
 
@@ -1219,7 +1220,7 @@ async fn try_revoke_token_remote(
 
     // Try revoking access token
     if let Some(ref enc) = token.access_token_encrypted {
-        if let Ok(decrypted) = encryption_keys.decrypt(enc) {
+        if let Ok(decrypted) = encryption_keys.decrypt(enc).await {
             if let Ok(access_token) = String::from_utf8(decrypted) {
                 let _ = send_revocation_request(
                     revocation_url,
@@ -1237,7 +1238,7 @@ async fn try_revoke_token_remote(
 
     // Try revoking refresh token
     if let Some(ref enc) = token.refresh_token_encrypted {
-        if let Ok(decrypted) = encryption_keys.decrypt(enc) {
+        if let Ok(decrypted) = encryption_keys.decrypt(enc).await {
             if let Ok(refresh_token) = String::from_utf8(decrypted) {
                 let _ = send_revocation_request(
                     revocation_url,

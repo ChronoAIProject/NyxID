@@ -112,8 +112,20 @@ pub struct AppConfig {
     pub apns_sandbox: bool,
 
     /// Key provider type for envelope encryption KEK operations.
-    /// Currently only "local" is supported. Phase 4+ will add "aws-kms", "gcp-kms", etc.
+    /// Supported: "local", "aws-kms" (feature aws-kms), "gcp-kms" (feature gcp-kms).
     pub key_provider: String,
+
+    // AWS KMS (Phase 4)
+    /// AWS KMS key ARN for DEK wrapping. Required when KEY_PROVIDER=aws-kms.
+    pub aws_kms_key_arn: Option<String>,
+    /// Optional previous AWS KMS key ARN for multi-key migration.
+    pub aws_kms_key_arn_previous: Option<String>,
+
+    // GCP KMS (Phase 4)
+    /// GCP Cloud KMS key resource name. Required when KEY_PROVIDER=gcp-kms.
+    pub gcp_kms_key_name: Option<String>,
+    /// Optional previous GCP KMS key name for multi-key migration.
+    pub gcp_kms_key_name_previous: Option<String>,
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -179,6 +191,38 @@ impl std::fmt::Debug for AppConfig {
             .field("apns_topic", &self.apns_topic)
             .field("apns_sandbox", &self.apns_sandbox)
             .field("key_provider", &self.key_provider)
+            .field(
+                "aws_kms_key_arn",
+                if self.aws_kms_key_arn.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "aws_kms_key_arn_previous",
+                if self.aws_kms_key_arn_previous.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "gcp_kms_key_name",
+                if self.gcp_kms_key_name.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "gcp_kms_key_name_previous",
+                if self.gcp_kms_key_name_previous.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
             .finish()
     }
 }
@@ -296,6 +340,15 @@ impl AppConfig {
                 .unwrap_or(is_dev),
 
             key_provider: env::var("KEY_PROVIDER").unwrap_or_else(|_| "local".to_string()),
+
+            aws_kms_key_arn: env::var("AWS_KMS_KEY_ARN").ok().filter(|s| !s.is_empty()),
+            aws_kms_key_arn_previous: env::var("AWS_KMS_KEY_ARN_PREVIOUS")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            gcp_kms_key_name: env::var("GCP_KMS_KEY_NAME").ok().filter(|s| !s.is_empty()),
+            gcp_kms_key_name_previous: env::var("GCP_KMS_KEY_NAME_PREVIOUS")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 
@@ -376,7 +429,37 @@ impl AppConfig {
     pub fn validate_key_provider(&self) {
         match self.key_provider.as_str() {
             "local" => self.validate_encryption_key(),
-            other => panic!("Unsupported KEY_PROVIDER: {other}. Supported providers: local"),
+            #[cfg(feature = "aws-kms")]
+            "aws-kms" => {
+                self.aws_kms_key_arn.as_ref().unwrap_or_else(|| {
+                    panic!("AWS_KMS_KEY_ARN must be set when KEY_PROVIDER=aws-kms")
+                });
+                // ENCRYPTION_KEY is optional (for migration fallback)
+                if self.encryption_key.is_some() {
+                    self.validate_encryption_key();
+                }
+            }
+            #[cfg(feature = "gcp-kms")]
+            "gcp-kms" => {
+                self.gcp_kms_key_name.as_ref().unwrap_or_else(|| {
+                    panic!("GCP_KMS_KEY_NAME must be set when KEY_PROVIDER=gcp-kms")
+                });
+                if self.encryption_key.is_some() {
+                    self.validate_encryption_key();
+                }
+            }
+            other => {
+                #[allow(unused_mut)]
+                let mut supported = vec!["local"];
+                #[cfg(feature = "aws-kms")]
+                supported.push("aws-kms");
+                #[cfg(feature = "gcp-kms")]
+                supported.push("gcp-kms");
+                panic!(
+                    "Unsupported KEY_PROVIDER: {other}. Supported providers: {}",
+                    supported.join(", ")
+                );
+            }
         }
     }
 
@@ -525,6 +608,10 @@ mod tests {
             apns_topic: None,
             apns_sandbox: true,
             key_provider: "local".to_string(),
+            aws_kms_key_arn: None,
+            aws_kms_key_arn_previous: None,
+            gcp_kms_key_name: None,
+            gcp_kms_key_name_previous: None,
         }
     }
 

@@ -70,7 +70,7 @@ pub async fn setup_totp(
     let qr_code_url = totp.get_url();
 
     // Encrypt the secret for storage
-    let encrypted_secret = encryption_keys.encrypt(secret_base32.as_bytes())?;
+    let encrypted_secret = encryption_keys.encrypt(secret_base32.as_bytes()).await?;
 
     let factor_id = Uuid::new_v4().to_string();
     let now = Utc::now();
@@ -125,7 +125,7 @@ pub async fn verify_totp_setup(
         .as_ref()
         .ok_or_else(|| AppError::Internal("Missing encrypted secret".to_string()))?;
 
-    let secret_bytes = encryption_keys.decrypt(encrypted_secret)?;
+    let secret_bytes = encryption_keys.decrypt(encrypted_secret).await?;
     let secret_str = String::from_utf8(secret_bytes)
         .map_err(|e| AppError::Internal(format!("Invalid secret encoding: {e}")))?;
 
@@ -207,7 +207,7 @@ pub async fn verify_totp(
         .as_ref()
         .ok_or_else(|| AppError::Internal("Missing encrypted secret".to_string()))?;
 
-    let secret_bytes = encryption_keys.decrypt(encrypted_secret)?;
+    let secret_bytes = encryption_keys.decrypt(encrypted_secret).await?;
     let secret_str = String::from_utf8(secret_bytes)
         .map_err(|e| AppError::Internal(format!("Invalid secret encoding: {e}")))?;
 

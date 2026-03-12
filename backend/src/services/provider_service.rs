@@ -135,7 +135,9 @@ pub async fn seed_default_providers(
 
     // 2. OpenAI Codex (Device Code - ChatGPT subscription)
     if !slug_exists!("openai-codex") {
-        let client_id_enc = encryption_keys.encrypt(b"app_EMoamEEZ73f0CkXaXp7hrann")?;
+        let client_id_enc = encryption_keys
+            .encrypt(b"app_EMoamEEZ73f0CkXaXp7hrann")
+            .await?;
 
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1166,7 +1168,7 @@ pub async fn seed_default_services(
         }
 
         // Create an empty encrypted credential (field is required)
-        let empty_credential = encryption_keys.encrypt(b"")?;
+        let empty_credential = encryption_keys.encrypt(b"").await?;
 
         let service_id = Uuid::new_v4().to_string();
         let is_llm_service = seed.service_slug.starts_with("llm-");
@@ -1355,28 +1357,24 @@ pub async fn create_provider(
 
     // Encrypt OAuth credentials if provided
     let (client_id_enc, client_secret_enc) = if let Some(ref oauth) = oauth_config {
-        let cid = oauth
-            .client_id
-            .as_ref()
-            .map(|value| encryption_keys.encrypt(value.as_bytes()))
-            .transpose()?;
-        let csec = oauth
-            .client_secret
-            .as_ref()
-            .map(|value| encryption_keys.encrypt(value.as_bytes()))
-            .transpose()?;
+        let cid = match oauth.client_id.as_ref() {
+            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            None => None,
+        };
+        let csec = match oauth.client_secret.as_ref() {
+            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            None => None,
+        };
         (cid, csec)
     } else if let Some(ref dc) = device_code_config {
-        let cid = dc
-            .client_id
-            .as_ref()
-            .map(|value| encryption_keys.encrypt(value.as_bytes()))
-            .transpose()?;
-        let csec = dc
-            .client_secret
-            .as_ref()
-            .map(|value| encryption_keys.encrypt(value.as_bytes()))
-            .transpose()?;
+        let cid = match dc.client_id.as_ref() {
+            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            None => None,
+        };
+        let csec = match dc.client_secret.as_ref() {
+            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            None => None,
+        };
         (cid, csec)
     } else {
         (None, None)
@@ -1521,7 +1519,7 @@ pub async fn update_provider(
         set_doc.insert("default_scopes", scopes);
     }
     if let Some(ref cid) = updates.client_id {
-        let enc = encryption_keys.encrypt(cid.as_bytes())?;
+        let enc = encryption_keys.encrypt(cid.as_bytes()).await?;
         set_doc.insert(
             "client_id_encrypted",
             bson::Binary {
@@ -1531,7 +1529,7 @@ pub async fn update_provider(
         );
     }
     if let Some(ref csec) = updates.client_secret {
-        let enc = encryption_keys.encrypt(csec.as_bytes())?;
+        let enc = encryption_keys.encrypt(csec.as_bytes()).await?;
         set_doc.insert(
             "client_secret_encrypted",
             bson::Binary {

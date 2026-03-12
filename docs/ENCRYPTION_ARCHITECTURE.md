@@ -6,11 +6,11 @@ This document describes NyxID's encryption architecture from its current impleme
 
 ## Table of Contents
 
-- [Current Architecture (Phase 1)](#current-architecture-phase-1)
+- [Current Architecture (Phase 4)](#current-architecture-phase-4)
 - [Encryption Roadmap](#encryption-roadmap)
-- [Phase 2: Envelope Encryption](#phase-2-envelope-encryption)
-- [Phase 3: KeyProvider Abstraction](#phase-3-keyprovider-abstraction)
-- [Phase 4: Cloud KMS Integration](#phase-4-cloud-kms-integration)
+- [Phase 2: Envelope Encryption](#phase-2-envelope-encryption-completed)
+- [Phase 3: KeyProvider Abstraction](#phase-3-keyprovider-abstraction-completed)
+- [Phase 4: Cloud KMS Integration](#phase-4-cloud-kms-integration-completed)
 - [Phase 5: Per-Tenant Key Isolation](#phase-5-per-tenant-key-isolation)
 - [Phase 6: Bring Your Own Key (BYOK)](#phase-6-bring-your-own-key-byok)
 - [BYOK Deep Dive](#byok-deep-dive)
@@ -20,38 +20,38 @@ This document describes NyxID's encryption architecture from its current impleme
 
 ---
 
-## Current Architecture (Phase 3)
+## Current Architecture (Phase 4)
 
-Phase 3 provides **a pluggable KeyProvider abstraction** on top of Phase 2's envelope encryption. The `KeyProvider` trait now owns the v2 header key ID and wrapped-DEK blob semantics, so `EncryptionKeys` no longer assumes local env-var key IDs, fixed wrapped-DEK sizes, or direct access to raw KEKs. The current implementation ships with `LocalKeyProvider`, which performs in-process AES-256-GCM wrap/unwrap using env-var keys -- identical behavior to Phase 2, but behind the trait boundary.
+Phase 4 provides **Cloud KMS integration** on top of Phase 3's pluggable `KeyProvider` abstraction. The `KeyProvider` trait is now async (via `async-trait`) to support KMS network I/O, and two new providers -- `AwsKmsProvider` and `GcpKmsProvider` -- are available behind feature flags. A **fallback provider** mechanism enables zero-downtime migration from the local provider to a KMS backend.
 
-### Key Hierarchy (Phase 3)
+### Key Hierarchy (Phase 4)
 
 ```mermaid
 graph TD
-    KP["KeyProvider trait<br/>(pluggable backend)"]
+    KP["KeyProvider trait<br/>(async, pluggable backend)"]
 
     KP -->|delegates to| LKP["LocalKeyProvider<br/>AES-256-GCM wrap/unwrap<br/>from ENCRYPTION_KEY env var"]
+    KP -->|delegates to| AWS["AwsKmsProvider<br/>AWS KMS Encrypt/Decrypt<br/>feature: aws-kms"]
+    KP -->|delegates to| GCP["GcpKmsProvider<br/>GCP Cloud KMS<br/>feature: gcp-kms"]
 
     LKP -->|wraps| DEK1["DEK #1<br/>(random AES-256)"]
-    LKP -->|wraps| DEK2["DEK #2<br/>(random AES-256)"]
-    LKP -->|wraps| DEK3["DEK #3<br/>(random AES-256)"]
-    LKP -->|wraps| DEK4["DEK #4<br/>(random AES-256)"]
+    AWS -->|wraps| DEK2["DEK #2<br/>(random AES-256)"]
+    GCP -->|wraps| DEK3["DEK #3<br/>(random AES-256)"]
 
     DEK1 -->|encrypts| OT["OAuth tokens"]
     DEK2 -->|encrypts| AK["API keys"]
     DEK3 -->|encrypts| MFA["MFA secrets"]
-    DEK4 -->|encrypts| SC["Service credentials"]
 
     style KP fill:#9b59b6,color:#fff,stroke:#8e44ad
     style LKP fill:#e74c3c,color:#fff,stroke:#c0392b
-    style DEK1 fill:#e67e22,color:#fff
-    style DEK2 fill:#e67e22,color:#fff
-    style DEK3 fill:#e67e22,color:#fff
-    style DEK4 fill:#e67e22,color:#fff
-    style OT fill:#3498db,color:#fff
-    style AK fill:#3498db,color:#fff
-    style MFA fill:#3498db,color:#fff
-    style SC fill:#3498db,color:#fff
+    style AWS fill:#e67e22,color:#fff,stroke:#d35400
+    style GCP fill:#3498db,color:#fff,stroke:#2980b9
+    style DEK1 fill:#f39c12,color:#fff
+    style DEK2 fill:#f39c12,color:#fff
+    style DEK3 fill:#f39c12,color:#fff
+    style OT fill:#1abc9c,color:#fff
+    style AK fill:#1abc9c,color:#fff
+    style MFA fill:#1abc9c,color:#fff
 ```
 
 ### Ciphertext Formats
@@ -67,45 +67,53 @@ v1 (Phase 1):  [0x01] [key_id: 1B] [nonce: 12B] [ciphertext] [tag: 16B]
 v2 (CURRENT):  [0x02] [kek_id: 1B] [wrapped_dek_len: 2B BE] [wrapped_dek: NB] [data_nonce: 12B] [data_ciphertext] [data_tag: 16B]
                  ^        ^               ^                        ^
                  |        |               |                        +-- provider-defined wrapped DEK blob
-                 |        |               +-- big-endian u16, LocalKeyProvider currently uses 60
-                 |        +-- provider-defined stable key id for the wrapping KEK
+                 |        |               +-- big-endian u16; max 1024 (MAX_WRAPPED_DEK_SIZE)
+                 |        +-- provider-defined stable key id (SHA-256 of key material or identifier)
                  +-- version byte (envelope encryption)
 ```
 
 Total overhead: v0 = 28 bytes, v1 = 30 bytes, v2 = 32 + wrapped_dek_len bytes.
-With `LocalKeyProvider`, wrapped DEKs are 60 bytes, so v2 overhead is 92 bytes (+62 bytes over v1 per record).
+
+| Provider | Wrapped DEK Size | v2 Overhead per Record |
+|----------|-----------------|----------------------|
+| `LocalKeyProvider` | 60 bytes | 92 bytes |
+| `AwsKmsProvider` | ~170-200 bytes | ~202-232 bytes |
+| `GcpKmsProvider` | Variable | Variable |
+
+Maximum wrapped DEK size: 1024 bytes (enforced in both encrypt and decrypt paths).
 
 ### Decrypt Fallback Chain
 
 ```mermaid
 flowchart TD
-    A[Ciphertext input] --> V2{Looks like v2?<br/>len >= 92 AND<br/>byte 0 == 0x02}
+    A[Ciphertext input] --> V2{Looks like v2?<br/>len >= 33 AND<br/>byte 0 == 0x02}
 
-    V2 -->|Yes| V2K{kek_id matches<br/>current KEK?}
+    V2 -->|Yes| V2K[Try PRIMARY provider<br/>unwrap DEK]
     V2 -->|No| B
 
-    V2K -->|Yes| V2D[Unwrap DEK with CURRENT KEK<br/>Decrypt data with DEK]
-    V2K -->|No| V2P{kek_id matches<br/>previous KEK?}
+    V2K -->|Success| V2D[Decrypt data with DEK]
+    V2K -->|Fail| V2F{Fallback<br/>provider?}
 
     V2D -->|Success| R0[Return plaintext]
-    V2D -->|Fail| B
 
-    V2P -->|Yes| V2PD[Unwrap DEK with PREVIOUS KEK<br/>Decrypt data with DEK]
-    V2P -->|No| B
+    V2F -->|Yes| V2FD[Try FALLBACK provider<br/>unwrap DEK]
+    V2F -->|No| B
 
-    V2PD -->|Success| R0B[Return plaintext]
-    V2PD -->|Fail| B
+    V2FD -->|Success| V2FDD[Decrypt data with DEK]
+    V2FD -->|Fail| B
 
-    B{Looks like v1?<br/>len >= 30 AND<br/>byte 0 == 0x01} -->|Yes| C{key_id matches<br/>current key?}
+    V2FDD -->|Success| R0F[Return plaintext]
+
+    B{Looks like v1?<br/>len >= 30 AND<br/>byte 0 == 0x01} -->|Yes| C{key_id matches<br/>current legacy key?}
     B -->|No| G
 
-    C -->|Yes| D[Decrypt v1 payload<br/>with CURRENT key]
-    C -->|No| E{key_id matches<br/>previous key?}
+    C -->|Yes| D[Decrypt v1 payload<br/>with CURRENT legacy key]
+    C -->|No| E{key_id matches<br/>previous legacy key?}
 
     D -->|Success| R1[Return plaintext]
     D -->|Fail| G
 
-    E -->|Yes| F[Decrypt v1 payload<br/>with PREVIOUS key]
+    E -->|Yes| F[Decrypt v1 payload<br/>with PREVIOUS legacy key]
     E -->|No| DC[Try draft header<br/>compatibility]
 
     F -->|Success| R2[Return plaintext]
@@ -113,20 +121,21 @@ flowchart TD
 
     DC -->|Fail| G
 
-    G[Try v0 with CURRENT key] -->|Success| R3[Return plaintext]
+    G[Try v0 with CURRENT legacy key] -->|Success| R3[Return plaintext]
     G -->|Fail| H
 
-    H[Try v0 with PREVIOUS key] -->|Success| R4[Return plaintext]
+    H[Try v0 with PREVIOUS legacy key] -->|Success| R4[Return plaintext]
     H -->|Fail| ERR[Return error:<br/>no key could decrypt]
 
     style A fill:#34495e,color:#fff
     style R0 fill:#27ae60,color:#fff
-    style R0B fill:#27ae60,color:#fff
+    style R0F fill:#27ae60,color:#fff
     style R1 fill:#27ae60,color:#fff
     style R2 fill:#27ae60,color:#fff
     style R3 fill:#27ae60,color:#fff
     style R4 fill:#27ae60,color:#fff
     style ERR fill:#e74c3c,color:#fff
+    style V2F fill:#e67e22,color:#fff
 ```
 
 ### What Gets Encrypted
@@ -158,12 +167,17 @@ graph LR
     style EK fill:#e74c3c,color:#fff,stroke:#c0392b
 ```
 
-### Remaining Limitations (Phase 3)
+### Remaining Limitations (Phase 4)
 
 - Single platform-wide KEK -- all tenants share one KEK
-- Only `LocalKeyProvider` implemented (KEK still lives in app process memory from env var)
-- Only one previous KEK supported at a time
-- No cloud KMS integration yet (Phase 4)
+- Only one previous KEK supported at a time per provider
+- No DEK caching (each encrypt/decrypt calls the provider)
+- SDK-internal plaintext DEK copies are not zeroized (accepted limitation of external SDKs)
+
+Phase 4 resolved these former Phase 3 limitations:
+- ~~Only `LocalKeyProvider` implemented~~ -- AWS KMS and GCP Cloud KMS providers now available
+- ~~No cloud KMS integration~~ -- `AwsKmsProvider` and `GcpKmsProvider` behind feature flags
+- ~~KEK lives in app process memory~~ -- KMS providers never expose KEK material to the application
 
 Phase 3 resolved these former Phase 2 limitations:
 - ~~KEK wrap/unwrap hardcoded in `aes.rs`~~ -- now delegated to a `KeyProvider` trait, backend is pluggable
@@ -183,7 +197,7 @@ graph LR
     P1["Phase 1<br/>KEY VERSIONING<br/>+ rotation<br/>DONE"]
     P2["Phase 2<br/>ENVELOPE ENCRYPTION<br/>per-record DEKs<br/>DONE"]
     P3["Phase 3<br/>KEYPROVIDER TRAIT<br/>pluggable backend<br/>DONE"]
-    P4["Phase 4<br/>CLOUD KMS<br/>AWS / GCP / Azure"]
+    P4["Phase 4<br/>CLOUD KMS<br/>AWS / GCP<br/>DONE"]
     P5["Phase 5<br/>PER-TENANT KEYS<br/>blast radius = 1"]
     P6["Phase 6<br/>BYOK<br/>customer key control"]
 
@@ -192,7 +206,7 @@ graph LR
     style P1 fill:#27ae60,color:#fff
     style P2 fill:#27ae60,color:#fff
     style P3 fill:#27ae60,color:#fff
-    style P4 fill:#8e44ad,color:#fff
+    style P4 fill:#27ae60,color:#fff
     style P5 fill:#8e44ad,color:#fff
     style P6 fill:#e67e22,color:#fff
 ```
@@ -357,15 +371,16 @@ A `KeyProvider` trait abstracts the KEK operations, making the encryption backen
 ```rust
 pub struct WrappedKey {
     pub key_id: u8,
-    pub ciphertext: Vec<u8>,
+    pub ciphertext: Zeroizing<Vec<u8>>,  // defense-in-depth zeroization
 }
 
+#[async_trait]
 pub trait KeyProvider: Send + Sync + std::fmt::Debug {
     /// Wrap (encrypt) a plaintext DEK with the current KEK.
-    fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError>;
+    async fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError>;
 
     /// Unwrap (decrypt) a previously wrapped DEK.
-    fn unwrap_dek(&self, wrapped: &WrappedKey) -> Result<Vec<u8>, AppError>;
+    async fn unwrap_dek(&self, wrapped: &WrappedKey) -> Result<Zeroizing<Vec<u8>>, AppError>;
 
     /// Stable identifier stored in the ciphertext header for the active KEK.
     fn current_key_id(&self) -> u8;
@@ -382,45 +397,41 @@ pub trait KeyProvider: Send + Sync + std::fmt::Debug {
 
 ```mermaid
 graph TD
-    T["KeyProvider trait"]
+    T["KeyProvider trait<br/>(async)"]
 
-    T --> L["LocalKeyProvider<br/>Uses env var key<br/>(Phase 1 behavior behind trait)"]
-    T --> A["AwsKmsProvider<br/>Calls AWS KMS<br/>Encrypt/Decrypt APIs"]
-    T --> G["GcpKmsProvider<br/>Calls GCP Cloud KMS<br/>wrap/unwrap"]
-    T --> V["VaultProvider<br/>HashiCorp Vault<br/>Transit engine"]
+    T --> L["LocalKeyProvider<br/>In-process AES-256-GCM<br/>from ENCRYPTION_KEY env var<br/>(always available)"]
+    T --> A["AwsKmsProvider<br/>AWS KMS Encrypt/Decrypt APIs<br/>feature: aws-kms<br/>DONE"]
+    T --> G["GcpKmsProvider<br/>GCP Cloud KMS encrypt/decrypt<br/>feature: gcp-kms<br/>DONE"]
+    T --> V["VaultProvider<br/>HashiCorp Vault Transit<br/>(future)"]
 
-    CFG1["Config: provider=local<br/>key=&lt;hex&gt;"] --> L
-    CFG2["Config: provider=aws<br/>key_arn=arn:..."] --> A
-    CFG3["Config: provider=gcp<br/>key_name=projects/..."] --> G
-    CFG4["Config: provider=vault<br/>transit_key=nyxid-kek"] --> V
+    CFG1["KEY_PROVIDER=local<br/>ENCRYPTION_KEY=&lt;hex&gt;"] --> L
+    CFG2["KEY_PROVIDER=aws-kms<br/>AWS_KMS_KEY_ARN=arn:..."] --> A
+    CFG3["KEY_PROVIDER=gcp-kms<br/>GCP_KMS_KEY_NAME=projects/..."] --> G
+    CFG4["KEY_PROVIDER=vault<br/>(not yet implemented)"] --> V
 
     style T fill:#9b59b6,color:#fff
     style L fill:#2ecc71,color:#fff
-    style A fill:#e67e22,color:#fff
-    style G fill:#3498db,color:#fff
-    style V fill:#1abc9c,color:#fff
+    style A fill:#27ae60,color:#fff
+    style G fill:#27ae60,color:#fff
+    style V fill:#95a5a6,color:#fff
 ```
 
 ### Switching Between Providers
 
-Once a new provider implementation exists, switching the encryption engine no
-longer requires changes to `EncryptionKeys`, service code, or handlers. The
-provider is constructed at startup and the rest of the encryption pipeline
-continues to call `encrypt()` / `decrypt()` / `rewrap()` unchanged.
-
-For example, a future AWS KMS rollout would look like:
+Switching the encryption engine requires only config changes -- no modifications to `EncryptionKeys`, service code, or handlers. The provider is constructed at startup and the rest of the encryption pipeline continues to call `encrypt()` / `decrypt()` / `rewrap()` unchanged.
 
 ```bash
 # Before (local)
 ENCRYPTION_KEY=abcdef...
 KEY_PROVIDER=local
 
-# After (AWS KMS)
-KEY_PROVIDER=aws_kms
+# After (AWS KMS -- migration mode with local fallback)
+KEY_PROVIDER=aws-kms
 AWS_KMS_KEY_ARN=arn:aws:kms:us-east-1:123456:key/abc-def-123
+ENCRYPTION_KEY=abcdef...   # kept for fallback until rewrap completes
 ```
 
-The app reads the config, instantiates the right `KeyProvider`, and all existing code that calls `encryption_keys.encrypt()`/`decrypt()` works identically.
+The app reads the config, instantiates the right `KeyProvider` (with optional fallback), and all existing code that calls `encryption_keys.encrypt()`/`decrypt()` works identically. See [KMS Migration Guide](KMS_MIGRATION_GUIDE.md) for detailed procedures.
 
 ### Provider Initialization Flow
 
@@ -435,34 +446,47 @@ sequenceDiagram
     C-->>M: config (with key_provider field)
 
     M->>C: validate_key_provider()
-    Note over C: Panics if unsupported provider
+    Note over C: Panics if unsupported provider<br/>or missing required config
 
     alt KEY_PROVIDER=local
         M->>KP: LocalKeyProvider::from_config(&config)
         Note over KP: Parses ENCRYPTION_KEY hex<br/>Wraps in Zeroizing<[u8; 32]>
-    else KEY_PROVIDER=aws_kms (Phase 4)
-        M->>KP: AwsKmsProvider::new(key_arn)
+    else KEY_PROVIDER=aws-kms
+        M->>KP: AwsKmsProvider::from_config(&config).await
+        Note over KP: Loads AWS SDK config<br/>Creates KMS client
+    else KEY_PROVIDER=gcp-kms
+        M->>KP: GcpKmsProvider::from_config(&config).await
+        Note over KP: Loads GCP ADC<br/>Creates Cloud KMS client
     end
 
-    M->>EK: EncryptionKeys::with_provider(provider)
-    Note over EK: Stores Arc<dyn KeyProvider><br/>Delegates wrap/unwrap to provider
+    opt ENCRYPTION_KEY set AND provider != local
+        M->>M: Create LocalKeyProvider as fallback
+        M->>M: Cross-provider key_id collision check
+        Note over M: Panics on 1-in-256 collision
+    end
 
-    Note over M,EK: Local env-var deployments may instead use<br/>EncryptionKeys::from_config(&config)<br/>to retain v0/v1 legacy decrypt fallback
+    M->>EK: EncryptionKeys::with_provider_and_fallback(provider, fallback)
+    Note over EK: Stores Arc&lt;dyn KeyProvider&gt;<br/>+ optional fallback provider
+
+    opt ENCRYPTION_KEY set
+        M->>EK: set_legacy(LegacyKeys::from_config(&config))
+        Note over EK: Enables v0/v1 decrypt fallback
+    end
 ```
 
 ### Implementation Details
 
 - **Change scope**: Three new/modified files: `crypto/key_provider.rs` (trait + `WrappedKey` struct), `crypto/local_key_provider.rs` (env-var-based impl), `crypto/aes.rs` (delegates to provider via `EncryptionKeys::with_provider()`), `main.rs` (provider construction + dispatch), `config.rs` (`key_provider` field + `validate_key_provider()`)
-- **Public API**: `encrypt()`, `decrypt()`, `rewrap()`, `has_previous()`, `decrypt_stats()` signatures unchanged. `EncryptionKeys::with_provider()` is the provider-agnostic constructor; `from_config()` remains as the local env-var convenience path with legacy v0/v1 fallback
-- **Backward compatibility**: `EncryptionKeys::from_config()` keeps v0, v1, and v2 ciphertexts fully decryptable for local env-var deployments. `EncryptionKeys::with_provider()` only depends on the provider for v2
-- **Config**: `KEY_PROVIDER` env var (default: `"local"`). `ENCRYPTION_KEY` / `ENCRYPTION_KEY_PREVIOUS` are required only for `KEY_PROVIDER=local`
-- **Security**: `LocalKeyProvider` stores key material in `Zeroizing<[u8; 32]>`. `Debug` impl redacts all key bytes. The trait is `Send + Sync + Debug` to support `Arc<dyn KeyProvider>` in `AppState`
-- **No new dependencies**: Uses existing `aes-gcm`, `rand`, `zeroize`, `sha2` crates. The trait is synchronous (Phase 4+ may add async for KMS network calls)
-- **Testing**: `local_key_provider.rs` includes unit tests for roundtrip wrap/unwrap, nonce uniqueness, previous-key unwrap, key ID flags, debug redaction, config construction, same-key no-op rotation handling, and wrapped DEK size assertions. `aes.rs` also includes provider-only tests with non-local key IDs and non-60-byte wrapped DEKs
+- **Public API**: `encrypt()`, `decrypt()`, `rewrap()`, `has_previous()`, `decrypt_stats()` are now async. `EncryptionKeys::with_provider_and_fallback()` is the provider-agnostic constructor with optional fallback; `from_config()` remains as the local env-var convenience path with legacy v0/v1 fallback
+- **Backward compatibility**: `EncryptionKeys::from_config()` keeps v0, v1, and v2 ciphertexts fully decryptable for local env-var deployments. KMS providers + fallback handle the migration path
+- **Config**: `KEY_PROVIDER` env var (default: `"local"`). `ENCRYPTION_KEY` / `ENCRYPTION_KEY_PREVIOUS` are required only for `KEY_PROVIDER=local`. KMS providers require their respective key identifier env vars.
+- **Security**: `LocalKeyProvider` stores key material in `Zeroizing<[u8; 32]>`. KMS providers redact key ARNs/names in `Debug` output. `WrappedKey.ciphertext` is `Zeroizing<Vec<u8>>` for defense-in-depth. The trait is `Send + Sync + Debug` to support `Arc<dyn KeyProvider>` in `AppState`
+- **Dependencies**: `async-trait` (always-on for the trait). `aws-config` + `aws-sdk-kms` behind `aws-kms` feature. `google-cloud-kms` behind `gcp-kms` feature
+- **Testing**: `local_key_provider.rs` includes unit tests for roundtrip wrap/unwrap, nonce uniqueness, previous-key unwrap, key ID flags, debug redaction, config construction, same-key no-op rotation handling, and wrapped DEK size assertions. `aes.rs` includes 50+ tests covering v0/v1/v2/fallback/rewrap paths. Both KMS providers have 9 tests each covering key ID derivation, has_key_id logic, and debug redaction
 
 ---
 
-## Phase 4: Cloud KMS Integration
+## Phase 4: Cloud KMS Integration (COMPLETED)
 
 ### Encrypt / Decrypt Flow with KMS
 
@@ -517,6 +541,27 @@ graph LR
     style AZ_HSM fill:#8e44ad,color:#fff
 ```
 
+### Fallback Provider for Migration
+
+During migration from local to KMS, `EncryptionKeys` supports a fallback provider:
+
+```mermaid
+flowchart TD
+    EK["EncryptionKeys"] --> P["Primary Provider<br/>(e.g., AwsKmsProvider)"]
+    EK --> F["Fallback Provider<br/>(e.g., LocalKeyProvider)"]
+    EK --> L["LegacyKeys<br/>(v0/v1 fallback only)"]
+
+    P -->|new encrypt| W1["Wrap DEK with KMS"]
+    P -->|decrypt v2| U1["Try unwrap with KMS"]
+    U1 -->|fail| F
+    F -->|decrypt old v2| U2["Try unwrap with local"]
+    L -->|decrypt v1/v0| U3["Try legacy keys"]
+
+    style P fill:#e67e22,color:#fff
+    style F fill:#3498db,color:#fff
+    style L fill:#95a5a6,color:#fff
+```
+
 ### Key Rotation with KMS (Timeline)
 
 ```mermaid
@@ -535,6 +580,17 @@ gantt
     Re-wrap DEKs from v1 to v2 :crit, rewrap, 4, 6
     Disable v1 (optional)      :milestone, dis, after rewrap, 0
 ```
+
+### Implementation Details
+
+- **Change scope**: `crypto/key_provider.rs` (async trait via `async-trait`, shared `derive_key_id_from_str`), `crypto/aws_kms_provider.rs` (new), `crypto/gcp_kms_provider.rs` (new), `crypto/aes.rs` (async encrypt/decrypt/rewrap, fallback provider, `LegacyKeys`, `MAX_WRAPPED_DEK_SIZE`), `crypto/mod.rs` (feature-gated module exports), `config.rs` (4 new KMS config fields, updated validation), `main.rs` (provider dispatch, collision check, fallback construction), `Cargo.toml` (feature flags, optional KMS deps)
+- **Public API**: `encrypt()`, `decrypt()`, `rewrap()` are now `async fn`. ~42 call sites across services/handlers updated with `.await`. `EncryptionKeys::with_provider_and_fallback()` is the new primary constructor
+- **Backward compatibility**: All existing v0/v1/v2 ciphertexts remain fully decryptable. The fallback provider chain: primary -> fallback -> v1 legacy -> v0 legacy
+- **Config**: `KEY_PROVIDER` supports `"local"`, `"aws-kms"`, `"gcp-kms"`. New env vars: `AWS_KMS_KEY_ARN`, `AWS_KMS_KEY_ARN_PREVIOUS`, `GCP_KMS_KEY_NAME`, `GCP_KMS_KEY_NAME_PREVIOUS`
+- **Feature flags**: `aws-kms` = `aws-config` + `aws-sdk-kms`; `gcp-kms` = `google-cloud-kms`. Default build includes neither (local-only)
+- **Security**: All Debug impls redact key identifiers. KMS error messages are sanitized (logged for diagnostics, generic message in error chain). `WrappedKey.ciphertext` zeroized on drop. Cross-provider key ID collision check at startup. `MAX_WRAPPED_DEK_SIZE = 1024` prevents oversized wrapped DEKs
+- **Retry**: AWS SDK has built-in retry (3 attempts). GCP KMS uses manual retry (3 attempts, exponential backoff from 100ms)
+- **Testing**: 50+ tests in `aes.rs` (v0/v1/v2/fallback/rewrap), 9 tests each for AWS and GCP providers (key ID derivation, has_key_id, debug redaction), 14 config tests. 515 tests total pass with `--all-features`
 
 ---
 
@@ -886,15 +942,17 @@ graph LR
 
 ## Comparison: Key Management Approaches
 
-| Aspect | Phase 1-2 (Env var) | Phase 3 (Current -- KeyProvider trait) | Phase 4 (Cloud KMS) | Phase 5-6 (Per-tenant + BYOK) |
+| Aspect | Phase 1-2 (Env var) | Phase 3 (KeyProvider trait) | Phase 4 (Current -- Cloud KMS) | Phase 5-6 (Per-tenant + BYOK) |
 |--------|-------------------|------------------------------|---------------------|-------------------------------|
-| **Key storage** | Env var (wraps DEKs) | Pluggable backend (`LocalKeyProvider` from env var) | HSM-backed (FIPS 140-2 Level 3) | Customer KMS/HSM |
-| **Key rotation** | KEK rotation re-wraps DEKs via `rewrap()` | Same + pluggable providers | KMS auto-rotation (annual + on-demand) | Customer controlled |
+| **Key storage** | Env var (wraps DEKs) | Pluggable backend (`LocalKeyProvider` from env var) | HSM-backed via AWS KMS or GCP Cloud KMS (FIPS 140-2 Level 3) | Customer KMS/HSM |
+| **Key rotation** | KEK rotation re-wraps DEKs via `rewrap()` | Same + pluggable providers | KMS auto-rotation (annual + on-demand) + cross-key rotation | Customer controlled |
 | **Blast radius** | Per-record DEK isolation | Per-record DEK isolation | Per-record DEK + HSM protection | Per-tenant (isolated) |
-| **Re-encrypt on rotate** | Only DEKs (60 bytes each) | Only DEKs (provider-defined wrapped size; 60 bytes for local) | Only DEKs (small) | Only DEKs (small) |
+| **Re-encrypt on rotate** | Only DEKs (60 bytes each) | Only DEKs (60 bytes for local) | Only DEKs (60-200 bytes per provider) | Only DEKs (small) |
 | **Customer key control** | None | None | None | Full root key control + BYOK |
 | **Crypto-shredding** | No | No | No (NyxID key) | Yes (customer deletes their key) |
-| **KMS migration path** | Manual code changes required | Provider implementation + config change, no encryption-engine changes | Native KMS integration | Customer-managed KMS |
+| **KMS migration path** | Manual code changes | Config change only | Fallback provider for zero-downtime migration | Customer-managed KMS |
+| **Async** | No | No | Yes (`async-trait`) | Yes |
+| **Feature flags** | N/A | N/A | `aws-kms`, `gcp-kms` (optional deps) | N/A |
 | **Complexity** | Medium | Medium | Medium | High |
 
 ---

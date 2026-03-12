@@ -89,12 +89,14 @@ pub async fn refresh_oauth_token(
     let client_secret = resolved.client_secret;
 
     let decrypted_rt = Zeroizing::new(
-        encryption_keys.decrypt(
-            token
-                .refresh_token_encrypted
-                .as_ref()
-                .ok_or_else(|| AppError::Internal("Token missing refresh_token".to_string()))?,
-        )?,
+        encryption_keys
+            .decrypt(
+                token
+                    .refresh_token_encrypted
+                    .as_ref()
+                    .ok_or_else(|| AppError::Internal("Token missing refresh_token".to_string()))?,
+            )
+            .await?,
     );
     let refresh_token = String::from_utf8((*decrypted_rt).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode refresh_token: {e}")))?;
@@ -159,7 +161,7 @@ pub async fn refresh_oauth_token(
     let expires_in = token_data["expires_in"].as_i64();
     let now = Utc::now();
 
-    let access_enc = encryption_keys.encrypt(new_access_token.as_bytes())?;
+    let access_enc = encryption_keys.encrypt(new_access_token.as_bytes()).await?;
 
     let mut set_doc = doc! {
         "access_token_encrypted": bson::Binary {
@@ -178,7 +180,7 @@ pub async fn refresh_oauth_token(
     }
 
     if let Some(rt) = new_refresh_token {
-        let rt_enc = encryption_keys.encrypt(rt.as_bytes())?;
+        let rt_enc = encryption_keys.encrypt(rt.as_bytes()).await?;
         set_doc.insert(
             "refresh_token_encrypted",
             bson::Binary {

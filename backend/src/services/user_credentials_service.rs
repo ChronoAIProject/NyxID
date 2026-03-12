@@ -24,9 +24,9 @@ pub async fn upsert_user_credentials(
     let collection = db.collection::<UserProviderCredentials>(COLLECTION_NAME);
     let now = Utc::now();
 
-    let client_id_enc = encryption_keys.encrypt(client_id.as_bytes())?;
+    let client_id_enc = encryption_keys.encrypt(client_id.as_bytes()).await?;
     let client_secret_enc = match client_secret {
-        Some(s) => Some(encryption_keys.encrypt(s.as_bytes())?),
+        Some(s) => Some(encryption_keys.encrypt(s.as_bytes()).await?),
         None => None,
     };
 
@@ -202,7 +202,7 @@ pub async fn resolve_oauth_credentials(
     let mode = &provider.credential_mode;
 
     match mode.as_str() {
-        "admin" => decrypt_provider_credentials(encryption_keys, provider),
+        "admin" => decrypt_provider_credentials(encryption_keys, provider).await,
         "user" => {
             resolve_user_credentials_for_owner(
                 db,
@@ -216,9 +216,9 @@ pub async fn resolve_oauth_credentials(
         "both" => {
             let user_creds = get_user_credentials(db, user_id, &provider.id).await?;
             if let Some(creds) = user_creds {
-                decrypt_user_credentials(encryption_keys, &creds, user_id)
+                decrypt_user_credentials(encryption_keys, &creds, user_id).await
             } else if provider_has_admin_oauth_credentials(provider) {
-                decrypt_provider_credentials(encryption_keys, provider)
+                decrypt_provider_credentials(encryption_keys, provider).await
             } else {
                 Err(AppError::BadRequest(
                     "This provider requires either admin-configured OAuth app credentials or your own OAuth app credentials".to_string(),
@@ -231,7 +231,7 @@ pub async fn resolve_oauth_credentials(
                 mode = %mode,
                 "Unknown credential_mode, falling back to admin"
             );
-            decrypt_provider_credentials(encryption_keys, provider)
+            decrypt_provider_credentials(encryption_keys, provider).await
         }
     }
 }
@@ -259,7 +259,7 @@ pub async fn resolve_token_oauth_credentials(
         }
         None => {
             if provider_has_admin_oauth_credentials(provider) {
-                decrypt_provider_credentials(encryption_keys, provider)
+                decrypt_provider_credentials(encryption_keys, provider).await
             } else {
                 Err(AppError::BadRequest(
                     "The provider's OAuth app credentials are no longer configured. Reconnect after an admin updates the provider."
@@ -279,7 +279,7 @@ async fn resolve_user_credentials_for_owner(
 ) -> AppResult<ResolvedOAuthCredentials> {
     let user_creds = get_user_credentials(db, user_id, &provider.id).await?;
     match user_creds {
-        Some(creds) => decrypt_user_credentials(encryption_keys, &creds, user_id),
+        Some(creds) => decrypt_user_credentials(encryption_keys, &creds, user_id).await,
         None => Err(AppError::BadRequest(missing_message.to_string())),
     }
 }
@@ -289,7 +289,7 @@ async fn resolve_user_credentials_for_owner(
 /// Note: `Zeroizing` is best-effort here — the `String::from_utf8` clone means the
 /// plaintext remains in memory until deallocated. Acceptable for our threat model
 /// (encrypted at rest, decrypted in-memory only when needed).
-fn decrypt_provider_credentials(
+async fn decrypt_provider_credentials(
     encryption_keys: &EncryptionKeys,
     provider: &ProviderConfig,
 ) -> AppResult<ResolvedOAuthCredentials> {
@@ -297,12 +297,12 @@ fn decrypt_provider_credentials(
         AppError::Internal(format!("Provider {} missing client_id", provider.slug))
     })?;
 
-    let decrypted_cid = Zeroizing::new(encryption_keys.decrypt(encrypted_cid)?);
+    let decrypted_cid = Zeroizing::new(encryption_keys.decrypt(encrypted_cid).await?);
     let client_id = String::from_utf8((*decrypted_cid).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))?;
 
     let client_secret = if let Some(ref encrypted) = provider.client_secret_encrypted {
-        let decrypted = Zeroizing::new(encryption_keys.decrypt(encrypted)?);
+        let decrypted = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
         Some(
             String::from_utf8((*decrypted).clone())
                 .map_err(|e| AppError::Internal(format!("Failed to decode client_secret: {e}")))?,
@@ -321,7 +321,7 @@ fn decrypt_provider_credentials(
 /// Decrypt user-level OAuth credentials.
 ///
 /// Note: `Zeroizing` is best-effort — see `decrypt_provider_credentials` doc comment.
-fn decrypt_user_credentials(
+async fn decrypt_user_credentials(
     encryption_keys: &EncryptionKeys,
     creds: &UserProviderCredentials,
     credential_user_id: &str,
@@ -331,13 +331,13 @@ fn decrypt_user_credentials(
         .as_ref()
         .ok_or_else(|| AppError::Internal("User credentials missing client_id".to_string()))?;
 
-    let decrypted_cid = Zeroizing::new(encryption_keys.decrypt(encrypted_cid)?);
+    let decrypted_cid = Zeroizing::new(encryption_keys.decrypt(encrypted_cid).await?);
     let client_id = String::from_utf8((*decrypted_cid).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode user client_id: {e}")))?;
 
     let client_secret =
         if let Some(ref encrypted) = creds.client_secret_encrypted {
-            let decrypted = Zeroizing::new(encryption_keys.decrypt(encrypted)?);
+            let decrypted = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
             Some(String::from_utf8((*decrypted).clone()).map_err(|e| {
                 AppError::Internal(format!("Failed to decode user client_secret: {e}"))
             })?)

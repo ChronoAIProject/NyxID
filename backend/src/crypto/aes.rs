@@ -41,11 +41,12 @@ const V1_MIN_SIZE: usize = V1_HEADER_SIZE + NONCE_SIZE + TAG_SIZE;
 /// Size of the v2 header: version(1) + kek_id(1) + wrapped_dek_len(2 BE) = 4 bytes.
 const V2_HEADER_SIZE: usize = 4;
 
-/// Size of a wrapped DEK: dek_nonce(12) + encrypted_dek(32) + dek_tag(16) = 60 bytes.
+/// Maximum allowed wrapped DEK size (1024 bytes).
 ///
-/// This is the current size produced by [`LocalKeyProvider`]. Other providers
-/// may use a different wrapped-DEK size.
-const WRAPPED_DEK_SIZE: usize = NONCE_SIZE + 32 + TAG_SIZE;
+/// LocalKeyProvider produces 60-byte wrapped DEKs; KMS providers ~170-200 bytes.
+/// This upper bound guards against corrupted headers or unexpectedly large KMS
+/// responses causing unbounded allocations.
+const MAX_WRAPPED_DEK_SIZE: usize = 1024;
 
 /// Minimum v2 ciphertext: header(4) + wrapped_dek(1+) + data_nonce(12) + tag(16).
 const V2_MIN_SIZE: usize = V2_HEADER_SIZE + 1 + NONCE_SIZE + TAG_SIZE;
@@ -54,6 +55,7 @@ const V2_MIN_SIZE: usize = V2_HEADER_SIZE + 1 + NONCE_SIZE + TAG_SIZE;
 pub struct EncryptionDecryptStats {
     pub v2_current: u64,
     pub v2_previous: u64,
+    pub v2_fallback: u64,
     pub v1_current: u64,
     pub v1_previous: u64,
     pub v0_current: u64,
@@ -66,6 +68,7 @@ pub struct EncryptionDecryptStats {
 struct DecryptCounters {
     v2_current: AtomicU64,
     v2_previous: AtomicU64,
+    v2_fallback: AtomicU64,
     v1_current: AtomicU64,
     v1_previous: AtomicU64,
     v0_current: AtomicU64,
@@ -73,6 +76,7 @@ struct DecryptCounters {
     unknown_key_id_failures: AtomicU64,
     decrypt_failures: AtomicU64,
     logged_v2_previous: AtomicBool,
+    logged_v2_fallback: AtomicBool,
     logged_v1_previous: AtomicBool,
     logged_v0_current: AtomicBool,
     logged_v0_previous: AtomicBool,
@@ -84,6 +88,7 @@ impl DecryptCounters {
         EncryptionDecryptStats {
             v2_current: self.v2_current.load(Ordering::Relaxed),
             v2_previous: self.v2_previous.load(Ordering::Relaxed),
+            v2_fallback: self.v2_fallback.load(Ordering::Relaxed),
             v1_current: self.v1_current.load(Ordering::Relaxed),
             v1_previous: self.v1_previous.load(Ordering::Relaxed),
             v0_current: self.v0_current.load(Ordering::Relaxed),
@@ -95,7 +100,7 @@ impl DecryptCounters {
 }
 
 #[derive(Clone)]
-struct LegacyKeys {
+pub(crate) struct LegacyKeys {
     current: Zeroizing<[u8; 32]>,
     current_id: u8,
     previous: Option<Zeroizing<[u8; 32]>>,
@@ -103,7 +108,7 @@ struct LegacyKeys {
 }
 
 impl LegacyKeys {
-    fn from_config(config: &AppConfig) -> Self {
+    pub(crate) fn from_config(config: &AppConfig) -> Self {
         let current_hex = config
             .encryption_key
             .as_deref()
@@ -167,6 +172,9 @@ impl LegacyKeys {
 pub struct EncryptionKeys {
     /// KeyProvider for v2 envelope DEK wrap/unwrap operations.
     provider: Arc<dyn KeyProvider>,
+    /// Optional fallback provider for v2 DEKs wrapped by a previous provider
+    /// (e.g., local provider during migration to KMS).
+    fallback_provider: Option<Arc<dyn KeyProvider>>,
     /// Raw key material used only for legacy v0/v1 decrypt fallback.
     legacy: Option<LegacyKeys>,
     counters: DecryptCounters,
@@ -176,6 +184,14 @@ impl std::fmt::Debug for EncryptionKeys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptionKeys")
             .field("provider", &self.provider)
+            .field(
+                "fallback_provider",
+                if self.fallback_provider.is_some() {
+                    &"Some(...)"
+                } else {
+                    &"None"
+                },
+            )
             .field(
                 "legacy",
                 if self.legacy.is_some() {
@@ -196,6 +212,21 @@ impl EncryptionKeys {
     pub fn with_provider(provider: Arc<dyn KeyProvider>) -> Self {
         Self {
             provider,
+            fallback_provider: None,
+            legacy: None,
+            counters: DecryptCounters::default(),
+        }
+    }
+
+    /// Build with a primary and optional fallback provider.
+    /// Used during migration from one provider to another (e.g., local -> KMS).
+    pub fn with_provider_and_fallback(
+        provider: Arc<dyn KeyProvider>,
+        fallback: Option<Arc<dyn KeyProvider>>,
+    ) -> Self {
+        Self {
+            provider,
+            fallback_provider: fallback,
             legacy: None,
             counters: DecryptCounters::default(),
         }
@@ -211,6 +242,11 @@ impl EncryptionKeys {
         let mut keys = Self::with_provider(provider);
         keys.legacy = Some(legacy);
         keys
+    }
+
+    /// Attach legacy keys for v0/v1 decrypt fallback.
+    pub(crate) fn set_legacy(&mut self, legacy: LegacyKeys) {
+        self.legacy = Some(legacy);
     }
 
     /// Returns true if a previous key is configured.
@@ -231,7 +267,7 @@ impl EncryptionKeys {
     /// after use.
     ///
     /// Output: `0x02 || kek_id(1) || wrapped_dek_len(2 BE) || wrapped_dek(N) || data_nonce(12) || data_ciphertext || data_tag(16)`
-    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, AppError> {
+    pub async fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, AppError> {
         // Generate random 32-byte DEK
         let mut dek = Zeroizing::new([0u8; 32]);
         rand::thread_rng().fill_bytes(dek.as_mut());
@@ -247,7 +283,12 @@ impl EncryptionKeys {
             .map_err(|e| AppError::Internal(format!("AES data encryption failed: {e}")))?;
 
         // Wrap DEK with current KEK via provider
-        let wrapped = self.provider.wrap_dek(dek.as_ref())?;
+        let wrapped = self.provider.wrap_dek(dek.as_ref()).await?;
+        if wrapped.ciphertext.len() > MAX_WRAPPED_DEK_SIZE {
+            return Err(AppError::Internal(
+                "Wrapped DEK exceeds maximum size".to_string(),
+            ));
+        }
         let wrapped_dek_len = wrapped.ciphertext.len() as u16;
 
         // Assemble v2 envelope
@@ -272,7 +313,7 @@ impl EncryptionKeys {
     /// 3. Try v0 (raw `nonce || ciphertext || tag`) with current key
     /// 4. Try v0 with previous key
     /// 5. Return error if all fail
-    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
+    pub async fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
         let mut unknown_key_id = None;
         let current_key_id = self.provider.current_key_id();
 
@@ -282,16 +323,22 @@ impl EncryptionKeys {
             let wrapped_dek_len = u16::from_be_bytes([ciphertext[2], ciphertext[3]]) as usize;
             let required_len = V2_HEADER_SIZE + wrapped_dek_len + NONCE_SIZE + TAG_SIZE;
 
-            if wrapped_dek_len > 0 && ciphertext.len() >= required_len {
+            // Treat oversized wrapped-DEK lengths as a malformed v2 parse and
+            // fall through to the legacy v1/v0 chain. Random nonce bytes from
+            // valid v0 ciphertexts can look like a v2 header.
+            if wrapped_dek_len <= MAX_WRAPPED_DEK_SIZE
+                && wrapped_dek_len > 0
+                && ciphertext.len() >= required_len
+            {
                 let wrapped_dek = &ciphertext[V2_HEADER_SIZE..V2_HEADER_SIZE + wrapped_dek_len];
                 let data_payload = &ciphertext[V2_HEADER_SIZE + wrapped_dek_len..];
 
                 let wrapped = WrappedKey {
                     key_id: kek_id,
-                    ciphertext: wrapped_dek.to_vec(),
+                    ciphertext: Zeroizing::new(wrapped_dek.to_vec()),
                 };
 
-                match self.provider.unwrap_dek(&wrapped) {
+                match self.provider.unwrap_dek(&wrapped).await {
                     Ok(dek_bytes) => {
                         // dek_bytes is Zeroizing<Vec<u8>> -- automatically
                         // scrubbed from memory when this scope exits.
@@ -315,6 +362,30 @@ impl EncryptionKeys {
                         return decrypt_raw(data_payload, dek.as_ref());
                     }
                     Err(_) => {
+                        // Primary provider could not unwrap; try fallback provider
+                        if let Some(ref fallback) = self.fallback_provider {
+                            if fallback.has_key_id(kek_id) {
+                                if let Ok(dek_bytes) = fallback.unwrap_dek(&wrapped).await {
+                                    self.counters.v2_fallback.fetch_add(1, Ordering::Relaxed);
+                                    self.log_once(
+                                        &self.counters.logged_v2_fallback,
+                                        "Decrypted v2 envelope via fallback provider; migration from previous provider is still in progress",
+                                    );
+
+                                    let dek = Zeroizing::new(
+                                        <[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(
+                                            |_| {
+                                                AppError::Internal(
+                                                    "Unwrapped DEK is not 32 bytes".to_string(),
+                                                )
+                                            },
+                                        )?,
+                                    );
+                                    return decrypt_raw(data_payload, dek.as_ref());
+                                }
+                            }
+                        }
+
                         // Provider could not unwrap; if it is not the current or
                         // previous key, record the unknown key id for the error
                         // message later.
@@ -422,7 +493,7 @@ impl EncryptionKeys {
     /// Only the wrapped DEK portion changes; the encrypted data is untouched.
     /// Returns the original ciphertext unchanged if it is already wrapped with
     /// the current KEK.
-    pub fn rewrap(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
+    pub async fn rewrap(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
         if !looks_like_v2(ciphertext) {
             return Err(AppError::Internal(
                 "rewrap() only supports v2 envelope format".to_string(),
@@ -446,15 +517,27 @@ impl EncryptionKeys {
         let wrapped_dek = &ciphertext[V2_HEADER_SIZE..V2_HEADER_SIZE + wrapped_dek_len];
         let data_portion = &ciphertext[V2_HEADER_SIZE + wrapped_dek_len..];
 
-        // Unwrap DEK with previous key via provider.
+        // Unwrap DEK with previous key via provider, falling back to fallback provider.
         let old_wrapped = WrappedKey {
             key_id: kek_id,
-            ciphertext: wrapped_dek.to_vec(),
+            ciphertext: Zeroizing::new(wrapped_dek.to_vec()),
         };
-        let plaintext_dek = self.provider.unwrap_dek(&old_wrapped)?;
+        let plaintext_dek = match self.provider.unwrap_dek(&old_wrapped).await {
+            Ok(dek) => dek,
+            Err(_) => {
+                // Try fallback for migration rewrap
+                self.fallback_provider
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AppError::Internal("No provider could unwrap DEK for rewrap".into())
+                    })?
+                    .unwrap_dek(&old_wrapped)
+                    .await?
+            }
+        };
 
         // Wrap with current key via provider (plaintext_dek is Zeroizing<Vec<u8>>).
-        let new_wrapped = self.provider.wrap_dek(&plaintext_dek)?;
+        let new_wrapped = self.provider.wrap_dek(&plaintext_dek).await?;
         let new_wrapped_len = new_wrapped.ciphertext.len() as u16;
 
         // Assemble new v2 envelope with current KEK.
@@ -602,7 +685,12 @@ pub fn parse_hex_key(hex_key: &str) -> Result<Vec<u8>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use zeroize::Zeroizing;
+
+    /// Size of a wrapped DEK produced by LocalKeyProvider:
+    /// dek_nonce(12) + encrypted_dek(32) + dek_tag(16) = 60 bytes.
+    const WRAPPED_DEK_SIZE: usize = NONCE_SIZE + 32 + TAG_SIZE;
 
     fn test_config(key_hex: &str, prev_hex: Option<&str>) -> AppConfig {
         AppConfig {
@@ -649,6 +737,10 @@ mod tests {
             apns_topic: None,
             apns_sandbox: true,
             key_provider: "local".to_string(),
+            aws_kms_key_arn: None,
+            aws_kms_key_arn_previous: None,
+            gcp_kms_key_name: None,
+            gcp_kms_key_name_previous: None,
         }
     }
 
@@ -669,8 +761,9 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl KeyProvider for MockKeyProvider {
-        fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError> {
+        async fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError> {
             let mut ciphertext = Vec::with_capacity(3 + plaintext_dek.len());
             ciphertext.push(self.current_mask);
             ciphertext.push(0xA5);
@@ -679,11 +772,11 @@ mod tests {
 
             Ok(WrappedKey {
                 key_id: self.current_key_id,
-                ciphertext,
+                ciphertext: Zeroizing::new(ciphertext),
             })
         }
 
-        fn unwrap_dek(&self, wrapped: &WrappedKey) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        async fn unwrap_dek(&self, wrapped: &WrappedKey) -> Result<Zeroizing<Vec<u8>>, AppError> {
             let mask = if wrapped.key_id == self.current_key_id {
                 self.current_mask
             } else if let Some((previous_key_id, previous_mask)) = self.previous {
@@ -846,71 +939,71 @@ mod tests {
     // continuing to test v0/v1 backward-compatible decrypt paths. Tests named
     // "v1_decrypt_*" specifically test decryption of legacy v1 ciphertexts.
 
-    #[test]
-    fn v1_roundtrip() {
+    #[tokio::test]
+    async fn v1_roundtrip() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
         let plaintext = b"v1 encrypted data";
-        let encrypted = keys.encrypt(plaintext).unwrap();
+        let encrypted = keys.encrypt(plaintext).await.unwrap();
 
         // Verify v2 header (encrypt now produces v2 format)
         assert_eq!(encrypted[0], VERSION_V2);
         assert_eq!(encrypted[1], keys.provider.current_key_id());
 
-        let decrypted = keys.decrypt(&encrypted).unwrap();
+        let decrypted = keys.decrypt(&encrypted).await.unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
-    #[test]
-    fn v1_different_nonces() {
+    #[tokio::test]
+    async fn v1_different_nonces() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
         let plaintext = b"same data";
-        let enc1 = keys.encrypt(plaintext).unwrap();
-        let enc2 = keys.encrypt(plaintext).unwrap();
+        let enc1 = keys.encrypt(plaintext).await.unwrap();
+        let enc2 = keys.encrypt(plaintext).await.unwrap();
 
         assert_ne!(enc1, enc2);
-        assert_eq!(keys.decrypt(&enc1).unwrap(), plaintext);
-        assert_eq!(keys.decrypt(&enc2).unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&enc1).await.unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&enc2).await.unwrap(), plaintext);
     }
 
-    #[test]
-    fn v1_empty_plaintext() {
+    #[tokio::test]
+    async fn v1_empty_plaintext() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
-        let encrypted = keys.encrypt(b"").unwrap();
-        let decrypted = keys.decrypt(&encrypted).unwrap();
+        let encrypted = keys.encrypt(b"").await.unwrap();
+        let decrypted = keys.decrypt(&encrypted).await.unwrap();
         assert!(decrypted.is_empty());
     }
 
-    #[test]
-    fn v1_large_plaintext() {
+    #[tokio::test]
+    async fn v1_large_plaintext() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
         let plaintext = vec![0x42u8; 10_000];
-        let encrypted = keys.encrypt(&plaintext).unwrap();
-        let decrypted = keys.decrypt(&encrypted).unwrap();
+        let encrypted = keys.encrypt(&plaintext).await.unwrap();
+        let decrypted = keys.decrypt(&encrypted).await.unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
-    #[test]
-    fn v1_tamper_detection() {
+    #[tokio::test]
+    async fn v1_tamper_detection() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
-        let mut encrypted = keys.encrypt(b"tamper test").unwrap();
+        let mut encrypted = keys.encrypt(b"tamper test").await.unwrap();
         let last = encrypted.len() - 1;
         encrypted[last] ^= 0xFF;
 
-        assert!(keys.decrypt(&encrypted).is_err());
+        assert!(keys.decrypt(&encrypted).await.is_err());
     }
 
-    #[test]
-    fn v1_decrypt_v0_data_with_current_key() {
+    #[tokio::test]
+    async fn v1_decrypt_v0_data_with_current_key() {
         // Simulate existing v0 data encrypted with the current key
         let key_hex = "cd".repeat(32);
         let key_bytes = hex::decode(&key_hex).unwrap();
@@ -921,12 +1014,12 @@ mod tests {
         let v0_encrypted = encrypt(plaintext, &key_bytes).unwrap();
 
         // EncryptionKeys should be able to decrypt v0 data
-        let decrypted = keys.decrypt(&v0_encrypted).unwrap();
+        let decrypted = keys.decrypt(&v0_encrypted).await.unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
-    #[test]
-    fn v1_decrypt_v0_data_with_previous_key() {
+    #[tokio::test]
+    async fn v1_decrypt_v0_data_with_previous_key() {
         // Simulate key rotation: v0 data encrypted with old key, new key is now current
         let old_key_hex = "cd".repeat(32);
         let new_key_hex = "ef".repeat(32);
@@ -938,12 +1031,12 @@ mod tests {
         let v0_encrypted = encrypt(plaintext, &old_key_bytes).unwrap();
 
         // Should decrypt using the previous key fallback
-        let decrypted = keys.decrypt(&v0_encrypted).unwrap();
+        let decrypted = keys.decrypt(&v0_encrypted).await.unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
-    #[test]
-    fn v1_key_rotation_current_decrypts_previous_v1() {
+    #[tokio::test]
+    async fn v1_key_rotation_current_decrypts_previous_v1() {
         // Encrypt with key A as current, then rotate: key B becomes current, A becomes previous
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
@@ -952,7 +1045,7 @@ mod tests {
         // Phase 1: encrypt with key A (now produces v2)
         let config_a = test_config(&key_a_hex, None);
         let keys_a = EncryptionKeys::from_config(&config_a);
-        let encrypted = keys_a.encrypt(b"rotation test").unwrap();
+        let encrypted = keys_a.encrypt(b"rotation test").await.unwrap();
         assert_eq!(encrypted[1], key_a_id);
 
         // Phase 2: rotate - B is current, A is previous
@@ -960,12 +1053,12 @@ mod tests {
         let keys_rotated = EncryptionKeys::from_config(&config_rotated);
 
         // Should still decrypt data encrypted under key A
-        let decrypted = keys_rotated.decrypt(&encrypted).unwrap();
+        let decrypted = keys_rotated.decrypt(&encrypted).await.unwrap();
         assert_eq!(decrypted, b"rotation test");
     }
 
-    #[test]
-    fn v1_rollback_scenario() {
+    #[tokio::test]
+    async fn v1_rollback_scenario() {
         // Encrypt with key B as current, then rollback: A becomes current again, B becomes previous
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
@@ -973,34 +1066,34 @@ mod tests {
         // Phase 1: key B is current, encrypt some data
         let config_b = test_config(&key_b_hex, Some(&key_a_hex));
         let keys_b = EncryptionKeys::from_config(&config_b);
-        let encrypted = keys_b.encrypt(b"rollback test").unwrap();
+        let encrypted = keys_b.encrypt(b"rollback test").await.unwrap();
 
         // Phase 2: rollback - A is current again, B becomes previous
         let config_rollback = test_config(&key_a_hex, Some(&key_b_hex));
         let keys_rollback = EncryptionKeys::from_config(&config_rollback);
 
-        let decrypted = keys_rollback.decrypt(&encrypted).unwrap();
+        let decrypted = keys_rollback.decrypt(&encrypted).await.unwrap();
         assert_eq!(decrypted, b"rollback test");
     }
 
-    #[test]
-    fn v1_second_rotation_without_reencryption_fails_after_oldest_key_removed() {
+    #[tokio::test]
+    async fn v1_second_rotation_without_reencryption_fails_after_oldest_key_removed() {
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
         let key_c_hex = "cc".repeat(32);
 
         let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
-        let encrypted = keys_a.encrypt(b"still on key a").unwrap();
+        let encrypted = keys_a.encrypt(b"still on key a").await.unwrap();
 
         let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
-        assert_eq!(keys_b.decrypt(&encrypted).unwrap(), b"still on key a");
+        assert_eq!(keys_b.decrypt(&encrypted).await.unwrap(), b"still on key a");
 
         let keys_c = EncryptionKeys::from_config(&test_config(&key_c_hex, Some(&key_b_hex)));
-        assert!(keys_c.decrypt(&encrypted).is_err());
+        assert!(keys_c.decrypt(&encrypted).await.is_err());
     }
 
-    #[test]
-    fn v1_decrypt_supports_draft_phase1_header() {
+    #[tokio::test]
+    async fn v1_decrypt_supports_draft_phase1_header() {
         let key_hex = "ab".repeat(32);
         let key_bytes = hex::decode(&key_hex).unwrap();
         let keys = EncryptionKeys::from_config(&test_config(&key_hex, None));
@@ -1010,22 +1103,22 @@ mod tests {
         encrypted.push(DRAFT_KEY_ID_CURRENT);
         encrypted.extend_from_slice(&encrypt(b"draft v1", &key_bytes).unwrap());
 
-        assert_eq!(keys.decrypt(&encrypted).unwrap(), b"draft v1");
+        assert_eq!(keys.decrypt(&encrypted).await.unwrap(), b"draft v1");
     }
 
-    #[test]
-    fn v1_unknown_key_fails() {
+    #[tokio::test]
+    async fn v1_unknown_key_fails() {
         let key_a_hex = "aa".repeat(32);
         let key_c_hex = "cc".repeat(32);
 
         let config_a = test_config(&key_a_hex, None);
         let keys_a = EncryptionKeys::from_config(&config_a);
-        let encrypted = keys_a.encrypt(b"secret").unwrap();
+        let encrypted = keys_a.encrypt(b"secret").await.unwrap();
 
         // Try to decrypt with a completely different key
         let config_c = test_config(&key_c_hex, None);
         let keys_c = EncryptionKeys::from_config(&config_c);
-        assert!(keys_c.decrypt(&encrypted).is_err());
+        assert!(keys_c.decrypt(&encrypted).await.is_err());
     }
 
     #[test]
@@ -1039,15 +1132,18 @@ mod tests {
         assert!(keys_with_prev.has_previous());
     }
 
-    #[test]
-    fn v1_decrypt_stats_track_fallback_paths() {
+    #[tokio::test]
+    async fn v1_decrypt_stats_track_fallback_paths() {
         let current_hex = "ab".repeat(32);
         let previous_hex = "cd".repeat(32);
         let previous_bytes = hex::decode(&previous_hex).unwrap();
         let keys = EncryptionKeys::from_config(&test_config(&current_hex, Some(&previous_hex)));
 
         let v0_previous = encrypt(b"legacy previous", &previous_bytes).unwrap();
-        assert_eq!(keys.decrypt(&v0_previous).unwrap(), b"legacy previous");
+        assert_eq!(
+            keys.decrypt(&v0_previous).await.unwrap(),
+            b"legacy previous"
+        );
 
         let stats = keys.decrypt_stats();
         assert_eq!(
@@ -1055,6 +1151,7 @@ mod tests {
             EncryptionDecryptStats {
                 v2_current: 0,
                 v2_previous: 0,
+                v2_fallback: 0,
                 v1_current: 0,
                 v1_previous: 0,
                 v0_current: 0,
@@ -1076,8 +1173,8 @@ mod tests {
         assert!(!debug_str.contains("cd"));
     }
 
-    #[test]
-    fn v1_cross_version_roundtrip() {
+    #[tokio::test]
+    async fn v1_cross_version_roundtrip() {
         // Encrypt with v0 API, decrypt with EncryptionKeys (simulates migration)
         let key_hex = "dd".repeat(32);
         let key_bytes = hex::decode(&key_hex).unwrap();
@@ -1089,22 +1186,22 @@ mod tests {
         let keys = EncryptionKeys::from_config(&config);
 
         // v0 -> EncryptionKeys decrypt
-        let decrypted = keys.decrypt(&v0_encrypted).unwrap();
+        let decrypted = keys.decrypt(&v0_encrypted).await.unwrap();
         assert_eq!(decrypted, plaintext);
 
         // EncryptionKeys encrypt -> verify it's v2
-        let v2_encrypted = keys.encrypt(plaintext).unwrap();
+        let v2_encrypted = keys.encrypt(plaintext).await.unwrap();
         assert_eq!(v2_encrypted[0], VERSION_V2);
 
         // v2 -> EncryptionKeys decrypt
-        let decrypted2 = keys.decrypt(&v2_encrypted).unwrap();
+        let decrypted2 = keys.decrypt(&v2_encrypted).await.unwrap();
         assert_eq!(decrypted2, plaintext);
     }
 
     // -- v1 backward compatibility: decrypt v1-formatted ciphertexts --
 
-    #[test]
-    fn v1_decrypt_v1_format_ciphertext() {
+    #[tokio::test]
+    async fn v1_decrypt_v1_format_ciphertext() {
         let key_hex = "ab".repeat(32);
         let key_bytes = hex::decode(&key_hex).unwrap();
         let keys = EncryptionKeys::from_config(&test_config(&key_hex, None));
@@ -1113,31 +1210,31 @@ mod tests {
         let v1_encrypted = encrypt_v1(b"v1 format data", &key_bytes).unwrap();
         assert_eq!(v1_encrypted[0], VERSION_V1);
 
-        let decrypted = keys.decrypt(&v1_encrypted).unwrap();
+        let decrypted = keys.decrypt(&v1_encrypted).await.unwrap();
         assert_eq!(decrypted, b"v1 format data");
     }
 
-    #[test]
-    fn v1_decrypt_v1_format_with_previous_key() {
+    #[tokio::test]
+    async fn v1_decrypt_v1_format_with_previous_key() {
         let current_hex = "ab".repeat(32);
         let previous_hex = "cd".repeat(32);
         let previous_bytes = hex::decode(&previous_hex).unwrap();
         let keys = EncryptionKeys::from_config(&test_config(&current_hex, Some(&previous_hex)));
 
         let v1_encrypted = encrypt_v1(b"v1 previous key", &previous_bytes).unwrap();
-        let decrypted = keys.decrypt(&v1_encrypted).unwrap();
+        let decrypted = keys.decrypt(&v1_encrypted).await.unwrap();
         assert_eq!(decrypted, b"v1 previous key");
     }
 
     // -- v2 envelope encryption tests --
 
-    #[test]
-    fn v2_roundtrip() {
+    #[tokio::test]
+    async fn v2_roundtrip() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
         let plaintext = b"v2 envelope encrypted data";
-        let encrypted = keys.encrypt(plaintext).unwrap();
+        let encrypted = keys.encrypt(plaintext).await.unwrap();
 
         assert_eq!(encrypted[0], VERSION_V2);
         assert_eq!(encrypted[1], keys.provider.current_key_id());
@@ -1145,98 +1242,98 @@ mod tests {
         let wrapped_dek_len = u16::from_be_bytes([encrypted[2], encrypted[3]]) as usize;
         assert_eq!(wrapped_dek_len, WRAPPED_DEK_SIZE);
 
-        let decrypted = keys.decrypt(&encrypted).unwrap();
+        let decrypted = keys.decrypt(&encrypted).await.unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
-    #[test]
-    fn v2_different_deks() {
+    #[tokio::test]
+    async fn v2_different_deks() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
         let plaintext = b"same data";
-        let enc1 = keys.encrypt(plaintext).unwrap();
-        let enc2 = keys.encrypt(plaintext).unwrap();
+        let enc1 = keys.encrypt(plaintext).await.unwrap();
+        let enc2 = keys.encrypt(plaintext).await.unwrap();
 
         // Different DEKs and nonces means completely different output
         assert_ne!(enc1, enc2);
 
-        assert_eq!(keys.decrypt(&enc1).unwrap(), plaintext);
-        assert_eq!(keys.decrypt(&enc2).unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&enc1).await.unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&enc2).await.unwrap(), plaintext);
     }
 
-    #[test]
-    fn v2_empty_plaintext() {
+    #[tokio::test]
+    async fn v2_empty_plaintext() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
-        let encrypted = keys.encrypt(b"").unwrap();
+        let encrypted = keys.encrypt(b"").await.unwrap();
         assert_eq!(encrypted[0], VERSION_V2);
 
-        let decrypted = keys.decrypt(&encrypted).unwrap();
+        let decrypted = keys.decrypt(&encrypted).await.unwrap();
         assert!(decrypted.is_empty());
     }
 
-    #[test]
-    fn v2_large_plaintext() {
+    #[tokio::test]
+    async fn v2_large_plaintext() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
         let plaintext = vec![0x42u8; 100_000];
-        let encrypted = keys.encrypt(&plaintext).unwrap();
-        let decrypted = keys.decrypt(&encrypted).unwrap();
+        let encrypted = keys.encrypt(&plaintext).await.unwrap();
+        let decrypted = keys.decrypt(&encrypted).await.unwrap();
         assert_eq!(decrypted, plaintext);
     }
 
-    #[test]
-    fn v2_tamper_wrapped_dek() {
+    #[tokio::test]
+    async fn v2_tamper_wrapped_dek() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
-        let mut encrypted = keys.encrypt(b"tamper dek test").unwrap();
+        let mut encrypted = keys.encrypt(b"tamper dek test").await.unwrap();
         // Flip a byte inside the wrapped DEK region (after header)
         encrypted[V2_HEADER_SIZE + 5] ^= 0xFF;
 
-        assert!(keys.decrypt(&encrypted).is_err());
+        assert!(keys.decrypt(&encrypted).await.is_err());
     }
 
-    #[test]
-    fn v2_tamper_data() {
+    #[tokio::test]
+    async fn v2_tamper_data() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
-        let mut encrypted = keys.encrypt(b"tamper data test").unwrap();
+        let mut encrypted = keys.encrypt(b"tamper data test").await.unwrap();
         // Flip the last byte (in the data tag region)
         let last = encrypted.len() - 1;
         encrypted[last] ^= 0xFF;
 
-        assert!(keys.decrypt(&encrypted).is_err());
+        assert!(keys.decrypt(&encrypted).await.is_err());
     }
 
-    #[test]
-    fn v2_tamper_kek_id() {
+    #[tokio::test]
+    async fn v2_tamper_kek_id() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
-        let mut encrypted = keys.encrypt(b"tamper kek_id test").unwrap();
+        let mut encrypted = keys.encrypt(b"tamper kek_id test").await.unwrap();
         // Corrupt the kek_id byte
         encrypted[1] ^= 0xFF;
 
-        assert!(keys.decrypt(&encrypted).is_err());
+        assert!(keys.decrypt(&encrypted).await.is_err());
     }
 
-    #[test]
-    fn v2_kek_rotation() {
+    #[tokio::test]
+    async fn v2_kek_rotation() {
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
 
         // Encrypt with KEK-A
         let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
-        let encrypted = keys_a.encrypt(b"kek rotation test").unwrap();
+        let encrypted = keys_a.encrypt(b"kek rotation test").await.unwrap();
 
         // Rotate: KEK-B current, KEK-A previous
         let keys_rotated = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
-        let decrypted = keys_rotated.decrypt(&encrypted).unwrap();
+        let decrypted = keys_rotated.decrypt(&encrypted).await.unwrap();
         assert_eq!(decrypted, b"kek rotation test");
 
         // Verify stats show v2_previous
@@ -1245,20 +1342,20 @@ mod tests {
         assert_eq!(stats.v2_current, 0);
     }
 
-    #[test]
-    fn v2_rewrap_roundtrip() {
+    #[tokio::test]
+    async fn v2_rewrap_roundtrip() {
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
 
         // Encrypt with KEK-A
         let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
-        let encrypted = keys_a.encrypt(b"rewrap test").unwrap();
+        let encrypted = keys_a.encrypt(b"rewrap test").await.unwrap();
 
         // Rotate: KEK-B current, KEK-A previous
         let keys_rotated = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
 
         // Rewrap: unwrap DEK with KEK-A, re-wrap with KEK-B
-        let rewrapped = keys_rotated.rewrap(&encrypted).unwrap();
+        let rewrapped = keys_rotated.rewrap(&encrypted).await.unwrap();
 
         // Verify rewrapped ciphertext has KEK-B's id
         let key_b_id = derive_key_id(&hex::decode(&key_b_hex).unwrap());
@@ -1267,44 +1364,44 @@ mod tests {
 
         // Decrypt rewrapped ciphertext with KEK-B only (no previous)
         let keys_b_only = EncryptionKeys::from_config(&test_config(&key_b_hex, None));
-        let decrypted = keys_b_only.decrypt(&rewrapped).unwrap();
+        let decrypted = keys_b_only.decrypt(&rewrapped).await.unwrap();
         assert_eq!(decrypted, b"rewrap test");
     }
 
-    #[test]
-    fn v2_rewrap_already_current() {
+    #[tokio::test]
+    async fn v2_rewrap_already_current() {
         let key_hex = "ab".repeat(32);
         let keys = EncryptionKeys::from_config(&test_config(&key_hex, None));
 
-        let encrypted = keys.encrypt(b"already current").unwrap();
-        let rewrapped = keys.rewrap(&encrypted).unwrap();
+        let encrypted = keys.encrypt(b"already current").await.unwrap();
+        let rewrapped = keys.rewrap(&encrypted).await.unwrap();
 
         // Should be identical (no-op)
         assert_eq!(encrypted, rewrapped);
     }
 
-    #[test]
-    fn v2_rewrap_non_v2_fails() {
+    #[tokio::test]
+    async fn v2_rewrap_non_v2_fails() {
         let key_hex = "ab".repeat(32);
         let key_bytes = hex::decode(&key_hex).unwrap();
         let keys = EncryptionKeys::from_config(&test_config(&key_hex, None));
 
         // Try to rewrap v0 data
         let v0_data = encrypt(b"v0 data", &key_bytes).unwrap();
-        assert!(keys.rewrap(&v0_data).is_err());
+        assert!(keys.rewrap(&v0_data).await.is_err());
 
         // Try to rewrap v1 data
         let v1_data = encrypt_v1(b"v1 data", &key_bytes).unwrap();
-        assert!(keys.rewrap(&v1_data).is_err());
+        assert!(keys.rewrap(&v1_data).await.is_err());
     }
 
-    #[test]
-    fn v2_rewrap_preserves_data() {
+    #[tokio::test]
+    async fn v2_rewrap_preserves_data() {
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
 
         let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
-        let encrypted = keys_a.encrypt(b"data must survive rewrap").unwrap();
+        let encrypted = keys_a.encrypt(b"data must survive rewrap").await.unwrap();
 
         // Extract the data portion (after header + wrapped_dek)
         let wrapped_dek_len = u16::from_be_bytes([encrypted[2], encrypted[3]]) as usize;
@@ -1312,7 +1409,7 @@ mod tests {
 
         // Rewrap
         let keys_rotated = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
-        let rewrapped = keys_rotated.rewrap(&encrypted).unwrap();
+        let rewrapped = keys_rotated.rewrap(&encrypted).await.unwrap();
 
         // Data portion must be identical
         let new_wrapped_dek_len = u16::from_be_bytes([rewrapped[2], rewrapped[3]]) as usize;
@@ -1320,30 +1417,30 @@ mod tests {
         assert_eq!(data_before, data_after);
     }
 
-    #[test]
-    fn v2_rollback() {
+    #[tokio::test]
+    async fn v2_rollback() {
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
 
         // Encrypt with KEK-B
         let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
-        let encrypted = keys_b.encrypt(b"rollback v2 test").unwrap();
+        let encrypted = keys_b.encrypt(b"rollback v2 test").await.unwrap();
 
         // Rollback: KEK-A current, KEK-B previous
         let keys_rollback = EncryptionKeys::from_config(&test_config(&key_a_hex, Some(&key_b_hex)));
-        let decrypted = keys_rollback.decrypt(&encrypted).unwrap();
+        let decrypted = keys_rollback.decrypt(&encrypted).await.unwrap();
         assert_eq!(decrypted, b"rollback v2 test");
     }
 
-    #[test]
-    fn v2_decrypt_stats() {
+    #[tokio::test]
+    async fn v2_decrypt_stats() {
         let current_hex = "ab".repeat(32);
         let previous_hex = "cd".repeat(32);
         let keys = EncryptionKeys::from_config(&test_config(&current_hex, Some(&previous_hex)));
 
         // Encrypt and decrypt with current key (v2)
-        let encrypted = keys.encrypt(b"current key data").unwrap();
-        keys.decrypt(&encrypted).unwrap();
+        let encrypted = keys.encrypt(b"current key data").await.unwrap();
+        keys.decrypt(&encrypted).await.unwrap();
 
         let stats = keys.decrypt_stats();
         assert_eq!(stats.v2_current, 1);
@@ -1352,26 +1449,26 @@ mod tests {
         assert_eq!(stats.v0_current, 0);
     }
 
-    #[test]
-    fn v2_decrypt_stats_previous() {
+    #[tokio::test]
+    async fn v2_decrypt_stats_previous() {
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
 
         // Encrypt with KEK-A
         let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
-        let encrypted = keys_a.encrypt(b"stats previous test").unwrap();
+        let encrypted = keys_a.encrypt(b"stats previous test").await.unwrap();
 
         // Rotate, decrypt with KEK-B (previous = KEK-A)
         let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
-        keys_b.decrypt(&encrypted).unwrap();
+        keys_b.decrypt(&encrypted).await.unwrap();
 
         let stats = keys_b.decrypt_stats();
         assert_eq!(stats.v2_current, 0);
         assert_eq!(stats.v2_previous, 1);
     }
 
-    #[test]
-    fn v2_cross_version_all_formats() {
+    #[tokio::test]
+    async fn v2_cross_version_all_formats() {
         let key_hex = "dd".repeat(32);
         let key_bytes = hex::decode(&key_hex).unwrap();
         let keys = EncryptionKeys::from_config(&test_config(&key_hex, None));
@@ -1380,15 +1477,15 @@ mod tests {
 
         // v0 decrypt
         let v0 = encrypt(plaintext, &key_bytes).unwrap();
-        assert_eq!(keys.decrypt(&v0).unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&v0).await.unwrap(), plaintext);
 
         // v1 decrypt
         let v1 = encrypt_v1(plaintext, &key_bytes).unwrap();
-        assert_eq!(keys.decrypt(&v1).unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&v1).await.unwrap(), plaintext);
 
         // v2 decrypt (via encrypt)
-        let v2 = keys.encrypt(plaintext).unwrap();
-        assert_eq!(keys.decrypt(&v2).unwrap(), plaintext);
+        let v2 = keys.encrypt(plaintext).await.unwrap();
+        assert_eq!(keys.decrypt(&v2).await.unwrap(), plaintext);
 
         // Verify stats
         let stats = keys.decrypt_stats();
@@ -1397,13 +1494,13 @@ mod tests {
         assert_eq!(stats.v0_current, 1);
     }
 
-    #[test]
-    fn v2_size_overhead() {
+    #[tokio::test]
+    async fn v2_size_overhead() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
         let plaintext = b"measure overhead";
-        let encrypted = keys.encrypt(plaintext).unwrap();
+        let encrypted = keys.encrypt(plaintext).await.unwrap();
 
         // v2 overhead = header(4) + wrapped_dek(60) + data_nonce(12) + tag(16) = 92
         // Total = plaintext.len() + 92
@@ -1412,28 +1509,28 @@ mod tests {
         assert_eq!(encrypted.len(), expected_size);
     }
 
-    #[test]
-    fn v2_rewrap_unknown_kek_id_fails() {
+    #[tokio::test]
+    async fn v2_rewrap_unknown_kek_id_fails() {
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
         let key_c_hex = "cc".repeat(32);
 
         // Encrypt with KEK-A
         let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
-        let encrypted = keys_a.encrypt(b"unknown kek test").unwrap();
+        let encrypted = keys_a.encrypt(b"unknown kek test").await.unwrap();
 
         // Try to rewrap with KEK-C (current) + KEK-B (previous) -- neither matches KEK-A
         let keys_c = EncryptionKeys::from_config(&test_config(&key_c_hex, Some(&key_b_hex)));
-        assert!(keys_c.rewrap(&encrypted).is_err());
+        assert!(keys_c.rewrap(&encrypted).await.is_err());
     }
 
-    #[test]
-    fn v2_rewrap_rejects_short_wrapped_dek_len() {
+    #[tokio::test]
+    async fn v2_rewrap_rejects_short_wrapped_dek_len() {
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
 
         let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
-        let mut encrypted = keys_a.encrypt(b"bad wrapped_dek_len").unwrap();
+        let mut encrypted = keys_a.encrypt(b"bad wrapped_dek_len").await.unwrap();
 
         // Rotate to KEK-B so rewrap() will use KEK-A as the previous key.
         let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
@@ -1443,46 +1540,46 @@ mod tests {
         encrypted[2] = 0x00;
         encrypted[3] = (NONCE_SIZE - 1) as u8;
 
-        assert!(keys_b.rewrap(&encrypted).is_err());
+        assert!(keys_b.rewrap(&encrypted).await.is_err());
     }
 
-    #[test]
-    fn v2_second_rotation_without_rewrap_fails() {
+    #[tokio::test]
+    async fn v2_second_rotation_without_rewrap_fails() {
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
         let key_c_hex = "cc".repeat(32);
 
         // Encrypt with KEK-A
         let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
-        let encrypted = keys_a.encrypt(b"needs rewrap").unwrap();
+        let encrypted = keys_a.encrypt(b"needs rewrap").await.unwrap();
 
         // First rotation: B current, A previous -- still decryptable
         let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
-        assert_eq!(keys_b.decrypt(&encrypted).unwrap(), b"needs rewrap");
+        assert_eq!(keys_b.decrypt(&encrypted).await.unwrap(), b"needs rewrap");
 
         // Second rotation without rewrap: C current, B previous -- KEK-A gone
         let keys_c = EncryptionKeys::from_config(&test_config(&key_c_hex, Some(&key_b_hex)));
-        assert!(keys_c.decrypt(&encrypted).is_err());
+        assert!(keys_c.decrypt(&encrypted).await.is_err());
     }
 
-    #[test]
-    fn v2_provider_only_roundtrip_without_legacy_keys() {
+    #[tokio::test]
+    async fn v2_provider_only_roundtrip_without_legacy_keys() {
         let keys = EncryptionKeys::with_provider(Arc::new(MockKeyProvider::new(0x7A, 0x55, None)));
 
-        let encrypted = keys.encrypt(b"provider only").unwrap();
+        let encrypted = keys.encrypt(b"provider only").await.unwrap();
         let wrapped_dek_len = u16::from_be_bytes([encrypted[2], encrypted[3]]) as usize;
 
         assert_eq!(encrypted[0], VERSION_V2);
         assert_eq!(encrypted[1], 0x7A);
         assert_eq!(wrapped_dek_len, 35);
-        assert_eq!(keys.decrypt(&encrypted).unwrap(), b"provider only");
+        assert_eq!(keys.decrypt(&encrypted).await.unwrap(), b"provider only");
     }
 
-    #[test]
-    fn v2_provider_only_rewrap_with_non_local_key_ids() {
+    #[tokio::test]
+    async fn v2_provider_only_rewrap_with_non_local_key_ids() {
         let old_keys =
             EncryptionKeys::with_provider(Arc::new(MockKeyProvider::new(0x11, 0x33, None)));
-        let encrypted = old_keys.encrypt(b"provider rewrap").unwrap();
+        let encrypted = old_keys.encrypt(b"provider rewrap").await.unwrap();
 
         let rotated_keys = EncryptionKeys::with_provider(Arc::new(MockKeyProvider::new(
             0x9C,
@@ -1490,10 +1587,10 @@ mod tests {
             Some((0x11, 0x33)),
         )));
 
-        let decrypted = rotated_keys.decrypt(&encrypted).unwrap();
+        let decrypted = rotated_keys.decrypt(&encrypted).await.unwrap();
         assert_eq!(decrypted, b"provider rewrap");
 
-        let rewrapped = rotated_keys.rewrap(&encrypted).unwrap();
+        let rewrapped = rotated_keys.rewrap(&encrypted).await.unwrap();
         let wrapped_dek_len = u16::from_be_bytes([rewrapped[2], rewrapped[3]]) as usize;
 
         assert_eq!(rewrapped[1], 0x9C);
@@ -1502,33 +1599,33 @@ mod tests {
         let current_only =
             EncryptionKeys::with_provider(Arc::new(MockKeyProvider::new(0x9C, 0x77, None)));
         assert_eq!(
-            current_only.decrypt(&rewrapped).unwrap(),
+            current_only.decrypt(&rewrapped).await.unwrap(),
             b"provider rewrap"
         );
     }
 
-    #[test]
-    fn v2_rewrap_then_drop_old_key() {
+    #[tokio::test]
+    async fn v2_rewrap_then_drop_old_key() {
         let key_a_hex = "aa".repeat(32);
         let key_b_hex = "bb".repeat(32);
         let key_c_hex = "cc".repeat(32);
 
         // Encrypt with KEK-A
         let keys_a = EncryptionKeys::from_config(&test_config(&key_a_hex, None));
-        let encrypted = keys_a.encrypt(b"rewrap chain").unwrap();
+        let encrypted = keys_a.encrypt(b"rewrap chain").await.unwrap();
 
         // Rotate to KEK-B, rewrap
         let keys_b = EncryptionKeys::from_config(&test_config(&key_b_hex, Some(&key_a_hex)));
-        let rewrapped = keys_b.rewrap(&encrypted).unwrap();
+        let rewrapped = keys_b.rewrap(&encrypted).await.unwrap();
 
         // Second rotation: C current, B previous -- rewrapped data still works
         let keys_c = EncryptionKeys::from_config(&test_config(&key_c_hex, Some(&key_b_hex)));
-        let decrypted = keys_c.decrypt(&rewrapped).unwrap();
+        let decrypted = keys_c.decrypt(&rewrapped).await.unwrap();
         assert_eq!(decrypted, b"rewrap chain");
     }
 
-    #[test]
-    fn v2_v0_collision_fallback() {
+    #[tokio::test]
+    async fn v2_v0_collision_fallback() {
         // A valid v0 ciphertext can still look like v2 if its nonce starts
         // with 0x02 and the next bytes resemble a v2 header.
         let key_hex = "ab".repeat(32);
@@ -1559,34 +1656,128 @@ mod tests {
         v0.extend_from_slice(&encrypted);
 
         assert!(looks_like_v2(&v0));
-        assert_eq!(keys.decrypt(&v0).unwrap(), plaintext);
+        assert_eq!(keys.decrypt(&v0).await.unwrap(), plaintext);
     }
 
-    #[test]
-    fn v2_tamper_version_byte() {
+    #[tokio::test]
+    async fn v2_v0_collision_with_oversized_wrapped_len_still_falls_back() {
+        // A valid v0 ciphertext can also mimic a malformed v2 header where the
+        // declared wrapped-DEK length exceeds our safety bound. That must still
+        // fall through to the legacy v0 decrypt path.
+        let key_hex = "ab".repeat(32);
+        let key_bytes = hex::decode(&key_hex).unwrap();
+        let keys = EncryptionKeys::from_config(&test_config(&key_hex, None));
+
+        let plaintext = vec![0x24; 96];
+        let nonce_bytes = [
+            VERSION_V2,
+            derive_key_id(&key_bytes),
+            0x20,
+            0x00, // wrapped_dek_len = 8192 (> MAX_WRAPPED_DEK_SIZE)
+            0x10,
+            0x20,
+            0x30,
+            0x40,
+            0x50,
+            0x60,
+            0x70,
+            0x80,
+        ];
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes).unwrap();
+        let encrypted = cipher.encrypt(nonce, plaintext.as_slice()).unwrap();
+
+        let mut v0 = Vec::with_capacity(NONCE_SIZE + encrypted.len());
+        v0.extend_from_slice(&nonce_bytes);
+        v0.extend_from_slice(&encrypted);
+
+        assert!(looks_like_v2(&v0));
+        assert_eq!(keys.decrypt(&v0).await.unwrap(), plaintext);
+    }
+
+    #[tokio::test]
+    async fn v2_tamper_version_byte() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
-        let mut encrypted = keys.encrypt(b"version byte test").unwrap();
+        let mut encrypted = keys.encrypt(b"version byte test").await.unwrap();
         // Change version from 0x02 to 0x03
         encrypted[0] = 0x03;
 
         // Should fail: 0x03 is not recognized as v2 or v1, falls through to v0
         // which will also fail since the data has extra header bytes.
-        assert!(keys.decrypt(&encrypted).is_err());
+        assert!(keys.decrypt(&encrypted).await.is_err());
     }
 
-    #[test]
-    fn v2_invalid_wrapped_dek_len() {
+    #[tokio::test]
+    async fn v2_invalid_wrapped_dek_len() {
         let config = test_config(&"ab".repeat(32), None);
         let keys = EncryptionKeys::from_config(&config);
 
-        let mut encrypted = keys.encrypt(b"bad length test").unwrap();
+        let mut encrypted = keys.encrypt(b"bad length test").await.unwrap();
         // Set wrapped_dek_len to a value larger than the remaining ciphertext
         encrypted[2] = 0xFF;
         encrypted[3] = 0xFF;
 
         // Should fail: declared length exceeds actual data
-        assert!(keys.decrypt(&encrypted).is_err());
+        assert!(keys.decrypt(&encrypted).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn v2_fallback_provider_decrypt() {
+        // Encrypt with "local" mock (key_id=0xAA)
+        let local_mock = Arc::new(MockKeyProvider::new(0xAA, 0x33, None));
+        let local_keys = EncryptionKeys::with_provider(local_mock.clone());
+        let encrypted = local_keys.encrypt(b"fallback test data").await.unwrap();
+
+        // Decrypt with "KMS" mock primary (key_id=0xBB) + "local" mock fallback (key_id=0xAA)
+        let kms_mock = Arc::new(MockKeyProvider::new(0xBB, 0x77, None));
+        let migration_keys = EncryptionKeys::with_provider_and_fallback(
+            kms_mock,
+            Some(local_mock as Arc<dyn KeyProvider>),
+        );
+
+        let decrypted = migration_keys.decrypt(&encrypted).await.unwrap();
+        assert_eq!(decrypted, b"fallback test data");
+
+        let stats = migration_keys.decrypt_stats();
+        assert_eq!(stats.v2_fallback, 1);
+        assert_eq!(stats.v2_current, 0);
+    }
+
+    #[tokio::test]
+    async fn v2_fallback_provider_rewrap() {
+        // Encrypt with "local" mock (key_id=0xAA)
+        let local_mock = Arc::new(MockKeyProvider::new(0xAA, 0x33, None));
+        let local_keys = EncryptionKeys::with_provider(local_mock.clone());
+        let encrypted = local_keys.encrypt(b"rewrap via fallback").await.unwrap();
+
+        // Rewrap: KMS primary (key_id=0xBB) + local fallback (key_id=0xAA)
+        let kms_mock = Arc::new(MockKeyProvider::new(0xBB, 0x77, None));
+        let migration_keys = EncryptionKeys::with_provider_and_fallback(
+            kms_mock.clone(),
+            Some(local_mock as Arc<dyn KeyProvider>),
+        );
+
+        let rewrapped = migration_keys.rewrap(&encrypted).await.unwrap();
+        assert_eq!(rewrapped[1], 0xBB); // Now wrapped with KMS key_id
+
+        // Decrypt rewrapped with KMS only (no fallback)
+        let kms_only = EncryptionKeys::with_provider(kms_mock);
+        let decrypted = kms_only.decrypt(&rewrapped).await.unwrap();
+        assert_eq!(decrypted, b"rewrap via fallback");
+    }
+
+    #[tokio::test]
+    async fn v2_no_fallback_unknown_key_fails() {
+        // Encrypt with mock A
+        let mock_a = Arc::new(MockKeyProvider::new(0xAA, 0x33, None));
+        let keys_a = EncryptionKeys::with_provider(mock_a);
+        let encrypted = keys_a.encrypt(b"no fallback").await.unwrap();
+
+        // Decrypt with mock B (no fallback) -- should fail
+        let mock_b = Arc::new(MockKeyProvider::new(0xBB, 0x77, None));
+        let keys_b = EncryptionKeys::with_provider(mock_b);
+        assert!(keys_b.decrypt(&encrypted).await.is_err());
     }
 }

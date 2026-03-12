@@ -109,7 +109,7 @@ pub async fn connect_user(
 
     // Encrypt credential if provided
     let credential_encrypted = match credential {
-        Some(cred) => Some(encryption_keys.encrypt(cred.as_bytes())?),
+        Some(cred) => Some(encryption_keys.encrypt(cred.as_bytes()).await?),
         None => None,
     };
 
@@ -233,7 +233,7 @@ pub async fn update_credential(
         ));
     }
 
-    let encrypted = encryption_keys.encrypt(credential.as_bytes())?;
+    let encrypted = encryption_keys.encrypt(credential.as_bytes()).await?;
     let now = Utc::now();
 
     let mut set_doc = doc! {
