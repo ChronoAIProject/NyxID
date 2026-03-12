@@ -98,7 +98,12 @@ pub async fn execute_proxy_request(
         return;
     }
 
-    let mut url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    let normalized_path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    let mut url = format!("{}{}", base_url.trim_end_matches('/'), normalized_path);
     if let Some(q) = query {
         if !q.is_empty() {
             url = format!("{url}?{q}");

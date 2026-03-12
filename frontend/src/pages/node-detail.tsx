@@ -49,10 +49,33 @@ import {
   KeyRound,
   Link2,
   Plus,
+  Terminal,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
+import type { DownstreamService } from "@/types/api";
+
+function buildCredentialCommand(
+  serviceSlug: string,
+  service: DownstreamService | undefined,
+): string {
+  const base = `nyxid-node credentials add --service ${serviceSlug}`;
+  if (!service) return `${base} --header "<HEADER_NAME>: <YOUR_API_KEY>"`;
+
+  if (service.auth_method === "query") {
+    return `${base} --query-param "${service.auth_key_name}=<YOUR_API_KEY>"`;
+  }
+
+  // header injection (default)
+  const prefix =
+    service.auth_type === "bearer"
+      ? "Bearer "
+      : service.auth_type === "basic"
+        ? "Basic "
+        : "";
+  return `${base} --header "${service.auth_key_name}: ${prefix}<YOUR_API_KEY>"`;
+}
 
 export function NodeDetailPage() {
   const { nodeId } = useParams({ strict: false }) as { nodeId: string };
@@ -81,6 +104,11 @@ export function NodeDetailPage() {
     readonly id: string;
     readonly name: string;
   } | null>(null);
+  const [setupCommandSlug, setSetupCommandSlug] = useState<string | null>(null);
+
+  const servicesBySlug = new Map(
+    (services ?? []).map((s) => [s.slug, s]),
+  );
 
   // Filter out services that already have bindings
   const boundServiceIds = new Set(
@@ -123,6 +151,9 @@ export function NodeDetailPage() {
   async function handleCreateBinding() {
     if (!selectedServiceId) return;
     try {
+      const boundService = (services ?? []).find(
+        (s) => s.id === selectedServiceId,
+      );
       const result = await createBindingMutation.mutateAsync({
         nodeId,
         serviceId: selectedServiceId,
@@ -130,6 +161,9 @@ export function NodeDetailPage() {
       toast.success(`Bound to ${result.service_name}`);
       setShowBindDialog(false);
       setSelectedServiceId("");
+      if (boundService) {
+        setSetupCommandSlug(boundService.slug);
+      }
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to create binding",
@@ -363,7 +397,7 @@ export function NodeDetailPage() {
                   <TableHead>Slug</TableHead>
                   <TableHead>Priority</TableHead>
                   <TableHead>Bound</TableHead>
-                  <TableHead className="w-[80px]" />
+                  <TableHead className="w-[100px]" />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -418,22 +452,37 @@ export function NodeDetailPage() {
                       {formatRelativeTime(binding.created_at)}
                     </TableCell>
                     <TableCell>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                        onClick={() =>
-                          setUnbindTarget({
-                            id: binding.id,
-                            name: binding.service_name,
-                          })
-                        }
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        <span className="sr-only">
-                          Unbind {binding.service_name}
-                        </span>
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                          onClick={() =>
+                            setSetupCommandSlug(binding.service_slug)
+                          }
+                        >
+                          <Terminal className="h-4 w-4" />
+                          <span className="sr-only">
+                            Setup command for {binding.service_name}
+                          </span>
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          onClick={() =>
+                            setUnbindTarget({
+                              id: binding.id,
+                              name: binding.service_name,
+                            })
+                          }
+                        >
+                          <Trash2 className="h-4 w-4" />
+                          <span className="sr-only">
+                            Unbind {binding.service_name}
+                          </span>
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -630,6 +679,60 @@ export function NodeDetailPage() {
             >
               Unbind
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Credential Setup Command Dialog */}
+      <Dialog
+        open={setupCommandSlug !== null}
+        onOpenChange={(open) => {
+          if (!open) setSetupCommandSlug(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Node Credential Setup</DialogTitle>
+            <DialogDescription>
+              Run this command on your node to configure the credential for{" "}
+              <strong>{setupCommandSlug ?? ""}</strong>. Replace{" "}
+              <code className="rounded bg-muted px-1 text-xs">&lt;YOUR_API_KEY&gt;</code>{" "}
+              with the actual secret.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <CopyableField
+              label="Setup Command"
+              value={buildCredentialCommand(
+                setupCommandSlug ?? "",
+                servicesBySlug.get(setupCommandSlug ?? ""),
+              )}
+            />
+            {(() => {
+              const svc = servicesBySlug.get(setupCommandSlug ?? "");
+              if (!svc) return null;
+              return (
+                <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
+                  <p>
+                    <span className="font-medium text-foreground">Service:</span>{" "}
+                    {svc.name}
+                  </p>
+                  <p>
+                    <span className="font-medium text-foreground">Auth method:</span>{" "}
+                    {svc.auth_method} ({svc.auth_key_name})
+                  </p>
+                  {svc.auth_type && (
+                    <p>
+                      <span className="font-medium text-foreground">Auth type:</span>{" "}
+                      {svc.auth_type}
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setSetupCommandSlug(null)}>Done</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

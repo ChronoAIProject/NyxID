@@ -228,7 +228,11 @@ async fn execute_proxy(
             service_slug: target.service.slug.clone(),
             base_url: target.base_url.clone(),
             method: method_str.clone(),
-            path: path.to_string(),
+            path: if path.starts_with('/') {
+                path.to_string()
+            } else {
+                format!("/{path}")
+            },
             query: query.clone(),
             headers: node_forward_headers,
             body: body.as_ref().map(|b| b.to_vec()),

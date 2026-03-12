@@ -21,7 +21,7 @@ COPY backend/src backend/src
 RUN touch backend/src/main.rs
 
 # Build the real binary
-RUN cargo build --release --manifest-path backend/Cargo.toml
+RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
