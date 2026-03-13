@@ -13,6 +13,20 @@ import type { CreateRegistrationTokenFormData } from "@/schemas/nodes";
 
 // --- Query hooks ---
 
+interface MyBoundServicesResponse {
+  readonly service_ids: readonly string[];
+}
+
+export function useMyNodeBindings() {
+  return useQuery({
+    queryKey: ["nodes", "my-bindings"],
+    queryFn: async (): Promise<readonly string[]> => {
+      const res = await api.get<MyBoundServicesResponse>("/nodes/my-bindings");
+      return res.service_ids;
+    },
+  });
+}
+
 export function useNodes() {
   return useQuery({
     queryKey: ["nodes"],

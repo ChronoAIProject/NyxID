@@ -17,7 +17,7 @@ use crate::models::downstream_service::{
 };
 use crate::models::node::NodeMetadata;
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, node_service};
+use crate::services::{audit_service, node_routing_service, node_service};
 
 // --- Request types ---
 
@@ -494,4 +494,29 @@ pub async fn delete_binding(
     );
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// --- My Bindings ---
+
+#[derive(Debug, Serialize)]
+pub struct MyBoundServicesResponse {
+    pub service_ids: Vec<String>,
+}
+
+/// GET /api/v1/nodes/my-bindings
+///
+/// List all service IDs for which the authenticated user currently has a viable node route.
+pub async fn list_my_bound_services(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<MyBoundServicesResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+    let service_ids = node_routing_service::list_routable_service_ids(
+        &state.db,
+        &user_id_str,
+        state.node_ws_manager.as_ref(),
+    )
+    .await?;
+
+    Ok(Json(MyBoundServicesResponse { service_ids }))
 }

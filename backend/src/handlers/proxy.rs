@@ -96,28 +96,66 @@ async fn execute_proxy(
     let user_id_str = auth_user.user_id.to_string();
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
 
-    let target = match proxy_service::resolve_proxy_target(
+    // Resolve node routing FIRST so node-backed users bypass credential checks
+    let node_route = node_routing_service::resolve_node_route(
         &state.db,
-        &state.encryption_keys,
         &user_id_str,
         service_id,
+        &state.node_ws_manager,
     )
-    .await
-    {
-        Ok(t) => t,
-        Err(e) => {
-            audit_service::log_async(
-                state.db.clone(),
-                Some(user_id_str.clone()),
-                "proxy_request_denied".to_string(),
-                Some(serde_json::json!({
-                    "service_id": service_id,
-                    "reason": e.to_string(),
-                })),
-                None,
-                None,
-            );
-            return Err(e);
+    .await?;
+
+    let (target, has_server_credential) = if node_route.is_some() {
+        // Node route available: use lenient resolution (no credential required)
+        match proxy_service::resolve_proxy_target_lenient(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            service_id,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(user_id_str.clone()),
+                    "proxy_request_denied".to_string(),
+                    Some(serde_json::json!({
+                        "service_id": service_id,
+                        "reason": e.to_string(),
+                    })),
+                    None,
+                    None,
+                );
+                return Err(e);
+            }
+        }
+    } else {
+        // No node route: strict credential resolution (unchanged behavior)
+        match proxy_service::resolve_proxy_target(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            service_id,
+        )
+        .await
+        {
+            Ok(t) => (t, true),
+            Err(e) => {
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(user_id_str.clone()),
+                    "proxy_request_denied".to_string(),
+                    Some(serde_json::json!({
+                        "service_id": service_id,
+                        "reason": e.to_string(),
+                    })),
+                    None,
+                    None,
+                );
+                return Err(e);
+            }
         }
     };
 
@@ -213,14 +251,9 @@ async fn execute_proxy(
     };
 
     // === Node Proxy Routing (v2: failover + streaming + metrics + HMAC signing) ===
-    if let Some(node_route) = node_routing_service::resolve_node_route(
-        &state.db,
-        &user_id_str,
-        service_id,
-        &state.node_ws_manager,
-    )
-    .await?
-    {
+    // node_route was resolved earlier (before credential check) to allow node-backed
+    // users to bypass credential requirements.
+    if let Some(node_route) = node_route {
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -441,7 +474,16 @@ async fn execute_proxy(
             }
         }
 
-        // All nodes failed -- fall through to standard proxy
+        // All nodes failed
+        if !has_server_credential {
+            return Err(last_error.unwrap_or_else(|| {
+                AppError::NodeOffline(
+                    "All node routes failed and no server-side credential is available".to_string(),
+                )
+            }));
+        }
+
+        // Fall through to standard proxy with server-side credential
         if let Some(err) = last_error {
             tracing::warn!(
                 service_id = %service_id,
@@ -846,6 +888,8 @@ pub struct ProxyServiceItem {
     pub connected: bool,
     /// Whether a connection is required before proxying
     pub requires_connection: bool,
+    /// Whether the user currently has a viable node route for this service
+    pub has_node_binding: bool,
     /// UUID-based proxy URL
     pub proxy_url: String,
     /// Slug-based proxy URL (developer-friendly)
@@ -927,6 +971,14 @@ pub async fn list_proxy_services(
 
     let connected_set: HashSet<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
 
+    let bound_service_ids = node_routing_service::list_routable_service_ids(
+        &state.db,
+        &user_id_str,
+        state.node_ws_manager.as_ref(),
+    )
+    .await?;
+    let node_bound_set: HashSet<&str> = bound_service_ids.iter().map(|s| s.as_str()).collect();
+
     let items: Vec<ProxyServiceItem> = services
         .iter()
         .map(|s| ProxyServiceItem {
@@ -937,6 +989,7 @@ pub async fn list_proxy_services(
             service_category: s.service_category.clone(),
             connected: connected_set.contains(s.id.as_str()),
             requires_connection: s.requires_user_credential,
+            has_node_binding: node_bound_set.contains(s.id.as_str()),
             proxy_url: format!("{base}/api/v1/proxy/{}/{{path}}", s.id),
             proxy_url_slug: format!("{base}/api/v1/proxy/s/{}/{{path}}", s.slug),
         })

@@ -445,6 +445,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             post(handlers::node_admin::create_registration_token),
         )
         .route("/", get(handlers::node_admin::list_nodes))
+        .route(
+            "/my-bindings",
+            get(handlers::node_admin::list_my_bound_services),
+        )
         .route("/{node_id}", get(handlers::node_admin::get_node))
         .route("/{node_id}", delete(handlers::node_admin::delete_node))
         .route(

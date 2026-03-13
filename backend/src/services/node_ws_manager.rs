@@ -54,11 +54,16 @@ pub enum ProxyResponseType {
     Streaming(mpsc::UnboundedReceiver<StreamChunk>),
 }
 
+pub(crate) enum NodeProxyOutcome {
+    Response(ProxyResponseType),
+    RetryableFailure(String),
+}
+
 /// A pending proxy request that may receive a single response or a stream.
 pub(crate) enum PendingRequest {
     /// Waiting for the first correlated response, which may be either complete
     /// or a live streaming receiver.
-    Awaiting(oneshot::Sender<ProxyResponseType>),
+    Awaiting(oneshot::Sender<NodeProxyOutcome>),
     /// Streaming response: sends chunks through an mpsc channel
     Streaming(mpsc::UnboundedSender<StreamChunk>),
 }
@@ -142,6 +147,8 @@ pub struct WsProxyErrorMsg {
     pub error: String,
     #[serde(default)]
     pub status: Option<u16>,
+    #[serde(default)]
+    pub retryable: bool,
 }
 
 /// JSON proxy_response_start from node (streaming).
@@ -385,7 +392,10 @@ impl NodeWsManager {
         // Wait for response with timeout
         let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
         match tokio::time::timeout(timeout, resp_rx).await {
-            Ok(Ok(response)) => Ok(response),
+            Ok(Ok(NodeProxyOutcome::Response(response))) => Ok(response),
+            Ok(Ok(NodeProxyOutcome::RetryableFailure(message))) => {
+                Err(AppError::NodeOffline(message))
+            }
             Ok(Err(_)) => Err(AppError::NodeOffline(format!(
                 "Node {node_id} disconnected during request"
             ))),
@@ -437,7 +447,9 @@ impl NodeWsManager {
             if let Some((_, pending)) = conn.pending.remove(&response.request_id) {
                 match pending {
                     PendingRequest::Awaiting(sender) => {
-                        let _ = sender.send(ProxyResponseType::Complete(response));
+                        let _ = sender.send(NodeProxyOutcome::Response(
+                            ProxyResponseType::Complete(response),
+                        ));
                     }
                     PendingRequest::Streaming(tx) => {
                         // Unexpected: got a full response for a streaming request.
@@ -460,19 +472,33 @@ impl NodeWsManager {
     }
 
     /// Deliver a proxy error from a node. Called by the WS reader task.
-    pub fn deliver_proxy_error(&self, node_id: &str, request_id: &str, error: &str, status: u16) {
+    pub fn deliver_proxy_error(
+        &self,
+        node_id: &str,
+        request_id: &str,
+        error: &str,
+        status: u16,
+        retryable: bool,
+    ) {
         if let Some(conn) = self.connections.get(node_id) {
             if let Some((_, pending)) = conn.pending.remove(request_id) {
                 match pending {
                     PendingRequest::Awaiting(sender) => {
-                        let _ = sender.send(ProxyResponseType::Complete(NodeProxyResponse {
-                            request_id: request_id.to_string(),
-                            status,
-                            headers: vec![],
-                            body: serde_json::json!({ "error": error })
-                                .to_string()
-                                .into_bytes(),
-                        }));
+                        let outcome = if retryable {
+                            NodeProxyOutcome::RetryableFailure(error.to_string())
+                        } else {
+                            NodeProxyOutcome::Response(ProxyResponseType::Complete(
+                                NodeProxyResponse {
+                                    request_id: request_id.to_string(),
+                                    status,
+                                    headers: vec![],
+                                    body: serde_json::json!({ "error": error })
+                                        .to_string()
+                                        .into_bytes(),
+                                },
+                            ))
+                        };
+                        let _ = sender.send(outcome);
                     }
                     PendingRequest::Streaming(tx) => {
                         let _ = tx.send(StreamChunk::Error(error.to_string()));
@@ -504,7 +530,9 @@ impl NodeWsManager {
                 let (stream_tx, stream_rx) = mpsc::unbounded_channel();
                 let _ = stream_tx.send(StreamChunk::Start { status, headers });
                 if response_tx
-                    .send(ProxyResponseType::Streaming(stream_rx))
+                    .send(NodeProxyOutcome::Response(ProxyResponseType::Streaming(
+                        stream_rx,
+                    )))
                     .is_ok()
                 {
                     conn.pending
@@ -691,6 +719,60 @@ mod tests {
             }
             ProxyResponseType::Complete(_) => panic!("expected streaming response"),
         }
+
+        responder.await.expect("responder task");
+    }
+
+    #[tokio::test]
+    async fn retryable_proxy_error_is_returned_as_node_offline() {
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+
+        let mgr_clone = mgr.clone();
+        let responder = tokio::spawn(async move {
+            let Some(NodeOutboundMessage::Text(msg)) = rx.recv().await else {
+                panic!("expected outbound proxy request");
+            };
+            let parsed: Value = serde_json::from_str(&msg).expect("valid json");
+            let request_id = parsed["request_id"].as_str().expect("request id");
+
+            mgr_clone.deliver_proxy_error(
+                "node-1",
+                request_id,
+                "No credentials configured for service 'demo'",
+                502,
+                true,
+            );
+        });
+
+        let err = match mgr
+            .send_proxy_request(
+                "node-1",
+                NodeProxyRequest {
+                    request_id: "req-2".to_string(),
+                    service_id: "svc-1".to_string(),
+                    service_slug: "demo".to_string(),
+                    base_url: "https://api.example.com".to_string(),
+                    method: "GET".to_string(),
+                    path: "/models".to_string(),
+                    query: None,
+                    headers: vec![],
+                    body: None,
+                },
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("retryable node proxy error should trigger fallback"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            AppError::NodeOffline(message)
+                if message.contains("No credentials configured for service 'demo'")
+        ));
 
         responder.await.expect("responder task");
     }

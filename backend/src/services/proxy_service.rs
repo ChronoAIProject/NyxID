@@ -145,6 +145,96 @@ pub async fn resolve_proxy_target(
     })
 }
 
+/// Resolve proxy target with lenient credential handling for node-routed requests.
+///
+/// Unlike `resolve_proxy_target()`, this does NOT require a connection record or
+/// credential for "connection" services. Returns `(ProxyTarget, has_credential)`
+/// where `has_credential` indicates whether a server-side credential was resolved
+/// (i.e. standard proxy fallback is viable).
+pub async fn resolve_proxy_target_lenient(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<(ProxyTarget, bool)> {
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": service_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Downstream service not found".to_string()))?;
+
+    if !service.is_active {
+        return Err(AppError::BadRequest("Service is inactive".to_string()));
+    }
+
+    if service.service_category == "provider" {
+        return Err(AppError::BadRequest(
+            "Provider services are not proxyable".to_string(),
+        ));
+    }
+
+    // No-auth services: no credential needed
+    if service.auth_method == "none" {
+        return Ok((
+            ProxyTarget {
+                base_url: service.base_url.clone(),
+                auth_method: service.auth_method.clone(),
+                auth_key_name: service.auth_key_name.clone(),
+                credential: String::new(),
+                service,
+            },
+            true,
+        ));
+    }
+
+    // Try to resolve a credential, but don't fail if missing
+    let user_conn = db
+        .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
+        .find_one(doc! {
+            "user_id": user_id,
+            "service_id": service_id,
+        })
+        .await?;
+
+    // Respect explicit disconnection even in lenient mode
+    if let Some(ref conn) = user_conn {
+        if !conn.is_active {
+            return Err(AppError::Forbidden(
+                "You have disconnected from this service".to_string(),
+            ));
+        }
+    }
+
+    let credential_encrypted = if service.requires_user_credential {
+        user_conn.and_then(|c| c.credential_encrypted)
+    } else {
+        Some(service.credential_encrypted.clone())
+    };
+
+    let (credential, has_credential) = match credential_encrypted {
+        Some(enc) => {
+            let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&enc).await?);
+            let cred = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+                tracing::error!("Credential UTF-8 decode failed: {e}");
+                AppError::Internal("Failed to decode credential".to_string())
+            })?;
+            (cred, true)
+        }
+        None => (String::new(), false),
+    };
+
+    Ok((
+        ProxyTarget {
+            base_url: service.base_url.clone(),
+            auth_method: service.auth_method.clone(),
+            auth_key_name: service.auth_key_name.clone(),
+            credential,
+            service,
+        },
+        has_credential,
+    ))
+}
+
 /// Forward a request to the downstream service with credential injection,
 /// identity propagation headers, and delegated provider credentials.
 ///
