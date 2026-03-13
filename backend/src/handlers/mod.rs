@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod admin_groups;
 pub mod admin_helpers;
+pub mod admin_nodes;
 pub mod admin_roles;
 pub mod admin_sa_connections;
 pub mod admin_sa_providers;
@@ -19,6 +20,8 @@ pub mod llm_gateway;
 pub mod mcp;
 pub mod mcp_transport;
 pub mod mfa;
+pub mod node_admin;
+pub mod node_ws;
 pub mod notifications;
 pub mod oauth;
 pub mod oidc_discovery;

@@ -27,6 +27,7 @@ use crypto::key_provider::KeyProvider;
 use crypto::local_key_provider::LocalKeyProvider;
 use models::mcp_session::McpSessionStore;
 
+use services::node_ws_manager::NodeWsManager;
 use services::push_service::{ApnsAuth, FcmAuth};
 
 /// Shared application state available to all handlers via Axum's State extractor.
@@ -48,6 +49,8 @@ pub struct AppState {
     pub apns_auth: Option<Arc<ApnsAuth>>,
     /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
     pub encryption_keys: Arc<EncryptionKeys>,
+    /// WebSocket connection manager for credential nodes
+    pub node_ws_manager: Arc<NodeWsManager>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -247,6 +250,12 @@ async fn main() {
     // Create JWKS cache for external provider token verification
     let jwks_cache = Arc::new(JwksCache::new(http_client.clone()));
 
+    // Create node WebSocket connection manager
+    let node_ws_manager = Arc::new(NodeWsManager::new(
+        config.node_proxy_timeout_secs,
+        config.node_max_ws_connections,
+    ));
+
     // Create shared state
     let state = AppState {
         db,
@@ -259,6 +268,7 @@ async fn main() {
         fcm_auth: fcm_auth.clone(),
         apns_auth: apns_auth.clone(),
         encryption_keys: encryption_keys.clone(),
+        node_ws_manager,
     };
 
     // Create rate limiters
@@ -345,15 +355,29 @@ async fn main() {
         });
     }
 
+    // Spawn background heartbeat sweep for node WebSocket connections
+    let heartbeat_db = state.db.clone();
+    let heartbeat_ws = state.node_ws_manager.clone();
+    let heartbeat_interval = config.node_heartbeat_interval_secs;
+    let heartbeat_timeout = config.node_heartbeat_timeout_secs;
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(heartbeat_interval));
+        loop {
+            interval.tick().await;
+            handlers::node_ws::node_ws_manager_heartbeat_sweep(
+                &heartbeat_db,
+                &heartbeat_ws,
+                heartbeat_timeout,
+            )
+            .await;
+        }
+    });
+
     // Build set of allowed CORS origins: frontend_url + any extra from CORS_ALLOWED_ORIGINS
     let mut allowed_origins: std::collections::HashSet<axum::http::HeaderValue> =
         std::collections::HashSet::new();
-    allowed_origins.insert(
-        config
-            .frontend_url
-            .parse()
-            .expect("Invalid FRONTEND_URL"),
-    );
+    allowed_origins.insert(config.frontend_url.parse().expect("Invalid FRONTEND_URL"));
     for origin in &config.cors_allowed_origins {
         if let Ok(hv) = origin.parse() {
             allowed_origins.insert(hv);

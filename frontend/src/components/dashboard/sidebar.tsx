@@ -17,6 +17,7 @@ import {
   Bell,
   ClipboardList,
   Lock,
+  HardDrive,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
@@ -29,6 +30,7 @@ const NAV_ITEMS = [
   { to: "/services", icon: Server, label: "Services" },
   { to: "/connections", icon: Link2, label: "Connections" },
   { to: "/providers", icon: Plug, label: "Providers" },
+  { to: "/nodes", icon: HardDrive, label: "Nodes" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
   { to: "/guide", icon: BookOpen, label: "Guide" },
@@ -50,6 +52,7 @@ const ADMIN_NAV_ITEMS = [
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },
   { to: "/admin/groups", icon: UsersRound, label: "Groups" },
+  { to: "/admin/nodes", icon: HardDrive, label: "Nodes" },
 ] as const;
 
 /** Check if a nav item is the best (most specific) match for the current path. */

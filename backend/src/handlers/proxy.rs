@@ -20,13 +20,12 @@ use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
 use crate::mw::auth::AuthUser;
+use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
 use crate::services::{
     approval_service, audit_service, chatgpt_translator, delegation_service, identity_service,
-    notification_service, proxy_service,
+    node_metrics_service, node_routing_service, node_service, notification_service, proxy_service,
 };
 
-/// Response headers that are safe to forward back to the client.
-/// Uses an allowlist to prevent leaking internal headers from downstream services.
 /// Response headers that are safe to forward back to the client.
 /// Uses an allowlist to prevent leaking internal headers from downstream services.
 /// NOTE: CORS headers (access-control-*) are intentionally excluded — the NyxID
@@ -41,6 +40,17 @@ const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
     "cache-control",
     "etag",
     "last-modified",
+    "x-request-id",
+    "x-correlation-id",
+];
+
+/// Request headers safe to forward to node agents for proxy requests.
+const ALLOWED_FORWARD_HEADERS: &[&str] = &[
+    "content-type",
+    "accept",
+    "accept-encoding",
+    "accept-language",
+    "user-agent",
     "x-request-id",
     "x-correlation-id",
 ];
@@ -167,6 +177,281 @@ async fn execute_proxy(
         }
     }
 
+    // === Request Decomposition ===
+    // Extract method, query, headers, and body before branching between
+    // node proxy and standard proxy paths, since both need them.
+    let method = request.method().clone();
+    let method_str = method.as_str().to_string();
+    let query = request.uri().query().map(String::from);
+    let all_headers = request.headers().clone();
+
+    // Headers safe to forward to node agents
+    let node_forward_headers: Vec<(String, String)> = all_headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let name_lower = name.as_str().to_lowercase();
+            if ALLOWED_FORWARD_HEADERS.contains(&name_lower.as_str()) {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|v| (name.to_string(), v.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Read the request body (10MB limit)
+    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to read body: {e}")))?;
+
+    let body = if body_bytes.is_empty() {
+        None
+    } else {
+        Some(body_bytes)
+    };
+
+    // === Node Proxy Routing (v2: failover + streaming + metrics + HMAC signing) ===
+    if let Some(node_route) = node_routing_service::resolve_node_route(
+        &state.db,
+        &user_id_str,
+        service_id,
+        &state.node_ws_manager,
+    )
+    .await?
+    {
+        // Build base node request (will be cloned for failover retries)
+        let node_request = NodeProxyRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            service_id: service_id.to_string(),
+            service_slug: target.service.slug.clone(),
+            base_url: target.base_url.clone(),
+            method: method_str.clone(),
+            path: if path.starts_with('/') {
+                path.to_string()
+            } else {
+                format!("/{path}")
+            },
+            query: query.clone(),
+            headers: node_forward_headers,
+            body: body.as_ref().map(|b| b.to_vec()),
+        };
+
+        // Try primary node, then fallbacks
+        let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
+            .chain(node_route.fallback_node_ids.iter().map(|s| s.as_str()))
+            .collect();
+
+        let mut last_error: Option<AppError> = None;
+        for node_id in &all_node_ids {
+            // Generate a new request_id for each attempt to avoid correlation conflicts
+            let mut attempt_request = node_request.clone();
+            attempt_request.request_id = uuid::Uuid::new_v4().to_string();
+
+            // Resolve signing secret for this specific node. When HMAC signing is
+            // enabled, unsigned requests are treated as a routing failure rather
+            // than silently downgrading integrity guarantees.
+            let signing_secret: Option<Vec<u8>> = if state.config.node_hmac_signing_enabled {
+                let Some(node) = node_service::get_node_by_id(&state.db, node_id).await? else {
+                    last_error = Some(AppError::NodeNotFound(format!(
+                        "Node {node_id} not found during proxy routing"
+                    )));
+                    continue;
+                };
+
+                let Some(encrypted_secret) = node.signing_secret_encrypted.as_deref() else {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        "Skipping node route because signing secret is missing"
+                    );
+                    last_error = Some(AppError::NodeOffline(format!(
+                        "Node {node_id} is missing its signing secret"
+                    )));
+                    continue;
+                };
+
+                let secret_hex = String::from_utf8(
+                    state
+                        .encryption_keys
+                        .decrypt(encrypted_secret)
+                        .await
+                        .map_err(|e| {
+                            AppError::Internal(format!(
+                                "Failed to decrypt node signing secret for {node_id}: {e}"
+                            ))
+                        })?,
+                )
+                .map_err(|e| {
+                    AppError::Internal(format!(
+                        "Node signing secret for {node_id} is not valid UTF-8: {e}"
+                    ))
+                })?;
+
+                Some(hex::decode(&secret_hex).map_err(|e| {
+                    AppError::Internal(format!(
+                        "Node signing secret for {node_id} is not valid hex: {e}"
+                    ))
+                })?)
+            } else {
+                None
+            };
+
+            let start = std::time::Instant::now();
+            let result = state
+                .node_ws_manager
+                .send_proxy_request(node_id, attempt_request, signing_secret.as_deref())
+                .await;
+            let latency_ms = start.elapsed().as_millis() as u64;
+
+            match result {
+                Ok(proxy_response) => {
+                    // Record success metrics (fire-and-forget)
+                    let db_clone = state.db.clone();
+                    let nid = node_id.to_string();
+                    tokio::spawn(async move {
+                        let _ =
+                            node_metrics_service::record_success(db_clone, nid, latency_ms).await;
+                    });
+
+                    let response = match proxy_response {
+                        ProxyResponseType::Complete(node_response) => {
+                            let status = StatusCode::from_u16(node_response.status)
+                                .unwrap_or(StatusCode::BAD_GATEWAY);
+                            let mut response_builder = Response::builder().status(status);
+                            for (name, value) in &node_response.headers {
+                                let name_lower = name.to_lowercase();
+                                if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str()) {
+                                    if let (Ok(hn), Ok(hv)) = (
+                                        axum::http::header::HeaderName::from_bytes(name.as_bytes()),
+                                        axum::http::header::HeaderValue::from_bytes(
+                                            value.as_bytes(),
+                                        ),
+                                    ) {
+                                        response_builder = response_builder.header(hn, hv);
+                                    }
+                                }
+                            }
+                            response_builder
+                                .body(Body::from(node_response.body))
+                                .map_err(|e| {
+                                    AppError::Internal(format!("Failed to build response: {e}"))
+                                })?
+                        }
+                        ProxyResponseType::Streaming(mut rx) => {
+                            // Wait for the Start chunk
+                            let first = rx.recv().await.ok_or_else(|| {
+                                AppError::NodeOffline("Stream closed before start".to_string())
+                            })?;
+
+                            let (status, resp_headers) = match first {
+                                StreamChunk::Start { status, headers } => (status, headers),
+                                StreamChunk::Error(e) => {
+                                    return Err(AppError::Internal(format!("Stream error: {e}")));
+                                }
+                                _ => {
+                                    return Err(AppError::Internal(
+                                        "Expected stream start chunk".to_string(),
+                                    ));
+                                }
+                            };
+
+                            let http_status =
+                                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+                            let mut response_builder = Response::builder().status(http_status);
+
+                            for (name, value) in &resp_headers {
+                                let name_lower = name.to_lowercase();
+                                // Skip content-length for streaming responses
+                                if name_lower == "content-length" {
+                                    continue;
+                                }
+                                if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str()) {
+                                    if let (Ok(hn), Ok(hv)) = (
+                                        axum::http::header::HeaderName::from_bytes(name.as_bytes()),
+                                        axum::http::header::HeaderValue::from_bytes(
+                                            value.as_bytes(),
+                                        ),
+                                    ) {
+                                        response_builder = response_builder.header(hn, hv);
+                                    }
+                                }
+                            }
+
+                            // Convert the mpsc receiver into a streaming body
+                            let stream = async_stream::stream! {
+                                while let Some(chunk) = rx.recv().await {
+                                    match chunk {
+                                        StreamChunk::Data(bytes) => {
+                                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(bytes));
+                                        }
+                                        StreamChunk::End => break,
+                                        StreamChunk::Error(e) => {
+                                            tracing::error!(error = %e, "Stream error from node");
+                                            break;
+                                        }
+                                        StreamChunk::Start { .. } => {
+                                            // Duplicate start, ignore
+                                        }
+                                    }
+                                }
+                            };
+
+                            response_builder
+                                .body(Body::from_stream(stream))
+                                .map_err(|e| {
+                                    AppError::Internal(format!("Failed to build response: {e}"))
+                                })?
+                        }
+                    };
+
+                    audit_service::log_async(
+                        state.db.clone(),
+                        Some(user_id_str),
+                        "proxy_request".to_string(),
+                        Some(serde_json::json!({
+                            "service_id": service_id,
+                            "method": method_str,
+                            "path": path,
+                            "response_status": response.status().as_u16(),
+                            "routed_via": "node",
+                            "node_id": node_id,
+                        })),
+                        None,
+                        None,
+                    );
+
+                    return Ok(response);
+                }
+                Err(AppError::NodeOffline(_) | AppError::NodeProxyTimeout) => {
+                    tracing::warn!(node_id = %node_id, "Node proxy failed, trying next");
+
+                    // Record error metrics (fire-and-forget)
+                    let db_clone = state.db.clone();
+                    let nid = node_id.to_string();
+                    let err_msg = "Node offline or timeout".to_string();
+                    tokio::spawn(async move {
+                        let _ = node_metrics_service::record_error(db_clone, nid, err_msg).await;
+                    });
+
+                    last_error = Some(AppError::NodeOffline(format!("Node {node_id} failed")));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        // All nodes failed -- fall through to standard proxy
+        if let Some(err) = last_error {
+            tracing::warn!(
+                service_id = %service_id,
+                error = %err,
+                "All node proxies failed, falling through to standard proxy"
+            );
+        }
+    }
+    // === END Node Proxy Routing ===
+
     // Build identity headers if configured on the service
     let mut identity_headers = Vec::new();
 
@@ -217,10 +502,8 @@ async fn execute_proxy(
         match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id_str).await {
             Ok(rbac) => {
                 if !rbac.role_slugs.is_empty() {
-                    identity_headers.push((
-                        "X-NyxID-User-Roles".to_string(),
-                        rbac.role_slugs.join(","),
-                    ));
+                    identity_headers
+                        .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
                 }
                 if !rbac.permissions.is_empty() {
                     identity_headers.push((
@@ -280,21 +563,7 @@ async fn execute_proxy(
     .await
     .map_err(|e| AppError::BadRequest(format!("Provider credentials not available: {e}")))?;
 
-    let method = request.method().clone();
-    let query = request.uri().query().map(String::from);
-    let headers = request.headers().clone();
-
-    // Read the request body (10MB limit for proxy requests)
-    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
-
-    let body = if body_bytes.is_empty() {
-        None
-    } else {
-        Some(body_bytes)
-    };
-
+    // method, query, all_headers, body were already extracted above
     let reqwest_method = match method {
         Method::GET => reqwest::Method::GET,
         Method::POST => reqwest::Method::POST,
@@ -308,7 +577,7 @@ async fn execute_proxy(
 
     // Convert axum HeaderMap to reqwest HeaderMap
     let mut reqwest_headers = reqwest::header::HeaderMap::new();
-    for (name, value) in headers.iter() {
+    for (name, value) in all_headers.iter() {
         if let Ok(reqwest_name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
             && let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
         {

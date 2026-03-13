@@ -143,3 +143,16 @@ export const ApprovalGrantsPage = lazy(() =>
     default: m.ApprovalGrantsPage,
   })),
 );
+export const NodesPage = lazy(() =>
+  import("@/pages/nodes").then((m) => ({ default: m.NodesPage })),
+);
+export const NodeDetailPage = lazy(() =>
+  import("@/pages/node-detail").then((m) => ({
+    default: m.NodeDetailPage,
+  })),
+);
+export const AdminNodesPage = lazy(() =>
+  import("@/pages/admin-nodes").then((m) => ({
+    default: m.AdminNodesPage,
+  })),
+);
