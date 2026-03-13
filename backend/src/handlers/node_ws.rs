@@ -449,8 +449,12 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
     }
 }
 
-/// Heartbeat sweep: send pings to all connected nodes.
+/// Heartbeat sweep: check timeouts first, then send pings to surviving nodes.
 /// Called periodically from the background task in main.rs.
+///
+/// The order matters: we check whether the *previous* ping was answered before
+/// sending the next one.  This avoids a race where we send a ping and
+/// immediately check the (not-yet-updated) `last_heartbeat_at`.
 pub async fn node_ws_manager_heartbeat_sweep(
     db: &mongodb::Database,
     ws_manager: &Arc<crate::services::node_ws_manager::NodeWsManager>,
@@ -459,22 +463,9 @@ pub async fn node_ws_manager_heartbeat_sweep(
     let node_ids = ws_manager.connected_node_ids();
 
     for node_id in &node_ids {
-        // Send heartbeat ping
-        if let Err(e) = ws_manager.send_heartbeat_ping(node_id) {
-            tracing::debug!(node_id = %node_id, error = %e, "Failed to send heartbeat ping");
-            ws_manager
-                .disconnect_connection(node_id, 4004, "heartbeat ping failed")
-                .await;
-            if let Err(e) = node_service::set_node_status(db, node_id, NodeStatus::Offline).await {
-                tracing::warn!(node_id = %node_id, error = %e, "Failed to set node offline after ping failure");
-            }
-            continue;
-        }
-
-        // Check if node's last heartbeat is too old.
-        // A None last_heartbeat_at is acceptable for newly registered nodes
-        // since registration sets it, but we skip the timeout check defensively.
-        match node_service::get_node_by_id(db, node_id).await {
+        // 1. Check if the previous heartbeat was answered in time.
+        //    Skip for nodes with no last_heartbeat_at (newly connected).
+        let timed_out = match node_service::get_node_by_id(db, node_id).await {
             Ok(Some(node)) => {
                 if let Some(last_hb) = node.last_heartbeat_at {
                     let elapsed = chrono::Utc::now()
@@ -498,7 +489,12 @@ pub async fn node_ws_manager_heartbeat_sweep(
                                 "Failed to set node offline after timeout"
                             );
                         }
+                        true
+                    } else {
+                        false
                     }
+                } else {
+                    false
                 }
             }
             Ok(None) => {
@@ -506,6 +502,7 @@ pub async fn node_ws_manager_heartbeat_sweep(
                 ws_manager
                     .disconnect_connection(node_id, 4006, "node deleted")
                     .await;
+                true
             }
             Err(e) => {
                 tracing::warn!(
@@ -513,6 +510,23 @@ pub async fn node_ws_manager_heartbeat_sweep(
                     error = %e,
                     "Failed to check node heartbeat"
                 );
+                false
+            }
+        };
+
+        if timed_out {
+            continue;
+        }
+
+        // 2. Send the next heartbeat ping (node will respond with pong,
+        //    which updates last_heartbeat_at before the next sweep).
+        if let Err(e) = ws_manager.send_heartbeat_ping(node_id) {
+            tracing::debug!(node_id = %node_id, error = %e, "Failed to send heartbeat ping");
+            ws_manager
+                .disconnect_connection(node_id, 4004, "heartbeat ping failed")
+                .await;
+            if let Err(e) = node_service::set_node_status(db, node_id, NodeStatus::Offline).await {
+                tracing::warn!(node_id = %node_id, error = %e, "Failed to set node offline after ping failure");
             }
         }
     }

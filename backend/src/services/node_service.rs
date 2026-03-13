@@ -310,6 +310,7 @@ pub async fn set_node_status(
 
     if status == NodeStatus::Online {
         update_fields.insert("connected_at", &now);
+        update_fields.insert("last_heartbeat_at", &now);
     }
 
     db.collection::<Node>(NODES)
