@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::Instant;
 
 use reqwest::Client;
@@ -6,6 +7,24 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::errors::{AppError, AppResult};
+
+// ---------------------------------------------------------------------------
+// Dedicated HTTP/2 client for APNs
+// ---------------------------------------------------------------------------
+// Apple requires HTTP/2 for all APNs connections. The shared reqwest client
+// negotiates the protocol via ALPN, which can cause hyper Parse(Version)
+// errors when the connection pool mixes HTTP/1.1 and HTTP/2 origins.
+// A dedicated client with `http2_prior_knowledge()` forces HTTP/2 framing
+// unconditionally, eliminating the mismatch.
+
+static APNS_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+    Client::builder()
+        .http2_prior_knowledge()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .build()
+        .expect("Failed to create APNs HTTP/2 client")
+});
 
 // ---------------------------------------------------------------------------
 // Shared token cache
@@ -436,8 +455,11 @@ pub enum ApnsSendResult {
 }
 
 /// Send an alert notification via APNs HTTP/2 API.
+///
+/// Uses a dedicated HTTP/2 client (`APNS_HTTP_CLIENT`) instead of the shared
+/// client to avoid protocol version mismatch errors with Apple's servers.
 pub async fn send_apns_notification(
-    http_client: &Client,
+    _http_client: &Client,
     apns_auth: &ApnsAuth,
     device_token: &str,
     topic: &str,
@@ -478,7 +500,7 @@ pub async fn send_apns_notification(
         }
     }
 
-    let resp = http_client
+    let resp = APNS_HTTP_CLIENT
         .post(&url)
         .bearer_auth(&jwt)
         .header("apns-topic", topic)
@@ -488,7 +510,10 @@ pub async fn send_apns_notification(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("APNs send failed: {e}")))?;
+        .map_err(|e| {
+            tracing::error!("APNs send failed for {url}: {e:?}");
+            AppError::Internal(format!("APNs send failed: {e}"))
+        })?;
 
     let status = resp.status();
 
@@ -512,7 +537,7 @@ pub async fn send_apns_notification(
             tracing::warn!("APNs ExpiredProviderToken: refreshing and retrying");
             let new_jwt = apns_auth.refresh_token().await?;
 
-            let retry_resp = http_client
+            let retry_resp = APNS_HTTP_CLIENT
                 .post(&url)
                 .bearer_auth(&new_jwt)
                 .header("apns-topic", topic)
@@ -522,7 +547,10 @@ pub async fn send_apns_notification(
                 .json(&payload)
                 .send()
                 .await
-                .map_err(|e| AppError::Internal(format!("APNs retry failed: {e}")))?;
+                .map_err(|e| {
+                    tracing::error!("APNs retry failed for {url}: {e:?}");
+                    AppError::Internal(format!("APNs retry failed: {e}"))
+                })?;
 
             if retry_resp.status().is_success() {
                 Ok(ApnsSendResult::Success)
@@ -543,8 +571,10 @@ pub async fn send_apns_notification(
 }
 
 /// Send a silent (background) notification via APNs.
+///
+/// Uses the dedicated HTTP/2 client (`APNS_HTTP_CLIENT`).
 pub async fn send_apns_silent(
-    http_client: &Client,
+    _http_client: &Client,
     apns_auth: &ApnsAuth,
     device_token: &str,
     topic: &str,
@@ -573,7 +603,7 @@ pub async fn send_apns_silent(
         }
     }
 
-    let resp = http_client
+    let resp = APNS_HTTP_CLIENT
         .post(&url)
         .bearer_auth(&jwt)
         .header("apns-topic", topic)
@@ -583,7 +613,10 @@ pub async fn send_apns_silent(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| AppError::Internal(format!("APNs silent send failed: {e}")))?;
+        .map_err(|e| {
+            tracing::error!("APNs silent send failed for {url}: {e:?}");
+            AppError::Internal(format!("APNs silent send failed: {e}"))
+        })?;
 
     let resp_status = resp.status().as_u16();
 
