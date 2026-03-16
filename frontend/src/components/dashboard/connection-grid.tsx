@@ -47,19 +47,14 @@ export function ConnectionGrid() {
 
   const isLoading = servicesLoading || connectionsLoading;
 
-  async function handleConnect(
-    service: DownstreamService,
-    viaNode = false,
-  ) {
+  async function handleConnect(service: DownstreamService, viaNode = false) {
     const inputType = getCredentialInputType(service);
 
     if (inputType.type === "none" || viaNode) {
       // Internal service or node-backed: connect directly without credential
       try {
         await connectMutation.mutateAsync({ serviceId: service.id });
-        toast.success(
-          viaNode ? "Connected via node" : "Connected to service",
-        );
+        toast.success(viaNode ? "Connected via node" : "Connected to service");
       } catch (error) {
         if (error instanceof ApiError) {
           toast.error(error.message);
@@ -73,10 +68,7 @@ export function ConnectionGrid() {
     }
   }
 
-  async function handleCredentialSubmit(
-    credential: string,
-    label?: string,
-  ) {
+  async function handleCredentialSubmit(credential: string, label?: string) {
     if (!credentialDialog) return;
     const { service, mode } = credentialDialog;
 
@@ -134,9 +126,8 @@ export function ConnectionGrid() {
   }
 
   // Filter: only connectable services (exclude providers and OIDC)
-  const connectableServices = services?.filter(
-    (s) => isConnectable(s) && !isOidcService(s),
-  ) ?? [];
+  const connectableServices =
+    services?.filter((s) => isConnectable(s) && !isOidcService(s)) ?? [];
 
   if (connectableServices.length === 0) {
     return (
@@ -159,6 +150,10 @@ export function ConnectionGrid() {
           const connection = connections?.find(
             (c) => c.service_id === service.id,
           );
+          const canRepairCredential =
+            connection !== undefined &&
+            service.requires_user_credential &&
+            (connection.has_credential || !nodeRouteSet.has(service.id));
 
           return (
             <Card
@@ -179,9 +174,7 @@ export function ConnectionGrid() {
                     >
                       <Server
                         className={`h-5 w-5 ${
-                          isConnected
-                            ? "text-primary"
-                            : "text-muted-foreground"
+                          isConnected ? "text-primary" : "text-muted-foreground"
                         }`}
                       />
                     </div>
@@ -222,10 +215,18 @@ export function ConnectionGrid() {
                         {service.requires_user_credential &&
                           !connection.has_credential &&
                           (nodeRouteSet.has(service.id) ? (
-                            <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                              <Cable className="h-3 w-3" />
-                              Via node
-                            </span>
+                            <div className="flex flex-col gap-0.5">
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                                <Cable className="h-3 w-3" />
+                                Via node
+                              </span>
+                              <span className="text-[10px] text-muted-foreground/60">
+                                Manage credentials via{" "}
+                                <code className="rounded bg-muted px-1 py-0.5 font-mono">
+                                  nyxid-node credentials
+                                </code>
+                              </span>
+                            </div>
                           ) : (
                             <span className="text-xs text-destructive">
                               Credential missing
@@ -233,7 +234,7 @@ export function ConnectionGrid() {
                           ))}
                       </div>
                       <div className="flex gap-1.5">
-                        {service.requires_user_credential && (
+                        {canRepairCredential && (
                           <Button
                             variant="outline"
                             size="sm"
@@ -271,9 +272,7 @@ export function ConnectionGrid() {
                             <Button
                               size="sm"
                               variant="outline"
-                              onClick={() =>
-                                void handleConnect(service, true)
-                              }
+                              onClick={() => void handleConnect(service, true)}
                               disabled={connectMutation.isPending}
                             >
                               <Cable className="mr-1.5 h-3 w-3" />

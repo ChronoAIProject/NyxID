@@ -15,9 +15,11 @@ use std::path::Path;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use std::time::Duration;
+
 use crate::cli::{Cli, Commands, CredentialCommands};
 use crate::config::NodeConfig;
-use crate::credential_store::CredentialStore;
+use crate::credential_store::{CredentialStore, SharedCredentials, SharedCredentialsSender};
 use crate::error::Result;
 use crate::secret_backend::SecretBackend;
 
@@ -127,17 +129,85 @@ async fn cmd_start(config_path: Option<&str>) -> Result<()> {
     let signing_secret = backend.load_signing_secret(&config)?;
     let credentials = CredentialStore::from_config_with_backend(&config, &backend)?;
 
+    let (cred_sender, shared_creds) = SharedCredentials::new(credentials);
+
     tracing::info!(
         node_id = %config.node.id,
         server = %config.server.url,
         storage = %config.storage_backend,
-        credentials = credentials.count(),
+        credentials = shared_creds.snapshot().count(),
         "Starting node agent"
     );
 
-    ws_client::run_with_shutdown(config, auth_token, signing_secret, credentials).await;
+    // Spawn background task that reloads credentials when config file changes
+    let reload_handle = tokio::spawn(credential_reload_loop(
+        config_file,
+        config_dir,
+        cred_sender,
+        Duration::from_secs(5),
+    ));
 
+    ws_client::run_with_shutdown(config, auth_token, signing_secret, shared_creds).await;
+
+    reload_handle.abort();
     Ok(())
+}
+
+/// Poll the config file mtime and reload credentials when it changes.
+async fn credential_reload_loop(
+    config_file: std::path::PathBuf,
+    config_dir: std::path::PathBuf,
+    sender: SharedCredentialsSender,
+    interval: Duration,
+) {
+    let mut last_modified = std::fs::metadata(&config_file)
+        .and_then(|m| m.modified())
+        .ok();
+
+    loop {
+        tokio::time::sleep(interval).await;
+
+        let current_modified = match std::fs::metadata(&config_file).and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to stat config file for credential reload");
+                continue;
+            }
+        };
+
+        if Some(current_modified) == last_modified {
+            continue;
+        }
+
+        last_modified = Some(current_modified);
+
+        let config = match NodeConfig::load(&config_file) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to reload config, keeping existing credentials");
+                continue;
+            }
+        };
+
+        let backend = match SecretBackend::from_config(&config, &config_dir) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to init secret backend, keeping existing credentials");
+                continue;
+            }
+        };
+
+        match CredentialStore::from_config_with_backend(&config, &backend) {
+            Ok(new_store) => {
+                let count = new_store.count();
+                sender.update(new_store);
+                tracing::info!(credentials = count, "Credentials reloaded from config");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to reload credentials, keeping existing");
+            }
+        }
+    }
 }
 
 fn cmd_status(config_path: Option<&str>) -> Result<()> {
@@ -383,11 +453,10 @@ mod tests {
     use super::*;
     use crate::encryption::LocalEncryption;
     use crate::error::Error;
-    use crate::keychain::{KEY_AUTH_TOKEN, KEY_SIGNING_SECRET, KeychainBackend, credential_key};
 
     #[test]
     fn missing_keychain_signing_secret_fails_closed() {
-        let backend = SecretBackend::Keychain(KeychainBackend::new_mock("node-1"));
+        let backend = SecretBackend::new_mock_keychain("node-1");
         let mut config = NodeConfig::new(
             "wss://example.com/api/v1/nodes/ws".to_string(),
             "node-1".to_string(),
@@ -406,7 +475,7 @@ mod tests {
     #[test]
     fn migrate_keychain_to_file_cleans_up_source_secrets() {
         let dir = tempfile::tempdir().unwrap();
-        let source = SecretBackend::Keychain(KeychainBackend::new_mock("node-1"));
+        let source = SecretBackend::new_mock_keychain("node-1");
         let target = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
 
         let mut config = NodeConfig::new(
@@ -469,7 +538,7 @@ mod tests {
     #[test]
     fn migrate_preserves_source_secrets_when_save_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let source = SecretBackend::Keychain(KeychainBackend::new_mock("node-1"));
+        let source = SecretBackend::new_mock_keychain("node-1");
         let target = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
 
         let mut config = NodeConfig::new(
@@ -516,7 +585,7 @@ mod tests {
 
     #[test]
     fn cleanup_source_secrets_removes_auth_signing_and_credentials() {
-        let backend = SecretBackend::Keychain(KeychainBackend::new_mock("node-1"));
+        let backend = SecretBackend::new_mock_keychain("node-1");
         let mut config = NodeConfig::new(
             "wss://example.com/api/v1/nodes/ws".to_string(),
             "node-1".to_string(),
@@ -542,15 +611,9 @@ mod tests {
         );
 
         assert!(warnings.is_empty());
-        let keychain = match backend {
-            SecretBackend::Keychain(ref keychain) => keychain.clone(),
-            SecretBackend::File(_) => unreachable!(),
-        };
-        assert_eq!(keychain.get_optional(KEY_AUTH_TOKEN).unwrap(), None);
-        assert_eq!(keychain.get_optional(KEY_SIGNING_SECRET).unwrap(), None);
-        assert_eq!(
-            keychain.get_optional(&credential_key("openai")).unwrap(),
-            None
-        );
+        // After cleanup, vault fields should be cleared
+        assert!(backend.load_auth_token(&config).is_err());
+        assert!(backend.load_signing_secret(&config).is_err());
+        assert!(backend.load_credential_value("openai", None).is_err());
     }
 }

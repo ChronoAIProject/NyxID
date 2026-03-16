@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::NodeConfig;
-use crate::credential_store::CredentialStore;
+use crate::credential_store::SharedCredentials;
 use crate::error::{Error, Result};
 use crate::metrics::NodeMetrics;
 use crate::proxy_executor;
@@ -117,7 +117,7 @@ pub async fn run_with_shutdown(
     config: NodeConfig,
     auth_token: String,
     signing_secret: Option<String>,
-    credentials: CredentialStore,
+    credentials: SharedCredentials,
 ) {
     let in_flight = Arc::new(AtomicUsize::new(0));
     let in_flight_shutdown = in_flight.clone();
@@ -146,7 +146,7 @@ async fn run_connection_loop(
     config: &NodeConfig,
     auth_token: &str,
     signing_secret: Option<&str>,
-    credentials: &CredentialStore,
+    credentials: &SharedCredentials,
     in_flight: Arc<AtomicUsize>,
 ) {
     let mut backoff =
@@ -184,7 +184,7 @@ async fn connect_and_serve(
     config: &NodeConfig,
     auth_token: &str,
     signing_secret: Option<&str>,
-    credentials: &CredentialStore,
+    credentials: &SharedCredentials,
     in_flight: Arc<AtomicUsize>,
 ) -> Result<()> {
     // 1. Connect
@@ -278,7 +278,7 @@ async fn connect_and_serve(
             }
             Some("proxy_request") => {
                 let tx_clone = tx.clone();
-                let creds = credentials.clone();
+                let creds = credentials.snapshot();
                 let secret = signing_secret.map(String::from);
                 let replay = replay_guard.clone();
                 let metrics_clone = metrics.clone();
