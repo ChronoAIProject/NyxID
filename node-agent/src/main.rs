@@ -12,12 +12,13 @@ mod ws_client;
 
 use std::path::Path;
 
+use base64::Engine as _;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use std::time::Duration;
 
-use crate::cli::{Cli, Commands, CredentialCommands};
+use crate::cli::{Cli, Commands, CredentialCommands, CredentialSecretFormat};
 use crate::config::NodeConfig;
 use crate::credential_store::{CredentialStore, SharedCredentials, SharedCredentialsSender};
 use crate::error::Result;
@@ -372,16 +373,72 @@ fn cmd_credentials(command: CredentialCommands, config_path: Option<&str>) -> Re
             service,
             header,
             query_param,
+            secret_format,
+            value,
         } => {
             let mut config = NodeConfig::load(&config_file)?;
             let backend = SecretBackend::from_config(&config, &config_dir)?;
 
-            if let Some(header_val) = header {
-                let (name, value) = parse_header(&header_val)?;
-                config.add_header_credential_via(&service, &name, &value, &backend)?;
-            } else if let Some(qp_val) = query_param {
-                let (name, value) = parse_query_param(&qp_val)?;
-                config.add_query_param_credential_via(&service, &name, &value, &backend)?;
+            if let Some(header_name) = header {
+                // Support legacy inline format "Name: value" for backwards compat
+                if header_name.contains(':') {
+                    if value.is_some() {
+                        return Err(crate::error::Error::Validation(
+                            "Use either --header Name with a prompted/inline secret, or the legacy --header 'Name: value' form"
+                                .to_string(),
+                        ));
+                    }
+                    if secret_format != CredentialSecretFormat::Raw {
+                        return Err(crate::error::Error::Validation(
+                            "Legacy 'Name: value' input cannot be combined with --secret-format"
+                                .to_string(),
+                        ));
+                    }
+                    let (name, val) = parse_header(&header_name)?;
+                    config.add_header_credential_via(&service, &name, &val, &backend)?;
+                } else {
+                    let secret = read_secret_value(
+                        value,
+                        &format!("Enter value for header '{header_name}'"),
+                    )?;
+                    let secret = format_secret_value(secret, secret_format)?;
+                    config.add_header_credential_via(&service, &header_name, &secret, &backend)?;
+                }
+            } else if let Some(param_name) = query_param {
+                // Support legacy inline format "name=value" for backwards compat
+                if param_name.contains('=') {
+                    if value.is_some() {
+                        return Err(crate::error::Error::Validation(
+                            "Use either --query-param name with a prompted/inline secret, or the legacy --query-param 'name=value' form"
+                                .to_string(),
+                        ));
+                    }
+                    if secret_format != CredentialSecretFormat::Raw {
+                        return Err(crate::error::Error::Validation(
+                            "Legacy 'name=value' input cannot be combined with --secret-format"
+                                .to_string(),
+                        ));
+                    }
+                    let (name, val) = parse_query_param(&param_name)?;
+                    config.add_query_param_credential_via(&service, &name, &val, &backend)?;
+                } else {
+                    if secret_format != CredentialSecretFormat::Raw {
+                        return Err(crate::error::Error::Validation(
+                            "--secret-format bearer/basic is only supported with --header"
+                                .to_string(),
+                        ));
+                    }
+                    let secret = read_secret_value(
+                        value,
+                        &format!("Enter value for query param '{param_name}'"),
+                    )?;
+                    config.add_query_param_credential_via(
+                        &service,
+                        &param_name,
+                        &secret,
+                        &backend,
+                    )?;
+                }
             } else {
                 return Err(crate::error::Error::Validation(
                     "Either --header or --query-param must be provided".to_string(),
@@ -424,6 +481,50 @@ fn cmd_credentials(command: CredentialCommands, config_path: Option<&str>) -> Re
     }
 }
 
+fn read_secret_value(value: Option<String>, prompt: &str) -> Result<String> {
+    let value = match value {
+        Some(v) => v,
+        None => prompt_secret(prompt)?,
+    };
+    if value.is_empty() {
+        return Err(crate::error::Error::Validation(
+            "Secret value must not be empty".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
+fn format_secret_value(secret: String, secret_format: CredentialSecretFormat) -> Result<String> {
+    match secret_format {
+        CredentialSecretFormat::Raw => Ok(secret),
+        CredentialSecretFormat::Bearer => {
+            if secret.starts_with("Bearer ") {
+                Ok(secret)
+            } else {
+                Ok(format!("Bearer {secret}"))
+            }
+        }
+        CredentialSecretFormat::Basic => {
+            if secret.starts_with("Basic ") {
+                Ok(secret)
+            } else if secret.contains(':') {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(secret);
+                Ok(format!("Basic {encoded}"))
+            } else {
+                Err(crate::error::Error::Validation(
+                    "Basic auth secret must be in 'username:password' format".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+fn prompt_secret(prompt: &str) -> Result<String> {
+    let value = rpassword::prompt_password(format!("{prompt}: "))
+        .map_err(|e| crate::error::Error::Validation(format!("Failed to read secret: {e}")))?;
+    read_secret_value(Some(value), prompt)
+}
+
 fn parse_header(header: &str) -> Result<(String, String)> {
     let (name, value) = header.split_once(':').ok_or_else(|| {
         crate::error::Error::Validation(
@@ -453,6 +554,46 @@ mod tests {
     use super::*;
     use crate::encryption::LocalEncryption;
     use crate::error::Error;
+
+    #[test]
+    fn format_secret_value_supports_raw_bearer_and_basic() {
+        assert_eq!(
+            format_secret_value("sk-test".to_string(), CredentialSecretFormat::Raw).unwrap(),
+            "sk-test"
+        );
+        assert_eq!(
+            format_secret_value("sk-test".to_string(), CredentialSecretFormat::Bearer).unwrap(),
+            "Bearer sk-test"
+        );
+        assert_eq!(
+            format_secret_value("user:pass".to_string(), CredentialSecretFormat::Basic).unwrap(),
+            "Basic dXNlcjpwYXNz"
+        );
+    }
+
+    #[test]
+    fn format_secret_value_accepts_existing_bearer_and_basic_prefixes() {
+        assert_eq!(
+            format_secret_value("Bearer sk-test".to_string(), CredentialSecretFormat::Bearer,)
+                .unwrap(),
+            "Bearer sk-test"
+        );
+        assert_eq!(
+            format_secret_value(
+                "Basic dXNlcjpwYXNz".to_string(),
+                CredentialSecretFormat::Basic,
+            )
+            .unwrap(),
+            "Basic dXNlcjpwYXNz"
+        );
+    }
+
+    #[test]
+    fn basic_secret_requires_username_password_pair() {
+        let err = format_secret_value("token-only".to_string(), CredentialSecretFormat::Basic)
+            .unwrap_err();
+        assert!(matches!(err, Error::Validation(_)));
+    }
 
     #[test]
     fn missing_keychain_signing_secret_fails_closed() {

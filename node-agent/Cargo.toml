@@ -26,6 +26,7 @@ zeroize = { version = "1", features = ["derive"] }
 directories = "5"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 thiserror = "2"
+rpassword = "7"
 
 [dev-dependencies]
 tempfile = "3"
