@@ -7,6 +7,52 @@ use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 
+/// Known OIDC scopes supported by NyxID. Used for validation of
+/// `allowed_scopes` on OAuth clients.
+pub const KNOWN_OIDC_SCOPES: &[&str] = &["openid", "profile", "email", "roles", "groups"];
+
+/// Default allowed scopes for new OAuth clients.
+pub const DEFAULT_ALLOWED_SCOPES: &str = "openid profile email";
+
+/// Validate and canonicalize `allowed_scopes`.
+///
+/// - Every scope must be in [`KNOWN_OIDC_SCOPES`].
+/// - `openid` is always required (auto-prepended if missing).
+/// - Duplicates are removed.
+/// - Returns a deduplicated, space-separated string.
+pub fn validate_allowed_scopes(scopes: &str) -> AppResult<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+
+    for s in scopes.split_whitespace() {
+        if !KNOWN_OIDC_SCOPES.contains(&s) {
+            return Err(AppError::ValidationError(format!(
+                "Unknown OIDC scope '{s}'. Must be one of: {}",
+                KNOWN_OIDC_SCOPES.join(", ")
+            )));
+        }
+        if seen.insert(s) {
+            out.push(s);
+        }
+    }
+
+    // openid is mandatory per OIDC spec
+    if !seen.contains("openid") {
+        out.insert(0, "openid");
+    }
+
+    Ok(out.join(" "))
+}
+
+/// Validate and canonicalize `allowed_scopes` supplied as an API list.
+///
+/// An explicit empty list is normalized to `openid`, while omission should be
+/// handled by the caller when the endpoint wants to apply
+/// [`DEFAULT_ALLOWED_SCOPES`].
+pub fn validate_allowed_scopes_list(scopes: &[String]) -> AppResult<String> {
+    validate_allowed_scopes(&scopes.join(" "))
+}
+
 /// Well-known client ID for native MCP clients (Cursor, Claude Code, etc.).
 const MCP_CLIENT_ID: &str = "nyx-mcp";
 
@@ -32,7 +78,7 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         client_name: "NyxID MCP Client".to_string(),
         client_secret_hash: "NONE".to_string(),
         redirect_uris: vec![],
-        allowed_scopes: "openid profile email".to_string(),
+        allowed_scopes: DEFAULT_ALLOWED_SCOPES.to_string(),
         grant_types: "authorization_code".to_string(),
         client_type: "public".to_string(),
         is_active: true,
@@ -52,6 +98,9 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
 ///
 /// Returns the persisted client and, for confidential clients, the raw client
 /// secret (which is only available at creation time -- only the hash is stored).
+///
+/// `allowed_scopes` must contain only known OIDC scopes (validated by the
+/// caller). Pass [`DEFAULT_ALLOWED_SCOPES`] for the standard set.
 pub async fn create_client(
     db: &mongodb::Database,
     name: &str,
@@ -59,6 +108,7 @@ pub async fn create_client(
     client_type: &str,
     created_by: &str,
     delegation_scopes: &str,
+    allowed_scopes: &str,
 ) -> AppResult<(OauthClient, Option<String>)> {
     let client_id = Uuid::new_v4().to_string();
     let now = Utc::now();
@@ -76,7 +126,7 @@ pub async fn create_client(
         client_name: name.to_string(),
         client_secret_hash: secret_hash,
         redirect_uris: redirect_uris.to_vec(),
-        allowed_scopes: "openid profile email".to_string(),
+        allowed_scopes: allowed_scopes.to_string(),
         grant_types: "authorization_code".to_string(),
         client_type: client_type.to_string(),
         is_active: true,
@@ -177,6 +227,7 @@ pub async fn update_client_for_creator(
     client_name: Option<&str>,
     redirect_uris: Option<&[String]>,
     delegation_scopes: Option<&str>,
+    allowed_scopes: Option<&str>,
 ) -> AppResult<OauthClient> {
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
@@ -197,6 +248,10 @@ pub async fn update_client_for_creator(
 
     if let Some(scopes) = delegation_scopes {
         set_doc.insert("delegation_scopes", scopes);
+    }
+
+    if let Some(scopes) = allowed_scopes {
+        set_doc.insert("allowed_scopes", scopes);
     }
 
     let result = db
@@ -290,4 +345,73 @@ pub async fn rotate_client_secret_for_creator(
 
     let updated = get_client_for_creator(db, client_id, created_by).await?;
     Ok((updated, new_secret))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_default_scopes() {
+        let result = validate_allowed_scopes("openid profile email").unwrap();
+        assert_eq!(result, "openid profile email");
+    }
+
+    #[test]
+    fn valid_with_roles_and_groups() {
+        let result = validate_allowed_scopes("openid profile email roles groups").unwrap();
+        assert_eq!(result, "openid profile email roles groups");
+    }
+
+    #[test]
+    fn valid_minimal_openid_only() {
+        let result = validate_allowed_scopes("openid").unwrap();
+        assert_eq!(result, "openid");
+    }
+
+    #[test]
+    fn valid_roles_without_profile() {
+        let result = validate_allowed_scopes("openid roles").unwrap();
+        assert_eq!(result, "openid roles");
+    }
+
+    #[test]
+    fn auto_prepends_openid_when_missing() {
+        let result = validate_allowed_scopes("profile email").unwrap();
+        assert!(result.starts_with("openid"));
+        assert!(result.contains("profile"));
+        assert!(result.contains("email"));
+    }
+
+    #[test]
+    fn deduplicates_scopes() {
+        let result = validate_allowed_scopes("openid openid profile profile").unwrap();
+        assert_eq!(result, "openid profile");
+    }
+
+    #[test]
+    fn rejects_unknown_scope() {
+        let result = validate_allowed_scopes("openid admin");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("admin"));
+    }
+
+    #[test]
+    fn rejects_arbitrary_scope() {
+        let result = validate_allowed_scopes("openid read:users");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_string_gets_openid() {
+        let result = validate_allowed_scopes("").unwrap();
+        assert_eq!(result, "openid");
+    }
+
+    #[test]
+    fn empty_list_gets_openid() {
+        let result = validate_allowed_scopes_list(&[]).unwrap();
+        assert_eq!(result, "openid");
+    }
 }

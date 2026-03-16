@@ -484,8 +484,8 @@ async fn validate_authorize_request(
 
     let client =
         oauth_service::validate_client(&state.db, &params.client_id, &params.redirect_uri).await?;
-    let scope = params.scope.as_deref().unwrap_or("openid profile email");
-    let validated_scope = oauth_service::validate_scopes(scope, &client.allowed_scopes)?;
+    let validated_scope =
+        oauth_service::resolve_authorize_scope(params.scope.as_deref(), &client.allowed_scopes)?;
 
     Ok((client, validated_scope))
 }
@@ -1267,6 +1267,7 @@ pub async fn register_client(
         "public",
         "dynamic_registration",
         "",
+        oauth_client_service::DEFAULT_ALLOWED_SCOPES,
     )
     .await?;
 

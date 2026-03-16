@@ -67,6 +67,16 @@ pub fn validate_scopes(requested: &str, allowed: &str) -> AppResult<String> {
     Ok(requested_set.join(" "))
 }
 
+/// Resolve the effective authorize scope for an OAuth client.
+///
+/// If the request omits `scope`, the client's configured `allowed_scopes` are
+/// used as the default so narrowed clients still work without an explicit
+/// override.
+pub fn resolve_authorize_scope(requested: Option<&str>, allowed: &str) -> AppResult<String> {
+    let requested = requested.unwrap_or(allowed);
+    validate_scopes(requested, allowed)
+}
+
 /// Create an authorization code for the OAuth authorization code flow.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_authorization_code(
@@ -386,4 +396,30 @@ fn is_private_use_uri_scheme(uri: &str) -> bool {
         return false;
     };
     !matches!(parsed.scheme(), "http" | "https")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorize_scope_defaults_to_client_allowed_scopes() {
+        let result = resolve_authorize_scope(None, "openid roles").unwrap();
+        assert_eq!(result, "openid roles");
+    }
+
+    #[test]
+    fn authorize_scope_keeps_valid_requested_subset() {
+        let result = resolve_authorize_scope(Some("openid"), "openid profile email").unwrap();
+        assert_eq!(result, "openid");
+    }
+
+    #[test]
+    fn authorize_scope_rejects_scope_outside_allowed_set() {
+        let result = resolve_authorize_scope(None, "openid");
+        assert_eq!(result.unwrap(), "openid");
+
+        let invalid = resolve_authorize_scope(Some("openid email"), "openid");
+        assert!(invalid.is_err());
+    }
 }
