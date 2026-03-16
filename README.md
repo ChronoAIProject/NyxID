@@ -293,7 +293,7 @@ The backend follows a layered architecture:
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/yourorg/NyxID.git
+git clone https://github.com/ChronoAIProject/NyxID.git
 cd NyxID
 
 cp .env.example .env
