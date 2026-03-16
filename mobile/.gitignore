@@ -1,0 +1,8 @@
+node_modules
+.expo
+dist
+build
+/android
+/.eas
+GoogleService-Info.plist
+build-android-release.sh

@@ -2,7 +2,7 @@ use axum::{Json, extract::State};
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::AppState;
 use crate::errors::AppResult;
@@ -14,6 +14,7 @@ use crate::models::user_service_connection::{
     COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
 use crate::mw::auth::AuthUser;
+use crate::services::node_routing_service;
 
 // --- Response types ---
 
@@ -92,6 +93,17 @@ pub async fn get_mcp_config(
         .try_collect()
         .await?;
 
+    let node_route_service_ids = node_routing_service::list_routable_service_ids(
+        &state.db,
+        &user_id,
+        state.node_ws_manager.as_ref(),
+    )
+    .await?;
+    let node_route_set: HashSet<&str> = node_route_service_ids
+        .iter()
+        .map(|service_id| service_id.as_str())
+        .collect();
+
     // 3. Filter: only include services where credentials are satisfied
     let conn_map: HashMap<&str, &UserServiceConnection> = connections
         .iter()
@@ -109,6 +121,7 @@ pub async fn get_mcp_config(
                 Some(conn) => {
                     if svc.requires_user_credential {
                         conn.credential_encrypted.is_some()
+                            || node_route_set.contains(svc.id.as_str())
                     } else {
                         true
                     }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 
 use crate::AppState;
-use crate::crypto::{aes, jwt};
+use crate::crypto::jwt;
 use crate::models::mcp_session;
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -502,7 +502,13 @@ async fn handle_tools_list(
     session_id: &str,
     request: &JsonRpcRequest,
 ) -> Response {
-    let services = match mcp_service::load_user_tools(&state.db, user_id).await {
+    let services = match mcp_service::load_user_tools(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        user_id,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load user tools: {e}");
@@ -599,7 +605,13 @@ async fn handle_tools_call(
     // -- Service tool: verify activation, load, resolve, execute --
     let activated = state.mcp_sessions.get_activated_service_ids(session_id);
 
-    let services = match mcp_service::load_user_tools(&state.db, user_id).await {
+    let services = match mcp_service::load_user_tools(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        user_id,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load tools for execution: {e}");
@@ -633,18 +645,10 @@ async fn handle_tools_call(
         );
     }
 
-    let encryption_key = match aes::parse_hex_key(&state.config.encryption_key) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::error!("Failed to parse encryption key: {e}");
-            return tool_result(request.id.clone(), "Internal server error", true);
-        }
-    };
-
     let (status, body) = match mcp_service::execute_tool(
         &state.http_client,
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         user_id,
         service,
         endpoint,
@@ -714,27 +718,48 @@ async fn handle_meta_call_tool(
         return tool_result(request_id, "tool_name too long (max 200 chars)", true);
     }
 
-    // Accept arguments either nested under "arguments" key or flat alongside
-    // "tool_name".  LLMs sometimes flatten the structure, so we handle both:
-    //   { "tool_name": "x", "arguments": { "foo": 1 } }   -- nested
-    //   { "tool_name": "x", "foo": 1 }                     -- flat
-    let inner_args = if let Some(nested) = arguments.get("arguments") {
-        nested.clone()
-    } else {
-        // Collect all keys except "tool_name" as the arguments
-        let mut flat = serde_json::Map::new();
-        if let Some(obj) = arguments.as_object() {
-            for (k, v) in obj {
-                if k != "tool_name" {
-                    flat.insert(k.clone(), v.clone());
+    // Accept arguments in multiple formats (LLMs are unpredictable):
+    //   1. { "tool_name": "x", "arguments_json": "{\"foo\":1}" }  -- JSON string (preferred)
+    //   2. { "tool_name": "x", "arguments": { "foo": 1 } }       -- nested object (legacy)
+    //   3. { "tool_name": "x", "foo": 1 }                         -- flat (fallback)
+    let inner_args =
+        if let Some(json_str) = arguments.get("arguments_json").and_then(|v| v.as_str()) {
+            // Preferred: arguments_json is a JSON string — parse it
+            match serde_json::from_str::<serde_json::Value>(json_str) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    tracing::warn!("Failed to parse arguments_json as JSON: {e}, raw: {json_str}");
+                    return tool_result(
+                        request_id,
+                        &format!("arguments_json must be a valid JSON string. Parse error: {e}"),
+                        true,
+                    );
                 }
             }
-        }
-        serde_json::Value::Object(flat)
-    };
+        } else if let Some(nested) = arguments.get("arguments") {
+            // Legacy: arguments as a nested object
+            nested.clone()
+        } else {
+            // Flat fallback: collect all keys except "tool_name" and "arguments_json"
+            let mut flat = serde_json::Map::new();
+            if let Some(obj) = arguments.as_object() {
+                for (k, v) in obj {
+                    if k != "tool_name" && k != "arguments_json" {
+                        flat.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            serde_json::Value::Object(flat)
+        };
 
     // Load user tools
-    let services = match mcp_service::load_user_tools(&state.db, user_id).await {
+    let services = match mcp_service::load_user_tools(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        user_id,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load tools for call_tool: {e}");
@@ -766,18 +791,10 @@ async fn handle_meta_call_tool(
     }
 
     // Execute
-    let encryption_key = match aes::parse_hex_key(&state.config.encryption_key) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::error!("Failed to parse encryption key: {e}");
-            return tool_result(request_id, "Internal server error", true);
-        }
-    };
-
     let (status, body) = match mcp_service::execute_tool(
         &state.http_client,
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         user_id,
         service,
         endpoint,
@@ -854,7 +871,13 @@ async fn handle_meta_search(
     }
 
     // Load ALL user tools (not just activated)
-    let services = match mcp_service::load_user_tools(&state.db, user_id).await {
+    let services = match mcp_service::load_user_tools(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        user_id,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load tools for search: {e}");
@@ -975,17 +998,10 @@ async fn handle_meta_connect(
     let credential = arguments.get("credential").and_then(|c| c.as_str());
     let credential_label = arguments.get("credential_label").and_then(|l| l.as_str());
 
-    let encryption_key = match aes::parse_hex_key(&state.config.encryption_key) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::error!("Failed to parse encryption key: {e}");
-            return tool_result(request_id, "Internal server error", true);
-        }
-    };
-
     match mcp_service::connect_service(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
+        state.node_ws_manager.as_ref(),
         user_id,
         service_id,
         credential,

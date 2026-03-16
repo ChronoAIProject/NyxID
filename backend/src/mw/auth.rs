@@ -103,7 +103,57 @@ impl FromRequestParts<AppState> for AuthUser {
                 })?;
 
                 if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                    let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)?;
+                    // Try JWT verification first. If it fails for a reason
+                    // other than expiry, fall back to API-key validation so
+                    // that OpenAI-compatible clients (which send API keys as
+                    // `Authorization: Bearer <key>`) work against the LLM
+                    // gateway and proxy routes.
+                    let claims = match jwt::verify_token(&state.jwt_keys, &state.config, token) {
+                        Ok(claims) => claims,
+                        Err(AppError::TokenExpired) => return Err(AppError::TokenExpired),
+                        Err(jwt_err) => {
+                            match crate::services::key_service::validate_api_key(&state.db, token)
+                                .await
+                            {
+                                Ok((api_user_id_str, api_key)) => {
+                                    let user_id =
+                                        Uuid::parse_str(&api_user_id_str).map_err(|_| {
+                                            AppError::Internal(
+                                                "Invalid user_id in API key".to_string(),
+                                            )
+                                        })?;
+
+                                    let user_model = state
+                                        .db
+                                        .collection::<User>(USERS)
+                                        .find_one(doc! { "_id": &api_user_id_str })
+                                        .await
+                                        .map_err(|e| {
+                                            AppError::Internal(format!("User lookup failed: {e}"))
+                                        })?;
+
+                                    match user_model {
+                                        Some(u) if u.is_active => {}
+                                        _ => {
+                                            return Err(AppError::Unauthorized(
+                                                "User account is inactive".to_string(),
+                                            ));
+                                        }
+                                    }
+
+                                    return Ok(AuthUser {
+                                        user_id,
+                                        session_id: None,
+                                        scope: api_key.scopes.clone(),
+                                        acting_client_id: None,
+                                        approval_owner_user_id: None,
+                                        auth_method: AuthMethod::ApiKey,
+                                    });
+                                }
+                                Err(_) => return Err(jwt_err),
+                            }
+                        }
+                    };
 
                     if claims.token_type != "access" {
                         return Err(AppError::Unauthorized("Expected access token".to_string()));
@@ -216,97 +266,67 @@ impl FromRequestParts<AppState> for AuthUser {
                     .await
                     .map_err(|e| AppError::Internal(format!("Session lookup failed: {e}")))?;
 
-                if let Some(sess) = session
-                    && sess.expires_at > chrono::Utc::now()
-                {
-                    let user_id = Uuid::parse_str(&sess.user_id).map_err(|_| {
-                        AppError::Internal("Invalid user_id in session".to_string())
-                    })?;
-                    let session_id = Uuid::parse_str(&sess.id)
-                        .map_err(|_| AppError::Internal("Invalid session id".to_string()))?;
+                if session.is_none() {
+                    tracing::debug!("Session cookie present but no matching active session in DB");
+                }
 
-                    // Verify the user account is still active
-                    let user_model = state
-                        .db
-                        .collection::<User>(USERS)
-                        .find_one(doc! { "_id": &sess.user_id })
-                        .await
-                        .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
+                match session {
+                    Some(sess) if sess.expires_at > chrono::Utc::now() => {
+                        let user_id = Uuid::parse_str(&sess.user_id).map_err(|_| {
+                            AppError::Internal("Invalid user_id in session".to_string())
+                        })?;
+                        let session_id = Uuid::parse_str(&sess.id)
+                            .map_err(|_| AppError::Internal("Invalid session id".to_string()))?;
 
-                    match user_model {
-                        Some(u) if u.is_active => {
-                            // Session-based auth uses an empty scope string.
-                            // RBAC-scoped claims (roles, groups) are only
-                            // included in OAuth tokens that explicitly request
-                            // those scopes. Session users can retrieve RBAC
-                            // data via the /oauth/userinfo endpoint instead.
-                            return Ok(AuthUser {
-                                user_id,
-                                session_id: Some(session_id),
-                                scope: String::new(),
-                                acting_client_id: None,
-                                approval_owner_user_id: None,
-                                auth_method: AuthMethod::Session,
-                            });
-                        }
-                        _ => {
-                            // User not found or inactive -- reject session
-                            tracing::warn!(
-                                user_id = %sess.user_id,
-                                "Session auth rejected: user inactive or not found"
-                            );
+                        // Verify the user account is still active
+                        let user_model = state
+                            .db
+                            .collection::<User>(USERS)
+                            .find_one(doc! { "_id": &sess.user_id })
+                            .await
+                            .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
+
+                        match user_model {
+                            Some(u) if u.is_active => {
+                                // Session-based auth uses an empty scope string.
+                                // RBAC-scoped claims (roles, groups) are only
+                                // included in OAuth tokens that explicitly request
+                                // those scopes. Session users can retrieve RBAC
+                                // data via the /oauth/userinfo endpoint instead.
+                                return Ok(AuthUser {
+                                    user_id,
+                                    session_id: Some(session_id),
+                                    scope: String::new(),
+                                    acting_client_id: None,
+                                    approval_owner_user_id: None,
+                                    auth_method: AuthMethod::Session,
+                                });
+                            }
+                            _ => {
+                                // User not found or inactive -- reject session
+                                tracing::warn!(
+                                    user_id = %sess.user_id,
+                                    "Session auth rejected: user inactive or not found"
+                                );
+                            }
                         }
                     }
+                    Some(sess) => {
+                        tracing::debug!(
+                            user_id = %sess.user_id,
+                            session_id = %sess.id,
+                            expires_at = %sess.expires_at,
+                            "Session cookie present but session expired in DB"
+                        );
+                    }
+                    None => {}
                 }
             }
 
-            // Also try access token cookie
+            // Legacy access-token cookies are no longer accepted for browser auth.
+            // We still detect their presence for logging and CSRF hardening while
+            // first-party web flows migrate to session-cookie-only auth.
             let access_token = parse_cookie(cookie_header, ACCESS_TOKEN_COOKIE_NAME);
-
-            if let Some(token) = access_token {
-                let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)?;
-
-                if claims.token_type != "access" {
-                    return Err(AppError::Unauthorized("Expected access token".to_string()));
-                }
-
-                let user_id = Uuid::parse_str(&claims.sub)
-                    .map_err(|_| AppError::Unauthorized("Invalid token subject".to_string()))?;
-
-                let user_id_str = user_id.to_string();
-
-                // Verify the user account is still active
-                let user_model = state
-                    .db
-                    .collection::<User>(USERS)
-                    .find_one(doc! { "_id": &user_id_str })
-                    .await
-                    .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
-
-                match user_model {
-                    Some(u) if u.is_active => {}
-                    _ => {
-                        return Err(AppError::Unauthorized(
-                            "User account is inactive".to_string(),
-                        ));
-                    }
-                }
-
-                let auth_method = if claims.act.is_some() {
-                    AuthMethod::Delegated
-                } else {
-                    AuthMethod::AccessToken
-                };
-
-                return Ok(AuthUser {
-                    user_id,
-                    session_id: None,
-                    scope: claims.scope.clone(),
-                    acting_client_id: claims.act.map(|a| a.sub),
-                    approval_owner_user_id: None,
-                    auth_method,
-                });
-            }
 
             // Try API key (X-API-Key header)
             if let Some(api_key_header) = parts.headers.get("x-api-key") {
@@ -347,6 +367,14 @@ impl FromRequestParts<AppState> for AuthUser {
                 });
             }
 
+            tracing::debug!(
+                has_session_cookie = session_token.is_some(),
+                has_access_cookie = access_token.is_some(),
+                has_api_key = parts.headers.get("x-api-key").is_some(),
+                has_bearer = parts.headers.get("authorization").is_some(),
+                "All auth methods exhausted"
+            );
+
             Err(AppError::Unauthorized(
                 "No valid authentication credentials provided".to_string(),
             ))
@@ -371,23 +399,12 @@ pub async fn reject_delegated_tokens(
     Ok(next.run(request).await)
 }
 
-/// Check if the request bears a delegated token (Bearer header or access token cookie).
+/// Check if the request bears a delegated token.
 fn is_delegated_request(request: &axum::http::Request<axum::body::Body>) -> bool {
     // Check Authorization header
     if let Some(auth_header) = request.headers().get("authorization") {
         if let Ok(auth_str) = auth_header.to_str() {
             if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                if is_jwt_delegated(token) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // Check access token cookie
-    if let Some(cookie_header) = request.headers().get("cookie") {
-        if let Ok(cookie_str) = cookie_header.to_str() {
-            if let Some(token) = parse_cookie(cookie_str, ACCESS_TOKEN_COOKIE_NAME) {
                 if is_jwt_delegated(token) {
                     return true;
                 }
@@ -443,23 +460,12 @@ pub async fn reject_service_account_tokens(
     Ok(next.run(request).await)
 }
 
-/// Check if the request bears a service account token (Bearer header or access token cookie).
+/// Check if the request bears a service account token.
 fn is_service_account_request(request: &axum::http::Request<axum::body::Body>) -> bool {
     // Check Authorization header
     if let Some(auth_header) = request.headers().get("authorization") {
         if let Ok(auth_str) = auth_header.to_str() {
             if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                if is_jwt_service_account(token) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // Check access token cookie
-    if let Some(cookie_header) = request.headers().get("cookie") {
-        if let Ok(cookie_str) = cookie_header.to_str() {
-            if let Some(token) = parse_cookie(cookie_str, ACCESS_TOKEN_COOKIE_NAME) {
                 if is_jwt_service_account(token) {
                     return true;
                 }
@@ -539,6 +545,8 @@ fn parse_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, header};
 
     #[test]
     fn parse_cookie_single() {
@@ -682,5 +690,81 @@ mod tests {
             .encode(serde_json::to_vec(&payload).unwrap());
         let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
         assert!(!is_jwt_delegated(&fake_jwt));
+    }
+
+    #[test]
+    fn delegated_request_detection_uses_bearer_header() {
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "delegated": true,
+            "act": { "sub": "client-1" }
+        });
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
+        let request = Request::builder()
+            .header(header::AUTHORIZATION, format!("Bearer {fake_jwt}"))
+            .body(Body::empty())
+            .unwrap();
+
+        assert!(is_delegated_request(&request));
+    }
+
+    #[test]
+    fn delegated_request_detection_ignores_legacy_access_cookie() {
+        let payload = serde_json::json!({
+            "sub": "user-123",
+            "delegated": true,
+            "act": { "sub": "client-1" }
+        });
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
+        let request = Request::builder()
+            .header(
+                header::COOKIE,
+                format!("{ACCESS_TOKEN_COOKIE_NAME}={fake_jwt}"),
+            )
+            .body(Body::empty())
+            .unwrap();
+
+        assert!(!is_delegated_request(&request));
+    }
+
+    #[test]
+    fn service_account_request_detection_uses_bearer_header() {
+        let payload = serde_json::json!({
+            "sub": "sa-id-123",
+            "sa": true
+        });
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
+        let request = Request::builder()
+            .header(header::AUTHORIZATION, format!("Bearer {fake_jwt}"))
+            .body(Body::empty())
+            .unwrap();
+
+        assert!(is_service_account_request(&request));
+    }
+
+    #[test]
+    fn service_account_request_detection_ignores_legacy_access_cookie() {
+        let payload = serde_json::json!({
+            "sub": "sa-id-123",
+            "sa": true
+        });
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
+        let request = Request::builder()
+            .header(
+                header::COOKIE,
+                format!("{ACCESS_TOKEN_COOKIE_NAME}={fake_jwt}"),
+            )
+            .body(Body::empty())
+            .unwrap();
+
+        assert!(!is_service_account_request(&request));
     }
 }

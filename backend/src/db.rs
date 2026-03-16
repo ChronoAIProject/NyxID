@@ -521,6 +521,17 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     sac.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
+    // ── user_provider_credentials ──
+    let user_creds = db.collection::<mongodb::bson::Document>("user_provider_credentials");
+    user_creds
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "provider_config_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // ── notification_channels ──
     let notification_channels = db.collection::<mongodb::bson::Document>("notification_channels");
     notification_channels
@@ -547,6 +558,92 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Supports token-based cleanup paths (e.g. account switching and logout detach).
+    notification_channels
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "push_devices.token": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+
+    // ── nodes ──
+    let nodes = db.collection::<mongodb::bson::Document>("nodes");
+    // Drop legacy index without partial filter (if it exists) to replace with soft-delete-safe version
+    let _ = nodes.drop_index("user_id_1_name_1").await;
+    nodes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "name": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! { "is_active": true })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    nodes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "is_active": 1 })
+                .build(),
+        )
+        .await?;
+    nodes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "auth_token_hash": 1 })
+                .build(),
+        )
+        .await?;
+
+    // ── node_service_bindings ──
+    let nsb = db.collection::<mongodb::bson::Document>("node_service_bindings");
+    // Drop legacy index without partial filter (if it exists) to replace with soft-delete-safe version
+    let _ = nsb.drop_index("node_id_1_service_id_1").await;
+    nsb.create_index(
+        IndexModel::builder()
+            .keys(doc! { "node_id": 1, "service_id": 1 })
+            .options(
+                IndexOptions::builder()
+                    .unique(true)
+                    .partial_filter_expression(doc! { "is_active": true })
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+    nsb.create_index(
+        IndexModel::builder()
+            .keys(doc! { "user_id": 1, "service_id": 1, "is_active": 1 })
+            .build(),
+    )
+    .await?;
+    nsb.create_index(
+        IndexModel::builder()
+            .keys(doc! { "node_id": 1, "is_active": 1 })
+            .build(),
+    )
+    .await?;
+
+    // ── node_registration_tokens ──
+    let nrt = db.collection::<mongodb::bson::Document>("node_registration_tokens");
+    nrt.create_index(IndexModel::builder().keys(doc! { "token_hash": 1 }).build())
+        .await?;
+    nrt.create_index(
+        IndexModel::builder()
+            .keys(doc! { "expires_at": 1 })
+            .options(
+                IndexOptions::builder()
+                    .expire_after(Duration::from_secs(0))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     Ok(())
 }

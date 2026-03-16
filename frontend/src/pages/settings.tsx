@@ -1,7 +1,8 @@
 import { useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useUser, useMfaDisable } from "@/hooks/use-auth";
 import { api, ApiError } from "@/lib/api-client";
@@ -56,6 +57,7 @@ import {
 import {
   ShieldCheck,
   ShieldOff,
+  TriangleAlert,
   Monitor,
   Smartphone,
   Globe,
@@ -65,6 +67,11 @@ import {
   Check,
 } from "lucide-react";
 import { toast } from "sonner";
+
+interface DeleteAccountResponse {
+  readonly status: string;
+  readonly deleted_at: string;
+}
 
 export function SettingsPage() {
   return (
@@ -185,10 +192,16 @@ function ProfileTab() {
 
 function SecurityTab() {
   const user = useAuthStore((s) => s.user);
+  const logout = useAuthStore((s) => s.logout);
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [mfaDialogOpen, setMfaDialogOpen] = useState(false);
   const [disableMfaDialogOpen, setDisableMfaDialogOpen] = useState(false);
   const [disableMfaPassword, setDisableMfaPassword] = useState("");
   const [disableMfaError, setDisableMfaError] = useState<string | null>(null);
+  const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
+  const [deleteConfirmEmail, setDeleteConfirmEmail] = useState("");
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const disableMfa = useMfaDisable();
 
   const passwordForm = useForm<ChangePasswordFormData>({
@@ -241,6 +254,39 @@ function SecurityTab() {
     setDisableMfaDialogOpen(false);
     setDisableMfaPassword("");
     setDisableMfaError(null);
+  }
+
+  async function handleDeleteAccount() {
+    if (!user?.email) return;
+    if (deleteConfirmEmail.trim() !== user.email) {
+      toast.error("Please enter your email to confirm");
+      return;
+    }
+    setIsDeletingAccount(true);
+    try {
+      await api.delete<DeleteAccountResponse>("/users/me");
+      toast.success("Account deleted successfully");
+      try {
+        await logout();
+      } catch {}
+      queryClient.clear();
+      void navigate({ to: "/login" });
+    } catch (error) {
+      if (error instanceof ApiError) {
+        toast.error(error.message);
+      } else {
+        toast.error("Failed to delete account");
+      }
+    } finally {
+      setIsDeletingAccount(false);
+    }
+  }
+
+  function handleDeleteAccountDialog(open: boolean) {
+    setDeleteAccountOpen(open);
+    if (!open) {
+      setDeleteConfirmEmail("");
+    }
   }
 
   return (
@@ -430,6 +476,70 @@ function SecurityTab() {
           </Form>
         </CardContent>
       </Card>
+
+      <Card className="border-destructive/40">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-destructive">
+            <TriangleAlert className="h-5 w-5" aria-hidden="true" />
+            Delete Account
+          </CardTitle>
+          <CardDescription>
+            Permanently delete your account and all associated data. This action
+            cannot be undone.
+          </CardDescription>
+        </CardHeader>
+        <CardFooter>
+          <Button
+            variant="destructive"
+            onClick={() => setDeleteAccountOpen(true)}
+          >
+            Delete My Account
+          </Button>
+        </CardFooter>
+      </Card>
+
+      <Dialog open={deleteAccountOpen} onOpenChange={handleDeleteAccountDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Account</DialogTitle>
+            <DialogDescription>
+              Please enter your email address to confirm account deletion. This
+              action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2">
+            <label className="text-sm font-medium" htmlFor="delete-account-email">
+              Email
+            </label>
+            <Input
+              id="delete-account-email"
+              value={deleteConfirmEmail}
+              onChange={(e) => setDeleteConfirmEmail(e.target.value)}
+              placeholder={user?.email ?? "your@email.com"}
+              autoFocus
+            />
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => handleDeleteAccountDialog(false)}
+              disabled={isDeletingAccount}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              isLoading={isDeletingAccount}
+              disabled={deleteConfirmEmail.trim() !== (user?.email ?? "")}
+              onClick={() => void handleDeleteAccount()}
+            >
+              Permanently Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

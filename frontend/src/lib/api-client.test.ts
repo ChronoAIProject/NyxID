@@ -2,6 +2,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { apiClient, ApiError, api } from "./api-client";
 
 const mockFetch = vi.fn();
+const { mockSetUser } = vi.hoisted(() => ({
+  mockSetUser: vi.fn(),
+}));
+
+vi.mock("@/stores/auth-store", () => ({
+  useAuthStore: {
+    getState: () => ({
+      setUser: mockSetUser,
+    }),
+  },
+}));
+
 vi.stubGlobal("fetch", mockFetch);
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -15,6 +27,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  mockSetUser.mockReset();
 });
 
 describe("apiClient", () => {
@@ -124,7 +137,7 @@ describe("apiClient", () => {
   });
 });
 
-describe("401 token refresh interceptor", () => {
+describe("401 auth state handling", () => {
   function errorResponse(status: number, errorCode: number, message: string): Response {
     return {
       ok: false,
@@ -139,77 +152,14 @@ describe("401 token refresh interceptor", () => {
     } as Response;
   }
 
-  it("refreshes token and retries on 401", async () => {
-    // 1st call: original request returns 401
+  it("clears auth state on 401 for protected endpoints", async () => {
     mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Not authenticated"));
-    // 2nd call: refresh endpoint succeeds
-    mockFetch.mockResolvedValueOnce(jsonResponse({}, 200));
-    // 3rd call: retried original request succeeds
-    mockFetch.mockResolvedValueOnce(jsonResponse({ data: "success" }));
-
-    const result = await apiClient<{ data: string }>("/users/me");
-
-    expect(result).toEqual({ data: "success" });
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    // Verify refresh was called
-    expect(mockFetch.mock.calls[1]?.[0]).toBe("/api/v1/auth/refresh");
-    // Verify retry used same endpoint
-    expect(mockFetch.mock.calls[2]?.[0]).toBe("/api/v1/users/me");
+    await expect(apiClient("/users/me")).rejects.toThrow(ApiError);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockSetUser).toHaveBeenCalledWith(null);
   });
 
-  it("throws original 401 when refresh fails", async () => {
-    // 1st call: original request returns 401
-    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Not authenticated"));
-    // 2nd call: refresh endpoint fails
-    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Refresh failed"));
-
-    try {
-      await apiClient("/users/me");
-      expect.fail("should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ApiError);
-      const apiErr = err as ApiError;
-      expect(apiErr.status).toBe(401);
-      expect(apiErr.message).toBe("Not authenticated");
-    }
-
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-  });
-
-  it("throws ApiError when retry after refresh also fails", async () => {
-    // 1st call: original 401
-    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Not authenticated"));
-    // 2nd call: refresh succeeds
-    mockFetch.mockResolvedValueOnce(jsonResponse({}, 200));
-    // 3rd call: retry fails with 403
-    mockFetch.mockResolvedValueOnce(errorResponse(403, 1002, "Forbidden"));
-
-    try {
-      await apiClient("/admin/users");
-      expect.fail("should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ApiError);
-      const apiErr = err as ApiError;
-      expect(apiErr.status).toBe(403);
-      expect(apiErr.message).toBe("Forbidden");
-    }
-  });
-
-  it("returns undefined when retry yields 204", async () => {
-    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Expired"));
-    mockFetch.mockResolvedValueOnce(jsonResponse({}, 200));
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 204,
-      json: () => Promise.reject(new Error("No body")),
-      headers: new Headers(),
-    } as Response);
-
-    const result = await apiClient<void>("/sessions/current");
-    expect(result).toBeUndefined();
-  });
-
-  it("skips refresh for auth endpoints", async () => {
+  it("does not clear auth state for auth endpoints", async () => {
     const authEndpoints = [
       "/auth/login",
       "/auth/register",
@@ -232,53 +182,18 @@ describe("401 token refresh interceptor", () => {
         expect((err as ApiError).status).toBe(401);
       }
 
-      // Only 1 call -- no refresh attempt
       expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockSetUser).not.toHaveBeenCalled();
     }
   });
 
-  it("coalesces concurrent refresh attempts into a single call", async () => {
-    // Set up responses for 2 concurrent requests that both get 401
-    // Request 1: 401
+  it("throws the original 401 response", async () => {
     mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Expired"));
-    // Request 2: 401
-    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Expired"));
-    // Single shared refresh call
-    mockFetch.mockResolvedValueOnce(jsonResponse({}, 200));
-    // Request 1 retry
-    mockFetch.mockResolvedValueOnce(jsonResponse({ id: "1" }));
-    // Request 2 retry
-    mockFetch.mockResolvedValueOnce(jsonResponse({ id: "2" }));
 
-    const [r1, r2] = await Promise.all([
-      apiClient<{ id: string }>("/users/1"),
-      apiClient<{ id: string }>("/users/2"),
-    ]);
-
-    expect(r1).toEqual({ id: "1" });
-    expect(r2).toEqual({ id: "2" });
-
-    // 2 original + 1 refresh + 2 retries = 5 total
-    expect(mockFetch).toHaveBeenCalledTimes(5);
-    // Verify only 1 refresh call was made
-    const refreshCalls = mockFetch.mock.calls.filter(
-      (call: unknown[]) => call[0] === "/api/v1/auth/refresh",
-    );
-    expect(refreshCalls).toHaveLength(1);
-  });
-
-  it("handles network error during refresh gracefully", async () => {
-    mockFetch.mockResolvedValueOnce(errorResponse(401, 1001, "Expired"));
-    // Refresh call throws network error
-    mockFetch.mockRejectedValueOnce(new TypeError("Failed to fetch"));
-
-    try {
-      await apiClient("/users/me");
-      expect.fail("should have thrown");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ApiError);
-      expect((err as ApiError).status).toBe(401);
-    }
+    await expect(apiClient("/users/me")).rejects.toMatchObject({
+      status: 401,
+      message: "Expired",
+    });
   });
 });
 

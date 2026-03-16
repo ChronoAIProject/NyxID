@@ -315,6 +315,7 @@ If using cert-manager for automatic TLS certificates:
 |------------------|------------------------------------------------|-------------------------------------------------|
 | `DATABASE_URL`   | MongoDB connection string                      | `mongodb://user:pass@host:27017/nyxid?authSource=admin` |
 | `ENCRYPTION_KEY` | 32-byte hex-encoded AES-256 key (64 hex chars) | Output of `openssl rand -hex 32`                |
+| `ENCRYPTION_KEY_PREVIOUS` | Previous encryption key for key rotation (64 hex chars, optional) | Old `ENCRYPTION_KEY` value during rotation. Phase 1 supports one previous key at a time. |
 
 ### Server Variables
 
@@ -743,7 +744,7 @@ Load Balancer ----->+---> NyxID instance 2 ---+---> MongoDB
 
 Requirements for horizontal scaling:
 - All instances must share the same RSA key pair
-- All instances must use the same `ENCRYPTION_KEY`
+- All instances must use the same `ENCRYPTION_KEY` and `ENCRYPTION_KEY_PREVIOUS` (if set)
 - All instances must connect to the same MongoDB instance or replica set
 - Load balancer should use sticky sessions or round-robin (both work since state is in the database)
 
@@ -1396,7 +1397,8 @@ APPROVAL_EXPIRY_INTERVAL_SECS=10  # Check every 10 seconds
 
 - [ ] Monitor the `/health` endpoint
 - [ ] Review audit logs periodically
-- [ ] Rotate the `ENCRYPTION_KEY` and RSA keys on a schedule
+- [ ] Rotate the `ENCRYPTION_KEY` deliberately, not on an unattended schedule, unless you have completed re-encryption of old-key data and `/health` shows zero fallback decrypts for the old key (see [SECURITY.md](SECURITY.md#key-rotation))
+- [ ] Rotate RSA keys on a schedule
 - [ ] Keep dependencies updated (`cargo update`, `npm update`)
 - [ ] Subscribe to security advisories for critical dependencies (argon2, jsonwebtoken, rsa, aes-gcm)
 

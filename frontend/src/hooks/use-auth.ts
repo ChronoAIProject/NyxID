@@ -86,7 +86,7 @@ export function useMfaVerify() {
 
   return useMutation({
     mutationFn: async (data: MfaVerifyRequest): Promise<void> => {
-      await api.post<void>("/auth/mfa/verify", data);
+      await api.post<void>("/auth/mfa/verify", { ...data, client: "web" });
     },
     onSuccess: () => {
       clearMfaState();

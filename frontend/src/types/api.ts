@@ -167,8 +167,9 @@ export interface RegisterCredentials {
 
 export interface LoginResponse {
   readonly user_id: string;
-  readonly access_token: string;
-  readonly expires_in: number;
+  readonly access_token?: string;
+  readonly expires_in?: number;
+  readonly refresh_token?: string;
 }
 
 export interface RegisterResponse {
@@ -190,9 +191,12 @@ export interface MfaVerifyRequest {
 
 export interface PublicConfig {
   readonly mcp_url: string;
+  readonly node_ws_url: string;
   readonly version: string;
   readonly social_providers: readonly string[];
 }
+
+export type CredentialMode = "admin" | "user" | "both";
 
 export interface ProviderConfig {
   readonly id: string;
@@ -201,6 +205,7 @@ export interface ProviderConfig {
   readonly description: string | null;
   readonly provider_type: "oauth2" | "api_key" | "device_code";
   readonly has_oauth_config: boolean;
+  readonly credential_mode: CredentialMode;
   readonly default_scopes: readonly string[] | null;
   readonly supports_pkce: boolean;
   readonly device_code_url: string | null;
@@ -209,11 +214,23 @@ export interface ProviderConfig {
   readonly hosted_callback_url: string | null;
   readonly api_key_instructions: string | null;
   readonly api_key_url: string | null;
+  readonly token_endpoint_auth_method: string;
+  readonly extra_auth_params: Readonly<Record<string, string>> | null;
+  readonly device_code_format: string;
+  readonly client_id_param_name: string | null;
   readonly icon_url: string | null;
   readonly documentation_url: string | null;
   readonly is_active: boolean;
   readonly created_at: string;
   readonly updated_at: string;
+}
+
+export interface UserProviderCredentials {
+  readonly provider_config_id: string;
+  readonly has_credentials: boolean;
+  readonly label: string | null;
+  readonly created_at: string | null;
+  readonly updated_at: string | null;
 }
 
 export interface UserProviderToken {
@@ -280,4 +297,31 @@ export interface LlmStatusResponse {
   readonly providers: readonly LlmProviderStatus[];
   readonly gateway_url: string;
   readonly supported_models: readonly string[];
+}
+
+/**
+ * Social Token Exchange (RFC 8693) - used by mobile apps with native SDK login.
+ * Mobile apps exchange provider tokens (Google ID token, GitHub access token) for NyxID token sets
+ * via POST /oauth/token with grant_type=urn:ietf:params:oauth:grant-type:token-exchange.
+ */
+
+export type SocialTokenExchangeProvider = "google" | "github" | "apple";
+
+export interface SocialTokenExchangeRequest {
+  readonly grant_type: "urn:ietf:params:oauth:grant-type:token-exchange";
+  readonly subject_token: string;
+  readonly subject_token_type: "urn:ietf:params:oauth:token-type:id_token" | "urn:ietf:params:oauth:token-type:access_token";
+  readonly client_id: string;
+  readonly client_secret?: string;
+  readonly provider: SocialTokenExchangeProvider;
+}
+
+export interface SocialTokenExchangeResponse {
+  readonly access_token: string;
+  readonly token_type: "Bearer";
+  readonly expires_in: number;
+  readonly refresh_token: string;
+  readonly id_token?: string;
+  readonly scope: string;
+  readonly issued_token_type: string;
 }

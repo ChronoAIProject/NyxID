@@ -278,6 +278,43 @@ pub fn generate_refresh_token(
     Ok((token, jti))
 }
 
+/// Rebuild an already-issued refresh token from persisted metadata.
+///
+/// This is used for post-rotation retries so concurrent refresh requests can
+/// converge on the same active token instead of rotating the chain again.
+pub fn reissue_refresh_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    jti: &str,
+    issued_at: i64,
+    expires_at: i64,
+) -> Result<String, AppError> {
+    let claims = Claims {
+        sub: user_id.to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.base_url.clone(),
+        exp: expires_at,
+        iat: issued_at,
+        jti: jti.to_string(),
+        scope: String::new(),
+        token_type: "refresh".to_string(),
+        roles: None,
+        groups: None,
+        permissions: None,
+        sid: None,
+        act: None,
+        delegated: None,
+        sa: None,
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
+
+    encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode refresh token: {e}")))
+}
+
 /// TTL for delegation tokens issued via Token Exchange (5 minutes).
 pub const DELEGATED_TOKEN_TTL_SECS: i64 = 300;
 
@@ -523,12 +560,17 @@ mod tests {
             google_client_secret: None,
             github_client_id: None,
             github_client_secret: None,
+            apple_client_id: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_private_key_path: None,
             smtp_host: None,
             smtp_port: None,
             smtp_username: None,
             smtp_password: None,
             smtp_from_address: None,
-            encryption_key: "ab".repeat(32),
+            encryption_key: Some("ab".repeat(32)),
+            encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
@@ -538,6 +580,27 @@ mod tests {
             telegram_webhook_url: None,
             telegram_bot_username: None,
             approval_expiry_interval_secs: 5,
+            fcm_service_account_path: None,
+            fcm_project_id: None,
+            apns_key_path: None,
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
+            apns_sandbox: true,
+            key_provider: "local".to_string(),
+            aws_kms_key_arn: None,
+            aws_kms_key_arn_previous: None,
+            gcp_kms_key_name: None,
+            gcp_kms_key_name_previous: None,
+            cors_allowed_origins: vec![],
+            node_heartbeat_interval_secs: 30,
+            node_heartbeat_timeout_secs: 90,
+            node_proxy_timeout_secs: 30,
+            node_registration_token_ttl_secs: 3600,
+            node_max_per_user: 10,
+            node_max_ws_connections: 100,
+            node_max_stream_duration_secs: 300,
+            node_hmac_signing_enabled: true,
         };
 
         (keys, config)
@@ -568,6 +631,19 @@ mod tests {
         assert_eq!(claims.token_type, "refresh");
         assert_eq!(claims.jti, jti);
         assert!(claims.scope.is_empty());
+    }
+
+    #[test]
+    fn reissue_refresh_token_recreates_original_jwt() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let (token, jti) = generate_refresh_token(&keys, &config, &user_id).unwrap();
+        let claims = verify_token(&keys, &config, &token).unwrap();
+
+        let reissued =
+            reissue_refresh_token(&keys, &config, &user_id, &jti, claims.iat, claims.exp).unwrap();
+
+        assert_eq!(reissued, token);
     }
 
     #[test]

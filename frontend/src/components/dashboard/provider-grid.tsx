@@ -7,12 +7,19 @@ import {
   useInitiateOAuth,
   useDisconnectProvider,
   useRefreshProviderToken,
+  useMyProviderCredentials,
 } from "@/hooks/use-providers";
 import { useLlmStatus } from "@/hooks/use-llm-gateway";
 import { ProviderCard } from "./provider-card";
 import { ApiKeyDialog } from "./api-key-dialog";
 import { DeviceCodeDialog } from "./device-code-dialog";
+import { UserCredentialsDialog } from "./user-credentials-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  canConnectProvider,
+  getProviderConnectHint,
+  needsUserCredentials,
+} from "@/lib/constants";
 import { KeyRound } from "lucide-react";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
@@ -32,12 +39,21 @@ export function ProviderGrid() {
   );
   const [deviceCodeDialog, setDeviceCodeDialog] =
     useState<ProviderConfig | null>(null);
+  const [credentialsDialog, setCredentialsDialog] =
+    useState<ProviderConfig | null>(null);
   // Track which provider is currently being acted upon for per-card disabled state
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
 
   const isLoading = providersLoading || tokensLoading;
 
-  function handleConnect(provider: ProviderConfig) {
+  function handleConnect(provider: ProviderConfig, hasUserCredentials = false) {
+    if (!canConnectProvider(provider, hasUserCredentials)) {
+      toast.error(
+        getProviderConnectHint(provider, hasUserCredentials) ?? "Provider is not ready to connect.",
+      );
+      return;
+    }
+
     if (provider.provider_type === "api_key") {
       setApiKeyDialog(provider);
     } else if (provider.provider_type === "device_code") {
@@ -159,7 +175,7 @@ export function ProviderGrid() {
         {activeProviders.map((provider) => {
           const isActive = activeProviderId === provider.id;
           return (
-            <ProviderCard
+            <ProviderCardWithCredentials
               key={provider.id}
               provider={provider}
               token={tokensByProviderId.get(provider.id)}
@@ -168,6 +184,7 @@ export function ProviderGrid() {
               onConnect={handleConnect}
               onDisconnect={(id) => void handleDisconnect(id)}
               onRefresh={(id) => void handleRefresh(id)}
+              onSetupCredentials={setCredentialsDialog}
               isConnecting={
                 isActive &&
                 (connectApiKeyMutation.isPending ||
@@ -195,6 +212,37 @@ export function ProviderGrid() {
           onClose={() => setDeviceCodeDialog(null)}
         />
       )}
+
+      {credentialsDialog !== null && (
+        <UserCredentialsDialog
+          provider={credentialsDialog}
+          onClose={() => setCredentialsDialog(null)}
+        />
+      )}
     </>
+  );
+}
+
+/**
+ * Wrapper that fetches per-user credential status for a provider,
+ * then renders the presentational ProviderCard with credential data.
+ */
+function ProviderCardWithCredentials(
+  props: Omit<
+    React.ComponentProps<typeof ProviderCard>,
+    "hasUserCredentials"
+  >,
+) {
+  const showCreds = needsUserCredentials(props.provider);
+  const { data: credentials } = useMyProviderCredentials(
+    showCreds ? props.provider.id : "",
+  );
+  const hasUserCredentials = credentials?.has_credentials === true;
+
+  return (
+    <ProviderCard
+      {...props}
+      hasUserCredentials={hasUserCredentials}
+    />
   );
 }

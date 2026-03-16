@@ -1,0 +1,61 @@
+{
+  "expo": {
+    "name": "NyxID Mobile",
+    "slug": "nyxid-mobile",
+    "scheme": "nyxid",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#10101A"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "fun.chrono-ai.nyxid",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "fun.chronoai.nyxid",
+      "versionCode": 14,
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ],
+      "googleServicesFile": "./google-services.json",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#10101A"
+      }
+    },
+    "notification": {
+      "icon": "./assets/notification-icon.png",
+      "androidMode": "default",
+      "androidCollapsed": "NyxID",
+      "color": "#8B5CF6"
+    },
+    "plugins": [
+      "expo-secure-store",
+      [
+        "expo-notifications",
+        {
+          "enableBackgroundRemoteNotifications": true,
+          "androidMode": "default",
+          "defaultChannel": "approvals"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "84ed5f10-0e59-46db-bf71-799e3ddd6ba9"
+      }
+    }
+  }
+}

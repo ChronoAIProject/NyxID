@@ -2,7 +2,7 @@ use mongodb::bson::doc;
 use reqwest::Client;
 use zeroize::Zeroizing;
 
-use crate::crypto::aes;
+use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -55,7 +55,7 @@ pub async fn resolve_service_by_slug(
 /// Provider services are not proxyable.
 pub async fn resolve_proxy_target(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     service_id: &str,
 ) -> AppResult<ProxyTarget> {
@@ -130,7 +130,7 @@ pub async fn resolve_proxy_target(
     };
 
     // SEC-M3: Wrap raw decrypted bytes in Zeroizing so they are zeroed on drop
-    let decrypted_bytes = Zeroizing::new(aes::decrypt(&credential_encrypted, encryption_key)?);
+    let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&credential_encrypted).await?);
     let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
         tracing::error!("Credential UTF-8 decode failed: {e}");
         AppError::Internal("Failed to decode credential".to_string())
@@ -143,6 +143,96 @@ pub async fn resolve_proxy_target(
         credential,
         service,
     })
+}
+
+/// Resolve proxy target with lenient credential handling for node-routed requests.
+///
+/// Unlike `resolve_proxy_target()`, this does NOT require a connection record or
+/// credential for "connection" services. Returns `(ProxyTarget, has_credential)`
+/// where `has_credential` indicates whether a server-side credential was resolved
+/// (i.e. standard proxy fallback is viable).
+pub async fn resolve_proxy_target_lenient(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<(ProxyTarget, bool)> {
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": service_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Downstream service not found".to_string()))?;
+
+    if !service.is_active {
+        return Err(AppError::BadRequest("Service is inactive".to_string()));
+    }
+
+    if service.service_category == "provider" {
+        return Err(AppError::BadRequest(
+            "Provider services are not proxyable".to_string(),
+        ));
+    }
+
+    // No-auth services: no credential needed
+    if service.auth_method == "none" {
+        return Ok((
+            ProxyTarget {
+                base_url: service.base_url.clone(),
+                auth_method: service.auth_method.clone(),
+                auth_key_name: service.auth_key_name.clone(),
+                credential: String::new(),
+                service,
+            },
+            true,
+        ));
+    }
+
+    // Try to resolve a credential, but don't fail if missing
+    let user_conn = db
+        .collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
+        .find_one(doc! {
+            "user_id": user_id,
+            "service_id": service_id,
+        })
+        .await?;
+
+    // Respect explicit disconnection even in lenient mode
+    if let Some(ref conn) = user_conn {
+        if !conn.is_active {
+            return Err(AppError::Forbidden(
+                "You have disconnected from this service".to_string(),
+            ));
+        }
+    }
+
+    let credential_encrypted = if service.requires_user_credential {
+        user_conn.and_then(|c| c.credential_encrypted)
+    } else {
+        Some(service.credential_encrypted.clone())
+    };
+
+    let (credential, has_credential) = match credential_encrypted {
+        Some(enc) => {
+            let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&enc).await?);
+            let cred = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+                tracing::error!("Credential UTF-8 decode failed: {e}");
+                AppError::Internal("Failed to decode credential".to_string())
+            })?;
+            (cred, true)
+        }
+        None => (String::new(), false),
+    };
+
+    Ok((
+        ProxyTarget {
+            base_url: service.base_url.clone(),
+            auth_method: service.auth_method.clone(),
+            auth_key_name: service.auth_key_name.clone(),
+            credential,
+            service,
+        },
+        has_credential,
+    ))
 }
 
 /// Forward a request to the downstream service with credential injection,
@@ -251,6 +341,33 @@ pub async fn forward_request(
                 request = request.query(&[(&cred.injection_key, &cred.credential)]);
             }
             _ => {}
+        }
+    }
+
+    if let Some(ref body_bytes) = body {
+        // Log request body for LLM proxy calls to diagnose truncation issues
+        if url.contains("/responses") {
+            let body_str = String::from_utf8_lossy(body_bytes);
+            let preview = if body_str.len() > 2048 {
+                // Find a safe char boundary at or before 2048 bytes
+                let mut end = 2048;
+                while end > 0 && !body_str.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!(
+                    "{}...(truncated, total {} bytes)",
+                    &body_str[..end],
+                    body_str.len()
+                )
+            } else {
+                body_str.to_string()
+            };
+            tracing::info!(
+                url = %url,
+                body_len = body_bytes.len(),
+                body = %preview,
+                "Proxy LLM request body"
+            );
         }
     }
 

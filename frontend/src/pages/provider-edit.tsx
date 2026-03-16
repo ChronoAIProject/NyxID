@@ -19,6 +19,13 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
@@ -65,6 +72,7 @@ export function ProviderEditPage() {
       slug: "",
       description: "",
       provider_type: "oauth2",
+      credential_mode: "admin" as const,
       authorization_url: "",
       token_url: "",
       revocation_url: "",
@@ -90,6 +98,7 @@ export function ProviderEditPage() {
         slug: provider.slug,
         description: provider.description ?? "",
         provider_type: provider.provider_type,
+        credential_mode: provider.credential_mode ?? "admin",
         authorization_url: "",
         token_url: "",
         revocation_url: "",
@@ -269,6 +278,44 @@ export function ProviderEditPage() {
                 </FormItem>
               )}
             />
+
+            {(isOAuth || isDeviceCode) && (
+              <FormField
+                control={form.control}
+                name="credential_mode"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Credential Mode</FormLabel>
+                    <Select
+                      value={field.value ?? "admin"}
+                      onValueChange={field.onChange}
+                    >
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value="admin">
+                          Admin Only
+                        </SelectItem>
+                        <SelectItem value="user">
+                          User Provided
+                        </SelectItem>
+                        <SelectItem value="both">
+                          Admin or User
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Controls whether admin-configured or user-provided OAuth
+                      credentials are used for connections.
+                    </p>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            )}
 
             <FormField
               control={form.control}

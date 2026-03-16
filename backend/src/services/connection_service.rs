@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use mongodb::bson::doc;
 use uuid::Uuid;
 
-use crate::crypto::aes;
+use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -10,6 +10,8 @@ use crate::models::downstream_service::{
 use crate::models::user_service_connection::{
     COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
+use crate::services::node_routing_service;
+use crate::services::node_ws_manager::NodeWsManager;
 
 /// Maximum credential length in bytes to prevent abuse.
 const MAX_CREDENTIAL_LENGTH: usize = 8192;
@@ -26,7 +28,8 @@ pub struct ConnectionResult {
 /// For "provider" category services: returns error (not connectable).
 pub async fn connect_user(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &NodeWsManager,
     user_id: &str,
     service_id: &str,
     credential: Option<&str>,
@@ -48,9 +51,18 @@ pub async fn connect_user(
         }
         "connection" => {
             if credential.is_none() {
-                return Err(AppError::BadRequest(
-                    "Credential is required for this service type".to_string(),
-                ));
+                let has_node_route = node_routing_service::has_routable_node_bindings(
+                    db,
+                    user_id,
+                    service_id,
+                    node_ws_manager,
+                )
+                .await?;
+                if !has_node_route {
+                    return Err(AppError::BadRequest(
+                        "Credential is required for this service type unless an online node route is available".to_string(),
+                    ));
+                }
             }
         }
         "internal" => {
@@ -109,7 +121,7 @@ pub async fn connect_user(
 
     // Encrypt credential if provided
     let credential_encrypted = match credential {
-        Some(cred) => Some(aes::encrypt(cred.as_bytes(), encryption_key)?),
+        Some(cred) => Some(encryption_keys.encrypt(cred.as_bytes()).await?),
         None => None,
     };
 
@@ -194,7 +206,7 @@ pub async fn connect_user(
 /// Update the credential on an existing connection.
 pub async fn update_credential(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     service_id: &str,
     credential: &str,
@@ -233,7 +245,7 @@ pub async fn update_credential(
         ));
     }
 
-    let encrypted = aes::encrypt(credential.as_bytes(), encryption_key)?;
+    let encrypted = encryption_keys.encrypt(credential.as_bytes()).await?;
     let now = Utc::now();
 
     let mut set_doc = doc! {

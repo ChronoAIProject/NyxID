@@ -77,6 +77,9 @@ export function PrivacyPage() {
               <li>User-agent string and device type</li>
               <li>Timestamps of login events and API requests</li>
             </ul>
+            <p className="mt-2 text-muted-foreground text-sm">
+              These are received by our servers as part of normal HTTPS requests. The web application does not collect, store, or share this technical metadata beyond what the server needs for security and audit.
+            </p>
           </Section>
 
           <Section title="3. How We Use Your Information">

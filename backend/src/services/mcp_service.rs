@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 
-use crate::errors::AppResult;
+use crate::crypto::aes::EncryptionKeys;
+use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
@@ -11,7 +12,8 @@ use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, Serv
 use crate::models::user_service_connection::{
     COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
-use crate::services::{connection_service, proxy_service};
+use crate::services::node_ws_manager::NodeWsManager;
+use crate::services::{connection_service, node_routing_service, proxy_service};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -55,6 +57,7 @@ pub struct McpToolDefinition {
 /// Filters out provider services and connections with unsatisfied credentials.
 pub async fn load_user_tools(
     db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
     user_id: &str,
 ) -> AppResult<Vec<McpToolService>> {
     // 1. All connections for this user (active and inactive, for opt-out detection)
@@ -68,6 +71,13 @@ pub async fn load_user_tools(
     let conn_map: HashMap<&str, &UserServiceConnection> = connections
         .iter()
         .map(|c| (c.service_id.as_str(), c))
+        .collect();
+
+    let node_route_service_ids =
+        node_routing_service::list_routable_service_ids(db, user_id, node_ws_manager).await?;
+    let node_route_set: HashSet<&str> = node_route_service_ids
+        .iter()
+        .map(|service_id| service_id.as_str())
         .collect();
 
     // 2. Explicitly connected services (active connections)
@@ -112,7 +122,8 @@ pub async fn load_user_tools(
         if svc.requires_user_credential {
             // Must have credential in connection
             if let Some(conn) = conn_map.get(svc.id.as_str()) {
-                if conn.credential_encrypted.is_none() {
+                if conn.credential_encrypted.is_none() && !node_route_set.contains(svc.id.as_str())
+                {
                     continue;
                 }
             } else {
@@ -279,22 +290,23 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__call_tool".to_string(),
         description: "Execute any connected tool by name. Use nyx__search_tools first to \
-            discover available tools, then invoke them through this tool. Pass the exact \
-            tool name from search results and any required arguments."
+            discover available tools and their inputSchema, then invoke them through this \
+            tool. Pass the tool_name and arguments_json (a JSON string containing all \
+            required parameters from the tool's inputSchema)."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "tool_name": {
                     "type": "string",
-                    "description": "The full tool name from search results (e.g., 'sisyphus-maker__verify')"
+                    "description": "The full tool name from search results (e.g., 'chrono-graph-service__get_api_graphs_by_graphid_snapshot')"
                 },
-                "arguments": {
-                    "type": "object",
-                    "description": "Arguments to pass to the tool (matching the tool's input schema from search results)"
+                "arguments_json": {
+                    "type": "string",
+                    "description": "A JSON string containing all required arguments for the tool. Check the tool's inputSchema from nyx__search_tools results. Example: '{\"graphId\": \"dbeef00f-f2c7-4447-9686-3a6deba65a72\", \"depth\": 2}'. Pass '{}' if the tool takes no arguments."
                 }
             },
-            "required": ["tool_name"]
+            "required": ["tool_name", "arguments_json"]
         }),
     });
 
@@ -561,7 +573,7 @@ pub fn build_proxy_args(
 pub async fn execute_tool(
     http_client: &reqwest::Client,
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     user_id: &str,
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
@@ -576,7 +588,7 @@ pub async fn execute_tool(
     let (method, path, query, body) = build_proxy_args(endpoint, arguments);
 
     let target =
-        proxy_service::resolve_proxy_target(db, encryption_key, user_id, &service.service_id)
+        proxy_service::resolve_proxy_target(db, encryption_keys, user_id, &service.service_id)
             .await?;
 
     // Build identity headers if configured on the service (CR-8)
@@ -618,57 +630,47 @@ pub async fn execute_tool(
                 }
             }
         }
-    }
 
-    // Generate delegation token if configured on the service
-    if target.service.inject_delegation_token {
-        let user_uuid = uuid::Uuid::parse_str(user_id)
-            .map_err(|_| crate::errors::AppError::Internal("Invalid user_id".to_string()))?;
-
-        match crate::crypto::jwt::generate_delegated_access_token(
-            jwt_keys,
-            config,
-            &user_uuid,
-            &target.service.delegation_token_scope,
-            &service.service_slug,
-            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
-        ) {
-            Ok(delegation_token) => {
-                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
-
-                // M1: Audit log for MCP delegation token generation
-                crate::services::audit_service::log_async(
-                    db.clone(),
-                    Some(user_id.to_string()),
-                    "mcp_delegation_token_generated".to_string(),
-                    Some(serde_json::json!({
-                        "service_id": &service.service_id,
-                        "service_slug": &service.service_slug,
-                        "scope": &target.service.delegation_token_scope,
-                    })),
-                    None,
-                    None,
-                );
+        // Resolve user RBAC and inject as headers so downstream services can
+        // enforce permission checks without needing JWT verification.
+        match crate::services::rbac_helpers::resolve_user_rbac(db, user_id).await {
+            Ok(rbac) => {
+                if !rbac.role_slugs.is_empty() {
+                    identity_headers
+                        .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
+                }
+                if !rbac.permissions.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Permissions".to_string(),
+                        rbac.permissions.join(","),
+                    ));
+                }
+                if !rbac.group_slugs.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Groups".to_string(),
+                        rbac.group_slugs.join(","),
+                    ));
+                }
             }
             Err(e) => {
                 tracing::warn!(
-                    service_id = %service.service_id,
+                    user_id = %user_id,
                     error = %e,
-                    "Failed to generate delegation token for MCP tool"
+                    "Failed to resolve RBAC for delegation headers"
                 );
             }
         }
     }
 
-    // Resolve delegated credentials (CR-8)
+    // Resolve delegated credentials. Required provider connections must succeed.
     let delegated = delegation_service::resolve_delegated_credentials(
         db,
-        encryption_key,
+        encryption_keys,
         user_id,
         &service.service_id,
     )
     .await
-    .unwrap_or_default();
+    .map_err(|e| AppError::BadRequest(format!("Provider credentials not available: {e}")))?;
 
     // Minimal headers for the downstream request.
     // Always set Content-Type for methods that typically carry a body, even
@@ -840,7 +842,8 @@ pub async fn discover_services(
 /// Connect the user to a service from within the MCP client.
 pub async fn connect_service(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &crate::services::node_ws_manager::NodeWsManager,
     user_id: &str,
     service_id: &str,
     credential: Option<&str>,
@@ -848,7 +851,8 @@ pub async fn connect_service(
 ) -> AppResult<serde_json::Value> {
     let result = connection_service::connect_user(
         db,
-        encryption_key,
+        encryption_keys,
+        node_ws_manager,
         user_id,
         service_id,
         credential,

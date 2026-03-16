@@ -19,6 +19,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Service Connections](#service-connections)
   - [Service Provider Requirements](#service-provider-requirements)
   - [Providers](#providers)
+  - [User Provider Credentials](#user-provider-credentials)
   - [User Provider Tokens](#user-provider-tokens)
   - [Sessions](#sessions)
   - [Service Endpoints](#service-endpoints)
@@ -29,6 +30,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [MFA](#mfa-multi-factor-authentication)
   - [OAuth / OpenID Connect](#oauth--openid-connect)
   - [Token Exchange (Delegated Access)](#token-exchange-delegated-access)
+  - [Social Token Exchange (Native Mobile)](#social-token-exchange-native-mobile)
   - [Token Introspection](#token-introspection)
   - [Token Revocation](#token-revocation)
   - [User Consents](#user-consents)
@@ -38,6 +40,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Admin Groups](#admin-groups)
   - [Admin Service Accounts](#admin-service-accounts)
   - [Notification Settings](#notification-settings)
+  - [Device Token Management](#device-token-management)
   - [Approval Management](#approval-management)
   - [Webhooks](#webhooks)
 
@@ -45,17 +48,16 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 
 ## Authentication
 
-Most endpoints require authentication. NyxID supports four authentication methods, checked in the following order:
+Most endpoints require authentication. NyxID supports three active authentication methods, checked in the following order:
 
 1. **Bearer Token** -- `Authorization: Bearer <access_token>` header
-2. **Session Cookie** -- `nyx_session` HttpOnly cookie (set at login)
-3. **Access Token Cookie** -- `nyx_access_token` HttpOnly cookie (set at login)
-4. **API Key** -- `X-API-Key: <key>` header
+2. **Session Cookie** -- `nyx_session` HttpOnly cookie for first-party browser sessions
+3. **API Key** -- `X-API-Key: <key>` header
 
 Endpoints marked **Auth: None** do not require authentication.
 Endpoints marked **Auth: Required** require any of the above.
 Endpoints marked **Auth: Admin** require an authenticated user with `is_admin = true`.
-Endpoints marked **Auth: Cookie** use a specific cookie (e.g., the refresh token cookie).
+Endpoints marked **Auth: None** may still require a grant-specific credential in the request body, such as a refresh token.
 
 **Service accounts** authenticate via OAuth2 Client Credentials Grant at `POST /oauth/token` and receive a Bearer token. Service account tokens include an `sa: true` claim and are restricted to proxy, LLM gateway, connections, providers, and delegation endpoints.
 
@@ -113,6 +115,8 @@ Internal errors never leak implementation details. The `message` for error codes
 | 6001 | `social_auth_conflict`     | 409         | Email already linked to another provider |
 | 6002 | `social_auth_no_email`     | 400         | No verified email from provider          |
 | 6003 | `social_auth_deactivated`  | 403         | Social login account is deactivated      |
+| 6004 | `external_token_invalid`   | 400         | External provider token verification failed (signature, expiry, audience, or claims) |
+| 6005 | `external_provider_not_configured` | 400  | Provider hint missing or provider not configured on the server |
 | 7000 | `approval_required`        | 403         | User approval required (proxy/LLM requests block until decision; this code is used for async status polling) |
 
 ---
@@ -197,7 +201,11 @@ curl -X POST http://localhost:3001/api/v1/auth/register \
 
 #### POST /api/v1/auth/login
 
-Authenticate with email and password. On success, sets three HttpOnly cookies (`nyx_session`, `nyx_access_token`, `nyx_refresh_token`) and returns the access token in the response body.
+Authenticate with email and password.
+
+For first-party browser requests, login creates a server-side session, sets the `nyx_session` cookie, clears legacy browser token cookies, and returns a minimal JSON body.
+
+For token clients such as native mobile apps, send `client: "mobile"` or `client: "token"`. Token clients receive `access_token` and `refresh_token` in the JSON response and should use bearer authentication on subsequent requests.
 
 If the user has MFA enabled and no `mfa_code` is provided, returns a `403` with error code `2002` and a `session_token` for the MFA verification step.
 
@@ -210,30 +218,41 @@ If the user has MFA enabled and no `mfa_code` is provided, returns a `403` with 
 | `email`    | string | Yes      | User email address                             |
 | `password` | string | Yes      | User password (max 128 chars)                  |
 | `mfa_code` | string | No       | 6-digit TOTP code (required if MFA is enabled) |
+| `client`   | string | No       | `"web"` for browser session mode, `"mobile"` / `"token"` for token response mode |
 
 ```json
 {
   "email": "user@example.com",
-  "password": "securepassword123"
+  "password": "securepassword123",
+  "client": "web"
 }
 ```
 
-**Response (200):**
+**Response (200, browser session):**
+
+```json
+{
+  "user_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Response Headers (Set-Cookie, browser session):**
+
+```
+Set-Cookie: nyx_session=<token>; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000
+Set-Cookie: nyx_access_token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0
+Set-Cookie: nyx_refresh_token=; HttpOnly; SameSite=Lax; Path=/api/v1/auth/refresh; Max-Age=0
+```
+
+**Response (200, token client):**
 
 ```json
 {
   "user_id": "550e8400-e29b-41d4-a716-446655440000",
   "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expires_in": 900
+  "expires_in": 900,
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
 }
-```
-
-**Response Headers (Set-Cookie):**
-
-```
-Set-Cookie: nyx_session=<token>; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000
-Set-Cookie: nyx_access_token=<jwt>; HttpOnly; SameSite=Lax; Path=/; Max-Age=900
-Set-Cookie: nyx_refresh_token=<jwt>; HttpOnly; SameSite=Lax; Path=/api/v1/auth/refresh; Max-Age=604800
 ```
 
 **MFA Challenge Response (403):**
@@ -257,23 +276,33 @@ To complete login with MFA, re-send the login request with the `mfa_code` field 
 **Example:**
 
 ```bash
-# Basic login
-curl -X POST http://localhost:3001/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -c cookies.txt \
-  -d '{
-    "email": "user@example.com",
-    "password": "securepassword123"
-  }'
-
-# Login with MFA
+# Browser session login
 curl -X POST http://localhost:3001/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -c cookies.txt \
   -d '{
     "email": "user@example.com",
     "password": "securepassword123",
-    "mfa_code": "123456"
+    "client": "web"
+  }'
+
+# Token-client login
+curl -X POST http://localhost:3001/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securepassword123",
+    "client": "mobile"
+  }'
+
+# Login with MFA
+curl -X POST http://localhost:3001/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "securepassword123",
+    "mfa_code": "123456",
+    "client": "mobile"
   }'
 ```
 
@@ -306,31 +335,44 @@ curl -X POST http://localhost:3001/api/v1/auth/logout \
 
 #### POST /api/v1/auth/refresh
 
-Exchange a refresh token for a new access token. The refresh token is read from the `nyx_refresh_token` cookie. Implements token rotation: the old refresh token is invalidated and a new one is issued.
+Exchange a refresh token for a new access token. This endpoint is for token clients such as native mobile apps. The refresh token is supplied in the JSON body. Implements token rotation: the old refresh token is invalidated and a new one is issued.
 
-**Auth:** Cookie (`nyx_refresh_token`)
+**Auth:** None
+
+**Request Body:**
+
+| Field           | Type   | Required | Description                              |
+|-----------------|--------|----------|------------------------------------------|
+| `refresh_token` | string | Yes      | A valid refresh token                    |
+
+```json
+{
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
 
 **Response (200):**
 
 ```json
 {
   "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expires_in": 900
+  "expires_in": 900,
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
 }
 ```
 
-**Response Headers:** Sets new `nyx_access_token` and `nyx_refresh_token` cookies.
-
 **Errors:**
-- `1001 unauthorized` -- No refresh token cookie present
+- `1001 unauthorized` -- No refresh token provided or token revoked
 - `2001 token_expired` -- Refresh token has expired
 
 **Example:**
 
 ```bash
 curl -X POST http://localhost:3001/api/v1/auth/refresh \
-  -b cookies.txt \
-  -c cookies.txt
+  -H "Content-Type: application/json" \
+  -d '{
+    "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }'
 ```
 
 ---
@@ -504,7 +546,9 @@ curl -X POST http://localhost:3001/api/v1/auth/setup \
 
 ### Social Auth
 
-Social login allows users to authenticate via GitHub or Google OAuth 2.0. The flow is entirely browser-based: the frontend navigates to the authorize endpoint, the user authenticates with the provider, and the callback endpoint creates a session and redirects to the frontend dashboard.
+Social login supports two modes:
+- First-party web: browser redirect flow that creates a NyxID session and sets only the `nyx_session` cookie.
+- Native mobile: deep-link redirect flow via `?client=mobile&redirect_uri=...` that returns access and refresh tokens in the success redirect URL.
 
 **Flow:**
 
@@ -513,7 +557,7 @@ Social login allows users to authenticate via GitHub or Google OAuth 2.0. The fl
 3. User authorizes the application on the provider's site
 4. Provider redirects back to `GET /api/v1/auth/social/{provider}/callback` with `code` and `state` query parameters
 5. Backend validates the state token, exchanges the code for an access token, fetches the user's profile
-6. Backend finds or creates a user (matching by email), creates a session, sets auth cookies, and redirects to the frontend dashboard
+6. Backend finds or creates a user, then either creates a browser session and redirects to the frontend or returns tokens via a mobile deep link
 
 #### GET /api/v1/auth/social/{provider}
 
@@ -527,7 +571,14 @@ Initiate an OAuth 2.0 authorization flow with a social provider.
 |------------|--------|----------------------------------------|
 | `provider` | string | Social provider: `"github"` or `"google"` |
 
-**Response (302):** Redirects to the provider's authorization page. Sets a `social_auth_state` HttpOnly cookie containing the CSRF state token.
+**Response (302):** Redirects to the provider's authorization page. Sets the `nyx_social_state` HttpOnly cookie containing the CSRF state token.
+
+**Mobile Query Parameters:**
+
+| Parameter      | Type   | Description |
+|----------------|--------|-------------|
+| `client`       | string | Set to `"mobile"` for native mobile deep-link mode |
+| `redirect_uri` | string | Required for mobile mode. Must be an allowed `nyxid://` or `exp://` deep link |
 
 **Errors:**
 - `6000 social_auth_failed` -- Provider not configured (missing client ID/secret) or unsupported provider
@@ -559,10 +610,12 @@ OAuth callback handler. Called by the provider after user authorization.
 | Parameter | Type   | Description                                         |
 |-----------|--------|-----------------------------------------------------|
 | `code`    | string | Authorization code from the provider                |
-| `state`   | string | CSRF state token (must match the `social_auth_state` cookie) |
+| `state`   | string | CSRF state token (must match the `nyx_social_state` cookie) |
 | `error`   | string | Error code from the provider (if authorization was denied) |
 
-**Response (302 on success):** Redirects to the frontend dashboard (`{FRONTEND_URL}/dashboard`). Sets the same auth cookies as a regular login: `nyx_session`, `nyx_access_token`, `nyx_refresh_token`.
+**Response (302 on success, web):** Redirects to the frontend root and sets the `nyx_session` cookie.
+
+**Response (302 on success, mobile):** Redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters.
 
 **Response (302 on error):** Redirects to `{FRONTEND_URL}/login?error={error_key}`.
 
@@ -1947,7 +2000,7 @@ curl -X DELETE http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567
 
 ### Providers
 
-Providers represent external service providers (e.g., OpenAI, Anthropic, Google AI) that users can connect their credentials to. NyxID stores provider configurations centrally, and users connect by entering API keys or completing OAuth flows.
+Providers represent external service providers that users can connect their credentials to. NyxID seeds 19 providers at startup: API key providers (OpenAI, Anthropic, Google AI, Mistral, Cohere, DeepSeek), OAuth2 providers (Google, GitHub, Twitter/X, Facebook, Discord, Spotify, LinkedIn, Slack, Microsoft, TikTok, Twitch, Reddit), and device-code providers (OpenAI Codex). Users connect by entering API keys, completing OAuth2 flows, or using device-code authorization. Providers support three credential modes: `admin` (admin-configured OAuth app), `user` (users bring their own OAuth app credentials), or `both`.
 
 #### GET /api/v1/providers
 
@@ -1966,9 +2019,14 @@ List all active provider configurations.
       "name": "OpenAI",
       "description": "OpenAI API for GPT models",
       "provider_type": "api_key",
+      "credential_mode": "admin",
       "has_oauth_config": false,
       "default_scopes": null,
       "supports_pkce": false,
+      "token_endpoint_auth_method": "client_secret_post",
+      "extra_auth_params": null,
+      "device_code_format": "rfc8628",
+      "client_id_param_name": null,
       "api_key_instructions": "Get your API key from https://platform.openai.com/api-keys",
       "api_key_url": "https://platform.openai.com/api-keys",
       "icon_url": "https://example.com/openai-icon.svg",
@@ -2003,14 +2061,22 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `name`              | string   | Yes      | Display name (max 200 chars)                                         |
 | `slug`              | string   | Yes      | URL-safe identifier (1-100 chars, lowercase alphanumeric + hyphens)  |
 | `description`       | string   | No       | Provider description                                                 |
-| `provider_type`     | string   | Yes      | `oauth2` or `api_key`                                                |
+| `provider_type`     | string   | Yes      | `oauth2`, `api_key`, or `device_code`                                |
+| `credential_mode`   | string   | No       | `admin` (default), `user`, or `both` -- controls where OAuth credentials come from |
 | `authorization_url` | string   | OAuth2   | OAuth2 authorization endpoint (required for `oauth2` type)           |
 | `token_url`         | string   | OAuth2   | OAuth2 token endpoint (required for `oauth2` type)                   |
-| `revocation_url`    | string   | No       | OAuth2 token revocation endpoint                                     |
+| `revocation_url`    | string   | No       | OAuth2 token revocation endpoint (RFC 7009)                          |
 | `default_scopes`    | string[] | No       | Default OAuth2 scopes to request                                     |
 | `client_id`         | string   | OAuth2   | OAuth2 client ID (required for `oauth2` type, encrypted at rest)     |
 | `client_secret`     | string   | OAuth2   | OAuth2 client secret (required for `oauth2` type, encrypted at rest) |
 | `supports_pkce`     | boolean  | No       | Whether the provider supports PKCE (default: `false`)                |
+| `token_endpoint_auth_method` | string | No | `client_secret_post` (default) or `client_secret_basic`             |
+| `extra_auth_params` | object   | No       | Extra authorization URL parameters (e.g., `{"access_type": "offline"}`) |
+| `device_code_url`   | string   | device_code | Device authorization endpoint (required for `device_code` type)   |
+| `device_token_url`  | string   | device_code | Device token polling endpoint (required for `device_code` type)   |
+| `device_verification_url` | string | No   | User verification URL for device code flow                           |
+| `device_code_format` | string  | No       | `rfc8628` (default) or `openai`                                      |
+| `client_id_param_name` | string | No      | Custom client_id parameter name (e.g., `client_key` for TikTok)     |
 | `api_key_instructions` | string | No      | Instructions for obtaining an API key (for `api_key` type)           |
 | `api_key_url`       | string   | No       | URL where users can create API keys                                  |
 | `icon_url`          | string   | No       | Provider icon/logo URL                                               |
@@ -2057,7 +2123,7 @@ Returns the created provider (same shape as list response items, without encrypt
 **Errors:**
 - `1002 forbidden` -- User is not an admin
 - `1004 conflict` -- Slug already exists
-- `1008 validation_error` -- Missing required fields, invalid provider_type, invalid slug, or SSRF-blocked URL
+- `1008 validation_error` -- Missing required fields, invalid provider_type/credential_mode, invalid slug, or SSRF-blocked URL
 
 **Example:**
 
@@ -2122,13 +2188,21 @@ Update a provider configuration. Only the provided fields are updated (partial u
 | `name`              | string   | No       | Display name                                         |
 | `description`       | string   | No       | Provider description                                 |
 | `is_active`         | boolean  | No       | Enable or disable the provider                       |
+| `credential_mode`   | string   | No       | `admin`, `user`, or `both`                           |
 | `authorization_url` | string   | No       | OAuth2 authorization endpoint                        |
 | `token_url`         | string   | No       | OAuth2 token endpoint                                |
-| `revocation_url`    | string   | No       | OAuth2 revocation endpoint                           |
+| `revocation_url`    | string   | No       | OAuth2 revocation endpoint (RFC 7009)                |
 | `default_scopes`    | string[] | No       | Default OAuth2 scopes                                |
 | `client_id`         | string   | No       | OAuth2 client ID (encrypted at rest)                 |
 | `client_secret`     | string   | No       | OAuth2 client secret (encrypted at rest)             |
 | `supports_pkce`     | boolean  | No       | PKCE support flag                                    |
+| `token_endpoint_auth_method` | string | No | `client_secret_post` or `client_secret_basic`       |
+| `extra_auth_params` | object   | No       | Extra authorization URL parameters                   |
+| `device_code_url`   | string   | No       | Device authorization endpoint                        |
+| `device_token_url`  | string   | No       | Device token polling endpoint                        |
+| `device_verification_url` | string | No   | User verification URL for device code flow           |
+| `device_code_format` | string  | No       | `rfc8628` or `openai`                                |
+| `client_id_param_name` | string | No      | Custom client_id parameter name                      |
 | `api_key_instructions` | string | No      | Instructions for obtaining an API key                |
 | `api_key_url`       | string   | No       | URL where users can create API keys                  |
 | `icon_url`          | string   | No       | Provider icon/logo URL                               |
@@ -2183,6 +2257,129 @@ Deactivate a provider and revoke all user tokens associated with it.
 ```bash
 curl -X DELETE http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890 \
   -H "Authorization: Bearer <admin_access_token>"
+```
+
+---
+
+### User Provider Credentials
+
+Per-user OAuth app credentials for providers configured with `credential_mode` of `"user"` or `"both"`. Users bring their own OAuth client_id and client_secret.
+
+#### GET /api/v1/providers/{provider_id}/credentials
+
+Get the current user's OAuth app credentials metadata for a provider.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Response (200) -- credentials exist:**
+
+```json
+{
+  "provider_config_id": "p1a2b3c4-d5e6-7890-abcd-ef1234567890",
+  "has_credentials": true,
+  "label": "My Twitter App",
+  "created_at": "2026-03-09T10:00:00+00:00",
+  "updated_at": "2026-03-09T10:00:00+00:00"
+}
+```
+
+**Response (200) -- no credentials:**
+
+```json
+{
+  "provider_config_id": "p1a2b3c4-d5e6-7890-abcd-ef1234567890",
+  "has_credentials": false,
+  "label": null,
+  "created_at": null,
+  "updated_at": null
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Provider does not exist
+- `1008 validation_error` -- Provider does not support user credentials
+
+**Example:**
+
+```bash
+curl http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/credentials \
+  -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+#### PUT /api/v1/providers/{provider_id}/credentials
+
+Set or update the current user's OAuth app credentials for a provider.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Request Body:**
+
+| Field           | Type   | Required | Description                                           |
+|-----------------|--------|----------|-------------------------------------------------------|
+| `client_id`     | string | Yes      | OAuth client ID (max 500 chars, encrypted at rest)    |
+| `client_secret` | string | No       | OAuth client secret (max 2000 chars, encrypted at rest) |
+| `label`         | string | No       | Display label (max 200 chars)                         |
+
+**Response (200):**
+
+Same as GET response with `has_credentials: true`.
+
+**Errors:**
+- `1008 validation_error` -- Provider does not support user credentials, or invalid input
+
+**Example:**
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/credentials \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"client_id": "my-app-client-id", "client_secret": "my-app-secret", "label": "My Twitter App"}'
+```
+
+---
+
+#### DELETE /api/v1/providers/{provider_id}/credentials
+
+Delete the current user's OAuth app credentials for a provider.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter     | Type | Description     |
+|---------------|------|-----------------|
+| `provider_id` | UUID | The provider ID |
+
+**Response (200):**
+
+```json
+{
+  "message": "Credentials deleted"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Provider does not exist or no credentials found
+
+**Example:**
+
+```bash
+curl -X DELETE http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef1234567890/credentials \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ---
@@ -2340,9 +2537,28 @@ This endpoint is not called directly by the frontend. It is the OAuth redirect U
 
 ---
 
+#### POST /api/v1/providers/callback
+
+OAuth callback endpoint for providers that use `response_mode=form_post` (e.g., Apple). Accepts the authorization code and state as a form body instead of query parameters, then redirects the same way as the GET callback.
+
+**Auth:** Required (session cookie)
+
+**Form Body:**
+
+| Field               | Type   | Required | Description                                |
+|---------------------|--------|----------|--------------------------------------------|
+| `code`              | string | Yes      | Authorization code from the provider       |
+| `state`             | string | Yes      | State parameter (maps to NyxID OAuth state)|
+| `error`             | string | No       | Error code from the provider               |
+| `error_description` | string | No       | Error description from the provider        |
+
+**Response:** HTTP 302 redirect to `{FRONTEND_URL}/providers/callback?status=success` on success, or `?status=error&message=...` on failure.
+
+---
+
 #### DELETE /api/v1/providers/{provider_id}/disconnect
 
-Disconnect from a provider. Sets the token status to "revoked" and clears encrypted credential data.
+Disconnect from a provider. Sets the token status to "revoked", clears encrypted credential data, and performs best-effort remote token revocation via the provider's revocation endpoint (RFC 7009) if configured.
 
 **Auth:** Required
 
@@ -2889,7 +3105,7 @@ Authorization endpoint. Validates the OAuth client and parameters, then issues a
 | `response_type`         | string | Yes      | Must be `code`                           |
 | `client_id`             | string | Yes      | UUID of the registered OAuth client      |
 | `redirect_uri`          | string | Yes      | Must match a registered redirect URI     |
-| `scope`                 | string | No       | Space-separated scopes (default: `openid profile email`). Additional scopes: `roles` (include RBAC roles and permissions in tokens), `groups` (include group memberships in tokens) |
+| `scope`                 | string | No       | Space-separated scopes (default: the client's configured `allowed_scopes`). Additional scopes: `roles` (include RBAC roles and permissions in tokens), `groups` (include group memberships in tokens) |
 | `state`                 | string | No       | Opaque value for CSRF protection         |
 | `code_challenge`        | string | Yes      | PKCE code challenge (base64url-encoded SHA-256) |
 | `code_challenge_method` | string | No       | Must be `S256` if provided               |
@@ -2926,7 +3142,7 @@ curl -G http://localhost:3001/oauth/authorize \
 
 #### POST /oauth/token
 
-Token endpoint. Exchanges an authorization code for access, refresh, and ID tokens. Also supports the `refresh_token` grant type and `urn:ietf:params:oauth:grant-type:token-exchange` for delegated access (see [Token Exchange](#token-exchange-delegated-access)).
+Token endpoint. Exchanges an authorization code for access, refresh, and ID tokens. Also supports the `refresh_token` grant type, `urn:ietf:params:oauth:grant-type:token-exchange` for delegated access (see [Token Exchange](#token-exchange-delegated-access)), and social token exchange for native mobile apps (see [Social Token Exchange](#social-token-exchange-native-mobile)).
 
 **Auth:** None (client authenticates via `client_id` and optionally `client_secret`)
 
@@ -3314,6 +3530,153 @@ def analyze():
         },
     )
     return response.json()
+```
+
+---
+
+### Social Token Exchange (Native Mobile)
+
+NyxID supports exchanging external provider tokens (Google ID tokens, GitHub access tokens) for full NyxID token sets via the existing [RFC 8693 Token Exchange](https://tools.ietf.org/html/rfc8693) endpoint. This enables mobile apps using native SDKs (Google Sign-In, Sign in with GitHub) to authenticate users without browser redirects.
+
+The social token exchange flow is distinguished from the [delegated access flow](#token-exchange-delegated-access) by the `provider` hint and provider-specific `subject_token_type`:
+- `provider` omitted + `subject_token_type=urn:ietf:params:oauth:token-type:access_token` -- Delegated access (existing flow, unchanged)
+- `provider=google` + `subject_token_type=urn:ietf:params:oauth:token-type:id_token` -- Google social token exchange
+- `provider=github` + `subject_token_type=urn:ietf:params:oauth:token-type:access_token` -- GitHub social token exchange
+
+#### POST /oauth/token (social token exchange grant)
+
+Exchange a Google ID token or GitHub access token for a full NyxID token set (access token, refresh token, ID token). If the user does not exist, a new account is created automatically (same logic as web-based social login).
+
+**Auth:** None (client authenticates via `client_id` and optionally `client_secret` in the request body)
+
+**Request Body (form-encoded):**
+
+| Field                | Type   | Required    | Description                                                |
+|----------------------|--------|-------------|------------------------------------------------------------|
+| `grant_type`         | string | Yes         | `urn:ietf:params:oauth:grant-type:token-exchange`          |
+| `subject_token`      | string | Yes         | The external provider token (Google JWT or GitHub access token) |
+| `subject_token_type` | string | Yes         | `urn:ietf:params:oauth:token-type:id_token` (Google) or `urn:ietf:params:oauth:token-type:access_token` (GitHub) |
+| `client_id`          | string | Yes         | NyxID OAuth client ID                                      |
+| `client_secret`      | string | Conditional | Required for confidential clients; omit for public clients |
+| `provider`           | string | Yes         | Provider hint: `"google"` or `"github"`                    |
+
+**Response (200):**
+
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "Bearer",
+  "expires_in": 900,
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "scope": "openid profile email",
+  "issued_token_type": "urn:ietf:params:oauth:token-type:access_token"
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Missing required parameters (`subject_token`, `subject_token_type`, `provider`)
+- `1001 unauthorized` -- Invalid client credentials
+- `6000 social_auth_failed` -- Provider API call failed (e.g., GitHub API unreachable)
+- `6001 social_auth_conflict` -- Email from provider is already linked to a different social provider
+- `6002 social_auth_no_email` -- No verified email returned by provider
+- `6003 social_auth_deactivated` -- Matched user account is deactivated
+- `6004 external_token_invalid` -- External token verification failed (expired, bad signature, wrong audience, unverified email)
+- `6005 external_provider_not_configured` -- Provider not configured on the server (e.g., missing `GOOGLE_CLIENT_ID` or `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`)
+
+**Example (Google ID token):**
+
+```bash
+curl -X POST http://localhost:3001/oauth/token \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  -d "subject_token=eyJhbGciOiJSUzI1NiIs..." \
+  -d "subject_token_type=urn:ietf:params:oauth:token-type:id_token" \
+  -d "client_id=your-nyxid-client-id" \
+  -d "provider=google"
+```
+
+**Example (GitHub access token):**
+
+```bash
+curl -X POST http://localhost:3001/oauth/token \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+  -d "subject_token=gho_xxxxxxxxxxxxxxxxxxxx" \
+  -d "subject_token_type=urn:ietf:params:oauth:token-type:access_token" \
+  -d "client_id=your-nyxid-client-id" \
+  -d "provider=github"
+```
+
+**Provider Token Verification:**
+
+| Provider | Token Type     | Verification Method                                           |
+|----------|----------------|---------------------------------------------------------------|
+| Google   | JWT (RS256)    | JWKS signature verification against `googleapis.com/oauth2/v3/certs`; validates `iss`, `aud`, `exp`, `email_verified`, and `iat` freshness (max 10 min) |
+| GitHub   | Opaque token   | App-bound token verification via `POST https://api.github.com/applications/{client_id}/token` (using configured `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`), then profile lookup via `GET /user` + `GET /user/emails` |
+
+**User Matching:**
+
+The same account linking logic as web-based social login applies:
+
+1. **Returning user** -- If a user with the same provider + provider ID exists, log them in
+2. **Email linking** -- If a user with the same email exists (no social provider linked), link the social identity
+3. **New user** -- If no match, create a new user with `email_verified = true`
+
+**Security Notes:**
+- Google ID tokens are verified cryptographically (RS256 JWKS) -- NyxID never sends Google tokens to a third party
+- GitHub tokens are first verified against NyxID's configured GitHub OAuth app, then profile data is fetched from GitHub APIs
+- JWKS keys are cached with TTL (default 1 hour, respects `Cache-Control: max-age`) to minimize external calls
+- The `provider` parameter is required (not auto-detected) to avoid issuer guessing attacks
+- All exchanges are audit-logged with provider, client ID, and result
+- Existing rate limiting on `POST /oauth/token` applies
+
+**Mobile SDK Integration:**
+
+To use social token exchange from a mobile app:
+
+1. **Register an OAuth client** in NyxID (can be a public client for mobile -- no `client_secret` required)
+2. **Authenticate with the native SDK** in your mobile app:
+   - **iOS/Android (Google):** Use [Google Sign-In SDK](https://developers.google.com/identity/sign-in) to obtain a Google ID token
+   - **iOS/Android (GitHub):** Use GitHub OAuth (via ASWebAuthenticationSession / Chrome Custom Tabs) to obtain a GitHub access token
+3. **Exchange the token** by calling `POST /oauth/token` with the parameters above
+4. **Store the NyxID tokens** securely (iOS Keychain / Android Keystore) and use the access token for subsequent API calls
+5. **Refresh when expired** using the standard `refresh_token` grant at `POST /oauth/token`
+
+```swift
+// iOS (Swift) example
+let url = URL(string: "https://auth.example.com/oauth/token")!
+var request = URLRequest(url: url)
+request.httpMethod = "POST"
+request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+let body = [
+    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+    "subject_token": googleIdToken,
+    "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+    "client_id": "your-nyxid-client-id",
+    "provider": "google"
+].map { "\($0.key)=\($0.value)" }.joined(separator: "&")
+
+request.httpBody = body.data(using: .utf8)
+let (data, _) = try await URLSession.shared.data(for: request)
+```
+
+```kotlin
+// Android (Kotlin) example
+val client = OkHttpClient()
+val body = FormBody.Builder()
+    .add("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange")
+    .add("subject_token", googleIdToken)
+    .add("subject_token_type", "urn:ietf:params:oauth:token-type:id_token")
+    .add("client_id", "your-nyxid-client-id")
+    .add("provider", "google")
+    .build()
+
+val request = Request.Builder()
+    .url("https://auth.example.com/oauth/token")
+    .post(body)
+    .build()
+
+val response = client.newCall(request).execute()
 ```
 
 ---
@@ -5366,6 +5729,137 @@ Clears the linked Telegram account and disables Telegram notifications.
 ```bash
 curl -X DELETE -H "Authorization: Bearer $TOKEN" \
   http://localhost:3001/api/v1/notifications/telegram
+```
+
+---
+
+## Device Token Management
+
+Register, list, and remove mobile push notification device tokens (FCM and APNs). All endpoints require authentication (human-only, no service accounts or delegated tokens).
+
+### Register Device Token
+
+```
+POST /api/v1/notifications/devices
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications.
+
+**Request Body:**
+
+| Field         | Type   | Required | Description                                           |
+|---------------|--------|----------|-------------------------------------------------------|
+| `platform`    | string | Yes      | `"fcm"` or `"apns"`                                  |
+| `token`       | string | Yes      | Device registration token (max 4096 chars)            |
+| `device_name` | string | No       | Human-readable name (max 100 chars, e.g. "iPhone 15") |
+| `app_id`      | string | APNs: Yes, FCM: No | App bundle ID (used as APNs topic, max 256 chars) |
+
+```json
+{
+  "platform": "fcm",
+  "token": "dGVzdC1kZXZpY2UtdG9rZW4...",
+  "device_name": "iPhone 15 Pro",
+  "app_id": "dev.nyxid.app"
+}
+```
+
+**Validation:**
+- `platform`: Must be `"fcm"` or `"apns"`
+- `token`: Non-empty, max 4096 characters. APNs tokens must be hex-only; FCM tokens allow alphanumeric, `:`, `-`, `_`
+- `app_id`: Required when `platform` is `"apns"`
+- Maximum 10 devices per user
+
+**Response (200):**
+
+```json
+{
+  "device_id": "550e8400-e29b-41d4-a716-446655440000",
+  "platform": "fcm",
+  "device_name": "iPhone 15 Pro",
+  "registered_at": "2026-03-03T12:00:00+00:00"
+}
+```
+
+**Errors:**
+- `1000 bad_request` -- Maximum 10 devices exceeded
+- `1008 validation_error` -- Invalid platform, empty token, token too long, missing app_id for APNs, invalid token characters
+
+**curl:**
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"platform": "fcm", "token": "device-token-here", "device_name": "Pixel 8"}' \
+  http://localhost:3001/api/v1/notifications/devices
+```
+
+### List Registered Devices
+
+```
+GET /api/v1/notifications/devices
+Authorization: Bearer <access_token>
+```
+
+Returns all registered push notification devices for the current user. Device tokens are NOT returned (they are secret credentials).
+
+**Response (200):**
+
+```json
+{
+  "devices": [
+    {
+      "device_id": "550e8400-e29b-41d4-a716-446655440000",
+      "platform": "fcm",
+      "device_name": "iPhone 15 Pro",
+      "registered_at": "2026-03-03T12:00:00+00:00",
+      "last_used_at": "2026-03-03T14:30:00+00:00"
+    },
+    {
+      "device_id": "660e8400-e29b-41d4-a716-446655440001",
+      "platform": "apns",
+      "device_name": "iPad Air",
+      "registered_at": "2026-03-01T08:00:00+00:00",
+      "last_used_at": null
+    }
+  ],
+  "push_enabled": true
+}
+```
+
+**curl:**
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/notifications/devices
+```
+
+### Remove Device
+
+```
+DELETE /api/v1/notifications/devices/{device_id}
+Authorization: Bearer <access_token>
+```
+
+Remove a registered push notification device. If no devices remain after removal, push notifications are automatically disabled.
+
+**Response (200):**
+
+```json
+{
+  "message": "Device removed"
+}
+```
+
+**Errors:**
+- `1003 not_found` -- Device not found
+
+**curl:**
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3001/api/v1/notifications/devices/550e8400-e29b-41d4-a716-446655440000
 ```
 
 ---

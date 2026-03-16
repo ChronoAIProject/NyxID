@@ -24,14 +24,9 @@ interface RequestOptions {
   readonly headers?: Record<string, string>;
 }
 
-// Token refresh lock: when a 401 triggers a refresh, all concurrent
-// requests wait on the same promise instead of each firing their own
-// refresh call. Resets to null after the refresh settles.
-let refreshPromise: Promise<boolean> | null = null;
-
-// Endpoints that should never trigger a token refresh (they are part of
-// the auth flow itself and would cause infinite loops).
-const NO_REFRESH_ENDPOINTS = new Set([
+// Endpoints that should not clear the global auth state on 401 because they
+// are part of the auth flow itself.
+const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
   "/auth/login",
   "/auth/register",
   "/auth/refresh",
@@ -40,19 +35,6 @@ const NO_REFRESH_ENDPOINTS = new Set([
   "/auth/verify-email",
   "/auth/setup",
 ]);
-
-async function attemptTokenRefresh(): Promise<boolean> {
-  try {
-    const response = await fetch(`${BASE_URL}/auth/refresh`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-    });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
 
 function buildFetchConfig(options: RequestOptions): RequestInit {
   const { method = "GET", body, headers = {} } = options;
@@ -105,37 +87,9 @@ export async function apiClient<T>(
 
   const response = await fetch(url, config);
 
-  // On 401, attempt a single token refresh then retry the original request.
-  // Auth endpoints are excluded to avoid infinite loops.
-  if (response.status === 401 && !NO_REFRESH_ENDPOINTS.has(endpoint)) {
-    // Coalesce concurrent refresh attempts behind a single promise
-    if (refreshPromise === null) {
-      refreshPromise = attemptTokenRefresh().finally(() => {
-        refreshPromise = null;
-      });
-    }
-
-    const refreshed = await refreshPromise;
-
-    if (refreshed) {
-      // Retry the original request with the new access token cookie
-      const retryResponse = await fetch(url, buildFetchConfig(options));
-
-      if (!retryResponse.ok) {
-        const errorBody = await parseErrorResponse(retryResponse);
-        redirectToConsentIfRequired(errorBody);
-        throw new ApiError(retryResponse.status, errorBody);
-      }
-
-      if (retryResponse.status === 204) {
-        return undefined as T;
-      }
-
-      return retryResponse.json() as Promise<T>;
-    }
-
-    // Refresh failed -- throw the original 401
-    throw new ApiError(401, await parseErrorResponse(response));
+  if (response.status === 401 && !NO_AUTH_STATE_CLEAR_ENDPOINTS.has(endpoint)) {
+    const { useAuthStore } = await import("@/stores/auth-store");
+    useAuthStore.getState().setUser(null);
   }
 
   if (!response.ok) {

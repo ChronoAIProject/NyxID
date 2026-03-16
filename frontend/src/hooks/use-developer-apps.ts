@@ -11,6 +11,7 @@ export interface CreateDeveloperAppRequest {
   readonly redirect_uris: readonly string[];
   readonly client_type: "public" | "confidential";
   readonly delegation_scopes?: string;
+  readonly allowed_scopes?: readonly string[];
 }
 
 export function useDeveloperApps() {
@@ -55,6 +56,7 @@ export interface UpdateDeveloperAppRequest {
   readonly name?: string;
   readonly redirect_uris?: readonly string[];
   readonly delegation_scopes?: string;
+  readonly allowed_scopes?: readonly string[];
 }
 
 interface RotateSecretResponse {

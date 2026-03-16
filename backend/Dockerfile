@@ -6,10 +6,12 @@ WORKDIR /build
 # Copy workspace manifests and lock file for dependency caching
 COPY Cargo.toml Cargo.lock ./
 COPY backend/Cargo.toml backend/Cargo.toml
+COPY node-agent/Cargo.toml node-agent/Cargo.toml
 
-# Create a dummy main.rs so cargo can resolve and compile dependencies
-RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs
-RUN cargo build --release --manifest-path backend/Cargo.toml
+# Create dummy main.rs files so cargo can resolve and compile dependencies
+RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
+    && mkdir -p node-agent/src && echo "fn main() {}" > node-agent/src/main.rs
+RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # Remove the dummy build artifacts (forces recompilation of our code only)
 RUN rm -rf backend/src target/release/deps/nyxid-* target/release/nyxid
@@ -21,7 +23,7 @@ COPY backend/src backend/src
 RUN touch backend/src/main.rs
 
 # Build the real binary
-RUN cargo build --release --manifest-path backend/Cargo.toml
+RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim

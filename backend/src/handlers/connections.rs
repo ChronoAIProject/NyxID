@@ -7,7 +7,6 @@ use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::crypto::aes;
 use crate::errors::AppResult;
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -160,11 +159,11 @@ pub async fn connect_service(
     Json(body): Json<ConnectRequest>,
 ) -> AppResult<Json<ConnectResponse>> {
     let user_id = auth_user.user_id.to_string();
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     let result = connection_service::connect_user(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
+        state.node_ws_manager.as_ref(),
         &user_id,
         &service_id,
         body.credential.as_deref(),
@@ -207,11 +206,10 @@ pub async fn update_connection_credential(
     Json(body): Json<UpdateCredentialRequest>,
 ) -> AppResult<Json<UpdateCredentialResponse>> {
     let user_id = auth_user.user_id.to_string();
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
 
     connection_service::update_credential(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &user_id,
         &service_id,
         &body.credential,

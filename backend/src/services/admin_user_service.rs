@@ -18,6 +18,15 @@ const USER_PROVIDER_TOKENS: &str = "user_provider_tokens";
 const MFA_FACTORS: &str = "mfa_factors";
 const AUTHORIZATION_CODES: &str = "authorization_codes";
 const OAUTH_STATES: &str = "oauth_states";
+const CONSENTS: &str = "consents";
+const MCP_SESSIONS: &str = "mcp_sessions";
+const APPROVAL_REQUESTS: &str = "approval_requests";
+const APPROVAL_GRANTS: &str = "approval_grants";
+const SERVICE_APPROVAL_CONFIGS: &str = "service_approval_configs";
+const NOTIFICATION_CHANNELS: &str = "notification_channels";
+const OAUTH_CLIENTS: &str = "oauth_clients";
+const SERVICE_ACCOUNTS: &str = "service_accounts";
+const SERVICE_ACCOUNT_TOKENS: &str = "service_account_tokens";
 
 /// Create a new user (admin action).
 ///
@@ -346,10 +355,6 @@ pub async fn force_password_reset(
 ///
 /// Self-protection: admin_user_id must differ from target_user_id.
 /// Audit log entries are retained (orphaned reference).
-///
-/// Attempts to run inside a MongoDB transaction for atomicity. If
-/// transactions are unavailable (standalone), falls back to a two-phase
-/// approach: mark the user as inactive first, then delete related data.
 pub async fn delete_user_cascade(
     db: &mongodb::Database,
     admin_user_id: &str,
@@ -361,6 +366,20 @@ pub async fn delete_user_cascade(
         ));
     }
 
+    delete_user_cascade_internal(db, target_user_id).await
+}
+
+/// Delete the currently authenticated user and cascade-delete all related documents.
+///
+/// This is intended for self-service account deletion flows (e.g. DELETE /users/me).
+pub async fn delete_current_user_cascade(db: &mongodb::Database, user_id: &str) -> AppResult<()> {
+    delete_user_cascade_internal(db, user_id).await
+}
+
+async fn delete_user_cascade_internal(
+    db: &mongodb::Database,
+    target_user_id: &str,
+) -> AppResult<()> {
     let _target = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": target_user_id })
@@ -379,10 +398,10 @@ pub async fn delete_user_cascade(
         )
         .await?;
 
-    // Phase 2: cascade delete related documents
-    let filter = doc! { "user_id": target_user_id };
+    // Phase 2: cascade delete user-owned documents keyed by user_id
+    let user_filter = doc! { "user_id": target_user_id };
 
-    let collections = [
+    let user_scoped_collections = [
         SESSIONS,
         REFRESH_TOKENS,
         API_KEYS,
@@ -391,18 +410,66 @@ pub async fn delete_user_cascade(
         MFA_FACTORS,
         AUTHORIZATION_CODES,
         OAUTH_STATES,
+        CONSENTS,
+        MCP_SESSIONS,
+        APPROVAL_REQUESTS,
+        APPROVAL_GRANTS,
+        SERVICE_APPROVAL_CONFIGS,
+        NOTIFICATION_CHANNELS,
     ];
 
-    for coll_name in collections {
+    for coll_name in user_scoped_collections {
         db.collection::<bson::Document>(coll_name)
-            .delete_many(filter.clone())
+            .delete_many(user_filter.clone())
+            .await?;
+    }
+
+    // Delete OAuth clients created by the deleted user.
+    db.collection::<bson::Document>(OAUTH_CLIENTS)
+        .delete_many(doc! { "created_by": target_user_id })
+        .await?;
+
+    // Delete service accounts owned by the deleted user and their issued tokens.
+    let service_account_owner_filter = doc! {
+        "$or": [
+            { "owner_user_id": target_user_id },
+            { "owner_user_id": bson::Bson::Null, "created_by": target_user_id },
+            { "owner_user_id": { "$exists": false }, "created_by": target_user_id },
+        ]
+    };
+
+    let owned_service_account_ids: Vec<String> = db
+        .collection::<bson::Document>(SERVICE_ACCOUNTS)
+        .distinct("_id", service_account_owner_filter.clone())
+        .await?
+        .into_iter()
+        .filter_map(|value| match value {
+            bson::Bson::String(id) => Some(id),
+            _ => None,
+        })
+        .collect();
+
+    db.collection::<bson::Document>(SERVICE_ACCOUNTS)
+        .delete_many(service_account_owner_filter)
+        .await?;
+
+    if !owned_service_account_ids.is_empty() {
+        db.collection::<bson::Document>(SERVICE_ACCOUNT_TOKENS)
+            .delete_many(doc! { "service_account_id": { "$in": owned_service_account_ids } })
             .await?;
     }
 
     // Phase 3: delete the user document itself
-    db.collection::<User>(USERS)
+    let user_delete_result = db
+        .collection::<User>(USERS)
         .delete_one(doc! { "_id": target_user_id })
         .await?;
+
+    if user_delete_result.deleted_count != 1 {
+        return Err(AppError::Internal(
+            "Failed to delete user record".to_string(),
+        ));
+    }
 
     Ok(())
 }

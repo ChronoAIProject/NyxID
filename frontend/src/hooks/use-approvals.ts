@@ -12,6 +12,8 @@ import type {
   ServiceApprovalConfigsResponse,
   SetServiceApprovalConfigResponse,
   DeleteServiceApprovalConfigResponse,
+  PushDevicesResponse,
+  RemoveDeviceResponse,
 } from "@/types/approvals";
 
 // --- Notification Settings ---
@@ -69,6 +71,37 @@ export function useTelegramDisconnect() {
       );
     },
     onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["notifications", "settings"],
+      });
+    },
+  });
+}
+
+// --- Push Devices ---
+
+export function usePushDevices() {
+  return useQuery({
+    queryKey: ["notifications", "devices"],
+    queryFn: async (): Promise<PushDevicesResponse> => {
+      return api.get<PushDevicesResponse>("/notifications/devices");
+    },
+  });
+}
+
+export function useRemoveDevice() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (deviceId: string): Promise<RemoveDeviceResponse> => {
+      return api.delete<RemoveDeviceResponse>(
+        `/notifications/devices/${deviceId}`,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["notifications", "devices"],
+      });
       void queryClient.invalidateQueries({
         queryKey: ["notifications", "settings"],
       });

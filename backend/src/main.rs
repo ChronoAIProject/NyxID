@@ -20,8 +20,15 @@ use std::sync::Arc;
 
 use crate::db::DbHandle;
 use config::AppConfig;
+use crypto::aes::EncryptionKeys;
+use crypto::jwks::JwksCache;
 use crypto::jwt::JwtKeys;
+use crypto::key_provider::KeyProvider;
+use crypto::local_key_provider::LocalKeyProvider;
 use models::mcp_session::McpSessionStore;
+
+use services::node_ws_manager::NodeWsManager;
+use services::push_service::{ApnsAuth, FcmAuth};
 
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
@@ -34,6 +41,16 @@ pub struct AppState {
     pub jwk_json: serde_json::Value,
     /// Hybrid in-memory + MongoDB MCP session store
     pub mcp_sessions: Arc<McpSessionStore>,
+    /// JWKS cache for verifying external provider ID tokens (Google)
+    pub jwks_cache: Arc<JwksCache>,
+    /// FCM push notification auth (None if not configured)
+    pub fcm_auth: Option<Arc<FcmAuth>>,
+    /// APNs push notification auth (None if not configured)
+    pub apns_auth: Option<Arc<ApnsAuth>>,
+    /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
+    pub encryption_keys: Arc<EncryptionKeys>,
+    /// WebSocket connection manager for credential nodes
+    pub node_ws_manager: Arc<NodeWsManager>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -62,7 +79,7 @@ async fn main() {
         .init();
 
     // Load configuration
-    let config = AppConfig::from_env();
+    let mut config = AppConfig::from_env();
 
     // Connect to database
     let db = db::create_connection(&config)
@@ -75,20 +92,84 @@ async fn main() {
         return;
     }
 
+    // Validate provider-specific encryption config before any seed calls that use it.
+    config.validate_key_provider();
+
+    // Build key provider(s)
+    let (provider, fallback_provider): (Arc<dyn KeyProvider>, Option<Arc<dyn KeyProvider>>) =
+        match config.key_provider.as_str() {
+            "local" => {
+                let local = Arc::new(LocalKeyProvider::from_config(&config));
+                (local, None)
+            }
+            #[cfg(feature = "aws-kms")]
+            "aws-kms" => {
+                let kms =
+                    Arc::new(crypto::aws_kms_provider::AwsKmsProvider::from_config(&config).await);
+                let fallback = config.encryption_key.as_ref().map(|_| {
+                    Arc::new(LocalKeyProvider::from_config(&config)) as Arc<dyn KeyProvider>
+                });
+                (kms, fallback)
+            }
+            #[cfg(feature = "gcp-kms")]
+            "gcp-kms" => {
+                let kms =
+                    Arc::new(crypto::gcp_kms_provider::GcpKmsProvider::from_config(&config).await);
+                let fallback = config.encryption_key.as_ref().map(|_| {
+                    Arc::new(LocalKeyProvider::from_config(&config)) as Arc<dyn KeyProvider>
+                });
+                (kms, fallback)
+            }
+            other => panic!("Unsupported KEY_PROVIDER: {other}"),
+        };
+
+    // Cross-provider key_id collision check (H2): during migration, the primary
+    // KMS provider and fallback local provider derive key_ids from different
+    // inputs. A collision (1-in-256 chance) would cause decrypt failures.
+    if let Some(ref fallback) = fallback_provider
+        && fallback.has_key_id(provider.current_key_id())
+    {
+        panic!(
+            "Primary and fallback providers have colliding key IDs (0x{:02x}). \
+             This is a 1-in-256 hash collision. Use a different KMS key.",
+            provider.current_key_id()
+        );
+    }
+
+    // Build EncryptionKeys with provider and optional fallback
+    let legacy = if config.encryption_key.is_some() {
+        Some(crypto::aes::LegacyKeys::from_config(&config))
+    } else {
+        None
+    };
+
+    let encryption_keys = Arc::new({
+        let mut ek = EncryptionKeys::with_provider_and_fallback(provider, fallback_provider);
+        if let Some(l) = legacy {
+            ek.set_legacy(l);
+        }
+        ek
+    });
+    if encryption_keys.has_previous() {
+        tracing::warn!(
+            "ENCRYPTION_KEY_PREVIOUS is configured. Only one previous key is supported; do not rotate again until all old-key ciphertexts have been re-wrapped or re-encrypted."
+        );
+    }
+
     // Seed default OAuth clients (idempotent)
     services::oauth_client_service::seed_default_clients(&db)
         .await
         .expect("Failed to seed default OAuth clients");
 
     // Seed default AI provider configurations (idempotent)
-    services::provider_service::seed_default_providers(&db, &config.encryption_key)
+    services::provider_service::seed_default_providers(&db, encryption_keys.as_ref())
         .await
         .expect("Failed to seed default providers");
 
-    // Seed downstream services for LLM providers (idempotent)
-    services::provider_service::seed_default_llm_services(&db, &config.encryption_key)
+    // Seed downstream services for default providers (idempotent)
+    services::provider_service::seed_default_services(&db, encryption_keys.as_ref())
         .await
-        .expect("Failed to seed default LLM services");
+        .expect("Failed to seed default services");
 
     // Seed system roles for RBAC (idempotent)
     services::role_service::seed_system_roles(&db)
@@ -100,8 +181,42 @@ async fn main() {
     tracing::info!(port = config.port, issuer = %config.jwt_issuer, "Configuration loaded");
     config.warn_if_non_url_issuer();
 
-    // Validate encryption key at startup
-    config.validate_encryption_key();
+    // Validate and initialize push notification config (reads FCM JSON, verifies APNs key)
+    config.validate_push_config();
+
+    // Initialize push notification auth
+    let fcm_auth = if config.fcm_service_account_path.is_some() {
+        match FcmAuth::from_service_account_file(
+            config.fcm_service_account_path.as_deref().unwrap(),
+        ) {
+            Ok(auth) => Some(Arc::new(auth)),
+            Err(e) => {
+                tracing::error!("Failed to initialize FCM auth: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let apns_auth = if config.apns_key_path.is_some() {
+        match ApnsAuth::new(
+            config.apns_key_path.as_deref().unwrap(),
+            config.apns_key_id.as_deref().expect("APNS_KEY_ID required"),
+            config
+                .apns_team_id
+                .as_deref()
+                .expect("APNS_TEAM_ID required"),
+        ) {
+            Ok(auth) => Some(Arc::new(auth)),
+            Err(e) => {
+                tracing::error!("Failed to initialize APNs auth: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Load JWT signing keys
     let jwt_keys = JwtKeys::from_config(&config).expect("Failed to load JWT keys");
@@ -113,9 +228,12 @@ async fn main() {
     let jwk_json =
         crypto::jwt::public_key_jwk(&public_pem).expect("Failed to compute JWK from public key");
 
-    // Create a shared reqwest client for connection reuse
+    // Create a shared reqwest client for connection reuse.
+    // Use connect_timeout (not global timeout) so SSE streaming responses
+    // from LLM services are not killed after 30 seconds.
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
         .build()
         .expect("Failed to create HTTP client");
 
@@ -129,6 +247,15 @@ async fn main() {
         Err(e) => tracing::warn!("Failed to load MCP sessions from database: {e}"),
     }
 
+    // Create JWKS cache for external provider token verification
+    let jwks_cache = Arc::new(JwksCache::new(http_client.clone()));
+
+    // Create node WebSocket connection manager
+    let node_ws_manager = Arc::new(NodeWsManager::new(
+        config.node_proxy_timeout_secs,
+        config.node_max_ws_connections,
+    ));
+
     // Create shared state
     let state = AppState {
         db,
@@ -137,6 +264,11 @@ async fn main() {
         http_client,
         jwk_json,
         mcp_sessions: mcp_sessions.clone(),
+        jwks_cache,
+        fcm_auth: fcm_auth.clone(),
+        apns_auth: apns_auth.clone(),
+        encryption_keys: encryption_keys.clone(),
+        node_ws_manager,
     };
 
     // Create rate limiters
@@ -175,6 +307,8 @@ async fn main() {
     let db_for_expiry = state.db.clone();
     let config_for_expiry = state.config.clone();
     let http_for_expiry = state.http_client.clone();
+    let fcm_for_expiry = state.fcm_auth.clone();
+    let apns_for_expiry = state.apns_auth.clone();
     let expiry_interval_secs = config.approval_expiry_interval_secs;
     tokio::spawn(async move {
         let mut interval =
@@ -185,6 +319,8 @@ async fn main() {
                 &db_for_expiry,
                 &config_for_expiry,
                 &http_for_expiry,
+                fcm_for_expiry.as_deref(),
+                apns_for_expiry.as_deref(),
             )
             .await
             {
@@ -219,10 +355,45 @@ async fn main() {
         });
     }
 
+    // Spawn background heartbeat sweep for node WebSocket connections
+    let heartbeat_db = state.db.clone();
+    let heartbeat_ws = state.node_ws_manager.clone();
+    let heartbeat_interval = config.node_heartbeat_interval_secs;
+    let heartbeat_timeout = config.node_heartbeat_timeout_secs;
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(heartbeat_interval));
+        loop {
+            interval.tick().await;
+            handlers::node_ws::node_ws_manager_heartbeat_sweep(
+                &heartbeat_db,
+                &heartbeat_ws,
+                heartbeat_timeout,
+            )
+            .await;
+        }
+    });
+
+    // Build set of allowed CORS origins: frontend_url + any extra from CORS_ALLOWED_ORIGINS
+    let mut allowed_origins: std::collections::HashSet<axum::http::HeaderValue> =
+        std::collections::HashSet::new();
+    allowed_origins.insert(config.frontend_url.parse().expect("Invalid FRONTEND_URL"));
+    for origin in &config.cors_allowed_origins {
+        if let Ok(hv) = origin.parse() {
+            allowed_origins.insert(hv);
+        } else {
+            tracing::warn!(origin, "Ignoring invalid CORS_ALLOWED_ORIGINS entry");
+        }
+    }
+    tracing::info!(
+        origins = ?allowed_origins.iter().map(|h| h.to_str().unwrap_or("?")).collect::<Vec<_>>(),
+        "CORS allowed origins"
+    );
+
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::exact(
-            config.frontend_url.parse().expect("Invalid FRONTEND_URL"),
-        ))
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            allowed_origins.contains(origin)
+        }))
         .allow_methods(AllowMethods::list([
             axum::http::Method::GET,
             axum::http::Method::POST,
@@ -237,6 +408,9 @@ async fn main() {
             axum::http::header::ACCEPT,
             axum::http::header::ORIGIN,
             axum::http::header::COOKIE,
+            "X-User-Email".parse().unwrap(),
+            "X-User-Display-Name".parse().unwrap(),
+            "X-API-Key".parse().unwrap(),
         ]))
         .allow_credentials(true);
 
@@ -244,8 +418,14 @@ async fn main() {
     // private API routes get restricted CORS (FRONTEND_URL only).
     let (public_oauth, private_api) = routes::build_router();
 
+    let csrf_state = state.clone();
+    let private_api = private_api.layer(cors).layer(axum_mw::from_fn_with_state(
+        csrf_state,
+        mw::csrf::browser_csrf_middleware,
+    ));
+
     let app = public_oauth
-        .merge(private_api.layer(cors))
+        .merge(private_api)
         .with_state(state)
         .layer(DefaultBodyLimit::max(1_048_576))
         .layer(axum_mw::from_fn(

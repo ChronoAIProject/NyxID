@@ -66,6 +66,10 @@ pub struct ApprovalRequest {
     #[serde(default)]
     pub decision_channel: Option<String>,
 
+    /// Idempotency key used for the final decision submission.
+    #[serde(default)]
+    pub decision_idempotency_key: Option<String>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -98,6 +102,7 @@ mod tests {
             expires_at: Utc::now(),
             decided_at: None,
             decision_channel: None,
+            decision_idempotency_key: None,
             created_at: Utc::now(),
         }
     }

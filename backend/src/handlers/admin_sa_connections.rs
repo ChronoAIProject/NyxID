@@ -8,7 +8,6 @@ use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::crypto::aes;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_admin};
 use crate::models::downstream_service::{
@@ -170,12 +169,11 @@ pub async fn connect_sa_service(
         ));
     }
 
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-
     // Reuse existing connection_service -- pass sa.id as user_id
     let result = connection_service::connect_user(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
+        state.node_ws_manager.as_ref(),
         &sa_id,
         &service_id,
         body.credential.as_deref(),
@@ -223,11 +221,9 @@ pub async fn update_sa_connection_credential(
         ));
     }
 
-    let encryption_key = aes::parse_hex_key(&state.config.encryption_key)?;
-
     connection_service::update_credential(
         &state.db,
-        &encryption_key,
+        &state.encryption_keys,
         &sa_id,
         &service_id,
         &body.credential,

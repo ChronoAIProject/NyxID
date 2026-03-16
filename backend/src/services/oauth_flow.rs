@@ -3,10 +3,11 @@ use mongodb::bson::{self, doc};
 use std::sync::LazyLock;
 use zeroize::Zeroizing;
 
-use crate::crypto::aes;
+use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::user_provider_token::{COLLECTION_NAME, UserProviderToken};
+use crate::services::user_credentials_service;
 
 /// A reqwest client that does NOT follow redirects, preventing `client_secret`
 /// from being forwarded to redirect targets (SEC-H2).
@@ -21,6 +22,24 @@ static TOKEN_EXCHANGE_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 /// Get the no-redirect HTTP client for OAuth token exchange operations.
 pub fn token_exchange_client() -> &'static reqwest::Client {
     &TOKEN_EXCHANGE_CLIENT
+}
+
+pub fn expect_json_response(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request.header(reqwest::header::ACCEPT, "application/json")
+}
+
+pub fn client_id_param_name(provider: &ProviderConfig) -> &str {
+    provider
+        .client_id_param_name
+        .as_deref()
+        .unwrap_or("client_id")
+}
+
+pub fn client_id_form_field(provider: &ProviderConfig, client_id: &str) -> (String, String) {
+    (
+        client_id_param_name(provider).to_string(),
+        client_id.to_string(),
+    )
 }
 
 /// Generate a PKCE code verifier (43-128 characters, URL-safe).
@@ -46,7 +65,7 @@ pub fn generate_code_challenge(verifier: &str) -> String {
 /// bodies before storing (SEC-M5).
 pub async fn refresh_oauth_token(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     token: &UserProviderToken,
 ) -> AppResult<String> {
     let provider = db
@@ -59,46 +78,48 @@ pub async fn refresh_oauth_token(
         AppError::Internal("OAuth provider missing token_url for refresh".to_string())
     })?;
 
-    let decrypted_cid = Zeroizing::new(aes::decrypt(
-        provider
-            .client_id_encrypted
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("Provider missing client_id".to_string()))?,
-        encryption_key,
-    )?);
-    let client_id = String::from_utf8((*decrypted_cid).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode client_id: {e}")))?;
+    let resolved = user_credentials_service::resolve_token_oauth_credentials(
+        db,
+        encryption_keys,
+        &provider,
+        token.credential_user_id.as_deref(),
+    )
+    .await?;
+    let client_id = resolved.client_id;
+    let client_secret = resolved.client_secret;
 
-    let decrypted_csec = Zeroizing::new(aes::decrypt(
-        provider
-            .client_secret_encrypted
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("Provider missing client_secret".to_string()))?,
-        encryption_key,
-    )?);
-    let client_secret = String::from_utf8((*decrypted_csec).clone())
-        .map_err(|e| AppError::Internal(format!("Failed to decode client_secret: {e}")))?;
-
-    let decrypted_rt = Zeroizing::new(aes::decrypt(
-        token
-            .refresh_token_encrypted
-            .as_ref()
-            .ok_or_else(|| AppError::Internal("Token missing refresh_token".to_string()))?,
-        encryption_key,
-    )?);
+    let decrypted_rt = Zeroizing::new(
+        encryption_keys
+            .decrypt(
+                token
+                    .refresh_token_encrypted
+                    .as_ref()
+                    .ok_or_else(|| AppError::Internal("Token missing refresh_token".to_string()))?,
+            )
+            .await?,
+    );
     let refresh_token = String::from_utf8((*decrypted_rt).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode refresh_token: {e}")))?;
 
-    let params = vec![
-        ("grant_type", "refresh_token"),
-        ("refresh_token", &refresh_token),
-        ("client_id", &client_id),
-        ("client_secret", &client_secret),
+    let use_basic_auth = provider.token_endpoint_auth_method == "client_secret_basic";
+    let mut params = vec![
+        ("grant_type".to_string(), "refresh_token".to_string()),
+        ("refresh_token".to_string(), refresh_token.clone()),
     ];
+    if use_basic_auth {
+        // Credentials go in Authorization header, not body
+    } else {
+        params.push(client_id_form_field(&provider, &client_id));
+        if let Some(ref secret) = client_secret {
+            params.push(("client_secret".to_string(), secret.clone()));
+        }
+    }
 
-    let response = token_exchange_client()
-        .post(token_url)
-        .form(&params)
+    let mut request = expect_json_response(token_exchange_client().post(token_url)).form(&params);
+    if use_basic_auth {
+        request = request.basic_auth(&client_id, client_secret.as_deref());
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("Token refresh request failed: {e}")))?;
@@ -140,7 +161,7 @@ pub async fn refresh_oauth_token(
     let expires_in = token_data["expires_in"].as_i64();
     let now = Utc::now();
 
-    let access_enc = aes::encrypt(new_access_token.as_bytes(), encryption_key)?;
+    let access_enc = encryption_keys.encrypt(new_access_token.as_bytes()).await?;
 
     let mut set_doc = doc! {
         "access_token_encrypted": bson::Binary {
@@ -159,7 +180,7 @@ pub async fn refresh_oauth_token(
     }
 
     if let Some(rt) = new_refresh_token {
-        let rt_enc = aes::encrypt(rt.as_bytes(), encryption_key)?;
+        let rt_enc = encryption_keys.encrypt(rt.as_bytes()).await?;
         set_doc.insert(
             "refresh_token_encrypted",
             bson::Binary {
@@ -180,4 +201,79 @@ pub async fn refresh_oauth_token(
     );
 
     Ok(new_access_token.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_provider() -> ProviderConfig {
+        ProviderConfig {
+            id: "provider-id".to_string(),
+            slug: "provider".to_string(),
+            name: "Provider".to_string(),
+            description: None,
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://example.com/oauth/authorize".to_string()),
+            token_url: Some("https://example.com/oauth/token".to_string()),
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "test".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn token_exchange_client_requests_json_responses() {
+        let request =
+            expect_json_response(token_exchange_client().post("https://example.com/oauth/token"))
+                .build()
+                .expect("request should build");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::ACCEPT)
+                .expect("accept header should be set"),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn client_id_form_field_defaults_to_client_id() {
+        let provider = test_provider();
+        assert_eq!(
+            client_id_form_field(&provider, "client-123"),
+            ("client_id".to_string(), "client-123".to_string())
+        );
+    }
+
+    #[test]
+    fn client_id_form_field_uses_provider_override() {
+        let mut provider = test_provider();
+        provider.client_id_param_name = Some("client_key".to_string());
+
+        assert_eq!(
+            client_id_form_field(&provider, "client-123"),
+            ("client_key".to_string(), "client-123".to_string())
+        );
+    }
 }

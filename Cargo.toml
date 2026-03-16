@@ -1,9 +1,13 @@
 [workspace]
-members = ["backend"]
+members = ["backend", "node-agent"]
 resolver = "2"
 
+[workspace.package]
+license = "MIT"
+repository = "https://github.com/ChronoAIProject/NyxID"
+
 [workspace.dependencies]
-axum = { version = "0.8.8", features = ["macros"] }
+axum = { version = "0.8.8", features = ["macros", "ws"] }
 tokio = { version = "1.49", features = ["full"] }
 mongodb = "3.5"
 bson = { version = "2.15", features = ["uuid-1", "chrono-0_4"] }

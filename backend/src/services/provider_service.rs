@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
-use crate::crypto::aes;
+use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -12,7 +14,22 @@ use crate::models::provider_config::{COLLECTION_NAME, ProviderConfig};
 use crate::models::service_provider_requirement::{
     COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
 };
+use crate::models::user_provider_credentials::COLLECTION_NAME as USER_PROVIDER_CREDENTIALS;
 use crate::models::user_provider_token::COLLECTION_NAME as USER_PROVIDER_TOKENS;
+
+const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
+    "google",
+    "github",
+    "facebook",
+    "discord",
+    "spotify",
+    "linkedin",
+    "slack",
+    "microsoft",
+    "tiktok",
+    "twitch",
+    "reddit",
+];
 
 /// Seed default AI provider configurations at startup (idempotent).
 ///
@@ -20,10 +37,9 @@ use crate::models::user_provider_token::COLLECTION_NAME as USER_PROVIDER_TOKENS;
 /// The OpenAI Codex `client_id` is encrypted before storage.
 pub async fn seed_default_providers(
     db: &mongodb::Database,
-    encryption_key_hex: &str,
+    encryption_keys: &EncryptionKeys,
 ) -> AppResult<()> {
     let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
-    let encryption_key = aes::parse_hex_key(encryption_key_hex)?;
     let now = Utc::now();
 
     let mut seeded_count: u32 = 0;
@@ -59,6 +75,11 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://platform.openai.com/docs".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -92,9 +113,31 @@ pub async fn seed_default_providers(
         }
     }
 
+    // Migration: set device_code_format to "openai" on existing openai-codex providers
+    if let Some(existing_codex) = collection
+        .find_one(doc! { "slug": "openai-codex", "device_code_format": { "$ne": "openai" } })
+        .await?
+    {
+        collection
+            .update_one(
+                doc! { "_id": &existing_codex.id },
+                doc! { "$set": {
+                    "device_code_format": "openai",
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }},
+            )
+            .await?;
+        tracing::info!(
+            slug = "openai-codex",
+            "Migrated existing provider to device_code_format=openai"
+        );
+    }
+
     // 2. OpenAI Codex (Device Code - ChatGPT subscription)
     if !slug_exists!("openai-codex") {
-        let client_id_enc = aes::encrypt(b"app_EMoamEEZ73f0CkXaXp7hrann", &encryption_key)?;
+        let client_id_enc = encryption_keys
+            .encrypt(b"app_EMoamEEZ73f0CkXaXp7hrann")
+            .await?;
 
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -129,6 +172,11 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://developers.openai.com/codex/auth/".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "openai".to_string(),
+            client_id_param_name: None,
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -167,6 +215,11 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://docs.anthropic.com".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -202,6 +255,11 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://ai.google.dev/docs".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -240,6 +298,11 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://docs.mistral.ai".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -275,6 +338,11 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://docs.cohere.com".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
@@ -310,12 +378,570 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://api-docs.deepseek.com".to_string()),
             is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
         };
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "deepseek", "Seeded default provider: DeepSeek");
+        seeded_count += 1;
+    }
+
+    // 8. Twitter / X (OAuth 2.0 with PKCE)
+    if !slug_exists!("twitter") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "twitter".to_string(),
+            name: "Twitter / X".to_string(),
+            description: Some("Twitter/X API access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://x.com/i/oauth2/authorize".to_string()),
+            token_url: Some("https://api.x.com/2/oauth2/token".to_string()),
+            revocation_url: Some("https://api.x.com/2/oauth2/revoke".to_string()),
+            // Write access is intentional: NyxID is a credential broker, so delegated
+            // clients commonly need to post on behalf of users. Admins can customise
+            // scopes per deployment.
+            default_scopes: Some(vec![
+                "tweet.read".to_string(),
+                "tweet.write".to_string(),
+                "users.read".to_string(),
+                "offline.access".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://developer.x.com/en/docs/x-api".to_string()),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_basic".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "twitter", "Seeded default provider: Twitter / X");
+        seeded_count += 1;
+    }
+
+    // Migration: set credential_mode and token_endpoint_auth_method on existing Twitter providers.
+    // The $ne filter means this is a no-op after migration completes.
+    if let Some(existing_twitter) = collection
+        .find_one(doc! { "slug": "twitter", "$or": [
+            { "credential_mode": { "$ne": "user" } },
+            { "token_endpoint_auth_method": { "$ne": "client_secret_basic" } },
+        ]})
+        .await?
+    {
+        collection
+            .update_one(
+                doc! { "_id": &existing_twitter.id },
+                doc! { "$set": {
+                    "credential_mode": "user",
+                    "token_endpoint_auth_method": "client_secret_basic",
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }},
+            )
+            .await?;
+        tracing::info!(
+            slug = "twitter",
+            "Migrated existing Twitter provider to credential_mode=user, token_endpoint_auth_method=client_secret_basic"
+        );
+    }
+
+    let social_user_mode_migration = collection
+        .update_many(
+            doc! {
+                "slug": { "$in": SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS },
+                "credential_mode": { "$ne": "user" }
+            },
+            doc! { "$set": {
+                "credential_mode": "user",
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+    if social_user_mode_migration.modified_count > 0 {
+        tracing::info!(
+            count = social_user_mode_migration.modified_count,
+            "Migrated existing seeded social providers to credential_mode=user"
+        );
+    }
+
+    // 9. Google (OAuth2)
+    if !slug_exists!("google") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "google".to_string(),
+            name: "Google".to_string(),
+            description: Some("Google account access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://accounts.google.com/o/oauth2/v2/auth".to_string()),
+            token_url: Some("https://oauth2.googleapis.com/token".to_string()),
+            revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
+            default_scopes: Some(vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://developers.google.com/identity/protocols/oauth2".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: Some(HashMap::from([
+                ("access_type".to_string(), "offline".to_string()),
+                ("prompt".to_string(), "consent".to_string()),
+            ])),
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "google", "Seeded default provider: Google");
+        seeded_count += 1;
+    }
+
+    // 10. GitHub (OAuth2)
+    if !slug_exists!("github") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "github".to_string(),
+            name: "GitHub".to_string(),
+            description: Some("GitHub account access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://github.com/login/oauth/authorize".to_string()),
+            token_url: Some("https://github.com/login/oauth/access_token".to_string()),
+            revocation_url: None,
+            default_scopes: Some(vec!["read:user".to_string(), "user:email".to_string()]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://docs.github.com/en/apps/oauth-apps".to_string()),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "github", "Seeded default provider: GitHub");
+        seeded_count += 1;
+    }
+
+    // 11. Facebook (OAuth2)
+    if !slug_exists!("facebook") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "facebook".to_string(),
+            name: "Facebook".to_string(),
+            description: Some("Facebook account access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://www.facebook.com/v21.0/dialog/oauth".to_string()),
+            token_url: Some("https://graph.facebook.com/v21.0/oauth/access_token".to_string()),
+            revocation_url: None,
+            default_scopes: Some(vec!["email".to_string(), "public_profile".to_string()]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://developers.facebook.com/docs/facebook-login/".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "facebook", "Seeded default provider: Facebook");
+        seeded_count += 1;
+    }
+
+    // 12. Discord (OAuth2)
+    if !slug_exists!("discord") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "discord".to_string(),
+            name: "Discord".to_string(),
+            description: Some("Discord account access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://discord.com/oauth2/authorize".to_string()),
+            token_url: Some("https://discord.com/api/oauth2/token".to_string()),
+            revocation_url: Some("https://discord.com/api/oauth2/token/revoke".to_string()),
+            default_scopes: Some(vec!["identify".to_string(), "email".to_string()]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://discord.com/developers/docs/topics/oauth2".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "discord", "Seeded default provider: Discord");
+        seeded_count += 1;
+    }
+
+    // 13. Spotify (OAuth2)
+    if !slug_exists!("spotify") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "spotify".to_string(),
+            name: "Spotify".to_string(),
+            description: Some("Spotify account access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://accounts.spotify.com/authorize".to_string()),
+            token_url: Some("https://accounts.spotify.com/api/token".to_string()),
+            revocation_url: None,
+            default_scopes: Some(vec![
+                "user-read-email".to_string(),
+                "user-read-private".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://developer.spotify.com/documentation/web-api".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "spotify", "Seeded default provider: Spotify");
+        seeded_count += 1;
+    }
+
+    // 14. LinkedIn (OAuth2)
+    if !slug_exists!("linkedin") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "linkedin".to_string(),
+            name: "LinkedIn".to_string(),
+            description: Some("LinkedIn account access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(
+                "https://www.linkedin.com/oauth/v2/authorization".to_string(),
+            ),
+            token_url: Some("https://www.linkedin.com/oauth/v2/accessToken".to_string()),
+            revocation_url: None,
+            default_scopes: Some(vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://learn.microsoft.com/en-us/linkedin/shared/authentication/authorization-code-flow".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "linkedin", "Seeded default provider: LinkedIn");
+        seeded_count += 1;
+    }
+
+    // 15. Slack (OAuth2)
+    if !slug_exists!("slack") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "slack".to_string(),
+            name: "Slack".to_string(),
+            description: Some("Slack workspace access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://slack.com/oauth/v2/authorize".to_string()),
+            token_url: Some("https://slack.com/api/oauth.v2.access".to_string()),
+            revocation_url: Some("https://slack.com/api/auth.revoke".to_string()),
+            default_scopes: Some(vec![
+                "users:read".to_string(),
+                "users:read.email".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://api.slack.com/authentication/oauth-v2".to_string()),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "slack", "Seeded default provider: Slack");
+        seeded_count += 1;
+    }
+
+    // 16. Microsoft (OAuth2)
+    if !slug_exists!("microsoft") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "microsoft".to_string(),
+            name: "Microsoft".to_string(),
+            description: Some("Microsoft account access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(
+                "https://login.microsoftonline.com/common/oauth2/v2.0/authorize".to_string(),
+            ),
+            token_url: Some(
+                "https://login.microsoftonline.com/common/oauth2/v2.0/token".to_string(),
+            ),
+            revocation_url: None,
+            default_scopes: Some(vec![
+                "openid".to_string(),
+                "email".to_string(),
+                "profile".to_string(),
+                "offline_access".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "microsoft", "Seeded default provider: Microsoft");
+        seeded_count += 1;
+    }
+
+    // 17. TikTok (OAuth2)
+    if !slug_exists!("tiktok") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "tiktok".to_string(),
+            name: "TikTok".to_string(),
+            description: Some("TikTok account access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://www.tiktok.com/v2/auth/authorize/".to_string()),
+            token_url: Some("https://open.tiktokapis.com/v2/oauth/token/".to_string()),
+            revocation_url: Some("https://open.tiktokapis.com/v2/oauth/revoke/".to_string()),
+            default_scopes: Some(vec!["user.info.basic".to_string()]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://developers.tiktok.com/doc/oauth-user-access-token-management/".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: Some("client_key".to_string()),
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "tiktok", "Seeded default provider: TikTok");
+        seeded_count += 1;
+    }
+
+    // 18. Twitch (OAuth2)
+    if !slug_exists!("twitch") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "twitch".to_string(),
+            name: "Twitch".to_string(),
+            description: Some("Twitch account access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://id.twitch.tv/oauth2/authorize".to_string()),
+            token_url: Some("https://id.twitch.tv/oauth2/token".to_string()),
+            revocation_url: Some("https://id.twitch.tv/oauth2/revoke".to_string()),
+            default_scopes: Some(vec!["user:read:email".to_string()]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://dev.twitch.tv/docs/authentication/".to_string()),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "twitch", "Seeded default provider: Twitch");
+        seeded_count += 1;
+    }
+
+    // 19. Reddit (OAuth2)
+    if !slug_exists!("reddit") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "reddit".to_string(),
+            name: "Reddit".to_string(),
+            description: Some("Reddit account access via OAuth 2.0".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://www.reddit.com/api/v1/authorize".to_string()),
+            token_url: Some("https://www.reddit.com/api/v1/access_token".to_string()),
+            revocation_url: Some("https://www.reddit.com/api/v1/revoke_token".to_string()),
+            default_scopes: Some(vec!["identity".to_string()]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://www.reddit.com/dev/api/oauth".to_string()),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_basic".to_string(),
+            extra_auth_params: Some(HashMap::from([(
+                "duration".to_string(),
+                "permanent".to_string(),
+            )])),
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "reddit", "Seeded default provider: Reddit");
         seeded_count += 1;
     }
 
@@ -326,7 +952,7 @@ pub async fn seed_default_providers(
     Ok(())
 }
 
-struct LlmServiceSeed {
+struct DefaultServiceSeed {
     provider_slug: &'static str,
     service_slug: &'static str,
     service_name: &'static str,
@@ -335,8 +961,8 @@ struct LlmServiceSeed {
     injection_key: &'static str,
 }
 
-const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
-    LlmServiceSeed {
+const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
+    DefaultServiceSeed {
         provider_slug: "openai",
         service_slug: "llm-openai",
         service_name: "OpenAI API",
@@ -344,7 +970,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "bearer",
         injection_key: "Authorization",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "openai-codex",
         service_slug: "llm-openai-codex",
         service_name: "OpenAI Codex API",
@@ -352,7 +978,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "bearer",
         injection_key: "Authorization",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "anthropic",
         service_slug: "llm-anthropic",
         service_name: "Anthropic API",
@@ -360,7 +986,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "header",
         injection_key: "x-api-key",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "google-ai",
         service_slug: "llm-google-ai",
         service_name: "Google AI API",
@@ -368,7 +994,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "query",
         injection_key: "key",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "mistral",
         service_slug: "llm-mistral",
         service_name: "Mistral AI API",
@@ -376,7 +1002,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "bearer",
         injection_key: "Authorization",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "cohere",
         service_slug: "llm-cohere",
         service_name: "Cohere API",
@@ -384,7 +1010,7 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "bearer",
         injection_key: "Authorization",
     },
-    LlmServiceSeed {
+    DefaultServiceSeed {
         provider_slug: "deepseek",
         service_slug: "llm-deepseek",
         service_name: "DeepSeek API",
@@ -392,17 +1018,104 @@ const LLM_SERVICE_SEEDS: &[LlmServiceSeed] = &[
         injection_method: "bearer",
         injection_key: "Authorization",
     },
+    DefaultServiceSeed {
+        provider_slug: "twitter",
+        service_slug: "api-twitter",
+        service_name: "Twitter / X API",
+        base_url: "https://api.x.com/2",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google",
+        service_name: "Google API",
+        base_url: "https://www.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "github",
+        service_slug: "api-github",
+        service_name: "GitHub API",
+        base_url: "https://api.github.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "facebook",
+        service_slug: "api-facebook",
+        service_name: "Facebook Graph API",
+        base_url: "https://graph.facebook.com/v21.0",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "discord",
+        service_slug: "api-discord",
+        service_name: "Discord API",
+        base_url: "https://discord.com/api/v10",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "spotify",
+        service_slug: "api-spotify",
+        service_name: "Spotify API",
+        base_url: "https://api.spotify.com/v1",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "slack",
+        service_slug: "api-slack",
+        service_name: "Slack API",
+        base_url: "https://slack.com/api",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "microsoft",
+        service_slug: "api-microsoft",
+        service_name: "Microsoft Graph API",
+        base_url: "https://graph.microsoft.com/v1.0",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "tiktok",
+        service_slug: "api-tiktok",
+        service_name: "TikTok API",
+        base_url: "https://open.tiktokapis.com/v2",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "twitch",
+        service_slug: "api-twitch",
+        service_name: "Twitch API",
+        base_url: "https://api.twitch.tv/helix",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "reddit",
+        service_slug: "api-reddit",
+        service_name: "Reddit API",
+        base_url: "https://oauth.reddit.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
 ];
 
-/// Seed downstream services for each LLM provider (idempotent).
+/// Seed downstream services for each default provider (idempotent).
 ///
 /// Creates a `DownstreamService` and a `ServiceProviderRequirement` for each
 /// seeded provider that does not yet have a corresponding downstream service.
-pub async fn seed_default_llm_services(
+pub async fn seed_default_services(
     db: &mongodb::Database,
-    encryption_key_hex: &str,
+    encryption_keys: &EncryptionKeys,
 ) -> AppResult<()> {
-    let encryption_key = aes::parse_hex_key(encryption_key_hex)?;
     let provider_col = db.collection::<ProviderConfig>(COLLECTION_NAME);
     let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
     let req_col = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
@@ -435,7 +1148,7 @@ pub async fn seed_default_llm_services(
         );
     }
 
-    for seed in LLM_SERVICE_SEEDS {
+    for seed in DEFAULT_SERVICE_SEEDS {
         // Find the provider by slug
         let provider = match provider_col
             .find_one(doc! { "slug": seed.provider_slug })
@@ -455,18 +1168,26 @@ pub async fn seed_default_llm_services(
         }
 
         // Create an empty encrypted credential (field is required)
-        let empty_credential = aes::encrypt(b"", &encryption_key)?;
+        let empty_credential = encryption_keys.encrypt(b"").await?;
 
         let service_id = Uuid::new_v4().to_string();
+        let is_llm_service = seed.service_slug.starts_with("llm-");
+        let description = if is_llm_service {
+            format!("{} proxied via NyxID LLM gateway", seed.service_name)
+        } else {
+            format!("{} proxied via NyxID proxy", seed.service_name)
+        };
+        let delegation_scope = if is_llm_service {
+            "llm:proxy"
+        } else {
+            "proxy:*"
+        };
 
         let service = DownstreamService {
             id: service_id.clone(),
             name: seed.service_name.to_string(),
             slug: seed.service_slug.to_string(),
-            description: Some(format!(
-                "{} proxied via NyxID LLM gateway",
-                seed.service_name
-            )),
+            description: Some(description),
             base_url: seed.base_url.to_string(),
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
@@ -484,7 +1205,7 @@ pub async fn seed_default_llm_services(
             identity_include_name: false,
             identity_jwt_audience: None,
             inject_delegation_token: false,
-            delegation_token_scope: "llm:proxy".to_string(),
+            delegation_token_scope: delegation_scope.to_string(),
             provider_config_id: Some(provider.id.clone()),
             created_at: now,
             updated_at: now,
@@ -510,7 +1231,7 @@ pub async fn seed_default_llm_services(
         tracing::info!(
             slug = seed.service_slug,
             provider = seed.provider_slug,
-            "Seeded LLM downstream service"
+            "Seeded default downstream service"
         );
         seeded_count += 1;
     }
@@ -518,7 +1239,7 @@ pub async fn seed_default_llm_services(
     if seeded_count > 0 {
         tracing::info!(
             count = seeded_count,
-            "LLM downstream service seeding complete"
+            "Default downstream service seeding complete"
         );
     }
 
@@ -531,8 +1252,8 @@ pub struct OAuthProviderInput {
     pub token_url: String,
     pub revocation_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
-    pub client_id: String,
-    pub client_secret: String,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
     pub supports_pkce: bool,
 }
 
@@ -545,7 +1266,7 @@ pub struct DeviceCodeProviderInput {
     pub device_verification_url: Option<String>,
     pub hosted_callback_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
-    pub client_id: String,
+    pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub supports_pkce: bool,
 }
@@ -576,16 +1297,23 @@ pub struct ProviderUpdateInput {
     pub api_key_url: Option<String>,
     pub icon_url: Option<String>,
     pub documentation_url: Option<String>,
+    pub credential_mode: Option<String>,
+    pub token_endpoint_auth_method: Option<String>,
+    pub extra_auth_params: Option<HashMap<String, String>>,
+    pub device_code_format: Option<String>,
+    pub client_id_param_name: Option<String>,
 }
 
 /// Create a new provider configuration. Admin only.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_provider(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     name: &str,
     slug: &str,
     provider_type: &str,
+    credential_mode: &str,
+    token_endpoint_auth_method: &str,
     oauth_config: Option<OAuthProviderInput>,
     api_key_config: Option<ApiKeyProviderInput>,
     device_code_config: Option<DeviceCodeProviderInput>,
@@ -593,12 +1321,22 @@ pub async fn create_provider(
     icon_url: Option<&str>,
     documentation_url: Option<&str>,
     created_by: &str,
+    extra_auth_params: Option<HashMap<String, String>>,
+    device_code_format: Option<&str>,
+    client_id_param_name: Option<&str>,
 ) -> AppResult<ProviderConfig> {
     let valid_types = ["oauth2", "api_key", "device_code"];
     if !valid_types.contains(&provider_type) {
         return Err(AppError::ValidationError(format!(
             "provider_type must be one of: {}",
             valid_types.join(", ")
+        )));
+    }
+    let valid_modes = ["admin", "user", "both"];
+    if !valid_modes.contains(&credential_mode) {
+        return Err(AppError::ValidationError(format!(
+            "credential_mode must be one of: {}",
+            valid_modes.join(", ")
         )));
     }
 
@@ -619,16 +1357,25 @@ pub async fn create_provider(
 
     // Encrypt OAuth credentials if provided
     let (client_id_enc, client_secret_enc) = if let Some(ref oauth) = oauth_config {
-        let cid = aes::encrypt(oauth.client_id.as_bytes(), encryption_key)?;
-        let csec = aes::encrypt(oauth.client_secret.as_bytes(), encryption_key)?;
-        (Some(cid), Some(csec))
-    } else if let Some(ref dc) = device_code_config {
-        let cid = aes::encrypt(dc.client_id.as_bytes(), encryption_key)?;
-        let csec = match dc.client_secret.as_ref() {
-            Some(s) => Some(aes::encrypt(s.as_bytes(), encryption_key)?),
+        let cid = match oauth.client_id.as_ref() {
+            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
             None => None,
         };
-        (Some(cid), csec)
+        let csec = match oauth.client_secret.as_ref() {
+            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            None => None,
+        };
+        (cid, csec)
+    } else if let Some(ref dc) = device_code_config {
+        let cid = match dc.client_id.as_ref() {
+            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            None => None,
+        };
+        let csec = match dc.client_secret.as_ref() {
+            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            None => None,
+        };
+        (cid, csec)
     } else {
         (None, None)
     };
@@ -683,6 +1430,11 @@ pub async fn create_provider(
         icon_url: icon_url.map(String::from),
         documentation_url: documentation_url.map(String::from),
         is_active: true,
+        credential_mode: credential_mode.to_string(),
+        token_endpoint_auth_method: token_endpoint_auth_method.to_string(),
+        extra_auth_params,
+        device_code_format: device_code_format.unwrap_or("rfc8628").to_string(),
+        client_id_param_name: client_id_param_name.map(String::from),
         created_by: created_by.to_string(),
         created_at: now,
         updated_at: now,
@@ -733,7 +1485,7 @@ pub async fn get_provider_by_slug(db: &mongodb::Database, slug: &str) -> AppResu
 /// extra read query (CR-14).
 pub async fn update_provider(
     db: &mongodb::Database,
-    encryption_key: &[u8],
+    encryption_keys: &EncryptionKeys,
     provider_id: &str,
     updates: ProviderUpdateInput,
 ) -> AppResult<ProviderConfig> {
@@ -767,7 +1519,7 @@ pub async fn update_provider(
         set_doc.insert("default_scopes", scopes);
     }
     if let Some(ref cid) = updates.client_id {
-        let enc = aes::encrypt(cid.as_bytes(), encryption_key)?;
+        let enc = encryption_keys.encrypt(cid.as_bytes()).await?;
         set_doc.insert(
             "client_id_encrypted",
             bson::Binary {
@@ -777,7 +1529,7 @@ pub async fn update_provider(
         );
     }
     if let Some(ref csec) = updates.client_secret {
-        let enc = aes::encrypt(csec.as_bytes(), encryption_key)?;
+        let enc = encryption_keys.encrypt(csec.as_bytes()).await?;
         set_doc.insert(
             "client_secret_encrypted",
             bson::Binary {
@@ -812,6 +1564,46 @@ pub async fn update_provider(
     }
     if let Some(ref url) = updates.documentation_url {
         set_doc.insert("documentation_url", url.as_str());
+    }
+    if let Some(ref mode) = updates.credential_mode {
+        let valid_modes = ["admin", "user", "both"];
+        if !valid_modes.contains(&mode.as_str()) {
+            return Err(AppError::ValidationError(format!(
+                "credential_mode must be one of: {}",
+                valid_modes.join(", ")
+            )));
+        }
+        set_doc.insert("credential_mode", mode.as_str());
+    }
+
+    if let Some(ref method) = updates.token_endpoint_auth_method {
+        let valid_methods: [&str; 2] = ["client_secret_post", "client_secret_basic"];
+        if !valid_methods.contains(&method.as_str()) {
+            return Err(AppError::ValidationError(format!(
+                "token_endpoint_auth_method must be one of: {}",
+                valid_methods.join(", ")
+            )));
+        }
+        set_doc.insert("token_endpoint_auth_method", method.as_str());
+    }
+
+    if let Some(ref params) = updates.extra_auth_params {
+        set_doc.insert(
+            "extra_auth_params",
+            bson::to_bson(params).unwrap_or(bson::Bson::Null),
+        );
+    }
+    if let Some(ref format) = updates.device_code_format {
+        let valid_formats = ["rfc8628", "openai"];
+        if !valid_formats.contains(&format.as_str()) {
+            return Err(AppError::ValidationError(
+                "device_code_format must be 'rfc8628' or 'openai'".to_string(),
+            ));
+        }
+        set_doc.insert("device_code_format", format.as_str());
+    }
+    if let Some(ref name) = updates.client_id_param_name {
+        set_doc.insert("client_id_param_name", name.as_str());
     }
 
     use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
@@ -860,7 +1652,12 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
         )
         .await?;
 
-    tracing::info!(provider_id = %provider_id, "Provider deactivated and user tokens revoked");
+    // Delete all per-user OAuth credentials for this provider
+    db.collection::<mongodb::bson::Document>(USER_PROVIDER_CREDENTIALS)
+        .delete_many(doc! { "provider_config_id": provider_id })
+        .await?;
+
+    tracing::info!(provider_id = %provider_id, "Provider deactivated, user tokens revoked, and user credentials deleted");
 
     Ok(())
 }

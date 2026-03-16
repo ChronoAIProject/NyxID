@@ -34,7 +34,7 @@ fn my_handler() -> AppResult<Json<MyResponse>> {
     // AppResult<T> = Result<T, AppError>
 }
 ```
-Error variants map to HTTP status codes and numeric error codes (1000-3002). Internal/database errors never leak details to clients.
+Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000, 8000-8003). Internal/database errors never leak details to clients.
 
 ### 4. Frontend Patterns
 
@@ -48,36 +48,67 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002). Int
 ### 5. Security
 
 - No hardcoded secrets -- environment variables for all sensitive data
-- AES-256 encryption for stored credentials (`crypto/aes.rs`)
+- AES-256 envelope encryption with pluggable async `KeyProvider` trait (`crypto/aes.rs`, `crypto/key_provider.rs`)
+- Cloud KMS support: AWS KMS (`crypto/aws_kms_provider.rs`, feature `aws-kms`) and GCP Cloud KMS (`crypto/gcp_kms_provider.rs`, feature `gcp-kms`) behind feature flags
+- Fallback provider for zero-downtime migration between encryption backends
+- All key material in `Zeroizing` wrappers; all Debug impls redact secrets and key identifiers
+- `MAX_WRAPPED_DEK_SIZE = 1024` enforced on encrypt and decrypt paths
 - Rate limiting middleware (`mw/rate_limit.rs`)
 - Security headers middleware (`mw/security_headers.rs`)
 - JWT auth middleware (`mw/auth.rs`)
 - PKCE for OAuth flows
 - Input validation on all endpoints
 
+### 6. Node Proxy Conventions
+
+- `NodeWsManager` is an in-memory connection pool shared via `Arc` in `AppState`; uses `DashMap` for lock-free concurrent access
+- Node auth tokens (`nyx_nauth_...`) and registration tokens (`nyx_nreg_...`) are 32-byte random values; only SHA-256 hashes are stored
+- HMAC signing secrets are generated at registration; stored as SHA-256 hashes on server, encrypted locally on the node agent
+- WebSocket handler (`handlers/node_ws.rs`) authenticates in the first message, not via HTTP middleware
+- Proxy routing check (`node_routing_service::resolve_node_route`) runs before credential resolution in `execute_proxy()`; returns `NodeRoute` with `fallback_node_ids` for multi-node failover
+- Streaming proxy uses `proxy_response_start` / `proxy_response_chunk` / `proxy_response_end` messages; `PendingRequest` upgrades from `OneShot` to `Streaming` on first chunk
+- Node metrics (`node_metrics_service`) are recorded asynchronously (fire-and-forget) after each proxy request; stored as embedded `NodeMetrics` document on the Node model
+- Node-routed audit events include `"routed_via": "node"` and `"node_id"` in event data
+- Error codes 8000-8003 are reserved for node errors (`NodeNotFound`, `NodeOffline`, `NodeProxyTimeout`, `NodeRegistrationFailed`)
+- `NodeStatus` is an enum (`Online`/`Offline`/`Draining`) -- not a bare string
+- WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
+- Admin node endpoints (`handlers/admin_nodes.rs`) require admin role and have no ownership check
+
 ## File Structure
 
 ```
+node-agent/src/
+|-- main.rs              # CLI entry point, command dispatch (register, start, status, credentials, version)
+|-- cli.rs               # Clap subcommand definitions
+|-- config.rs            # TOML config (server url, node id, encrypted auth token, signing secret, credentials)
+|-- ws_client.rs         # WebSocket connection loop, exponential backoff reconnection, graceful shutdown
+|-- proxy_executor.rs    # HTTP request execution, credential injection, SSE streaming detection
+|-- credential_store.rs  # In-memory decrypted credential store (header or query_param injection)
+|-- signing.rs           # HMAC-SHA256 verification, replay guard (5min skew, 10k nonce cap)
+|-- metrics.rs           # Local atomic counters (total_requests, success_count, error_count)
+|-- encryption.rs        # AES-256-GCM local encryption, keyfile management (0600 mode)
+|-- error.rs             # Error enum with thiserror
+
 backend/src/
 |-- config.rs            # AppConfig from env vars
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (25 models, 23 collections)
-|-- services/            # Business logic (28 services, incl. approval_service, notification_service, telegram_service)
-|-- handlers/            # HTTP handlers (29 handler modules, incl. approvals, notifications, webhooks)
-|-- crypto/              # JWT, AES, password hashing, token generation
+|-- models/              # MongoDB document structs (29 models, 27 collections, incl. node, node_service_binding, node_registration_token)
+|-- services/            # Business logic (33 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service)
+|-- handlers/            # HTTP handlers (34 handler modules, incl. node_admin, admin_nodes, node_ws)
+|-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
 frontend/src/
-|-- pages/               # Route pages (23 pages, incl. approval-history, approval-grants, notification-settings)
+|-- pages/               # Route pages (27 pages, incl. nodes, node-detail, admin-nodes)
 |-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/)
-|-- hooks/               # TanStack Query hooks (9 hooks, incl. use-approvals)
-|-- schemas/             # Zod validation schemas (7 schema files + tests)
+|-- hooks/               # TanStack Query hooks (12 hooks, incl. use-nodes, use-admin-nodes)
+|-- schemas/             # Zod validation schemas (8 schema files + tests, incl. nodes.ts)
 |-- stores/              # Zustand stores (auth-store)
 |-- lib/                 # API client, constants, utils
-|-- types/               # TypeScript type definitions
+|-- types/               # TypeScript type definitions (incl. AdminNodeInfo, NodeMetricsInfo)
 |-- router.tsx           # TanStack Router config
 ```
 
@@ -91,20 +122,23 @@ All API routes under `/api/v1`:
 - `/services` -- CRUD + OIDC credentials + endpoints + requirements
 - `/sessions` -- list sessions
 - `/connections` -- connect/disconnect services
-- `/providers` -- CRUD + OAuth/device-code/API-key flows + token management
+- `/providers` -- CRUD + OAuth/device-code/API-key flows + token management + per-user credentials
 - `/admin` -- user management, audit log, OAuth clients, service accounts
 - `/proxy/{service_id}/{path}` -- authenticated proxy (UUID-based)
 - `/proxy/s/{slug}/{path}` -- authenticated proxy (slug-based)
 - `/proxy/services` -- service discovery (paginated list of proxyable services)
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
 - `/delegation/refresh` -- refresh delegated access tokens
-- `/notifications` -- notification settings CRUD, Telegram link/disconnect
+- `/notifications` -- notification settings CRUD, Telegram link/disconnect, device token management (register/list/remove)
 - `/approvals` -- approval request history, grants, decide, status polling, per-service approval configs
 - `/webhooks/telegram` -- Telegram webhook (unauthenticated, secret-verified)
+- `/nodes` -- node management (register-token, list, get, delete, rotate-token, bindings CRUD + priority update)
+- `/nodes/ws` -- WebSocket upgrade for node agent connections (auth via WS protocol, not middleware)
+- `/admin/nodes` -- admin node management (list all, get, disconnect, delete -- no ownership check)
 
 - `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation, provider management (connect via API key/OAuth redirect/device-code, list, disconnect providers on behalf of SAs)
 
-- `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts) and `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access)
+- `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts), `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access and social token exchange via `subject_token_type=id_token` for native mobile Google/GitHub login)
 
 Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`
 
@@ -113,7 +147,17 @@ Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`
 ```bash
 # Required
 DATABASE_URL=mongodb://...          # MongoDB connection string
-ENCRYPTION_KEY=                     # 64 hex chars (32 bytes AES-256)
+ENCRYPTION_KEY=                     # 64 hex chars (32 bytes AES-256); required for local, optional for KMS (enables fallback)
+ENCRYPTION_KEY_PREVIOUS=            # Optional: previous key for zero-downtime rotation (64 hex chars)
+KEY_PROVIDER=local                  # Key provider backend: "local" (default), "aws-kms" (feature aws-kms), "gcp-kms" (feature gcp-kms)
+
+# AWS KMS (optional, requires --features aws-kms)
+AWS_KMS_KEY_ARN=                    # Full ARN of AWS KMS key (required when KEY_PROVIDER=aws-kms)
+AWS_KMS_KEY_ARN_PREVIOUS=           # Optional: previous AWS KMS key ARN for rotation
+
+# GCP Cloud KMS (optional, requires --features gcp-kms)
+GCP_KMS_KEY_NAME=                   # Full GCP KMS key resource name (required when KEY_PROVIDER=gcp-kms)
+GCP_KMS_KEY_NAME_PREVIOUS=          # Optional: previous GCP KMS key name for rotation
 
 # Defaults provided
 PORT=3001
@@ -136,6 +180,24 @@ TELEGRAM_WEBHOOK_URL=                   # e.g. https://auth.nyxid.dev/api/v1/web
 TELEGRAM_BOT_USERNAME=                  # Bot username without @
 APPROVAL_EXPIRY_INTERVAL_SECS=5         # Interval between expiry sweeps
 
+# Mobile Push Notifications (optional)
+FCM_SERVICE_ACCOUNT_PATH=               # Path to Firebase service account JSON
+APNS_KEY_PATH=                          # Path to APNs .p8 private key
+APNS_KEY_ID=                            # APNs Key ID (Apple Developer portal)
+APNS_TEAM_ID=                           # APNs Team ID (Apple Developer portal)
+APNS_TOPIC=                             # APNs topic / iOS bundle ID (e.g. dev.nyxid.app)
+APNS_SANDBOX=true                       # Use APNs sandbox (default: true in dev)
+
+# Credential Nodes (optional, all have defaults)
+NODE_HEARTBEAT_INTERVAL_SECS=30        # Heartbeat ping interval (default: 30)
+NODE_HEARTBEAT_TIMEOUT_SECS=90         # Mark offline after N seconds without heartbeat (default: 90)
+NODE_PROXY_TIMEOUT_SECS=30             # Timeout for proxy requests through nodes (default: 30)
+NODE_REGISTRATION_TOKEN_TTL_SECS=3600  # Registration token validity (default: 1 hour)
+NODE_MAX_PER_USER=10                   # Maximum nodes per user (default: 10)
+NODE_MAX_WS_CONNECTIONS=100            # Maximum concurrent node WebSocket connections (default: 100)
+NODE_MAX_STREAM_DURATION_SECS=300      # Maximum duration for streaming proxy responses (default: 300)
+NODE_HMAC_SIGNING_ENABLED=true         # Enable HMAC request signing for node proxy (default: true)
+
 # Optional
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
 GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET
@@ -147,9 +209,21 @@ SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_ADDRESS
 ```bash
 # Backend (from project root)
 source "$HOME/.cargo/env" 2>/dev/null  # Ensure cargo is available
-cargo build                             # Build backend
+cargo build                             # Build backend (local provider only)
+cargo build --features aws-kms          # Build with AWS KMS support
+cargo build --features gcp-kms          # Build with GCP Cloud KMS support
+cargo build --features aws-kms,gcp-kms  # Build with both KMS providers
 cargo test                              # Run backend tests
+cargo test --all-features               # Run all tests including KMS provider tests
 cargo run                               # Start backend (port 3001)
+
+# Node Agent (from project root)
+cargo build -p nyxid-node               # Build node agent binary
+cargo test -p nyxid-node                # Run node agent tests
+cargo run -p nyxid-node -- register --token nyx_nreg_... --url ws://localhost:3001/api/v1/nodes/ws
+cargo run -p nyxid-node -- start        # Start node agent
+cargo run -p nyxid-node -- status       # Show node status
+cargo run -p nyxid-node -- credentials list  # List configured credentials
 
 # Frontend (from frontend/)
 npm run dev                             # Dev server (port 3000)

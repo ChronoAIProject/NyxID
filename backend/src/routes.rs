@@ -49,6 +49,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/setup", post(handlers::auth::setup))
         .route("/social/{provider}", get(handlers::social_auth::authorize))
         .route(
+            "/social/apple/callback",
+            post(handlers::social_auth::apple_callback),
+        )
+        .route(
             "/social/{provider}/callback",
             get(handlers::social_auth::callback),
         )
@@ -57,6 +61,7 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let user_routes = Router::new()
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
+        .route("/me", delete(handlers::users::delete_me))
         .route("/me/consents", get(handlers::consent::list_my_consents))
         .route(
             "/me/consents/{client_id}",
@@ -145,7 +150,8 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/my-tokens", get(handlers::user_tokens::list_my_tokens))
         .route(
             "/callback",
-            get(handlers::user_tokens::generic_oauth_callback),
+            get(handlers::user_tokens::generic_oauth_callback)
+                .post(handlers::user_tokens::generic_oauth_callback_post),
         )
         .route("/{provider_id}", get(handlers::providers::get_provider))
         .route("/{provider_id}", put(handlers::providers::update_provider))
@@ -180,6 +186,12 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route(
             "/{provider_id}/refresh",
             post(handlers::user_tokens::manual_refresh),
+        )
+        .route(
+            "/{provider_id}/credentials",
+            get(handlers::user_credentials::get_my_credentials)
+                .put(handlers::user_credentials::set_my_credentials)
+                .delete(handlers::user_credentials::delete_my_credentials),
         );
 
     // TODO(M-7): LLM endpoints share the global rate limiter. Consider adding a
@@ -326,6 +338,16 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/groups/{group_id}/members/{user_id}",
             post(handlers::admin_groups::add_member).delete(handlers::admin_groups::remove_member),
         )
+        .route("/nodes", get(handlers::admin_nodes::admin_list_nodes))
+        .route(
+            "/nodes/{node_id}",
+            get(handlers::admin_nodes::admin_get_node)
+                .delete(handlers::admin_nodes::admin_delete_node),
+        )
+        .route(
+            "/nodes/{node_id}/disconnect",
+            post(handlers::admin_nodes::admin_disconnect_node),
+        )
         .route("/audit-log", get(handlers::admin::list_audit_log))
         .route(
             "/oauth-clients",
@@ -375,11 +397,29 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route(
             "/telegram",
             delete(handlers::notifications::telegram_disconnect),
+        )
+        // Device token management for push notifications
+        .route(
+            "/devices",
+            get(handlers::device_tokens::list_devices)
+                .post(handlers::device_tokens::register_device),
+        )
+        .route(
+            "/devices/current",
+            delete(handlers::device_tokens::remove_current_device),
+        )
+        .route(
+            "/devices/{device_id}",
+            delete(handlers::device_tokens::remove_device),
         );
 
     // Approval management (human-only; status polling is in api_v1_delegated)
     let approval_routes = Router::new()
         .route("/requests", get(handlers::approvals::list_requests))
+        .route(
+            "/requests/{request_id}",
+            get(handlers::approvals::get_request_by_id),
+        )
         .route(
             "/requests/{request_id}/decide",
             post(handlers::approvals::decide_request),
@@ -397,6 +437,32 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/service-configs/{service_id}",
             put(handlers::approvals::set_service_config)
                 .delete(handlers::approvals::delete_service_config),
+        );
+
+    let node_routes = Router::new()
+        .route(
+            "/register-token",
+            post(handlers::node_admin::create_registration_token),
+        )
+        .route("/", get(handlers::node_admin::list_nodes))
+        .route(
+            "/my-bindings",
+            get(handlers::node_admin::list_my_bound_services),
+        )
+        .route("/{node_id}", get(handlers::node_admin::get_node))
+        .route("/{node_id}", delete(handlers::node_admin::delete_node))
+        .route(
+            "/{node_id}/rotate-token",
+            post(handlers::node_admin::rotate_token),
+        )
+        .route(
+            "/{node_id}/bindings",
+            get(handlers::node_admin::list_bindings).post(handlers::node_admin::create_binding),
+        )
+        .route(
+            "/{node_id}/bindings/{binding_id}",
+            patch(handlers::node_admin::update_binding)
+                .delete(handlers::node_admin::delete_binding),
         );
 
     let developer_routes = Router::new()
@@ -453,6 +519,7 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest("/admin", admin_routes)
         .nest("/notifications", notification_routes)
         .nest("/approvals", approval_routes)
+        .nest("/nodes", node_routes)
         .route("/public/config", get(handlers::health::public_config))
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens));
@@ -489,6 +556,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/health", get(handlers::health::health_check))
         .nest("/api/v1/webhooks", webhook_routes)
         .nest("/api/v1", api_v1)
+        // WebSocket endpoint for node agents. Auth happens in-message (not middleware).
+        // Rate limiting: global per-IP rate limiter covers HTTP upgrade requests.
+        // Connection limiting: NodeWsManager enforces max concurrent connections.
+        .route("/api/v1/nodes/ws", get(handlers::node_ws::ws_handler))
         .route(
             "/mcp",
             post(handlers::mcp_transport::mcp_post)

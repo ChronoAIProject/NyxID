@@ -1,7 +1,6 @@
 # ─── Rust ───
 /target/
 **/target/
-Cargo.lock
 
 # ─── Node.js ───
 node_modules/
@@ -12,9 +11,9 @@ build/
 
 # ─── Environment ───
 .env
-.env.local
-.env.*.local
-.env.production
+.env.*
+!.env.example
+!**/.env.example
 
 # ─── Keys ───
 keys/
@@ -43,3 +42,4 @@ k8s/
 .claude
 .playwright-mcp
 
+mobile/screenshots

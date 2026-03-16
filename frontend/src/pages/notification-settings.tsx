@@ -6,6 +6,8 @@ import {
   useUpdateNotificationSettings,
   useTelegramLink,
   useTelegramDisconnect,
+  usePushDevices,
+  useRemoveDevice,
   useServiceApprovalConfigs,
   useSetServiceApprovalConfig,
   useDeleteServiceApprovalConfig,
@@ -53,7 +55,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Bell, MessageSquare, RotateCcw, Shield, Unlink } from "lucide-react";
+import {
+  Bell,
+  MessageSquare,
+  RotateCcw,
+  Shield,
+  Smartphone,
+  Trash2,
+  Unlink,
+} from "lucide-react";
 import { toast } from "sonner";
 
 export function NotificationSettingsPage() {
@@ -61,6 +71,12 @@ export function NotificationSettingsPage() {
   const updateMutation = useUpdateNotificationSettings();
   const telegramLinkMutation = useTelegramLink();
   const telegramDisconnectMutation = useTelegramDisconnect();
+
+  const {
+    data: pushDevices,
+    isLoading: isPushDevicesLoading,
+  } = usePushDevices();
+  const removeDeviceMutation = useRemoveDevice();
 
   const { data: services } = useServices();
   const {
@@ -73,6 +89,7 @@ export function NotificationSettingsPage() {
 
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [disconnectDialogOpen, setDisconnectDialogOpen] = useState(false);
+  const [removeDeviceId, setRemoveDeviceId] = useState<string | null>(null);
   const [addServiceDialogOpen, setAddServiceDialogOpen] = useState(false);
   const [selectedServiceId, setSelectedServiceId] = useState("");
   const [selectedApprovalRequired, setSelectedApprovalRequired] =
@@ -85,6 +102,7 @@ export function NotificationSettingsPage() {
     values: settings
       ? {
           telegram_enabled: settings.telegram_enabled,
+          push_enabled: settings.push_enabled,
           approval_required: settings.approval_required,
           approval_timeout_secs: settings.approval_timeout_secs,
           grant_expiry_days: settings.grant_expiry_days,
@@ -141,6 +159,21 @@ export function NotificationSettingsPage() {
       );
     } finally {
       setDisconnectDialogOpen(false);
+    }
+  }
+
+  async function handleRemoveDevice() {
+    if (!removeDeviceId) return;
+
+    try {
+      await removeDeviceMutation.mutateAsync(removeDeviceId);
+      toast.success("Device removed");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to remove device",
+      );
+    } finally {
+      setRemoveDeviceId(null);
     }
   }
 
@@ -267,6 +300,80 @@ export function NotificationSettingsPage() {
             </CardContent>
           </Card>
 
+          {/* Push Devices Card */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Smartphone className="h-5 w-5" aria-hidden="true" />
+                Push Devices
+              </CardTitle>
+              <CardDescription>
+                Mobile devices registered for push notifications. Devices are
+                registered from the NyxID mobile app.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {isPushDevicesLoading ? (
+                <div className="space-y-3 py-2">
+                  <Skeleton className="h-14 w-full" />
+                  <Skeleton className="h-14 w-full" />
+                </div>
+              ) : !pushDevices?.devices.length ? (
+                <p className="py-4 text-center text-sm text-muted-foreground">
+                  No devices registered. Install the NyxID mobile app and sign
+                  in to register a device.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {pushDevices.devices.map((device) => (
+                    <div
+                      key={device.device_id}
+                      className="flex items-center justify-between rounded-lg border border-border p-4"
+                    >
+                      <div className="flex items-center gap-3">
+                        <Badge
+                          variant={
+                            device.platform === "apns" ? "outline" : "secondary"
+                          }
+                        >
+                          {device.platform === "apns" ? "iOS" : "Android"}
+                        </Badge>
+                        <div className="space-y-0.5">
+                          <p className="text-sm font-medium">
+                            {device.device_name ?? "Unknown device"}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            Registered{" "}
+                            {new Date(
+                              device.registered_at,
+                            ).toLocaleDateString()}
+                            {device.last_used_at && (
+                              <>
+                                {" "}
+                                &middot; Last used{" "}
+                                {new Date(
+                                  device.last_used_at,
+                                ).toLocaleDateString()}
+                              </>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => setRemoveDeviceId(device.device_id)}
+                        title="Remove device"
+                      >
+                        <Trash2 className="h-4 w-4 text-muted-foreground" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Approval Preferences */}
           <Card>
             <CardHeader>
@@ -339,6 +446,33 @@ export function NotificationSettingsPage() {
                             checked={field.value}
                             onCheckedChange={field.onChange}
                             disabled={!settings?.telegram_connected}
+                          />
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
+                    name="push_enabled"
+                    render={({ field }) => (
+                      <FormItem className="flex items-center justify-between rounded-lg border border-border p-4">
+                        <div className="space-y-0.5">
+                          <FormLabel className="text-base">
+                            Push Notifications
+                          </FormLabel>
+                          <FormDescription>
+                            Send approval requests to your registered mobile
+                            devices.
+                          </FormDescription>
+                        </div>
+                        <FormControl>
+                          <Switch
+                            checked={field.value}
+                            onCheckedChange={field.onChange}
+                            disabled={
+                              !pushDevices?.devices.length
+                            }
                           />
                         </FormControl>
                       </FormItem>
@@ -564,6 +698,40 @@ export function NotificationSettingsPage() {
               isLoading={telegramDisconnectMutation.isPending}
             >
               Disconnect
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Remove Device Confirmation */}
+      <Dialog
+        open={removeDeviceId !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoveDeviceId(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove Device</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to remove this device? It will no longer
+              receive push notifications. You can re-register it from the mobile
+              app.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRemoveDeviceId(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void handleRemoveDevice()}
+              isLoading={removeDeviceMutation.isPending}
+            >
+              Remove Device
             </Button>
           </DialogFooter>
         </DialogContent>
