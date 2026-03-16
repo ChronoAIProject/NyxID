@@ -38,6 +38,7 @@ pub async fn execute_proxy_request(
                     request_id,
                     "Missing HMAC signature",
                     403,
+                    false,
                 ));
                 return;
             };
@@ -48,6 +49,7 @@ pub async fn execute_proxy_request(
                     request_id,
                     "HMAC signature verification failed",
                     403,
+                    false,
                 ));
                 return;
             }
@@ -62,6 +64,7 @@ pub async fn execute_proxy_request(
                     request_id,
                     "Request rejected: replay or expired timestamp",
                     403,
+                    false,
                 ));
                 return;
             }
@@ -77,6 +80,7 @@ pub async fn execute_proxy_request(
                 request_id,
                 &format!("No credentials configured for service '{service_slug}'"),
                 502,
+                true,
             ));
             return;
         }
@@ -94,6 +98,7 @@ pub async fn execute_proxy_request(
             request_id,
             "Missing downstream base URL in proxy request",
             502,
+            false,
         ));
         return;
     }
@@ -177,6 +182,7 @@ pub async fn execute_proxy_request(
                             request_id,
                             &format!("Failed to read response body: {e}"),
                             502,
+                            false,
                         ));
                     }
                 }
@@ -188,6 +194,7 @@ pub async fn execute_proxy_request(
                 request_id,
                 &format!("Downstream request failed: {e}"),
                 502,
+                false,
             ));
         }
     }
@@ -280,12 +287,13 @@ fn extract_response_headers(response: &reqwest::Response) -> serde_json::Value {
     serde_json::Value::Object(headers)
 }
 
-fn proxy_error_response(request_id: &str, error: &str, status: u16) -> String {
+fn proxy_error_response(request_id: &str, error: &str, status: u16, retryable: bool) -> String {
     serde_json::json!({
         "type": "proxy_error",
         "request_id": request_id,
         "error": error,
         "status": status,
+        "retryable": retryable,
     })
     .to_string()
 }

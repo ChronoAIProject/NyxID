@@ -12,7 +12,8 @@ use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, Serv
 use crate::models::user_service_connection::{
     COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
-use crate::services::{connection_service, proxy_service};
+use crate::services::node_ws_manager::NodeWsManager;
+use crate::services::{connection_service, node_routing_service, proxy_service};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -56,6 +57,7 @@ pub struct McpToolDefinition {
 /// Filters out provider services and connections with unsatisfied credentials.
 pub async fn load_user_tools(
     db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
     user_id: &str,
 ) -> AppResult<Vec<McpToolService>> {
     // 1. All connections for this user (active and inactive, for opt-out detection)
@@ -69,6 +71,13 @@ pub async fn load_user_tools(
     let conn_map: HashMap<&str, &UserServiceConnection> = connections
         .iter()
         .map(|c| (c.service_id.as_str(), c))
+        .collect();
+
+    let node_route_service_ids =
+        node_routing_service::list_routable_service_ids(db, user_id, node_ws_manager).await?;
+    let node_route_set: HashSet<&str> = node_route_service_ids
+        .iter()
+        .map(|service_id| service_id.as_str())
         .collect();
 
     // 2. Explicitly connected services (active connections)
@@ -113,7 +122,8 @@ pub async fn load_user_tools(
         if svc.requires_user_credential {
             // Must have credential in connection
             if let Some(conn) = conn_map.get(svc.id.as_str()) {
-                if conn.credential_encrypted.is_none() {
+                if conn.credential_encrypted.is_none() && !node_route_set.contains(svc.id.as_str())
+                {
                     continue;
                 }
             } else {
@@ -833,6 +843,7 @@ pub async fn discover_services(
 pub async fn connect_service(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
+    node_ws_manager: &crate::services::node_ws_manager::NodeWsManager,
     user_id: &str,
     service_id: &str,
     credential: Option<&str>,
@@ -841,6 +852,7 @@ pub async fn connect_service(
     let result = connection_service::connect_user(
         db,
         encryption_keys,
+        node_ws_manager,
         user_id,
         service_id,
         credential,

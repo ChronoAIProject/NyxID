@@ -6,7 +6,12 @@ import {
   createRegistrationTokenSchema,
   type CreateRegistrationTokenFormData,
 } from "@/schemas/nodes";
-import { useNodes, useCreateRegistrationToken, useDeleteNode } from "@/hooks/use-nodes";
+import {
+  useNodes,
+  useCreateRegistrationToken,
+  useDeleteNode,
+} from "@/hooks/use-nodes";
+import { usePublicConfig } from "@/hooks/use-public-config";
 import { ApiError } from "@/lib/api-client";
 import { formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
@@ -39,11 +44,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  HardDrive,
-  Plus,
-  Trash2,
-} from "lucide-react";
+import { HardDrive, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
 
@@ -55,6 +56,13 @@ function RegisterNodeDialog() {
     readonly expires_at: string;
   } | null>(null);
   const createMutation = useCreateRegistrationToken();
+  const { data: publicConfig } = usePublicConfig();
+
+  // Show --url flag when the backend is not on localhost
+  const nodeWsUrl = publicConfig?.node_ws_url ?? null;
+  const isLocalhost =
+    nodeWsUrl?.includes("localhost") || nodeWsUrl?.includes("127.0.0.1");
+  const urlFlag = nodeWsUrl && !isLocalhost ? ` --url ${nodeWsUrl}` : "";
 
   const form = useForm<CreateRegistrationTokenFormData>({
     resolver: zodResolver(createRegistrationTokenSchema),
@@ -108,7 +116,10 @@ function RegisterNodeDialog() {
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-3">
-              <CopyableField label="Registration Token" value={createdToken.token} />
+              <CopyableField
+                label="Registration Token"
+                value={createdToken.token}
+              />
               <div className="rounded-md bg-muted p-3 space-y-2">
                 <p className="text-xs font-medium text-text-tertiary">
                   Run on your node
@@ -119,14 +130,17 @@ function RegisterNodeDialog() {
                   </p>
                   <code className="text-xs text-foreground break-all">
                     nyxid-node register --token {createdToken.token}
+                    {urlFlag}
                   </code>
                 </div>
                 <div>
                   <p className="text-[10px] text-muted-foreground mb-0.5">
-                    OS keychain storage (macOS Keychain, Windows Credential Manager)
+                    OS keychain storage (macOS Keychain, Windows Credential
+                    Manager)
                   </p>
                   <code className="text-xs text-foreground break-all">
-                    nyxid-node register --token {createdToken.token} --keychain
+                    nyxid-node register --token {createdToken.token}
+                    {urlFlag} --keychain
                   </code>
                 </div>
               </div>
@@ -216,10 +230,7 @@ export function NodesPage() {
       {isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 3 }).map((_, i) => (
-            <Skeleton
-              key={`node-skel-${String(i)}`}
-              className="h-16 w-full"
-            />
+            <Skeleton key={`node-skel-${String(i)}`} className="h-16 w-full" />
           ))}
         </div>
       ) : error ? (
@@ -268,7 +279,10 @@ export function NodesPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
+                    <NodeStatusBadge
+                      status={node.status}
+                      isConnected={node.is_connected}
+                    />
                   </TableCell>
                   <TableCell>
                     <span className="text-sm text-muted-foreground">

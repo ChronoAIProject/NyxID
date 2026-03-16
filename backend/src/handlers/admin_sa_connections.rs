@@ -173,6 +173,7 @@ pub async fn connect_sa_service(
     let result = connection_service::connect_user(
         &state.db,
         &state.encryption_keys,
+        state.node_ws_manager.as_ref(),
         &sa_id,
         &service_id,
         body.credential.as_deref(),

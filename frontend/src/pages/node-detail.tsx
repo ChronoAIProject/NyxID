@@ -11,6 +11,10 @@ import {
 } from "@/hooks/use-nodes";
 import { useServices } from "@/hooks/use-services";
 import { ApiError } from "@/lib/api-client";
+import {
+  buildNodeCredentialCommand,
+  getNodeCredentialPromptHint,
+} from "@/lib/node-credentials";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { CopyableField } from "@/components/shared/copyable-field";
@@ -54,28 +58,6 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
-import type { DownstreamService } from "@/types/api";
-
-function buildCredentialCommand(
-  serviceSlug: string,
-  service: DownstreamService | undefined,
-): string {
-  const base = `nyxid-node credentials add --service ${serviceSlug}`;
-  if (!service) return `${base} --header "<HEADER_NAME>: <YOUR_API_KEY>"`;
-
-  if (service.auth_method === "query") {
-    return `${base} --query-param "${service.auth_key_name}=<YOUR_API_KEY>"`;
-  }
-
-  // header injection (default)
-  const prefix =
-    service.auth_type === "bearer"
-      ? "Bearer "
-      : service.auth_type === "basic"
-        ? "Basic "
-        : "";
-  return `${base} --header "${service.auth_key_name}: ${prefix}<YOUR_API_KEY>"`;
-}
 
 export function NodeDetailPage() {
   const { nodeId } = useParams({ strict: false }) as { nodeId: string };
@@ -109,6 +91,9 @@ export function NodeDetailPage() {
   const servicesBySlug = new Map(
     (services ?? []).map((s) => [s.slug, s]),
   );
+  const setupService =
+    setupCommandSlug !== null ? servicesBySlug.get(setupCommandSlug) : undefined;
+  const setupCommandHint = getNodeCredentialPromptHint(setupService);
 
   // Filter out services that already have bindings
   const boundServiceIds = new Set(
@@ -695,41 +680,36 @@ export function NodeDetailPage() {
             <DialogTitle>Node Credential Setup</DialogTitle>
             <DialogDescription>
               Run this command on your node to configure the credential for{" "}
-              <strong>{setupCommandSlug ?? ""}</strong>. Replace{" "}
-              <code className="rounded bg-muted px-1 text-xs">&lt;YOUR_API_KEY&gt;</code>{" "}
-              with the actual secret.
+              <strong>{setupCommandSlug ?? ""}</strong>. You will be prompted
+              to enter the secret value securely.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <CopyableField
               label="Setup Command"
-              value={buildCredentialCommand(
-                setupCommandSlug ?? "",
-                servicesBySlug.get(setupCommandSlug ?? ""),
-              )}
+              value={buildNodeCredentialCommand(setupCommandSlug ?? "", setupService)}
             />
-            {(() => {
-              const svc = servicesBySlug.get(setupCommandSlug ?? "");
-              if (!svc) return null;
-              return (
-                <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
+            {setupCommandHint && (
+              <p className="text-xs text-muted-foreground">{setupCommandHint}</p>
+            )}
+            {setupService && (
+              <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
+                <p>
+                  <span className="font-medium text-foreground">Service:</span>{" "}
+                  {setupService.name}
+                </p>
+                <p>
+                  <span className="font-medium text-foreground">Auth method:</span>{" "}
+                  {setupService.auth_method} ({setupService.auth_key_name})
+                </p>
+                {setupService.auth_type && (
                   <p>
-                    <span className="font-medium text-foreground">Service:</span>{" "}
-                    {svc.name}
+                    <span className="font-medium text-foreground">Auth type:</span>{" "}
+                    {setupService.auth_type}
                   </p>
-                  <p>
-                    <span className="font-medium text-foreground">Auth method:</span>{" "}
-                    {svc.auth_method} ({svc.auth_key_name})
-                  </p>
-                  {svc.auth_type && (
-                    <p>
-                      <span className="font-medium text-foreground">Auth type:</span>{" "}
-                      {svc.auth_type}
-                    </p>
-                  )}
-                </div>
-              );
-            })()}
+                )}
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button onClick={() => setSetupCommandSlug(null)}>Done</Button>

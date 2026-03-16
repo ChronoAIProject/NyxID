@@ -7,6 +7,7 @@ import {
   useDisconnectService,
   useUpdateCredential,
 } from "@/hooks/use-services";
+import { useMyNodeBindings } from "@/hooks/use-nodes";
 import {
   isConnectable,
   isOidcService,
@@ -24,7 +25,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Link2, Unlink, Server, KeyRound } from "lucide-react";
+import { Link2, Unlink, Server, KeyRound, Cable } from "lucide-react";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import { CredentialDialog } from "./credential-dialog";
@@ -32,9 +33,12 @@ import { CredentialDialog } from "./credential-dialog";
 export function ConnectionGrid() {
   const { data: services, isLoading: servicesLoading } = useServices();
   const { data: connections, isLoading: connectionsLoading } = useConnections();
+  const { data: nodeRoutableServiceIds } = useMyNodeBindings();
   const connectMutation = useConnectService();
   const disconnectMutation = useDisconnectService();
   const updateCredentialMutation = useUpdateCredential();
+
+  const nodeRouteSet = new Set(nodeRoutableServiceIds ?? []);
 
   const [credentialDialog, setCredentialDialog] = useState<{
     readonly service: DownstreamService;
@@ -43,14 +47,14 @@ export function ConnectionGrid() {
 
   const isLoading = servicesLoading || connectionsLoading;
 
-  async function handleConnect(service: DownstreamService) {
+  async function handleConnect(service: DownstreamService, viaNode = false) {
     const inputType = getCredentialInputType(service);
 
-    if (inputType.type === "none") {
-      // Internal service: connect directly without credential
+    if (inputType.type === "none" || viaNode) {
+      // Internal service or node-backed: connect directly without credential
       try {
         await connectMutation.mutateAsync({ serviceId: service.id });
-        toast.success("Connected to service");
+        toast.success(viaNode ? "Connected via node" : "Connected to service");
       } catch (error) {
         if (error instanceof ApiError) {
           toast.error(error.message);
@@ -64,10 +68,7 @@ export function ConnectionGrid() {
     }
   }
 
-  async function handleCredentialSubmit(
-    credential: string,
-    label?: string,
-  ) {
+  async function handleCredentialSubmit(credential: string, label?: string) {
     if (!credentialDialog) return;
     const { service, mode } = credentialDialog;
 
@@ -125,9 +126,8 @@ export function ConnectionGrid() {
   }
 
   // Filter: only connectable services (exclude providers and OIDC)
-  const connectableServices = services?.filter(
-    (s) => isConnectable(s) && !isOidcService(s),
-  ) ?? [];
+  const connectableServices =
+    services?.filter((s) => isConnectable(s) && !isOidcService(s)) ?? [];
 
   if (connectableServices.length === 0) {
     return (
@@ -150,6 +150,10 @@ export function ConnectionGrid() {
           const connection = connections?.find(
             (c) => c.service_id === service.id,
           );
+          const canRepairCredential =
+            connection !== undefined &&
+            service.requires_user_credential &&
+            (connection.has_credential || !nodeRouteSet.has(service.id));
 
           return (
             <Card
@@ -170,9 +174,7 @@ export function ConnectionGrid() {
                     >
                       <Server
                         className={`h-5 w-5 ${
-                          isConnected
-                            ? "text-primary"
-                            : "text-muted-foreground"
+                          isConnected ? "text-primary" : "text-muted-foreground"
                         }`}
                       />
                     </div>
@@ -211,14 +213,28 @@ export function ConnectionGrid() {
                             </span>
                           )}
                         {service.requires_user_credential &&
-                          !connection.has_credential && (
+                          !connection.has_credential &&
+                          (nodeRouteSet.has(service.id) ? (
+                            <div className="flex flex-col gap-0.5">
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                                <Cable className="h-3 w-3" />
+                                Via node
+                              </span>
+                              <span className="text-[10px] text-muted-foreground/60">
+                                Manage credentials via{" "}
+                                <code className="rounded bg-muted px-1 py-0.5 font-mono">
+                                  nyxid-node credentials
+                                </code>
+                              </span>
+                            </div>
+                          ) : (
                             <span className="text-xs text-destructive">
                               Credential missing
                             </span>
-                          )}
+                          ))}
                       </div>
                       <div className="flex gap-1.5">
-                        {service.requires_user_credential && (
+                        {canRepairCredential && (
                           <Button
                             variant="outline"
                             size="sm"
@@ -250,16 +266,30 @@ export function ConnectionGrid() {
                       <span className="text-xs text-muted-foreground">
                         Not connected
                       </span>
-                      <Button
-                        size="sm"
-                        onClick={() => void handleConnect(service)}
-                        disabled={connectMutation.isPending}
-                      >
-                        <Link2 className="mr-1.5 h-3 w-3" />
-                        {service.requires_user_credential
-                          ? "Connect"
-                          : "Enable"}
-                      </Button>
+                      <div className="flex gap-1.5">
+                        {service.requires_user_credential &&
+                          nodeRouteSet.has(service.id) && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void handleConnect(service, true)}
+                              disabled={connectMutation.isPending}
+                            >
+                              <Cable className="mr-1.5 h-3 w-3" />
+                              Via Node
+                            </Button>
+                          )}
+                        <Button
+                          size="sm"
+                          onClick={() => void handleConnect(service)}
+                          disabled={connectMutation.isPending}
+                        >
+                          <Link2 className="mr-1.5 h-3 w-3" />
+                          {service.requires_user_credential
+                            ? "Connect"
+                            : "Enable"}
+                        </Button>
+                      </div>
                     </>
                   )}
                 </div>

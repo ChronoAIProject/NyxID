@@ -502,7 +502,13 @@ async fn handle_tools_list(
     session_id: &str,
     request: &JsonRpcRequest,
 ) -> Response {
-    let services = match mcp_service::load_user_tools(&state.db, user_id).await {
+    let services = match mcp_service::load_user_tools(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        user_id,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load user tools: {e}");
@@ -599,7 +605,13 @@ async fn handle_tools_call(
     // -- Service tool: verify activation, load, resolve, execute --
     let activated = state.mcp_sessions.get_activated_service_ids(session_id);
 
-    let services = match mcp_service::load_user_tools(&state.db, user_id).await {
+    let services = match mcp_service::load_user_tools(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        user_id,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load tools for execution: {e}");
@@ -741,7 +753,13 @@ async fn handle_meta_call_tool(
         };
 
     // Load user tools
-    let services = match mcp_service::load_user_tools(&state.db, user_id).await {
+    let services = match mcp_service::load_user_tools(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        user_id,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load tools for call_tool: {e}");
@@ -853,7 +871,13 @@ async fn handle_meta_search(
     }
 
     // Load ALL user tools (not just activated)
-    let services = match mcp_service::load_user_tools(&state.db, user_id).await {
+    let services = match mcp_service::load_user_tools(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        user_id,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load tools for search: {e}");
@@ -977,6 +1001,7 @@ async fn handle_meta_connect(
     match mcp_service::connect_service(
         &state.db,
         &state.encryption_keys,
+        state.node_ws_manager.as_ref(),
         user_id,
         service_id,
         credential,

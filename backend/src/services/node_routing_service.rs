@@ -17,41 +17,32 @@ pub struct NodeRoute {
     pub fallback_node_ids: Vec<String>,
 }
 
-/// Check if a user has a node binding for this service.
-/// Returns Some(NodeRoute) if the user has an active binding to an active online node.
-/// Returns None to fall through to standard proxy.
-///
-/// Selection logic:
-/// 1. Find active bindings for (user_id, service_id) ordered by priority
-/// 2. Batch-fetch all referenced nodes in a single query
-/// 3. Filter to nodes that are both DB-online AND WS-connected
-/// 4. Skip nodes with >50% error rate (if enough samples)
-/// 5. Return the first viable node as primary, rest as fallbacks
-/// 6. Return None if no viable node found
-pub async fn resolve_node_route(
+async fn load_viable_bindings(
     db: &mongodb::Database,
     user_id: &str,
-    service_id: &str,
+    service_id: Option<&str>,
     ws_manager: &NodeWsManager,
-) -> AppResult<Option<NodeRoute>> {
-    // Find active bindings for this user+service, ordered by priority
+) -> AppResult<Vec<NodeServiceBinding>> {
+    let mut filter = doc! {
+        "user_id": user_id,
+        "is_active": true,
+    };
+    if let Some(service_id) = service_id {
+        filter.insert("service_id", service_id);
+    }
+
     let bindings: Vec<NodeServiceBinding> = db
         .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .find(doc! {
-            "user_id": user_id,
-            "service_id": service_id,
-            "is_active": true,
-        })
+        .find(filter)
         .sort(doc! { "priority": 1 })
         .await?
         .try_collect()
         .await?;
 
     if bindings.is_empty() {
-        return Ok(None);
+        return Ok(vec![]);
     }
 
-    // Batch-fetch all referenced nodes in a single query
     let node_id_array: bson::Array = bindings
         .iter()
         .map(|b| bson::Bson::String(b.node_id.clone()))
@@ -70,16 +61,13 @@ pub async fn resolve_node_route(
 
     let online_nodes: HashMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
-    // Filter to nodes that are both DB-online AND WS-connected,
-    // skipping unhealthy nodes (>50% error rate with sufficient samples)
-    let mut viable_nodes: Vec<String> = Vec::new();
-    for binding in &bindings {
+    let mut viable_bindings = Vec::new();
+    for binding in bindings {
         if let Some(node) = online_nodes.get(binding.node_id.as_str()) {
             if !ws_manager.is_connected(&node.id) {
                 continue;
             }
 
-            // Skip nodes with >50% error rate if they have enough samples
             if node.metrics.total_requests > 10 {
                 let error_rate =
                     node.metrics.error_count as f64 / node.metrics.total_requests as f64;
@@ -93,9 +81,35 @@ pub async fn resolve_node_route(
                 }
             }
 
-            viable_nodes.push(node.id.clone());
+            viable_bindings.push(binding);
         }
     }
+
+    Ok(viable_bindings)
+}
+
+/// Check if a user has a node binding for this service.
+/// Returns Some(NodeRoute) if the user has an active binding to an active online node.
+/// Returns None to fall through to standard proxy.
+///
+/// Selection logic:
+/// 1. Find active bindings for (user_id, service_id) ordered by priority
+/// 2. Batch-fetch all referenced nodes in a single query
+/// 3. Filter to nodes that are both DB-online AND WS-connected
+/// 4. Skip nodes with >50% error rate (if enough samples)
+/// 5. Return the first viable node as primary, rest as fallbacks
+/// 6. Return None if no viable node found
+pub async fn resolve_node_route(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+    ws_manager: &NodeWsManager,
+) -> AppResult<Option<NodeRoute>> {
+    let viable_nodes: Vec<String> = load_viable_bindings(db, user_id, Some(service_id), ws_manager)
+        .await?
+        .into_iter()
+        .map(|binding| binding.node_id)
+        .collect();
 
     if viable_nodes.is_empty() {
         return Ok(None);
@@ -105,4 +119,34 @@ pub async fn resolve_node_route(
         node_id: viable_nodes[0].clone(),
         fallback_node_ids: viable_nodes[1..].to_vec(),
     }))
+}
+
+/// Check if a user has any currently routable node bindings for a specific service.
+pub async fn has_routable_node_bindings(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+    ws_manager: &NodeWsManager,
+) -> AppResult<bool> {
+    Ok(
+        !load_viable_bindings(db, user_id, Some(service_id), ws_manager)
+            .await?
+            .is_empty(),
+    )
+}
+
+/// Return all service IDs for which the user currently has at least one viable node route.
+pub async fn list_routable_service_ids(
+    db: &mongodb::Database,
+    user_id: &str,
+    ws_manager: &NodeWsManager,
+) -> AppResult<Vec<String>> {
+    let mut service_ids: Vec<String> = load_viable_bindings(db, user_id, None, ws_manager)
+        .await?
+        .into_iter()
+        .map(|binding| binding.service_id)
+        .collect();
+    service_ids.sort();
+    service_ids.dedup();
+    Ok(service_ids)
 }

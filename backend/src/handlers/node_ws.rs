@@ -384,6 +384,7 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                     &err.request_id,
                     &err.error,
                     status,
+                    err.retryable,
                 );
             }
             NodeMessage::ProxyResponseStart(start) => {

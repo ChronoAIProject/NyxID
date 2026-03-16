@@ -10,6 +10,8 @@ use crate::models::downstream_service::{
 use crate::models::user_service_connection::{
     COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
+use crate::services::node_routing_service;
+use crate::services::node_ws_manager::NodeWsManager;
 
 /// Maximum credential length in bytes to prevent abuse.
 const MAX_CREDENTIAL_LENGTH: usize = 8192;
@@ -27,6 +29,7 @@ pub struct ConnectionResult {
 pub async fn connect_user(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
+    node_ws_manager: &NodeWsManager,
     user_id: &str,
     service_id: &str,
     credential: Option<&str>,
@@ -48,9 +51,18 @@ pub async fn connect_user(
         }
         "connection" => {
             if credential.is_none() {
-                return Err(AppError::BadRequest(
-                    "Credential is required for this service type".to_string(),
-                ));
+                let has_node_route = node_routing_service::has_routable_node_bindings(
+                    db,
+                    user_id,
+                    service_id,
+                    node_ws_manager,
+                )
+                .await?;
+                if !has_node_route {
+                    return Err(AppError::BadRequest(
+                        "Credential is required for this service type unless an online node route is available".to_string(),
+                    ));
+                }
             }
         }
         "internal" => {

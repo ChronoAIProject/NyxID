@@ -35,6 +35,7 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
 #[derive(Serialize)]
 pub struct PublicConfigResponse {
     pub mcp_url: String,
+    pub node_ws_url: String,
     pub version: String,
     pub social_providers: Vec<String>,
 }
@@ -56,8 +57,13 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
         social_providers.push("apple".to_string());
     }
 
+    let ws_base = base
+        .replace("https://", "wss://")
+        .replace("http://", "ws://");
+
     Json(PublicConfigResponse {
         mcp_url: format!("{base}/mcp"),
+        node_ws_url: format!("{ws_base}/api/v1/nodes/ws"),
         version: env!("CARGO_PKG_VERSION").to_string(),
         social_providers,
     })

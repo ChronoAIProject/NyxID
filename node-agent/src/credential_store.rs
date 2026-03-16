@@ -211,6 +211,39 @@ impl CredentialStore {
     }
 }
 
+/// Thread-safe, hot-reloadable credential handle.
+///
+/// The sender half is held by the background reload task.
+/// The receiver half is cloned into each connection and proxy handler.
+/// `snapshot()` returns the current `CredentialStore` via a cheap `Arc` clone.
+#[derive(Clone)]
+pub struct SharedCredentials {
+    rx: tokio::sync::watch::Receiver<CredentialStore>,
+}
+
+pub struct SharedCredentialsSender {
+    tx: tokio::sync::watch::Sender<CredentialStore>,
+}
+
+impl SharedCredentials {
+    pub fn new(initial: CredentialStore) -> (SharedCredentialsSender, Self) {
+        let (tx, rx) = tokio::sync::watch::channel(initial);
+        (SharedCredentialsSender { tx }, Self { rx })
+    }
+
+    /// Get a snapshot of the current credentials (cheap Arc clone).
+    pub fn snapshot(&self) -> CredentialStore {
+        self.rx.borrow().clone()
+    }
+}
+
+impl SharedCredentialsSender {
+    /// Atomically replace the credential store.
+    pub fn update(&self, new_store: CredentialStore) {
+        let _ = self.tx.send(new_store);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

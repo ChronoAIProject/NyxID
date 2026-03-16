@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "nyxid-node", about = "NyxID credential node agent")]
@@ -88,19 +88,27 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum CredentialCommands {
-    /// Add a credential for a service
+    /// Add a credential for a service (prompts for the secret value securely)
     Add {
         /// Service slug (e.g., "openai", "github-api")
         #[arg(long)]
         service: String,
 
-        /// Header to inject (e.g., "Authorization: Bearer sk-...")
+        /// Header name to inject (e.g., "Authorization"). The value will be prompted securely.
         #[arg(long)]
         header: Option<String>,
 
-        /// Query parameter to inject (e.g., "api_key=sk-...")
+        /// Query parameter name to inject (e.g., "api_key"). The value will be prompted securely.
         #[arg(long)]
         query_param: Option<String>,
+
+        /// How to format the prompted secret before storing it.
+        #[arg(long, value_enum, default_value_t = CredentialSecretFormat::Raw)]
+        secret_format: CredentialSecretFormat,
+
+        /// Inline secret value (skips interactive prompt; NOT recommended -- visible in shell history)
+        #[arg(long, hide = true)]
+        value: Option<String>,
     },
 
     /// List configured credentials
@@ -112,4 +120,14 @@ pub enum CredentialCommands {
         #[arg(long)]
         service: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum CredentialSecretFormat {
+    /// Store the secret exactly as entered.
+    Raw,
+    /// Prefix the secret with "Bearer ".
+    Bearer,
+    /// Base64-encode "username:password" and prefix it with "Basic ".
+    Basic,
 }
