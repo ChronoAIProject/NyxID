@@ -19,6 +19,7 @@ use social_auth_service::SocialProfile;
 const SOCIAL_STATE_COOKIE: &str = "nyx_social_state";
 const SOCIAL_CLIENT_COOKIE: &str = "nyx_social_client";
 const SOCIAL_REDIRECT_COOKIE: &str = "nyx_social_redirect";
+const SOCIAL_RETURN_TO_COOKIE: &str = "nyx_social_return_to";
 const SOCIAL_CLIENT_MOBILE: &str = "mobile";
 const SOCIAL_NONCE_COOKIE: &str = "nyx_social_nonce";
 const SOCIAL_STATE_MAX_AGE: i64 = 600; // 10 minutes
@@ -29,6 +30,9 @@ const COOKIE_SAMESITE_NONE: &str = "None";
 pub struct AuthorizeQuery {
     pub client: Option<String>,
     pub redirect_uri: Option<String>,
+    /// OAuth flow return_to URL. After social login, the user is redirected here
+    /// instead of the frontend root so the OAuth authorize flow can resume.
+    pub return_to: Option<String>,
 }
 
 /// GET /api/v1/auth/social/{provider}
@@ -180,6 +184,20 @@ pub async fn authorize(
         }
     }
 
+    // Persist return_to (OAuth authorize resume URL) in a cookie so the
+    // callback can redirect the user back into the OAuth flow after login.
+    // Clear stale variants first so a plain social login cannot accidentally
+    // reuse an abandoned OAuth resume URL from an earlier attempt.
+    append_return_to_cookie(
+        &mut headers,
+        query.return_to.as_deref(),
+        &state.config.frontend_url,
+        &state.config.base_url,
+        secure,
+        domain,
+        same_site,
+    )?;
+
     headers.insert(
         header::LOCATION,
         authorization_url
@@ -213,6 +231,7 @@ pub async fn callback(
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
     let frontend_url = &state.config.frontend_url;
+    let backend_url = &state.config.base_url;
 
     // Resolve redirect target from state param first (mobile info may be
     // encoded there since ASWebAuthenticationSession drops cookies), then
@@ -224,7 +243,7 @@ pub async fn callback(
                 redirect_uri: redirect_uri.clone(),
             }
         }
-        _ => resolve_redirect_target(frontend_url, &headers),
+        _ => resolve_redirect_target(frontend_url, backend_url, &headers),
     };
 
     // Parse provider
@@ -459,6 +478,7 @@ pub async fn apple_callback(
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
     let frontend_url = &state.config.frontend_url;
+    let backend_url = &state.config.base_url;
 
     // Resolve redirect target from state param (mobile info encoded in state)
     // before full validation so error redirects also go to the right place.
@@ -469,6 +489,7 @@ pub async fn apple_callback(
         }
         _ => SocialRedirectTarget::Web {
             frontend_url: frontend_url.to_string(),
+            return_to: extract_trusted_return_to(&headers, frontend_url, backend_url),
         },
     };
 
@@ -690,21 +711,16 @@ fn append_social_cleanup_cookies(
         );
     }
 
-    // Clear mobile client cookies
-    if let Ok(cookie) =
-        clear_cookie(SOCIAL_CLIENT_COOKIE, "/api/v1/auth/social", secure, domain).parse()
-    {
-        headers.append(header::SET_COOKIE, cookie);
+    // Clear mobile client cookies and all return_to variants.
+    for name in [SOCIAL_CLIENT_COOKIE, SOCIAL_REDIRECT_COOKIE] {
+        if let Ok(cookie) = clear_cookie(name, "/api/v1/auth/social", secure, domain).parse() {
+            headers.append(header::SET_COOKIE, cookie);
+        }
     }
-    if let Ok(cookie) = clear_cookie(
-        SOCIAL_REDIRECT_COOKIE,
-        "/api/v1/auth/social",
-        secure,
-        domain,
-    )
-    .parse()
-    {
-        headers.append(header::SET_COOKIE, cookie);
+    for cookie in return_to_clear_cookie_values(domain) {
+        if let Ok(parsed) = cookie.parse() {
+            headers.append(header::SET_COOKIE, parsed);
+        }
     }
 
     Ok(())
@@ -764,11 +780,22 @@ fn build_mobile_auth_redirect(
 
 #[derive(Debug, Clone)]
 enum SocialRedirectTarget {
-    Web { frontend_url: String },
-    Mobile { redirect_uri: String },
+    Web {
+        frontend_url: String,
+        /// If set, redirect here instead of `frontend_url` after login so the
+        /// user resumes an in-progress OAuth authorization flow.
+        return_to: Option<String>,
+    },
+    Mobile {
+        redirect_uri: String,
+    },
 }
 
-fn resolve_redirect_target(frontend_url: &str, headers: &HeaderMap) -> SocialRedirectTarget {
+fn resolve_redirect_target(
+    frontend_url: &str,
+    backend_url: &str,
+    headers: &HeaderMap,
+) -> SocialRedirectTarget {
     let client_cookie = extract_cookie_value(headers, SOCIAL_CLIENT_COOKIE);
     let redirect_cookie = extract_cookie_value(headers, SOCIAL_REDIRECT_COOKIE);
     let mobile_redirect = redirect_cookie
@@ -783,6 +810,7 @@ fn resolve_redirect_target(frontend_url: &str, headers: &HeaderMap) -> SocialRed
 
     SocialRedirectTarget::Web {
         frontend_url: frontend_url.to_string(),
+        return_to: extract_trusted_return_to(headers, frontend_url, backend_url),
     }
 }
 
@@ -797,9 +825,13 @@ fn build_success_redirect_url(
     tokens: Option<&token_service::IssuedTokens>,
 ) -> String {
     match target {
-        SocialRedirectTarget::Web { frontend_url } => {
-            frontend_url.trim_end_matches('/').to_string() + "/"
-        }
+        SocialRedirectTarget::Web {
+            frontend_url,
+            return_to,
+        } => match return_to {
+            Some(url) => url.clone(),
+            None => frontend_url.trim_end_matches('/').to_string() + "/",
+        },
         SocialRedirectTarget::Mobile { redirect_uri } => {
             let tokens = tokens.expect("mobile redirect requires issued tokens");
             let joiner = if redirect_uri.contains('?') { "&" } else { "?" };
@@ -826,9 +858,16 @@ fn redirect_with_error(
 ) -> (StatusCode, HeaderMap, ()) {
     let mut headers = HeaderMap::new();
     let url = match target {
-        SocialRedirectTarget::Web { frontend_url } => {
+        SocialRedirectTarget::Web {
+            frontend_url,
+            return_to,
+        } => {
             let base = frontend_url.trim_end_matches('/');
-            format!("{}/login?error={}", base, error)
+            let mut url = format!("{}/login?error={}", base, urlencoding::encode(error));
+            if let Some(return_to) = return_to {
+                url.push_str(&format!("&return_to={}", urlencoding::encode(return_to)));
+            }
+            url
         }
         SocialRedirectTarget::Mobile { redirect_uri } => {
             let joiner = if redirect_uri.contains('?') { "&" } else { "?" };
@@ -848,20 +887,15 @@ fn redirect_with_error(
             headers.append(header::SET_COOKIE, parsed);
         }
     }
-    if let Ok(cookie) =
-        clear_cookie(SOCIAL_CLIENT_COOKIE, "/api/v1/auth/social", secure, domain).parse()
-    {
-        headers.append(header::SET_COOKIE, cookie);
+    for name in [SOCIAL_CLIENT_COOKIE, SOCIAL_REDIRECT_COOKIE] {
+        if let Ok(cookie) = clear_cookie(name, "/api/v1/auth/social", secure, domain).parse() {
+            headers.append(header::SET_COOKIE, cookie);
+        }
     }
-    if let Ok(cookie) = clear_cookie(
-        SOCIAL_REDIRECT_COOKIE,
-        "/api/v1/auth/social",
-        secure,
-        domain,
-    )
-    .parse()
-    {
-        headers.append(header::SET_COOKIE, cookie);
+    for cookie in return_to_clear_cookie_values(domain) {
+        if let Ok(parsed) = cookie.parse() {
+            headers.append(header::SET_COOKIE, parsed);
+        }
     }
     (StatusCode::FOUND, headers, ())
 }
@@ -947,6 +981,90 @@ fn social_clear_cookie_values(secure: bool, domain: Option<&str>) -> [String; 4]
     ]
 }
 
+fn append_return_to_cookie(
+    headers: &mut HeaderMap,
+    return_to: Option<&str>,
+    frontend_url: &str,
+    backend_url: &str,
+    secure: bool,
+    domain: Option<&str>,
+    same_site: &str,
+) -> AppResult<()> {
+    for cookie in return_to_clear_cookie_values(domain) {
+        headers.append(
+            header::SET_COOKIE,
+            cookie
+                .parse()
+                .map_err(|_| AppError::Internal("Cookie error".to_string()))?,
+        );
+    }
+
+    let Some(return_to) =
+        return_to.filter(|url| is_trusted_return_to(frontend_url, backend_url, url))
+    else {
+        return Ok(());
+    };
+
+    headers.append(
+        header::SET_COOKIE,
+        build_cookie_with_same_site(
+            SOCIAL_RETURN_TO_COOKIE,
+            &urlencoding::encode(return_to),
+            SOCIAL_STATE_MAX_AGE,
+            "/api/v1/auth/social",
+            secure,
+            domain,
+            same_site,
+        )
+        .parse()
+        .map_err(|_| AppError::Internal("Cookie error".to_string()))?,
+    );
+
+    Ok(())
+}
+
+fn return_to_clear_cookie_values(domain: Option<&str>) -> [String; 3] {
+    [
+        clear_cookie_with_same_site(
+            SOCIAL_RETURN_TO_COOKIE,
+            "/api/v1/auth/social",
+            false,
+            domain,
+            COOKIE_SAMESITE_LAX,
+        ),
+        clear_cookie_with_same_site(
+            SOCIAL_RETURN_TO_COOKIE,
+            "/api/v1/auth/social",
+            true,
+            domain,
+            COOKIE_SAMESITE_LAX,
+        ),
+        clear_cookie_with_same_site(
+            SOCIAL_RETURN_TO_COOKIE,
+            "/api/v1/auth/social",
+            true,
+            domain,
+            COOKIE_SAMESITE_NONE,
+        ),
+    ]
+}
+
+fn extract_trusted_return_to(
+    headers: &HeaderMap,
+    frontend_url: &str,
+    backend_url: &str,
+) -> Option<String> {
+    extract_cookie_value(headers, SOCIAL_RETURN_TO_COOKIE)
+        .and_then(|encoded| urlencoding::decode(&encoded).ok().map(|v| v.to_string()))
+        .filter(|return_to| is_trusted_return_to(frontend_url, backend_url, return_to))
+}
+
+fn is_trusted_return_to(frontend_url: &str, backend_url: &str, return_to: &str) -> bool {
+    let frontend = frontend_url.trim_end_matches('/');
+    let backend = backend_url.trim_end_matches('/');
+    return_to.starts_with(&format!("{frontend}/")) || return_to.starts_with(&format!("{backend}/"))
+}
+
 /// Extract a cookie value by name from the request headers.
 ///
 /// Reads only the first `Cookie` header. Per RFC 6265 section 5.4, the user
@@ -1015,6 +1133,115 @@ mod tests {
         assert!(cookies.iter().any(|c| c.contains("nyx_social_nonce=")));
         assert!(cookies.iter().any(|c| c.contains("SameSite=Lax")));
         assert!(cookies.iter().any(|c| c.contains("SameSite=None")));
+    }
+
+    #[test]
+    fn return_to_clear_cookie_values_cover_lax_and_apple_variants() {
+        let cookies = return_to_clear_cookie_values(Some(".example.com"));
+        assert_eq!(cookies.len(), 3);
+        assert!(cookies.iter().all(|c| c.contains("nyx_social_return_to=")));
+        assert!(cookies.iter().all(|c| c.contains("Max-Age=0")));
+        assert!(cookies.iter().any(|c| c.contains("SameSite=Lax")));
+        assert!(cookies.iter().any(|c| c.contains("SameSite=None")));
+        assert!(cookies.iter().any(|c| c.contains("; Secure")));
+    }
+
+    #[test]
+    fn append_return_to_cookie_clears_stale_cookie_when_return_to_missing() {
+        let mut headers = HeaderMap::new();
+
+        append_return_to_cookie(
+            &mut headers,
+            None,
+            "http://localhost:3000",
+            "http://localhost:3001",
+            false,
+            None,
+            COOKIE_SAMESITE_LAX,
+        )
+        .unwrap();
+
+        let cookies: Vec<String> = headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_string))
+            .collect();
+
+        assert_eq!(cookies.len(), 3);
+        assert!(cookies.iter().all(|c| c.contains("nyx_social_return_to=")));
+        assert!(cookies.iter().all(|c| c.contains("Max-Age=0")));
+    }
+
+    #[test]
+    fn append_return_to_cookie_uses_requested_same_site_policy() {
+        let mut headers = HeaderMap::new();
+        let return_to = "http://localhost:3000/oauth/authorize?client_id=abc";
+
+        append_return_to_cookie(
+            &mut headers,
+            Some(return_to),
+            "http://localhost:3000",
+            "http://localhost:3001",
+            true,
+            None,
+            COOKIE_SAMESITE_NONE,
+        )
+        .unwrap();
+
+        let cookies: Vec<String> = headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_string))
+            .collect();
+        let set_cookie = cookies
+            .iter()
+            .find(|cookie| cookie.contains("Max-Age=600"))
+            .expect("expected a non-clearing return_to cookie");
+
+        assert!(set_cookie.contains("nyx_social_return_to="));
+        assert!(set_cookie.contains("SameSite=None"));
+        assert!(set_cookie.contains("; Secure"));
+    }
+
+    #[test]
+    fn resolve_redirect_target_ignores_untrusted_return_to_cookie() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "nyx_social_return_to=https%3A%2F%2Fevil.example%2Foauth"
+                .parse()
+                .unwrap(),
+        );
+
+        let target = resolve_redirect_target(
+            "https://app.example.com",
+            "https://auth.example.com",
+            &headers,
+        );
+
+        match target {
+            SocialRedirectTarget::Web { return_to, .. } => assert!(return_to.is_none()),
+            SocialRedirectTarget::Mobile { .. } => panic!("expected web redirect target"),
+        }
+    }
+
+    #[test]
+    fn redirect_with_error_preserves_return_to_for_web_login() {
+        let target = SocialRedirectTarget::Web {
+            frontend_url: "https://app.example.com".to_string(),
+            return_to: Some("https://app.example.com/oauth/authorize?client_id=abc".to_string()),
+        };
+
+        let (_status, headers, ()) = redirect_with_error(&target, "social_auth_denied", true, None);
+        let location = headers
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("expected redirect location");
+
+        assert!(location.contains("/login?error=social_auth_denied"));
+        assert!(location.contains(
+            "return_to=https%3A%2F%2Fapp.example.com%2Foauth%2Fauthorize%3Fclient_id%3Dabc"
+        ));
     }
 
     #[test]

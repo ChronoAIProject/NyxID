@@ -153,11 +153,15 @@ export function LoginForm({ returnTo }: LoginFormProps) {
         <div className="h-px flex-1 bg-border" />
       </div>
 
-      <SocialLoginButtons />
+      <SocialLoginButtons returnTo={returnTo} />
 
       <div className="flex items-center justify-center gap-1.5">
         <span className="text-xs text-text-tertiary">Don&apos;t have an account?</span>
-        <Link to="/register" className="text-xs font-medium text-void-400 hover:text-primary">
+        <Link
+          to="/register"
+          search={returnTo ? { return_to: returnTo } : {}}
+          className="text-xs font-medium text-void-400 hover:text-primary"
+        >
           Create account
         </Link>
       </div>
