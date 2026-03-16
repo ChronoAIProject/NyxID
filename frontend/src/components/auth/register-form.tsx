@@ -35,7 +35,11 @@ function getPasswordStrength(password: string): {
   return { score, label: "Strong", color: "bg-success" };
 }
 
-export function RegisterForm() {
+interface RegisterFormProps {
+  readonly returnTo?: string;
+}
+
+export function RegisterForm({ returnTo }: RegisterFormProps) {
   const navigate = useNavigate();
   const registerMutation = useRegister();
 
@@ -60,7 +64,10 @@ export function RegisterForm() {
         password: data.password,
       });
       toast.success(result.message || "Account created successfully");
-      void navigate({ to: "/login" as string });
+      void navigate({
+        to: "/login" as string,
+        search: returnTo ? { return_to: returnTo } : {},
+      });
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
@@ -208,11 +215,15 @@ export function RegisterForm() {
         <div className="h-px flex-1 bg-border" />
       </div>
 
-      <SocialLoginButtons />
+      <SocialLoginButtons returnTo={returnTo} />
 
       <div className="flex items-center justify-center gap-1.5">
         <span className="text-xs text-text-tertiary">Already have an account?</span>
-        <Link to="/login" className="text-xs font-medium text-void-400 hover:text-primary">
+        <Link
+          to="/login"
+          search={returnTo ? { return_to: returnTo } : {}}
+          className="text-xs font-medium text-void-400 hover:text-primary"
+        >
           Sign in
         </Link>
       </div>

@@ -53,7 +53,11 @@ const ALLOWED_PROVIDER_IDS = new Set<string>(
   SOCIAL_PROVIDERS.map((p) => p.id),
 );
 
-export function SocialLoginButtons() {
+interface SocialLoginButtonsProps {
+  readonly returnTo?: string;
+}
+
+export function SocialLoginButtons({ returnTo }: SocialLoginButtonsProps) {
   const { data: config } = usePublicConfig();
 
   const enabledProviders = config
@@ -65,9 +69,12 @@ export function SocialLoginButtons() {
       return;
     }
     const encodedProvider = encodeURIComponent(provider);
-    const returnUrl = `${window.location.origin}/api/v1/auth/social/${encodedProvider}`;
+    let returnUrl = `${window.location.origin}/api/v1/auth/social/${encodedProvider}`;
     if (!returnUrl.startsWith(window.location.origin)) {
       return;
+    }
+    if (returnTo) {
+      returnUrl += `?return_to=${encodeURIComponent(returnTo)}`;
     }
     void openExternal(returnUrl);
   }
