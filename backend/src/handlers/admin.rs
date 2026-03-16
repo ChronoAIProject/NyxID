@@ -699,6 +699,9 @@ pub struct CreateOAuthClientRequest {
     pub client_type: Option<String>,
     /// Space-separated delegation scopes (empty = token exchange disabled).
     pub delegation_scopes: Option<String>,
+    /// OIDC scopes this client is allowed to request.
+    /// Defaults to `["openid", "profile", "email"]` when omitted; `[]` canonicalizes to `["openid"]`.
+    pub allowed_scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -766,6 +769,13 @@ pub async fn create_oauth_client(
         }
     }
 
+    let allowed_scopes = body
+        .allowed_scopes
+        .as_deref()
+        .map(oauth_client_service::validate_allowed_scopes_list)
+        .transpose()?
+        .unwrap_or_else(|| oauth_client_service::DEFAULT_ALLOWED_SCOPES.to_string());
+
     let (client, raw_secret) = oauth_client_service::create_client(
         &state.db,
         &body.name,
@@ -773,6 +783,7 @@ pub async fn create_oauth_client(
         client_type,
         &user_id,
         delegation_scopes,
+        &allowed_scopes,
     )
     .await?;
 

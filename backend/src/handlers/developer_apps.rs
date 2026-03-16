@@ -21,6 +21,9 @@ pub struct CreateDeveloperOAuthClientRequest {
     pub client_type: Option<String>,
     /// Space-separated delegation scopes (empty = token exchange disabled).
     pub delegation_scopes: Option<String>,
+    /// OIDC scopes this client is allowed to request (e.g. `["openid", "profile", "email", "roles"]`).
+    /// Defaults to `["openid", "profile", "email"]` when omitted; `[]` canonicalizes to `["openid"]`.
+    pub allowed_scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +32,8 @@ pub struct UpdateDeveloperOAuthClientRequest {
     pub redirect_uris: Option<Vec<String>>,
     /// Space-separated delegation scopes (empty = token exchange disabled).
     pub delegation_scopes: Option<String>,
+    /// OIDC scopes this client is allowed to request. `[]` canonicalizes to `["openid"]`.
+    pub allowed_scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,6 +146,13 @@ pub async fn create_my_oauth_client(
     let delegation_scopes = body.delegation_scopes.as_deref().unwrap_or("");
     let user_id = auth_user.user_id.to_string();
 
+    let allowed_scopes = body
+        .allowed_scopes
+        .as_deref()
+        .map(oauth_client_service::validate_allowed_scopes_list)
+        .transpose()?
+        .unwrap_or_else(|| oauth_client_service::DEFAULT_ALLOWED_SCOPES.to_string());
+
     let (client, raw_secret) = oauth_client_service::create_client(
         &state.db,
         &body.name,
@@ -148,6 +160,7 @@ pub async fn create_my_oauth_client(
         client_type,
         &user_id,
         delegation_scopes,
+        &allowed_scopes,
     )
     .await?;
 
@@ -200,6 +213,13 @@ pub async fn update_my_oauth_client(
         .transpose()?;
 
     let user_id = auth_user.user_id.to_string();
+
+    let validated_allowed_scopes = body
+        .allowed_scopes
+        .as_deref()
+        .map(oauth_client_service::validate_allowed_scopes_list)
+        .transpose()?;
+
     let updated = oauth_client_service::update_client_for_creator(
         &state.db,
         &client_id,
@@ -207,6 +227,7 @@ pub async fn update_my_oauth_client(
         body.name.as_deref().map(str::trim),
         validated_uris.as_deref(),
         body.delegation_scopes.as_deref(),
+        validated_allowed_scopes.as_deref(),
     )
     .await?;
 

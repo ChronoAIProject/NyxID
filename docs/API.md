@@ -3105,7 +3105,7 @@ Authorization endpoint. Validates the OAuth client and parameters, then issues a
 | `response_type`         | string | Yes      | Must be `code`                           |
 | `client_id`             | string | Yes      | UUID of the registered OAuth client      |
 | `redirect_uri`          | string | Yes      | Must match a registered redirect URI     |
-| `scope`                 | string | No       | Space-separated scopes (default: `openid profile email`). Additional scopes: `roles` (include RBAC roles and permissions in tokens), `groups` (include group memberships in tokens) |
+| `scope`                 | string | No       | Space-separated scopes (default: the client's configured `allowed_scopes`). Additional scopes: `roles` (include RBAC roles and permissions in tokens), `groups` (include group memberships in tokens) |
 | `state`                 | string | No       | Opaque value for CSRF protection         |
 | `code_challenge`        | string | Yes      | PKCE code challenge (base64url-encoded SHA-256) |
 | `code_challenge_method` | string | No       | Must be `S256` if provided               |

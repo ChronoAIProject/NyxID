@@ -293,6 +293,7 @@ pub async fn create_service(
             "confidential",
             &user_id_str,
             "",
+            oauth_client_service::DEFAULT_ALLOWED_SCOPES,
         )
         .await?;
 

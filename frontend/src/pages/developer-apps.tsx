@@ -30,9 +30,18 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ClientSecretDialog } from "@/components/shared/client-secret-dialog";
 import { ApiError } from "@/lib/api-client";
 import { Code, Plus, Shield, ShieldCheck } from "lucide-react";
+
+const OIDC_SCOPES = [
+  { id: "openid", label: "openid", required: true },
+  { id: "profile", label: "profile", required: false },
+  { id: "email", label: "email", required: false },
+  { id: "roles", label: "roles", required: false, hint: "Includes user roles and permissions in tokens" },
+  { id: "groups", label: "groups", required: false, hint: "Includes user group memberships in tokens" },
+] as const;
 
 function StatCard({
   title,
@@ -70,6 +79,11 @@ export function DeveloperAppsPage() {
   const [clientType, setClientType] = useState<"public" | "confidential">(
     "public",
   );
+  const [selectedScopes, setSelectedScopes] = useState<readonly string[]>([
+    "openid",
+    "profile",
+    "email",
+  ]);
   const [secretOpen, setSecretOpen] = useState(false);
   const [createdClientId, setCreatedClientId] = useState("");
   const [createdClientSecret, setCreatedClientSecret] = useState("");
@@ -98,6 +112,7 @@ export function DeveloperAppsPage() {
         name: name.trim(),
         redirect_uris: parsedUris.uris,
         client_type: clientType,
+        allowed_scopes: selectedScopes,
       });
 
       toast.success("Developer app created");
@@ -110,6 +125,7 @@ export function DeveloperAppsPage() {
       setName("");
       setRedirectUrisText("");
       setClientType("public");
+      setSelectedScopes(["openid", "profile", "email"]);
     } catch (error) {
       if (error instanceof ApiError) {
         toast.error(error.message);
@@ -192,6 +208,44 @@ export function DeveloperAppsPage() {
                     <SelectItem value="confidential">Confidential</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+              <div className="space-y-3">
+                <label className="text-sm font-medium">Allowed Scopes</label>
+                <p className="text-xs text-muted-foreground">
+                  OIDC scopes this app can request. Determines what user data is included in tokens.
+                </p>
+                <div className="space-y-2">
+                  {OIDC_SCOPES.map((scope) => (
+                    <div key={scope.id} className="flex items-start gap-2">
+                      <Checkbox
+                        id={`scope-create-${scope.id}`}
+                        checked={selectedScopes.includes(scope.id)}
+                        disabled={scope.required}
+                        onCheckedChange={(checked) => {
+                          setSelectedScopes(
+                            checked
+                              ? [...selectedScopes, scope.id]
+                              : selectedScopes.filter((s) => s !== scope.id),
+                          );
+                        }}
+                      />
+                      <div className="grid gap-0.5 leading-none">
+                        <label
+                          htmlFor={`scope-create-${scope.id}`}
+                          className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                        >
+                          {scope.label}
+                          {scope.required && (
+                            <span className="ml-1 text-xs text-muted-foreground">(required)</span>
+                          )}
+                        </label>
+                        {"hint" in scope && scope.hint && (
+                          <p className="text-xs text-muted-foreground">{scope.hint}</p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
             <DialogFooter>

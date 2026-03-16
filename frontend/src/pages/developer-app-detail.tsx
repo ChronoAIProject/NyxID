@@ -25,10 +25,19 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ClientSecretDialog } from "@/components/shared/client-secret-dialog";
 import { parseRedirectUris } from "@/lib/oauth";
 import { ApiError } from "@/lib/api-client";
 import { toast } from "sonner";
+
+const OIDC_SCOPES = [
+  { id: "openid", label: "openid", required: true },
+  { id: "profile", label: "profile", required: false },
+  { id: "email", label: "email", required: false },
+  { id: "roles", label: "roles", required: false, hint: "Includes user roles and permissions in tokens" },
+  { id: "groups", label: "groups", required: false, hint: "Includes user group memberships in tokens" },
+] as const;
 
 export function DeveloperAppDetailPage() {
   const navigate = useNavigate();
@@ -42,6 +51,7 @@ export function DeveloperAppDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [name, setName] = useState("");
   const [redirectUrisText, setRedirectUrisText] = useState("");
+  const [editScopes, setEditScopes] = useState<readonly string[]>([]);
 
   const [secretOpen, setSecretOpen] = useState(false);
   const [rotatedSecret, setRotatedSecret] = useState("");
@@ -50,6 +60,7 @@ export function DeveloperAppDetailPage() {
     if (!app) return;
     setName(app.client_name);
     setRedirectUrisText(app.redirect_uris.join("\n"));
+    setEditScopes(app.allowed_scopes.split(/\s+/).filter(Boolean));
     setEditOpen(true);
   }
 
@@ -73,6 +84,7 @@ export function DeveloperAppDetailPage() {
         data: {
           name: name.trim(),
           redirect_uris: parsedUris.uris,
+          allowed_scopes: editScopes,
         },
       });
       toast.success("Application updated");
@@ -210,6 +222,27 @@ export function DeveloperAppDetailPage() {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle>Allowed Scopes</CardTitle>
+          <CardDescription>
+            OIDC scopes this client can request. Determines what user data is included in tokens.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-wrap gap-2">
+            {app.allowed_scopes
+              .split(/\s+/)
+              .filter(Boolean)
+              .map((scope) => (
+                <Badge key={scope} variant="secondary">
+                  {scope}
+                </Badge>
+              ))}
+          </div>
+        </CardContent>
+      </Card>
+
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
@@ -239,6 +272,41 @@ export function DeveloperAppDetailPage() {
                 onChange={(event) => setRedirectUrisText(event.target.value)}
                 className="flex min-h-[120px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               />
+            </div>
+            <div className="space-y-3">
+              <label className="text-sm font-medium">Allowed Scopes</label>
+              <div className="space-y-2">
+                {OIDC_SCOPES.map((scope) => (
+                  <div key={scope.id} className="flex items-start gap-2">
+                    <Checkbox
+                      id={`scope-edit-${scope.id}`}
+                      checked={editScopes.includes(scope.id)}
+                      disabled={scope.required}
+                      onCheckedChange={(checked) => {
+                        setEditScopes(
+                          checked
+                            ? [...editScopes, scope.id]
+                            : editScopes.filter((s) => s !== scope.id),
+                        );
+                      }}
+                    />
+                    <div className="grid gap-0.5 leading-none">
+                      <label
+                        htmlFor={`scope-edit-${scope.id}`}
+                        className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                      >
+                        {scope.label}
+                        {scope.required && (
+                          <span className="ml-1 text-xs text-muted-foreground">(required)</span>
+                        )}
+                      </label>
+                      {"hint" in scope && scope.hint && (
+                        <p className="text-xs text-muted-foreground">{scope.hint}</p>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
           <DialogFooter>
