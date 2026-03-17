@@ -161,7 +161,7 @@ mod tests {
     fn decrypt_too_short_fails() {
         let dir = tempfile::tempdir().unwrap();
         let enc = LocalEncryption::load_or_generate(dir.path()).unwrap();
-        let short = base64::engine::general_purpose::STANDARD.encode(&[0u8; 5]);
+        let short = base64::engine::general_purpose::STANDARD.encode([0u8; 5]);
         assert!(enc.decrypt(&short).is_err());
     }
 }

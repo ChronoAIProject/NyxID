@@ -109,10 +109,10 @@ pub async fn execute_proxy_request(
         format!("/{path}")
     };
     let mut url = format!("{}{}", base_url.trim_end_matches('/'), normalized_path);
-    if let Some(q) = query {
-        if !q.is_empty() {
-            url = format!("{url}?{q}");
-        }
+    if let Some(q) = query
+        && !q.is_empty()
+    {
+        url = format!("{url}?{q}");
     }
 
     // Handle query_param injection by appending to URL
@@ -141,10 +141,10 @@ pub async fn execute_proxy_request(
     }
 
     // 6. Attach body
-    if let Some(body_b64) = request["body"].as_str() {
-        if let Ok(body_bytes) = base64::engine::general_purpose::STANDARD.decode(body_b64) {
-            req_builder = req_builder.body(body_bytes);
-        }
+    if let Some(body_b64) = request["body"].as_str()
+        && let Ok(body_bytes) = base64::engine::general_purpose::STANDARD.decode(body_b64)
+    {
+        req_builder = req_builder.body(body_bytes);
     }
 
     // 7. Execute request
