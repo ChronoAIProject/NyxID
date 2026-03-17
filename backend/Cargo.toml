@@ -37,7 +37,7 @@ bytes = "1.11"
 anyhow = "1.0.101"
 thiserror = "2.0.18"
 dotenvy = "0.15.7"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 subtle = "2"
 url = "2.5"
 urlencoding = "2.1"
