@@ -182,9 +182,10 @@ pub async fn notify_decision(
         && let (Some(chat_id), Some(message_id)) =
             (request.telegram_chat_id, request.telegram_message_id)
     {
-        let bot_token = config.telegram_bot_token.as_deref().ok_or_else(|| {
-            AppError::Internal("Telegram bot token not configured".to_string())
-        })?;
+        let bot_token = config
+            .telegram_bot_token
+            .as_deref()
+            .ok_or_else(|| AppError::Internal("Telegram bot token not configured".to_string()))?;
 
         telegram_service::edit_message_after_decision(
             http_client,

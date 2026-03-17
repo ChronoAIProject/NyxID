@@ -542,8 +542,7 @@ async fn build_filtered_response(downstream_response: reqwest::Response) -> AppR
         if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
             && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            && let Ok(header_value) =
-                axum::http::header::HeaderValue::from_bytes(value.as_bytes())
+            && let Ok(header_value) = axum::http::header::HeaderValue::from_bytes(value.as_bytes())
         {
             response_builder = response_builder.header(header_name, header_value);
         }
@@ -677,9 +676,7 @@ async fn build_translated_sse_response(
                     }
                 }
                 Err(e) => {
-                    let _ = tx
-                        .send(Err(std::io::Error::other(e)))
-                        .await;
+                    let _ = tx.send(Err(std::io::Error::other(e))).await;
                     return;
                 }
             }

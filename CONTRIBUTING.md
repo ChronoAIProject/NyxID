@@ -61,6 +61,16 @@ cd frontend && npm install && npm run dev
 
 The backend starts on `http://localhost:3001`, frontend on `http://localhost:3000`, and Mailpit web UI on `http://localhost:8025`.
 
+### Pre-Commit Hook
+
+Install the pre-commit hook to catch formatting and lint issues before they reach CI:
+
+```bash
+ln -sf ../../scripts/pre-commit .git/hooks/pre-commit
+```
+
+The hook runs `cargo fmt --check`, `cargo clippy`, and `eslint` on staged files. It only checks the relevant tool when files of that type are staged.
+
 ### Verify
 
 ```bash

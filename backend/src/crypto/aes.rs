@@ -374,13 +374,9 @@ impl EncryptionKeys {
                             );
 
                             let dek = Zeroizing::new(
-                                <[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(
-                                    |_| {
-                                        AppError::Internal(
-                                            "Unwrapped DEK is not 32 bytes".to_string(),
-                                        )
-                                    },
-                                )?,
+                                <[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(|_| {
+                                    AppError::Internal("Unwrapped DEK is not 32 bytes".to_string())
+                                })?,
                             );
                             return decrypt_raw(data_payload, dek.as_ref());
                         }

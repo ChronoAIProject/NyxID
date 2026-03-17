@@ -632,7 +632,8 @@ async fn execute_proxy(
     // User-Agent, etc.), while preserving the caller's requested response mode.
     let is_codex = target.service.slug == "llm-openai-codex";
 
-    if is_codex && is_codex_transport_path(path)
+    if is_codex
+        && is_codex_transport_path(path)
         && let Some(body_ref) = body.as_ref()
     {
         let body_json: serde_json::Value = serde_json::from_slice(body_ref)

@@ -448,9 +448,9 @@ impl NodeWsManager {
         {
             match pending {
                 PendingRequest::Awaiting(sender) => {
-                    let _ = sender.send(NodeProxyOutcome::Response(
-                        ProxyResponseType::Complete(response),
-                    ));
+                    let _ = sender.send(NodeProxyOutcome::Response(ProxyResponseType::Complete(
+                        response,
+                    )));
                 }
                 PendingRequest::Streaming(tx) => {
                     // Unexpected: got a full response for a streaming request.
@@ -488,16 +488,14 @@ impl NodeWsManager {
                     let outcome = if retryable {
                         NodeProxyOutcome::RetryableFailure(error.to_string())
                     } else {
-                        NodeProxyOutcome::Response(ProxyResponseType::Complete(
-                            NodeProxyResponse {
-                                request_id: request_id.to_string(),
-                                status,
-                                headers: vec![],
-                                body: serde_json::json!({ "error": error })
-                                    .to_string()
-                                    .into_bytes(),
-                            },
-                        ))
+                        NodeProxyOutcome::Response(ProxyResponseType::Complete(NodeProxyResponse {
+                            request_id: request_id.to_string(),
+                            status,
+                            headers: vec![],
+                            body: serde_json::json!({ "error": error })
+                                .to_string()
+                                .into_bytes(),
+                        }))
                     };
                     let _ = sender.send(outcome);
                 }

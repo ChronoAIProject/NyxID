@@ -448,9 +448,7 @@ impl McpSessionStore {
         };
 
         // Persist to MongoDB if changed
-        if changed
-            && let Some(db) = &self.db
-        {
+        if changed && let Some(db) = &self.db {
             let db = db.clone();
             let sid = session_id.to_string();
             tokio::spawn(async move {
