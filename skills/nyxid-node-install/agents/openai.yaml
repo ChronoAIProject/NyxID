@@ -1,0 +1,7 @@
+interface:
+  display_name: "NyxID Node Install"
+  short_description: "Install and configure nyxid-node safely"
+  default_prompt: "Use $nyxid-node-install to install, register, and validate a nyxid-node credential agent on this machine."
+
+policy:
+  allow_implicit_invocation: true

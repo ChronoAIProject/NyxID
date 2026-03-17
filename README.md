@@ -742,11 +742,12 @@ NyxID supports user-operated **credential nodes** that keep API keys and tokens 
 - **Audit trail:** All node operations and node-routed proxy requests are logged
 
 **Quick start:**
-1. Build the agent: `cargo build --release -p nyxid-node`
+1. Install the agent: `cargo install --path node-agent` (or build it with `cargo build --release -p nyxid-node`)
 2. Navigate to **Credential Nodes** in the dashboard and click **Register Node**
 3. Register the agent: `nyxid-node register --token nyx_nreg_... --url wss://your-server/api/v1/nodes/ws`
    - Add `--keychain` to store secrets in the OS keychain instead of encrypted file
-4. Add credentials: `nyxid-node credentials add --service openai --header "Authorization: Bearer sk-..."`
+4. Add credentials: `nyxid-node credentials add --service openai --header Authorization --secret-format bearer`
+   - The CLI prompts securely for the raw secret instead of taking it on the command line
 5. Start the agent: `nyxid-node start`
 6. Bind services to the node from the node detail page
 7. (Optional) Migrate storage: `nyxid-node migrate --to keychain`
@@ -754,6 +755,7 @@ NyxID supports user-operated **credential nodes** that keep API keys and tokens 
 For the agent user guide, see **[docs/NYXID_NODE.md](docs/NYXID_NODE.md)**.
 For setup instructions, see **[docs/NODE_PROXY.md](docs/NODE_PROXY.md)**.
 For the WebSocket protocol specification, see **[docs/NODE_PROXY_PROTOCOL.md](docs/NODE_PROXY_PROTOCOL.md)**.
+For AI-agent-driven installation and repair flows, see **[skills/nyxid-node-install/SKILL.md](skills/nyxid-node-install/SKILL.md)**.
 
 ---
 
@@ -853,6 +855,8 @@ NyxID/
 |-- docker-compose.yml          MongoDB 8.0 + Mailpit
 |-- .env.example                Environment variable template
 |-- .gitignore                  Ignores target/, node_modules/, keys/, .env
+|-- skills/
+|   `-- nyxid-node-install/     AI-agent install and repair skill for nyxid-node
 |
 |-- node-agent/
 |   |-- Cargo.toml              nyxid-node agent binary

@@ -2,6 +2,8 @@
 
 `nyxid-node` is a lightweight Rust binary that runs on your infrastructure as a credential node agent. It connects to a NyxID server via WebSocket, receives proxy requests, injects locally stored credentials, and forwards requests to downstream services. Credentials never leave your infrastructure.
 
+> If an AI agent is driving the machine setup, use the repo-local install skill at `skills/nyxid-node-install/SKILL.md`. It follows the current CLI flow and avoids putting secrets on the command line.
+
 ---
 
 ## Table of Contents
@@ -143,16 +145,44 @@ Credentials are stored locally using the configured storage backend -- either AE
 ```bash
 nyxid-node credentials add \
   --service openai \
-  --header "Authorization: Bearer sk-proj-..."
+  --header Authorization \
+  --secret-format bearer
 ```
+
+When prompted, enter only the raw token. `nyxid-node` adds the `Bearer ` prefix before storing the secret.
+
+### Add a Credential (Basic Auth Header)
+
+```bash
+nyxid-node credentials add \
+  --service github \
+  --header Authorization \
+  --secret-format basic
+```
+
+When prompted, enter `username:password`. `nyxid-node` base64-encodes the value and adds the `Basic ` prefix before storing it.
+
+### Add a Credential (Raw Header Injection)
+
+```bash
+nyxid-node credentials add \
+  --service resend \
+  --header X-API-Key
+```
+
+When prompted, enter the raw header value exactly as the downstream service expects it.
 
 ### Add a Credential (Query Parameter Injection)
 
 ```bash
 nyxid-node credentials add \
   --service stripe \
-  --query-param "api_key=sk_live_..."
+  --query-param api_key
 ```
+
+When prompted, enter only the raw query parameter value.
+
+> **Security note:** The legacy inline forms `--header "Name: value"` and `--query-param "name=value"` still work for backwards compatibility, but they expose secrets to shell history and process inspection. Prefer the prompted flow above.
 
 ### List Credentials
 
@@ -482,8 +512,9 @@ CREDENTIALS SUBCOMMANDS:
 
 CREDENTIALS ADD OPTIONS:
   --service <SLUG>          Service slug (e.g., "openai")
-  --header <HEADER>         Header to inject (e.g., "Authorization: Bearer sk-...")
-  --query-param <PARAM>     Query parameter to inject (e.g., "api_key=sk-...")
+  --header <HEADER>         Header name to inject (e.g., "Authorization"); the value is prompted securely
+  --query-param <PARAM>     Query parameter name to inject (e.g., "api_key"); the value is prompted securely
+  --secret-format <FORMAT>  Format prompted secrets as raw, bearer, or basic (default: raw)
   --config <PATH>           Path to config directory
 
 CREDENTIALS REMOVE OPTIONS:
@@ -512,7 +543,7 @@ The auth token may have been rotated. Re-register the node with a new registrati
 The service slug in the proxy request does not match any entry in the local credential store. Add the credential with:
 
 ```bash
-nyxid-node credentials add --service <slug> --header "Authorization: Bearer ..."
+nyxid-node credentials add --service <slug> --header Authorization --secret-format bearer
 ```
 
 ### Agent keeps reconnecting
