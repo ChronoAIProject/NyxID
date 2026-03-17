@@ -19,7 +19,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-jsonwebtoken = "9.3"
+jsonwebtoken = "10.3"
 argon2 = "0.5.3"
 aes-gcm = "0.10.3"
 sha2 = "0.10.9"
