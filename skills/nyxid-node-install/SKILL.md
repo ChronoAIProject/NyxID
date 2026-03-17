@@ -9,7 +9,17 @@ Use this skill when an AI agent is responsible for setting up or repairing `nyxi
 
 ## Workflow
 
-1. Confirm the operating context.
+1. Confirm prerequisites and operating context.
+- If you are not already in a NyxID checkout containing `node-agent/`, obtain the repository first and switch to its root.
+- Run `cargo --version` and `rustc --version`.
+- If Rust is missing on macOS or Linux, install rustup non-interactively:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+```
+
+- If Rust is missing on Windows, install rustup with `winget install Rustlang.Rustup` or the official installer, then open a new shell.
 - If you are working inside this repository checkout, prefer `cargo install --path node-agent` when the user wants `nyxid-node` available on `PATH`.
 - Use `cargo build --release -p nyxid-node` when the user wants a repo-local build artifact at `target/release/nyxid-node`.
 - Collect the NyxID WebSocket URL and one-time registration token before starting registration. The built-in development default is `ws://localhost:3001/api/v1/nodes/ws`.
@@ -29,6 +39,14 @@ Alternative repo-local build:
 ```bash
 cargo build --release -p nyxid-node
 ```
+
+Verify the binary is runnable:
+
+```bash
+nyxid-node version
+```
+
+- If the shell cannot find `nyxid-node`, ensure Cargo's bin directory is on `PATH`. With rustup on macOS and Linux that is usually `~/.cargo/bin`.
 
 4. Register the node.
 

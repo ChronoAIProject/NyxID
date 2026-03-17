@@ -743,6 +743,7 @@ NyxID supports user-operated **credential nodes** that keep API keys and tokens 
 
 **Quick start:**
 1. Install the agent: `cargo install --path node-agent` (or build it with `cargo build --release -p nyxid-node`)
+   - If `cargo` is missing, install Rust/rustup first, then verify the binary with `nyxid-node version`
 2. Navigate to **Credential Nodes** in the dashboard and click **Register Node**
 3. Register the agent: `nyxid-node register --token nyx_nreg_... --url wss://your-server/api/v1/nodes/ws`
    - Add `--keychain` to store secrets in the OS keychain instead of encrypted file

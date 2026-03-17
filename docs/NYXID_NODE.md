@@ -28,6 +28,18 @@
 
 ## Installation
 
+Prerequisite: a Rust toolchain with `cargo` must be installed on the machine where you want to run `nyxid-node`.
+
+If `cargo` is not installed yet:
+
+```bash
+# macOS / Linux
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+```
+
+On Windows, install rustup with `winget install Rustlang.Rustup` (or the official rustup installer), then open a new shell.
+
 Build from source (requires Rust 2024 edition):
 
 ```bash
@@ -42,6 +54,14 @@ Or install directly:
 ```bash
 cargo install --path node-agent
 ```
+
+Verify the binary is available:
+
+```bash
+nyxid-node version
+```
+
+If the shell cannot find `nyxid-node`, ensure Cargo's bin directory is on `PATH`. With rustup on macOS and Linux that is usually `~/.cargo/bin`.
 
 ---
 
