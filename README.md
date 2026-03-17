@@ -2,7 +2,7 @@
 
 **NyxID** is a self-hosted authentication and single sign-on (SSO) platform. Named after Nyx, the Greek goddess and protector of darkness, NyxID guards the boundary between your users and your services.
 
-It provides a complete identity layer: user registration, session management, OpenID Connect, social login, multi-factor authentication, API key management, and a reverse proxy that injects credentials into downstream service requests.
+It provides a complete identity layer: user registration, session management, OpenID Connect, social login, multi-factor authentication, API key management, a reverse proxy that injects credentials into downstream service requests, a mobile approval app (iOS + Android), and a TypeScript OAuth SDK for client integration.
 
 ---
 
@@ -18,6 +18,7 @@ It provides a complete identity layer: user registration, session management, Op
 - [Security](#security)
 - [Credential Nodes (Node Proxy)](#credential-nodes-node-proxy)
 - [MCP Integration](#mcp-integration)
+- [Contributing](#contributing)
 - [Development Guide](#development-guide)
 - [Project Structure](#project-structure)
 - [License](#license)
@@ -203,7 +204,7 @@ It provides a complete identity layer: user registration, session management, Op
 - Auth token and signing secret rotation with immediate invalidation
 - Configurable limits: max nodes per user, max concurrent connections, proxy timeout
 
-See [docs/nyxid-node.md](docs/nyxid-node.md) for the agent user guide, [docs/node-proxy.md](docs/node-proxy.md) for setup instructions, and [docs/node-proxy-protocol.md](docs/node-proxy-protocol.md) for the WebSocket protocol specification.
+See [docs/NYXID_NODE.md](docs/NYXID_NODE.md) for the agent user guide, [docs/NODE_PROXY.md](docs/NODE_PROXY.md) for setup instructions, and [docs/NODE_PROXY_PROTOCOL.md](docs/NODE_PROXY_PROTOCOL.md) for the WebSocket protocol specification.
 
 ### Security Hardening
 - Rate limiting: per-IP sliding window with global token-bucket fallback
@@ -213,6 +214,22 @@ See [docs/nyxid-node.md](docs/nyxid-node.md) for the agent user guide, [docs/nod
 - Input validation on all endpoints
 - Structured error responses that never leak internal details
 - Audit logging for all authentication events
+
+### Mobile App (iOS + Android)
+- React Native + Expo cross-platform mobile app for transaction approvals
+- Challenge inbox: view, approve, and reject pending approval requests
+- Push notifications via APNs (iOS) and FCM (Android)
+- Deep linking: `nyxid://challenge/{id}` opens approval detail directly
+- Secure token storage via `expo-secure-store`
+- Approval grant management with revocation
+- EAS cloud builds for TestFlight and Play Store distribution
+
+### OAuth SDK (`@nyxids/*`)
+- TypeScript OAuth 2.0 client SDK for integrating with NyxID
+- `@nyxids/oauth-core`: PKCE Authorization Code flow, token management, userinfo endpoint
+- `@nyxids/oauth-react`: React context provider + `useNyxID()` hook
+- Storage-agnostic: works with `localStorage` (browser) or custom backends
+- Zero runtime dependencies in the core package
 
 ---
 
@@ -263,7 +280,7 @@ See [docs/nyxid-node.md](docs/nyxid-node.md) for the agent user guide, [docs/nod
                                   |
                          +--------v---------+
                          |  MongoDB 8.0     |
-                         |  (23 collections)|
+                         |  (29 collections)|
                          +------------------+
 ```
 
@@ -481,8 +498,13 @@ For the full API reference with request/response schemas and example curl comman
 | POST   | `/api/v1/nodes/{node_id}/rotate-token`      | Required | Rotate node auth token                |
 | GET    | `/api/v1/nodes/{node_id}/bindings`          | Required | List node service bindings            |
 | POST   | `/api/v1/nodes/{node_id}/bindings`          | Required | Create a service binding              |
+| PATCH  | `/api/v1/nodes/{node_id}/bindings/{binding_id}` | Required | Update binding priority          |
 | DELETE | `/api/v1/nodes/{node_id}/bindings/{binding_id}` | Required | Remove a service binding         |
 | GET    | `/api/v1/nodes/ws`                          | None*    | Node WebSocket upgrade (auth via WS protocol) |
+| GET    | `/api/v1/admin/nodes`                       | Admin    | List all nodes across all users       |
+| GET    | `/api/v1/admin/nodes/{node_id}`             | Admin    | Get any node's details                |
+| POST   | `/api/v1/admin/nodes/{node_id}/disconnect`  | Admin    | Force-disconnect a node               |
+| DELETE | `/api/v1/admin/nodes/{node_id}`             | Admin    | Admin-delete a node                   |
 
 `POST /oauth/token` also supports `grant_type=client_credentials` for service account authentication and `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` for social token exchange (Google: `subject_token_type=id_token`; GitHub: `subject_token_type=access_token`) and delegated access.
 
@@ -617,7 +639,7 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 
 ## Database Schema
 
-NyxID uses 26 MongoDB collections:
+NyxID uses 29 MongoDB collections:
 
 | Collection                 | Description                                          |
 |----------------------------|------------------------------------------------------|
@@ -633,6 +655,7 @@ NyxID uses 26 MongoDB collections:
 | `service_endpoints`        | Registered API endpoints per service (MCP tools)     |
 | `provider_configs`         | External provider registry (encrypted OAuth creds)   |
 | `user_provider_tokens`     | Per-user encrypted provider tokens (API keys/OAuth)  |
+| `user_provider_credentials`| Per-user encrypted provider credentials              |
 | `service_provider_requirements` | Provider token requirements per service          |
 | `oauth_states`             | Temporary OAuth state for provider flows             |
 | `roles`                    | Role definitions with permissions and scoping        |
@@ -647,6 +670,7 @@ NyxID uses 26 MongoDB collections:
 | `nodes`                    | Registered credential nodes (per user, with auth token hash and status) |
 | `node_service_bindings`    | Service-to-node routing bindings (which services a node handles) |
 | `node_registration_tokens` | One-time tokens for node registration (TTL-indexed, auto-expire) |
+| `mcp_sessions`             | MCP protocol session state                           |
 | `audit_log`                | Immutable audit trail of security events             |
 
 All documents use UUID identifiers, ISO 8601 timestamps, and appropriate indexes for query patterns.
@@ -727,15 +751,15 @@ NyxID supports user-operated **credential nodes** that keep API keys and tokens 
 6. Bind services to the node from the node detail page
 7. (Optional) Migrate storage: `nyxid-node migrate --to keychain`
 
-For the agent user guide, see **[docs/nyxid-node.md](docs/nyxid-node.md)**.
-For setup instructions, see **[docs/node-proxy.md](docs/node-proxy.md)**.
-For the WebSocket protocol specification, see **[docs/node-proxy-protocol.md](docs/node-proxy-protocol.md)**.
+For the agent user guide, see **[docs/NYXID_NODE.md](docs/NYXID_NODE.md)**.
+For setup instructions, see **[docs/NODE_PROXY.md](docs/NODE_PROXY.md)**.
+For the WebSocket protocol specification, see **[docs/NODE_PROXY_PROTOCOL.md](docs/NODE_PROXY_PROTOCOL.md)**.
 
 ---
 
 ## MCP Integration
 
-NyxID is designed to be accessible to AI agents via the Model Context Protocol (MCP). A dedicated MCP proxy (`mcp-proxy/`) exposes connected downstream services as MCP tools.
+NyxID is designed to be accessible to AI agents via the Model Context Protocol (MCP). The backend's built-in MCP transport (`/mcp`) exposes connected downstream services as MCP tools.
 
 **How it works:**
 - MCP sessions start with 3 meta-tools: `nyx__search_tools`, `nyx__discover_services`, and `nyx__connect_service`
@@ -753,6 +777,12 @@ NyxID is designed to be accessible to AI agents via the Model Context Protocol (
 - Query audit logs
 
 This makes NyxID suitable as an identity and credential management layer in agentic workflows. See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for MCP proxy deployment instructions.
+
+---
+
+## Contributing
+
+We welcome contributions. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the development workflow, coding conventions, and pull request process.
 
 ---
 
@@ -835,7 +865,10 @@ NyxID/
 |       |-- credential_store.rs In-memory decrypted credential store
 |       |-- signing.rs          HMAC-SHA256 verification, replay guard
 |       |-- metrics.rs          Local atomic counters (total, success, error)
-|       `-- encryption.rs       AES-256-GCM local encryption (keyfile management)
+|       |-- encryption.rs       AES-256-GCM local encryption (keyfile management)
+|       |-- keychain.rs         OS keychain storage backend (macOS/Windows/Linux)
+|       |-- secret_backend.rs   Pluggable secret storage trait (file vs keychain)
+|       `-- error.rs            Error enum with thiserror
 |
 |-- backend/
 |   |-- Cargo.toml              Backend dependencies
@@ -848,9 +881,15 @@ NyxID/
 |       |-- crypto/
 |       |   |-- password.rs     Argon2id hashing and verification
 |       |   |-- jwt.rs          RS256 JWT signing, verification, key management
-|       |   |-- aes.rs          AES-256-GCM encryption and decryption
-|       |   `-- token.rs        Random token generation, SHA-256 hashing
-|       |-- models/             MongoDB document definitions (26 modules, incl. role, group, consent, service_account, approval, service_approval_config)
+|       |   |-- aes.rs          AES-256-GCM envelope encryption (per-record DEKs wrapped by KEK)
+|       |   |-- token.rs        Random token generation, SHA-256 hashing
+|       |   |-- key_provider.rs Pluggable async KeyProvider trait for encryption backends
+|       |   |-- local_key_provider.rs Local hex-key encryption provider
+|       |   |-- aws_kms_provider.rs  AWS KMS encryption provider (feature: aws-kms)
+|       |   |-- gcp_kms_provider.rs  GCP Cloud KMS encryption provider (feature: gcp-kms)
+|       |   |-- jwks.rs         JWKS key fetching and caching (social token verification)
+|       |   `-- apple_client_secret.rs Apple Sign-In client secret generation
+|       |-- models/             MongoDB document definitions (29 collections, incl. role, group, consent, service_account, approval, mcp_session, node)
 |       |-- handlers/           HTTP handler functions by domain
 |       |   |-- auth.rs         Register, login, logout, refresh, verify-email, forgot/reset-password
 |       |   |-- social_auth.rs  Social login: authorize redirect + OAuth callback
@@ -873,6 +912,8 @@ NyxID/
 |       |   |-- admin_roles.rs  Admin role CRUD + user role assignment
 |       |   |-- admin_groups.rs Admin group CRUD + membership management
 |       |   |-- admin_service_accounts.rs Admin service account CRUD + secret rotation + token revocation
+|       |   |-- admin_sa_connections.rs Admin service account provider connections
+|       |   |-- admin_sa_providers.rs Admin service account provider management
 |       |   |-- admin_helpers.rs Shared admin handler helpers (require_admin, IP/UA extraction)
 |       |   |-- consent.rs      User consent listing and revocation
 |       |   |-- delegation.rs   Delegation token refresh endpoint
@@ -883,6 +924,9 @@ NyxID/
 |       |   |-- node_admin.rs   Node management API (register, list, delete, bindings, token rotation)
 |       |   |-- admin_nodes.rs  Admin node management (list all, get, disconnect, delete)
 |       |   |-- node_ws.rs      Node WebSocket handler + heartbeat sweep + streaming
+|       |   |-- developer_apps.rs Developer OAuth application management
+|       |   |-- user_credentials.rs User provider credential management
+|       |   |-- service_helpers.rs Shared service handler helpers
 |       |   |-- mfa.rs          MFA setup and verification
 |       |   `-- health.rs       Health check
 |       |-- services/           Business logic layer
@@ -911,13 +955,17 @@ NyxID/
 |       |   |-- notification_service.rs Multi-channel notification delivery (Telegram + FCM + APNs)
 |       |   |-- push_service.rs      FCM HTTP v1 + APNs HTTP/2 push notification clients
 |       |   |-- telegram_service.rs Telegram Bot API client (send, edit, answer, webhook)
+|       |   |-- telegram_poller.rs  Telegram long polling fallback for development
 |       |   |-- mcp_service.rs      MCP tool execution, delegation token injection
+|       |   |-- social_token_exchange_service.rs Social token exchange (Google/GitHub native mobile)
 |       |   |-- node_service.rs     Node CRUD, token validation, binding operations
 |       |   |-- node_routing_service.rs Node route resolution with failover + health filtering
 |       |   |-- node_ws_manager.rs  In-memory WS connection pool, request correlation, streaming, HMAC signing
 |       |   |-- node_metrics_service.rs Per-node proxy metrics (success/error/latency recording)
 |       |   |-- oauth_client_service.rs OAuth client management (admin)
 |       |   |-- service_endpoint_service.rs Service endpoint CRUD
+|       |   |-- chatgpt_translator.rs  OpenAI-to-Anthropic format translation
+|       |   |-- openapi_parser.rs  OpenAPI spec parsing for service endpoints
 |       |   `-- audit_service.rs    Async audit log insertion
 |       `-- mw/                 Middleware
 |           |-- auth.rs         AuthUser extractor (Bearer / cookie / API key)
@@ -937,6 +985,7 @@ NyxID/
         |   |-- admin.ts       Admin-specific types
         |   |-- rbac.ts        RBAC types (roles, groups, consents)
         |   |-- service-accounts.ts Service account types
+        |   |-- approvals.ts   Approval request and grant types
         |   `-- nodes.ts       Node and binding types
         |-- schemas/            Zod validation schemas
         |   |-- admin.ts       Admin form schemas
@@ -950,11 +999,15 @@ NyxID/
         |   |-- use-service-accounts.ts Service account management hooks
         |   |-- use-llm-gateway.ts LLM gateway status hook
         |   |-- use-approvals.ts Approval and notification settings hooks
-        |   `-- use-nodes.ts   Node and binding management hooks
+        |   |-- use-nodes.ts   Node and binding management hooks
+        |   |-- use-admin-nodes.ts Admin node management hooks
+        |   |-- use-developer-apps.ts Developer OAuth application hooks
+        |   `-- use-providers.ts Provider connection and token hooks
         |-- components/
-        |   |-- ui/             16 shadcn/ui primitives
+        |   |-- ui/             19 shadcn/ui primitives
         |   |-- auth/           Login, register, MFA forms
         |   |-- dashboard/      Sidebar, header, tables, cards
+        |   |-- shared/         Reusable components (breadcrumb, page-header, detail-section)
         |   `-- layout/         Auth and dashboard layout shells
         `-- pages/              Route pages
             |-- admin-roles.tsx    Admin role list
@@ -963,13 +1016,54 @@ NyxID/
             |-- admin-group-detail.tsx Admin group detail with member management
             |-- admin-service-accounts.tsx Admin service account list
             |-- admin-service-account-detail.tsx Admin service account detail
+            |-- admin-nodes.tsx  Admin node management
             |-- consents.tsx       User consent management
             |-- notification-settings.tsx  Notification and approval settings
             |-- approval-history.tsx  Approval request history (filterable)
             |-- approval-grants.tsx   Active approval grants with revocation
             |-- nodes.tsx         Credential node list with registration dialog
             |-- node-detail.tsx   Node detail with binding management
-            `-- (login, register, dashboard, admin-users, admin-user-detail, etc.)
+            |-- developer-apps.tsx Developer OAuth application management
+            |-- service-detail.tsx Service detail page
+            |-- service-edit.tsx   Service edit page
+            |-- service-list.tsx   Service card grid
+            |-- providers.tsx      Provider list and management
+            |-- provider-detail.tsx Provider detail page
+            `-- (login, register, dashboard, settings, admin-users, admin-user-detail, etc.)
+|
+|-- mobile/                        React Native + Expo mobile app (iOS + Android)
+|   |-- app.json                   Expo app config (bundle ID, permissions, splash)
+|   |-- eas.json                   EAS build profiles (development, preview, production)
+|   |-- package.json               Expo 53, React Native 0.79, TypeScript
+|   |-- google-services.json       Firebase/FCM config for Android push notifications
+|   `-- src/
+|       |-- app/
+|       |   |-- App.tsx            Root component
+|       |   |-- AppNavigator.tsx   React Navigation stack config
+|       |   `-- linking.ts        Deep link routing (nyxid://challenge/{id})
+|       |-- features/
+|       |   |-- auth/              Login, session management (SecureStore)
+|       |   |-- challenges/        Approval challenge inbox, detail, decision screens
+|       |   |-- approvals/         Approval grants list
+|       |   |-- account/           Account settings
+|       |   `-- legal/             Privacy policy, terms of service
+|       |-- components/            Reusable UI (BottomNav, PrimaryButton, ToastOverlay)
+|       |-- lib/
+|       |   |-- api/               HTTP client, API types, idempotency
+|       |   |-- auth/              Token persistence (expo-secure-store)
+|       |   `-- notifications/     APNs/FCM device registration and push handling
+|       `-- theme/                 Design tokens, mobile theme
+|
+`-- sdk/                           OAuth SDK monorepo (TypeScript)
+    |-- package.json               Workspace root (oauth-core, oauth-react, demo-react)
+    |-- oauth-core/                @nyxids/oauth-core: PKCE OAuth 2.0 client
+    |   |-- package.json           v0.1.0, zero runtime dependencies
+    |   `-- src/index.ts           NyxIDClient class (authorize, callback, tokens, userinfo)
+    |-- oauth-react/               @nyxids/oauth-react: React bindings
+    |   |-- package.json           v0.1.0, peerDep: react@^18
+    |   `-- src/index.tsx          NyxIDProvider context + useNyxID() hook
+    `-- demo-react/                Demo Vite app (private, not published)
+        `-- src/App.tsx            Example OAuth flow
 ```
 
 ---

@@ -1,0 +1,63 @@
+name: Bug Report
+description: Report a bug in NyxID
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Please fill out the sections below so we can reproduce and fix the issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to reproduce the issue.
+      placeholder: |
+        1. Go to ...
+        2. Click on ...
+        3. See error ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of NyxID is affected?
+      options:
+        - Backend (Rust/Axum)
+        - Frontend (React)
+        - Mobile App (React Native)
+        - Node Agent (nyxid-node)
+        - OAuth SDK
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Relevant version info and environment details.
+      placeholder: |
+        - NyxID version: v0.1.0
+        - OS: macOS 15.3 / Ubuntu 24.04 / Windows 11
+        - Browser: Chrome 131 (if frontend)
+        - Rust: 1.93.0 (if backend)
+        - Node: 22 (if frontend/SDK)
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Error Output
+      description: Paste any relevant error messages or logs. **Redact any secrets, tokens, or personal data.**
+      render: text
