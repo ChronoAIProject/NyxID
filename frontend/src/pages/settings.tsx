@@ -268,7 +268,9 @@ function SecurityTab() {
       toast.success("Account deleted successfully");
       try {
         await logout();
-      } catch {}
+      } catch {
+        // Logout may fail if session is already invalidated by account deletion
+      }
       queryClient.clear();
       void navigate({ to: "/login" });
     } catch (error) {

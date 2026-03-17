@@ -198,12 +198,12 @@ pub async fn update_my_oauth_client(
     Path(client_id): Path<String>,
     Json(body): Json<UpdateDeveloperOAuthClientRequest>,
 ) -> AppResult<Json<DeveloperOAuthClientResponse>> {
-    if let Some(name) = body.name.as_ref() {
-        if name.trim().is_empty() {
-            return Err(AppError::ValidationError(
-                "Client name cannot be empty".to_string(),
-            ));
-        }
+    if let Some(name) = body.name.as_ref()
+        && name.trim().is_empty()
+    {
+        return Err(AppError::ValidationError(
+            "Client name cannot be empty".to_string(),
+        ));
     }
 
     let validated_uris = body

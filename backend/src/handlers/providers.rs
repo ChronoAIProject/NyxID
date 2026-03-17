@@ -289,12 +289,12 @@ pub async fn create_provider(
         )));
     }
 
-    if let Some(ref format) = body.device_code_format {
-        if !["rfc8628", "openai"].contains(&format.as_str()) {
-            return Err(AppError::ValidationError(
-                "device_code_format must be 'rfc8628' or 'openai'".to_string(),
-            ));
-        }
+    if let Some(ref format) = body.device_code_format
+        && !["rfc8628", "openai"].contains(&format.as_str())
+    {
+        return Err(AppError::ValidationError(
+            "device_code_format must be 'rfc8628' or 'openai'".to_string(),
+        ));
     }
 
     let user_id_str = auth_user.user_id.to_string();

@@ -497,10 +497,9 @@ fn convert_headers(headers: &axum::http::HeaderMap) -> reqwest::header::HeaderMa
     let mut reqwest_headers = reqwest::header::HeaderMap::new();
     for (name, value) in headers.iter() {
         if let Ok(reqwest_name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
+            && let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
         {
-            if let Ok(reqwest_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
-                reqwest_headers.insert(reqwest_name, reqwest_value);
-            }
+            reqwest_headers.insert(reqwest_name, reqwest_value);
         }
     }
     reqwest_headers
@@ -540,16 +539,12 @@ async fn build_filtered_response(downstream_response: reqwest::Response) -> AppR
         if is_sse && name_lower == "content-length" {
             continue;
         }
-        if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str()) {
-            if let Ok(header_name) =
+        if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
+            && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            {
-                if let Ok(header_value) =
-                    axum::http::header::HeaderValue::from_bytes(value.as_bytes())
-                {
-                    response_builder = response_builder.header(header_name, header_value);
-                }
-            }
+            && let Ok(header_value) = axum::http::header::HeaderValue::from_bytes(value.as_bytes())
+        {
+            response_builder = response_builder.header(header_name, header_value);
         }
     }
 
@@ -599,16 +594,12 @@ async fn build_translated_json_response(
             if name_lower != "content-type"
                 && name_lower != "content-length"
                 && ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
-            {
-                if let Ok(header_name) =
+                && let Ok(header_name) =
                     axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-                {
-                    if let Ok(header_value) =
-                        axum::http::header::HeaderValue::from_bytes(value.as_bytes())
-                    {
-                        response_builder = response_builder.header(header_name, header_value);
-                    }
-                }
+                && let Ok(header_value) =
+                    axum::http::header::HeaderValue::from_bytes(value.as_bytes())
+            {
+                response_builder = response_builder.header(header_name, header_value);
             }
         }
 
@@ -678,17 +669,14 @@ async fn build_translated_sse_response(
                     while let Some(event) = parse_next_sse_event(&mut buffer) {
                         if let Some(translated) =
                             translator.translate_stream_event(&event, &mut state)
+                            && tx.send(Ok(bytes::Bytes::from(translated))).await.is_err()
                         {
-                            if tx.send(Ok(bytes::Bytes::from(translated))).await.is_err() {
-                                return; // client disconnected
-                            }
+                            return; // client disconnected
                         }
                     }
                 }
                 Err(e) => {
-                    let _ = tx
-                        .send(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
-                        .await;
+                    let _ = tx.send(Err(std::io::Error::other(e))).await;
                     return;
                 }
             }

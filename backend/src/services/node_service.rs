@@ -250,12 +250,12 @@ fn validate_node_metadata(meta: &NodeMetadata) -> AppResult<()> {
             "arch must be 64 characters or fewer".to_string(),
         ));
     }
-    if let Some(ref ip) = meta.ip_address {
-        if ip.parse::<std::net::IpAddr>().is_err() {
-            return Err(AppError::ValidationError(
-                "Invalid IP address format".to_string(),
-            ));
-        }
+    if let Some(ref ip) = meta.ip_address
+        && ip.parse::<std::net::IpAddr>().is_err()
+    {
+        return Err(AppError::ValidationError(
+            "Invalid IP address format".to_string(),
+        ));
     }
     Ok(())
 }
@@ -309,8 +309,8 @@ pub async fn set_node_status(
     };
 
     if status == NodeStatus::Online {
-        update_fields.insert("connected_at", &now);
-        update_fields.insert("last_heartbeat_at", &now);
+        update_fields.insert("connected_at", now);
+        update_fields.insert("last_heartbeat_at", now);
     }
 
     db.collection::<Node>(NODES)

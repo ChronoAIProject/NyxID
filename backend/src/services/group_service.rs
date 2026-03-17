@@ -98,31 +98,31 @@ pub async fn update_group(
     }
 
     // Check slug uniqueness if changing
-    if let Some(new_slug) = slug {
-        if new_slug != existing.slug {
-            let dup = db
-                .collection::<Group>(GROUPS)
-                .find_one(doc! { "slug": new_slug })
-                .await?;
-            if dup.is_some() {
-                return Err(AppError::DuplicateSlug(new_slug.to_string()));
-            }
+    if let Some(new_slug) = slug
+        && new_slug != existing.slug
+    {
+        let dup = db
+            .collection::<Group>(GROUPS)
+            .find_one(doc! { "slug": new_slug })
+            .await?;
+        if dup.is_some() {
+            return Err(AppError::DuplicateSlug(new_slug.to_string()));
         }
     }
 
     // Validate that all referenced role_ids exist
-    if let Some(r) = role_ids {
-        if !r.is_empty() {
-            let role_id_strs: Vec<&str> = r.iter().map(|s| s.as_str()).collect();
-            let found_count = db
-                .collection::<Role>(ROLES)
-                .count_documents(doc! { "_id": { "$in": &role_id_strs } })
-                .await?;
-            if found_count != r.len() as u64 {
-                return Err(AppError::BadRequest(
-                    "One or more role_ids do not exist".to_string(),
-                ));
-            }
+    if let Some(r) = role_ids
+        && !r.is_empty()
+    {
+        let role_id_strs: Vec<&str> = r.iter().map(|s| s.as_str()).collect();
+        let found_count = db
+            .collection::<Role>(ROLES)
+            .count_documents(doc! { "_id": { "$in": &role_id_strs } })
+            .await?;
+        if found_count != r.len() as u64 {
+            return Err(AppError::BadRequest(
+                "One or more role_ids do not exist".to_string(),
+            ));
         }
     }
 

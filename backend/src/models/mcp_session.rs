@@ -448,23 +448,21 @@ impl McpSessionStore {
         };
 
         // Persist to MongoDB if changed
-        if changed {
-            if let Some(db) = &self.db {
-                let db = db.clone();
-                let sid = session_id.to_string();
-                tokio::spawn(async move {
-                    if let Err(e) = db
-                        .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                        .update_one(
-                            doc! { "_id": &sid },
-                            doc! { "$set": { "activated_service_ids": &activated_list } },
-                        )
-                        .await
-                    {
-                        tracing::warn!("Failed to persist activated services to MongoDB: {e}");
-                    }
-                });
-            }
+        if changed && let Some(db) = &self.db {
+            let db = db.clone();
+            let sid = session_id.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = db
+                    .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                    .update_one(
+                        doc! { "_id": &sid },
+                        doc! { "$set": { "activated_service_ids": &activated_list } },
+                    )
+                    .await
+                {
+                    tracing::warn!("Failed to persist activated services to MongoDB: {e}");
+                }
+            });
         }
 
         changed
@@ -484,10 +482,10 @@ impl McpSessionStore {
     /// Returns true if sent successfully, false if no listener or channel full.
     pub fn send_notification(&self, session_id: &str, notification: serde_json::Value) -> bool {
         let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(session) = sessions.get(session_id) {
-            if let Some(tx) = &session.notification_tx {
-                return tx.try_send(notification).is_ok();
-            }
+        if let Some(session) = sessions.get(session_id)
+            && let Some(tx) = &session.notification_tx
+        {
+            return tx.try_send(notification).is_ok();
         }
         false
     }

@@ -141,10 +141,10 @@ pub async fn load_user_tools(
             continue; // Already included from explicit connections
         }
         // Check if user has explicitly disconnected (opt-out)
-        if let Some(conn) = conn_map.get(svc.id.as_str()) {
-            if !conn.is_active {
-                continue; // User opted out
-            }
+        if let Some(conn) = conn_map.get(svc.id.as_str())
+            && !conn.is_active
+        {
+            continue; // User opted out
         }
         if seen_ids.insert(svc.id.clone()) {
             valid_services.push(svc);

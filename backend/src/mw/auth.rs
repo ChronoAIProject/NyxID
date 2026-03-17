@@ -186,12 +186,12 @@ impl FromRequestParts<AppState> for AuthUser {
                                 AppError::Internal(format!("SA token lookup failed: {e}"))
                             })?;
 
-                        if let Some(record) = token_record {
-                            if record.revoked {
-                                return Err(AppError::Unauthorized(
-                                    "Token has been revoked".to_string(),
-                                ));
-                            }
+                        if let Some(record) = token_record
+                            && record.revoked
+                        {
+                            return Err(AppError::Unauthorized(
+                                "Token has been revoked".to_string(),
+                            ));
                         }
 
                         let sa_uuid = Uuid::parse_str(&sa_id).map_err(|_| {
@@ -402,14 +402,12 @@ pub async fn reject_delegated_tokens(
 /// Check if the request bears a delegated token.
 fn is_delegated_request(request: &axum::http::Request<axum::body::Body>) -> bool {
     // Check Authorization header
-    if let Some(auth_header) = request.headers().get("authorization") {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                if is_jwt_delegated(token) {
-                    return true;
-                }
-            }
-        }
+    if let Some(auth_header) = request.headers().get("authorization")
+        && let Ok(auth_str) = auth_header.to_str()
+        && let Some(token) = auth_str.strip_prefix("Bearer ")
+        && is_jwt_delegated(token)
+    {
+        return true;
     }
 
     false
@@ -463,14 +461,12 @@ pub async fn reject_service_account_tokens(
 /// Check if the request bears a service account token.
 fn is_service_account_request(request: &axum::http::Request<axum::body::Body>) -> bool {
     // Check Authorization header
-    if let Some(auth_header) = request.headers().get("authorization") {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                if is_jwt_service_account(token) {
-                    return true;
-                }
-            }
-        }
+    if let Some(auth_header) = request.headers().get("authorization")
+        && let Ok(auth_str) = auth_header.to_str()
+        && let Some(token) = auth_str.strip_prefix("Bearer ")
+        && is_jwt_service_account(token)
+    {
+        return true;
     }
 
     false

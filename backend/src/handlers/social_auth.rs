@@ -595,21 +595,20 @@ pub async fn apple_callback(
     })?;
 
     // Extract user name from the POST body (only present on first authorization)
-    if let Some(ref user_json) = form.user {
-        if let Ok(apple_user) = serde_json::from_str::<AppleUser>(user_json) {
-            if let Some(name) = apple_user.name {
-                let display_name = match (name.first_name, name.last_name) {
-                    (Some(f), Some(l)) => Some(format!("{f} {l}")),
-                    (Some(f), None) => Some(f),
-                    (None, Some(l)) => Some(l),
-                    (None, None) => None,
-                };
-                profile = SocialProfile {
-                    display_name,
-                    ..profile
-                };
-            }
-        }
+    if let Some(ref user_json) = form.user
+        && let Ok(apple_user) = serde_json::from_str::<AppleUser>(user_json)
+        && let Some(name) = apple_user.name
+    {
+        let display_name = match (name.first_name, name.last_name) {
+            (Some(f), Some(l)) => Some(format!("{f} {l}")),
+            (Some(f), None) => Some(f),
+            (None, Some(l)) => Some(l),
+            (None, None) => None,
+        };
+        profile = SocialProfile {
+            display_name,
+            ..profile
+        };
     }
 
     // Find or create user (same as Google/GitHub flow)

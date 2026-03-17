@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Rust: format check
+  # ---------------------------------------------------------------------------
+  rust-fmt:
+    name: Rust Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # ---------------------------------------------------------------------------
+  # Rust: clippy lint
+  # ---------------------------------------------------------------------------
+  rust-clippy:
+    name: Rust Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Rust: build and test (backend + node-agent)
+  # ---------------------------------------------------------------------------
+  rust-test:
+    name: Rust Test
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+        env:
+          MONGO_INITDB_ROOT_USERNAME: nyxid
+          MONGO_INITDB_ROOT_PASSWORD: nyxid_dev_password
+          MONGO_INITDB_DATABASE: nyxid
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand({ ping: 1 })' --quiet"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: mongodb://nyxid:nyxid_dev_password@localhost:27017/nyxid?authSource=admin
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      BASE_URL: http://localhost:3001
+      FRONTEND_URL: http://localhost:3000
+      JWT_ISSUER: nyxid-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Run tests
+        run: cargo test --workspace
+
+  # ---------------------------------------------------------------------------
+  # Rust: build with feature flags (KMS providers)
+  # ---------------------------------------------------------------------------
+  rust-features:
+    name: Rust Features (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - aws-kms
+          - gcp-kms
+          - aws-kms,gcp-kms
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: features-${{ matrix.features }}
+      - name: Build with --features ${{ matrix.features }}
+        run: cargo build -p nyxid --features ${{ matrix.features }}
+
+  # ---------------------------------------------------------------------------
+  # Frontend: lint, type-check, test, build
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test
+      - run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # SDK: build all packages
+  # ---------------------------------------------------------------------------
+  sdk:
+    name: SDK Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+      - run: npm ci
+      - run: npm run build

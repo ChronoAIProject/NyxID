@@ -210,6 +210,7 @@ pub async fn create_approval_request(
 /// Process a user's approval decision (from Telegram callback or web UI).
 /// Atomically updates status from "pending" to "approved"/"rejected".
 /// On approval: creates an ApprovalGrant with the user's configured expiry.
+#[allow(clippy::too_many_arguments)]
 pub async fn process_decision(
     db: &Database,
     config: &AppConfig,
@@ -327,16 +328,16 @@ fn is_idempotent_replay(
         return Err(AppError::Conflict("decision_state_conflict".to_string()));
     }
 
-    if let Some(key) = incoming_idempotency_key {
-        if existing_decision_idempotency_key == Some(key) {
-            let existing_approved = existing_status == "approved";
-            if existing_approved == approved {
-                return Ok(true);
-            }
-            return Err(AppError::Conflict(
-                "idempotency_key_reused_with_different_decision".to_string(),
-            ));
+    if let Some(key) = incoming_idempotency_key
+        && existing_decision_idempotency_key == Some(key)
+    {
+        let existing_approved = existing_status == "approved";
+        if existing_approved == approved {
+            return Ok(true);
         }
+        return Err(AppError::Conflict(
+            "idempotency_key_reused_with_different_decision".to_string(),
+        ));
     }
 
     Ok(false)
@@ -395,28 +396,25 @@ pub async fn expire_pending_requests(
         if req
             .notification_channel
             .as_deref()
-            .map_or(false, |ch| ch.contains("telegram"))
-        {
-            if let (Some(chat_id), Some(message_id)) =
+            .is_some_and(|ch| ch.contains("telegram"))
+            && let (Some(chat_id), Some(message_id)) =
                 (req.telegram_chat_id, req.telegram_message_id)
-            {
-                if let Some(bot_token) = config.telegram_bot_token.as_deref() {
-                    let http = http_client.clone();
-                    let token = bot_token.to_string();
-                    let svc_name = req.service_name.clone();
-                    tokio::spawn(async move {
-                        let _ = crate::services::telegram_service::edit_message_after_decision(
-                            &http,
-                            &token,
-                            chat_id,
-                            message_id,
-                            false,
-                            &format!("{svc_name} (expired)"),
-                        )
-                        .await;
-                    });
-                }
-            }
+            && let Some(bot_token) = config.telegram_bot_token.as_deref()
+        {
+            let http = http_client.clone();
+            let token = bot_token.to_string();
+            let svc_name = req.service_name.clone();
+            tokio::spawn(async move {
+                let _ = crate::services::telegram_service::edit_message_after_decision(
+                    &http,
+                    &token,
+                    chat_id,
+                    message_id,
+                    false,
+                    &format!("{svc_name} (expired)"),
+                )
+                .await;
+            });
         }
     }
 

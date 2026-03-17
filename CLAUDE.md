@@ -5,6 +5,8 @@ NyxID is an Auth/SSO platform (similar to Supabase Auth) with a Rust backend and
 **Tech Stack:**
 - **Backend:** Rust, Axum 0.8, MongoDB 8.0 (`mongodb` 3.5, `bson` 2.15)
 - **Frontend:** React 19, TypeScript, Vite 7, TanStack Router + Query, Tailwind CSS 4, Zod 4, Zustand
+- **Mobile:** React Native 0.79, Expo 53, TypeScript (iOS + Android approval app)
+- **SDK:** TypeScript OAuth 2.0 client (`@nyxids/oauth-core`, `@nyxids/oauth-react`)
 - **Dev tools:** Docker Compose (MongoDB + Mailpit), RSA keys for JWT signing
 
 ## Critical Rules
@@ -87,6 +89,8 @@ node-agent/src/
 |-- signing.rs           # HMAC-SHA256 verification, replay guard (5min skew, 10k nonce cap)
 |-- metrics.rs           # Local atomic counters (total_requests, success_count, error_count)
 |-- encryption.rs        # AES-256-GCM local encryption, keyfile management (0600 mode)
+|-- keychain.rs          # OS keychain storage backend (macOS/Windows/Linux)
+|-- secret_backend.rs    # Pluggable secret storage trait (file vs keychain)
 |-- error.rs             # Error enum with thiserror
 
 backend/src/
@@ -94,22 +98,34 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (29 models, 27 collections, incl. node, node_service_binding, node_registration_token)
-|-- services/            # Business logic (33 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service)
-|-- handlers/            # HTTP handlers (34 handler modules, incl. node_admin, admin_nodes, node_ws)
-|-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers
+|-- models/              # MongoDB document structs (31 models, 29 collections, incl. node, node_service_binding, mcp_session)
+|-- services/            # Business logic (37 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service)
+|-- handlers/            # HTTP handlers (37 handler modules, incl. node_admin, admin_nodes, node_ws, developer_apps)
+|-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers, JWKS
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
 frontend/src/
-|-- pages/               # Route pages (27 pages, incl. nodes, node-detail, admin-nodes)
+|-- pages/               # Route pages (38 pages, incl. nodes, node-detail, admin-nodes, service-detail, providers)
 |-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/)
-|-- hooks/               # TanStack Query hooks (12 hooks, incl. use-nodes, use-admin-nodes)
+|-- hooks/               # TanStack Query hooks (15 hooks, incl. use-nodes, use-admin-nodes, use-providers, use-developer-apps)
 |-- schemas/             # Zod validation schemas (8 schema files + tests, incl. nodes.ts)
 |-- stores/              # Zustand stores (auth-store)
 |-- lib/                 # API client, constants, utils
-|-- types/               # TypeScript type definitions (incl. AdminNodeInfo, NodeMetricsInfo)
+|-- types/               # TypeScript type definitions (6 files, incl. AdminNodeInfo, NodeMetricsInfo, approvals)
 |-- router.tsx           # TanStack Router config
+
+mobile/src/              # React Native + Expo mobile app (Expo 53, RN 0.79, TypeScript)
+|-- app/                 # App shell, navigator, deep linking (nyxid://challenge/{id})
+|-- features/            # Feature modules: auth, challenges, approvals, account, legal
+|-- components/          # Reusable mobile UI components
+|-- lib/                 # API client, auth session store (SecureStore), push notification registration
+|-- theme/               # Design tokens and mobile theme
+
+sdk/                     # OAuth SDK monorepo (TypeScript, @nyxids/* npm namespace)
+|-- oauth-core/          # @nyxids/oauth-core: PKCE OAuth 2.0 client (NyxIDClient class)
+|-- oauth-react/         # @nyxids/oauth-react: React context + useNyxID() hook
+|-- demo-react/          # Demo Vite app (private, not published)
 ```
 
 ## Key API Routes
@@ -231,6 +247,15 @@ npm run build                           # Type-check + production build
 npm run test                            # Run vitest
 npm run test:watch                      # Vitest in watch mode
 npm run lint                            # ESLint
+
+# Mobile (from mobile/)
+npm run start                           # Expo dev server
+npm run ios                             # Run on iOS simulator
+npm run android                         # Run on Android emulator
+
+# SDK (from sdk/)
+npm run build                           # Build all SDK packages
+npm run clean                           # Clean build artifacts
 
 # Docker (from project root)
 docker compose up -d                    # Start MongoDB (27018) + Mailpit (8025)

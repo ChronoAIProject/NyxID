@@ -735,7 +735,7 @@ mod tests {
             .expect("provider_config_id filter");
 
         assert_eq!(slug_filter.get_str("$regex").unwrap(), "^llm-");
-        assert_eq!(filter.get_bool("is_active").unwrap(), true);
+        assert!(filter.get_bool("is_active").unwrap());
         assert_eq!(provider_filter.get("$ne"), Some(&Bson::Null));
     }
 

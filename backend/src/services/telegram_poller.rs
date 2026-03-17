@@ -186,17 +186,17 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
     };
 
     // Check if the link code has expired
-    if let Some(expires_at) = channel.telegram_link_code_expires_at {
-        if expires_at < chrono::Utc::now() {
-            let _ = telegram_service::send_text_message(
-                &state.http_client,
-                bot_token,
-                chat_id,
-                "This link code has expired. Please generate a new one from NyxID settings.",
-            )
-            .await;
-            return;
-        }
+    if let Some(expires_at) = channel.telegram_link_code_expires_at
+        && expires_at < chrono::Utc::now()
+    {
+        let _ = telegram_service::send_text_message(
+            &state.http_client,
+            bot_token,
+            chat_id,
+            "This link code has expired. Please generate a new one from NyxID settings.",
+        )
+        .await;
+        return;
     }
 
     // Update the channel with the Telegram details

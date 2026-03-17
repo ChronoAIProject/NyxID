@@ -25,6 +25,7 @@ pub struct TokenExchangeResponse {
 /// 2. Validate the subject_token (user's access token)
 /// 3. Verify the user has consented to this client
 /// 4. Issue a constrained delegated access token
+#[allow(clippy::too_many_arguments)]
 pub async fn exchange_token(
     db: &mongodb::Database,
     config: &AppConfig,

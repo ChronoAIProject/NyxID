@@ -87,7 +87,7 @@ This document describes the system architecture, component design, data flows, a
              |
     +--------v---------+
     |  MongoDB 8.0     |
-    |  (19 collections)|
+    |  (29 collections)|
     +------------------+
 ```
 
@@ -560,51 +560,63 @@ Client                     NyxID Backend                     Downstream
 |               |<-------| api_keys          |
 |               |<-------| mfa_factors       |
 |               |<-------| audit_log         |
-|               |<--+    | user_service_conn |-------+
-+-------+-------+   |    +-------------------+       |
+|               |<-------| user_service_conn |-------+
+|               |<-------| notification_channels     |
++-------+-------+        +-------------------+       |
+        |                                             |
+        |    +-------------------+                    |
+        +--->| oauth_clients     |                    |
+        |    +-------------------+                    |
         |            |                                |
-        |            +--------------------------------+
-        |
-        |    +-------------------+
-        +--->| oauth_clients     |
+        |    +-------v-----------+                    |
+        +--->| authorization_codes|                   |
+        |    +-------------------+                    |
+        |                                             |
+        |    +-------------------+                    |
+        +--->| refresh_tokens    |                    |
+        |    +-------------------+                    |
+        |                                             |
+        |    +-------------------+                    |
+        +--->| downstream_services|<------------------+
         |    +-------------------+
         |            |
-        |    +-------v-----------+
-        +--->| authorization_codes|
-        |    +-------------------+
-        |
-        |    +-------------------+      +-------------------+
-        +--->| refresh_tokens    |----->| sessions          |
-        |    +-------------------+      +-------------------+
+        |            +-------->| service_endpoints          |
+        |            +-------->| service_provider_requirements |
+        |            +-------->| service_approval_configs   |
         |
         |    +-------------------+
-        +--->| downstream_services|----+
-        |    +-------------------+    |
-        |                             |
-        |    +-------------------+    |    +------------------------+
-        +--->| provider_configs  |<---+----| service_provider_      |
-        |    +-------------------+         | requirements           |
-        |            |                     +------------------------+
-        |    +-------v-----------+
-        +--->| user_provider_    |
-        |    | tokens            |
+        +--->| provider_configs  |
         |    +-------------------+
-        |
-        |    +-------------------+
-        +--->| oauth_states      |
-        |    +-------------------+
+        |            |
+        |    +-------v-------------------+
+        +--->| user_provider_tokens      |
+        |    | user_provider_credentials |
+        |    +---------------------------+
         |
         |    +-------------------+
         +--->| roles             |<--+
         |    +-------------------+   |
-        |                            |
         |    +-------------------+   |
         +--->| groups            |---+  (groups.role_ids -> roles)
         |    +-------------------+
         |
-        |    +-------------------+
         +--->| consents          |
-             +-------------------+
+        +--->| oauth_states      |
+        |
+        |    +-------------------+
+        +--->| service_accounts  |
+        |    | service_account_tokens    |
+        |    +-------------------+
+        |
+        |    +-------------------+
+        +--->| nodes             |
+        |    | node_service_bindings     |
+        |    | node_registration_tokens  |
+        |    +-------------------+
+        |
+        +--->| approval_requests |
+        +--->| approval_grants   |
+        +--->| mcp_sessions      |
 ```
 
 ### Collection Details
@@ -1064,6 +1076,125 @@ Per-user notification preferences and connected messaging accounts.
 | `updated_at`                  | ISO 8601 date | NOT NULL          | Last update timestamp                         |
 
 **Indexes:** `user_id` (unique), `telegram_link_code` (sparse), `telegram_chat_id` (sparse)
+
+#### service_approval_configs
+
+Per-user, per-service approval overrides.
+
+| Field          | Type          | Constraints       | Description                                  |
+|----------------|---------------|-------------------|----------------------------------------------|
+| `_id`          | UUID (string) | PK                | Config identifier                            |
+| `user_id`      | UUID (string) | NOT NULL          | Owner user ID                                |
+| `service_id`   | UUID (string) | NOT NULL          | Target service ID                            |
+| `require_approval` | boolean   | NOT NULL          | Whether approval is required for this service |
+| `created_at`   | ISO 8601 date | NOT NULL          | Record creation timestamp                    |
+| `updated_at`   | ISO 8601 date | NOT NULL          | Last update timestamp                        |
+
+**Indexes:** `(user_id, service_id)` (unique)
+
+#### service_endpoints
+
+Registered API endpoints per downstream service (exposed as MCP tools).
+
+| Field          | Type          | Constraints       | Description                                  |
+|----------------|---------------|-------------------|----------------------------------------------|
+| `_id`          | UUID (string) | PK                | Endpoint identifier                          |
+| `service_id`   | UUID (string) | NOT NULL          | Parent service ID                            |
+| `name`         | string        | NOT NULL          | Endpoint name (used as MCP tool suffix)      |
+| `method`       | string        | NOT NULL          | HTTP method (GET, POST, etc.)                |
+| `path`         | string        | NOT NULL          | URL path template                            |
+| `description`  | string        |                   | Human-readable description                   |
+| `parameters`   | object        |                   | JSON Schema for input parameters             |
+| `is_active`    | boolean       | NOT NULL          | Whether endpoint is active                   |
+| `created_at`   | ISO 8601 date | NOT NULL          | Record creation timestamp                    |
+| `updated_at`   | ISO 8601 date | NOT NULL          | Last update timestamp                        |
+
+**Indexes:** `(service_id, name)` (unique, partial: is_active=true)
+
+#### nodes
+
+Registered credential nodes (per user).
+
+| Field                | Type          | Constraints       | Description                                  |
+|----------------------|---------------|-------------------|----------------------------------------------|
+| `_id`                | UUID (string) | PK                | Node identifier                              |
+| `user_id`            | UUID (string) | NOT NULL          | Owner user ID                                |
+| `name`               | string        | NOT NULL          | Node name (lowercase alphanumeric + hyphens) |
+| `status`             | string        | NOT NULL          | online / offline / draining                  |
+| `auth_token_hash`    | string        | NOT NULL          | SHA-256 hash of auth token                   |
+| `signing_secret_hash`| string        | NOT NULL          | SHA-256 hash of HMAC signing secret          |
+| `metadata`           | object        |                   | Agent version, OS, architecture, IP          |
+| `metrics`            | object        |                   | Embedded NodeMetrics (requests, errors, latency) |
+| `last_heartbeat_at`  | ISO 8601 date |                   | Last heartbeat pong received                 |
+| `is_active`          | boolean       | NOT NULL          | Soft-delete flag                             |
+| `created_at`         | ISO 8601 date | NOT NULL          | Record creation timestamp                    |
+| `updated_at`         | ISO 8601 date | NOT NULL          | Last update timestamp                        |
+
+**Indexes:** `(user_id, name)` (unique, partial: is_active=true), `auth_token_hash` (unique)
+
+#### node_service_bindings
+
+Service-to-node routing bindings.
+
+| Field          | Type          | Constraints       | Description                                  |
+|----------------|---------------|-------------------|----------------------------------------------|
+| `_id`          | UUID (string) | PK                | Binding identifier                           |
+| `node_id`      | UUID (string) | NOT NULL          | Bound node ID                                |
+| `user_id`      | UUID (string) | NOT NULL          | Owner user ID                                |
+| `service_id`   | UUID (string) | NOT NULL          | Bound service ID                             |
+| `priority`     | i32           | NOT NULL          | Routing priority (lower = higher priority)   |
+| `is_active`    | boolean       | NOT NULL          | Soft-delete flag                             |
+| `created_at`   | ISO 8601 date | NOT NULL          | Record creation timestamp                    |
+| `updated_at`   | ISO 8601 date | NOT NULL          | Last update timestamp                        |
+
+**Indexes:** `(node_id, service_id)` (unique, partial: is_active=true), `(user_id, service_id)` (for route resolution)
+
+#### node_registration_tokens
+
+One-time tokens for node agent registration (auto-expire via TTL index).
+
+| Field          | Type          | Constraints       | Description                                  |
+|----------------|---------------|-------------------|----------------------------------------------|
+| `_id`          | UUID (string) | PK                | Token identifier                             |
+| `user_id`      | UUID (string) | NOT NULL          | Owner user ID                                |
+| `name`         | string        | NOT NULL          | Name for the node being registered           |
+| `token_hash`   | string        | NOT NULL          | SHA-256 hash of registration token           |
+| `used`         | boolean       | NOT NULL          | Whether token has been consumed              |
+| `expires_at`   | ISO 8601 date | NOT NULL          | Token expiry (TTL-indexed for auto-delete)   |
+| `created_at`   | ISO 8601 date | NOT NULL          | Record creation timestamp                    |
+
+**Indexes:** `token_hash` (unique), `expires_at` (TTL: 0 seconds)
+
+#### user_provider_credentials
+
+Per-user encrypted provider credentials (user-provided OAuth app credentials).
+
+| Field                   | Type          | Constraints       | Description                                  |
+|-------------------------|---------------|-------------------|----------------------------------------------|
+| `_id`                   | UUID (string) | PK                | Credential identifier                        |
+| `user_id`               | UUID (string) | NOT NULL          | Owner user ID                                |
+| `provider_config_id`    | UUID (string) | NOT NULL          | Provider configuration ID                    |
+| `client_id_encrypted`   | binary        | NOT NULL          | AES-256-GCM encrypted client ID              |
+| `client_secret_encrypted`| binary       | NOT NULL          | AES-256-GCM encrypted client secret          |
+| `is_active`             | boolean       | NOT NULL          | Soft-delete flag                             |
+| `created_at`            | ISO 8601 date | NOT NULL          | Record creation timestamp                    |
+| `updated_at`            | ISO 8601 date | NOT NULL          | Last update timestamp                        |
+
+**Indexes:** `(user_id, provider_config_id)` (unique, partial: is_active=true)
+
+#### mcp_sessions
+
+MCP protocol session state for active tool sessions.
+
+| Field          | Type          | Constraints       | Description                                  |
+|----------------|---------------|-------------------|----------------------------------------------|
+| `_id`          | UUID (string) | PK                | Session identifier                           |
+| `user_id`      | UUID (string) | NOT NULL          | Owner user ID                                |
+| `activated_services` | array  |                   | List of activated service IDs                |
+| `created_at`   | ISO 8601 date | NOT NULL          | Session creation timestamp                   |
+| `updated_at`   | ISO 8601 date | NOT NULL          | Last activity timestamp                      |
+
+**Indexes:** `user_id`
 
 ---
 

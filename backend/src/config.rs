@@ -528,7 +528,7 @@ impl AppConfig {
                 }
             }
             other => {
-                #[allow(unused_mut)]
+                #[allow(unused_mut, clippy::useless_vec)]
                 let mut supported = vec!["local"];
                 #[cfg(feature = "aws-kms")]
                 supported.push("aws-kms");

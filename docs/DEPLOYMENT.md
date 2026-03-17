@@ -176,10 +176,9 @@ export MONGO_ROOT_PASSWORD=$(openssl rand -base64 24)
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-The compose file starts four services:
-- **backend**: builds from `backend/Dockerfile`, mounts `keys/` read-only, waits for MongoDB health
+The compose file starts three services:
+- **backend**: builds from `backend/Dockerfile`, mounts `keys/` read-only, waits for MongoDB health (MCP transport is built into the backend at `/mcp`)
 - **frontend**: builds from `frontend/Dockerfile`, proxies API requests to backend via `BACKEND_URL` env var
-- **mcp-proxy**: builds from `mcp-proxy/Dockerfile`, connects to backend for OAuth and API proxying, waits for backend health
 - **mongodb**: persistent volume, health check via `mongosh`
 
 ### Pushing to a Registry
@@ -394,37 +393,41 @@ mongodb://user:pass@host1:27017,host2:27017,host3:27017/nyxid?authSource=admin&r
 
 NyxID creates all required collections and indexes automatically on first startup via `db::ensure_indexes()`. No manual migration steps are needed for fresh installations.
 
-### Data Migrations
-
-When upgrading NyxID, some releases may include data migration scripts in `docs/migrations/`. These scripts backfill new fields on existing documents. See **[docs/migrations/README.md](migrations/README.md)** for details.
-
-Currently available migrations:
-
-| Script | Description | When to run |
-|--------|-------------|-------------|
-| `001-service-categories.js` | Adds `service_category` and `requires_user_credential` to services, `credential_type` and `credential_label` to connections | Before deploying the service proxy overhaul |
-| `002-delegation-scopes.js` | Adds `delegation_scopes` (empty string default) to `oauth_clients` | Before deploying delegated access feature |
-| `003-delegation-token-injection.js` | Adds `inject_delegation_token` (false) and `delegation_token_scope` (`"llm:proxy"`) to `downstream_services` | Before deploying delegated access feature |
-
 ### Collections Created
+
+NyxID uses 29 MongoDB collections, all created automatically at startup:
 
 | Collection               | Purpose                                      |
 |--------------------------|----------------------------------------------|
-| `users`                  | User accounts                                |
-| `sessions`               | Server-side sessions                         |
-| `oauth_clients`          | Registered OAuth/OIDC clients                |
+| `users`                  | User accounts (email, password hash, MFA status) |
+| `sessions`               | Server-side sessions with hashed tokens      |
+| `oauth_clients`          | Registered OAuth/OIDC clients (includes delegation_scopes) |
 | `authorization_codes`    | Short-lived OIDC authorization codes         |
-| `refresh_tokens`         | Refresh tokens with rotation tracking        |
-| `api_keys`               | User-scoped API keys                         |
-| `downstream_services`    | Registered downstream services               |
+| `refresh_tokens`         | Refresh tokens with rotation chain tracking  |
+| `api_keys`               | User-scoped API keys (hashed, with prefix)   |
+| `downstream_services`    | Registered downstream services for proxying  |
 | `user_service_connections` | Per-user connections and encrypted credentials |
-| `mfa_factors`            | TOTP factors and recovery codes              |
+| `mfa_factors`            | TOTP factors and encrypted recovery codes    |
 | `service_endpoints`      | Registered API endpoints per service (MCP tools) |
-| `provider_configs`       | External provider registry (OpenAI, Anthropic, etc.) |
-| `user_provider_tokens`   | Per-user encrypted provider tokens                |
-| `service_provider_requirements` | Provider token requirements per service     |
-| `oauth_states`           | Temporary OAuth state for provider flows          |
-| `audit_log`              | Immutable audit trail                        |
+| `provider_configs`       | External provider registry (encrypted OAuth creds) |
+| `user_provider_tokens`   | Per-user encrypted provider tokens (API keys/OAuth) |
+| `user_provider_credentials` | Per-user encrypted provider credentials    |
+| `service_provider_requirements` | Provider token requirements per service |
+| `oauth_states`           | Temporary OAuth state for provider flows     |
+| `roles`                  | Role definitions with permissions and scoping |
+| `groups`                 | Group definitions with role inheritance      |
+| `consents`               | User OAuth consent records per client        |
+| `service_accounts`       | Non-human (machine) identity definitions     |
+| `service_account_tokens` | Issued service account JWT records for revocation |
+| `approval_requests`      | Pending/resolved approval requests for proxy access |
+| `approval_grants`        | Cached approval grants (time-limited, revocable) |
+| `service_approval_configs` | Per-service approval overrides (per user)  |
+| `notification_channels`  | Per-user notification preferences, Telegram links, push device tokens |
+| `nodes`                  | Registered credential nodes (per user, with auth token hash and status) |
+| `node_service_bindings`  | Service-to-node routing bindings             |
+| `node_registration_tokens` | One-time tokens for node registration (TTL-indexed) |
+| `mcp_sessions`           | MCP protocol session state                   |
+| `audit_log`              | Immutable audit trail of security events     |
 
 ### MongoDB Atlas
 
