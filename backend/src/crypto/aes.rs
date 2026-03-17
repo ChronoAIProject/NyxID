@@ -363,27 +363,26 @@ impl EncryptionKeys {
                     }
                     Err(_) => {
                         // Primary provider could not unwrap; try fallback provider
-                        if let Some(ref fallback) = self.fallback_provider {
-                            if fallback.has_key_id(kek_id) {
-                                if let Ok(dek_bytes) = fallback.unwrap_dek(&wrapped).await {
-                                    self.counters.v2_fallback.fetch_add(1, Ordering::Relaxed);
-                                    self.log_once(
-                                        &self.counters.logged_v2_fallback,
-                                        "Decrypted v2 envelope via fallback provider; migration from previous provider is still in progress",
-                                    );
+                        if let Some(ref fallback) = self.fallback_provider
+                            && fallback.has_key_id(kek_id)
+                            && let Ok(dek_bytes) = fallback.unwrap_dek(&wrapped).await
+                        {
+                            self.counters.v2_fallback.fetch_add(1, Ordering::Relaxed);
+                            self.log_once(
+                                &self.counters.logged_v2_fallback,
+                                "Decrypted v2 envelope via fallback provider; migration from previous provider is still in progress",
+                            );
 
-                                    let dek = Zeroizing::new(
-                                        <[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(
-                                            |_| {
-                                                AppError::Internal(
-                                                    "Unwrapped DEK is not 32 bytes".to_string(),
-                                                )
-                                            },
-                                        )?,
-                                    );
-                                    return decrypt_raw(data_payload, dek.as_ref());
-                                }
-                            }
+                            let dek = Zeroizing::new(
+                                <[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(
+                                    |_| {
+                                        AppError::Internal(
+                                            "Unwrapped DEK is not 32 bytes".to_string(),
+                                        )
+                                    },
+                                )?,
+                            );
+                            return decrypt_raw(data_payload, dek.as_ref());
                         }
 
                         // Provider could not unwrap; if it is not the current or

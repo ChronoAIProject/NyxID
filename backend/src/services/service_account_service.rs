@@ -54,12 +54,12 @@ pub async fn create_service_account(
         ));
     }
 
-    if let Some(d) = description {
-        if d.len() > 500 {
-            return Err(AppError::ValidationError(
-                "Description must be 500 characters or less".to_string(),
-            ));
-        }
+    if let Some(d) = description
+        && d.len() > 500
+    {
+        return Err(AppError::ValidationError(
+            "Description must be 500 characters or less".to_string(),
+        ));
     }
 
     // Scopes are free-form strings. Validation against a known scope vocabulary
@@ -71,12 +71,12 @@ pub async fn create_service_account(
         ));
     }
 
-    if let Some(rl) = rate_limit_override {
-        if rl == 0 {
-            return Err(AppError::ValidationError(
-                "Rate limit override must be greater than 0".to_string(),
-            ));
-        }
+    if let Some(rl) = rate_limit_override
+        && rl == 0
+    {
+        return Err(AppError::ValidationError(
+            "Rate limit override must be greater than 0".to_string(),
+        ));
     }
 
     if !role_ids.is_empty() {
@@ -167,6 +167,7 @@ pub async fn get_service_account(db: &Database, sa_id: &str) -> AppResult<Servic
 }
 
 /// Update a service account's mutable fields.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_service_account(
     db: &Database,
     sa_id: &str,

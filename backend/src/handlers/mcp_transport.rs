@@ -208,10 +208,10 @@ async fn authenticate_mcp(
     // --- Session-based auth fallback ---
     let session_id = headers.get("mcp-session-id").and_then(|v| v.to_str().ok());
 
-    if let Some(sid) = session_id {
-        if let Some(user_id) = state.mcp_sessions.get_user_id(sid) {
-            return verify_user_active(state, user_id).await;
-        }
+    if let Some(sid) = session_id
+        && let Some(user_id) = state.mcp_sessions.get_user_id(sid)
+    {
+        return verify_user_active(state, user_id).await;
     }
 
     Err(mcp_401(&state.config.base_url))
@@ -784,7 +784,7 @@ async fn handle_meta_call_tool(
     // Auto-activate so future tools/list responses include this service
     let changed = state
         .mcp_sessions
-        .activate_services(session_id, &[service.service_id.clone()]);
+        .activate_services(session_id, std::slice::from_ref(&service.service_id));
 
     if changed {
         send_tools_list_changed(state, session_id);

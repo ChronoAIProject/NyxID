@@ -97,15 +97,15 @@ pub async fn update_role(
     }
 
     // Check slug uniqueness if changing
-    if let Some(new_slug) = slug {
-        if new_slug != existing.slug {
-            let dup = db
-                .collection::<Role>(ROLES)
-                .find_one(doc! { "slug": new_slug })
-                .await?;
-            if dup.is_some() {
-                return Err(AppError::DuplicateSlug(new_slug.to_string()));
-            }
+    if let Some(new_slug) = slug
+        && new_slug != existing.slug
+    {
+        let dup = db
+            .collection::<Role>(ROLES)
+            .find_one(doc! { "slug": new_slug })
+            .await?;
+        if dup.is_some() {
+            return Err(AppError::DuplicateSlug(new_slug.to_string()));
         }
     }
 

@@ -147,10 +147,10 @@ impl LlmTranslator for ChatgptTranslator {
                 "message" => {
                     if let Some(content_arr) = item.get("content").and_then(|c| c.as_array()) {
                         for block in content_arr {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("output_text") {
-                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                    text_parts.push(text.to_string());
-                                }
+                            if block.get("type").and_then(|t| t.as_str()) == Some("output_text")
+                                && let Some(text) = block.get("text").and_then(|t| t.as_str())
+                            {
+                                text_parts.push(text.to_string());
                             }
                         }
                     }
@@ -488,13 +488,13 @@ fn convert_messages_to_input(
             "assistant" => {
                 if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
                     // Emit text content as a message if present
-                    if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-                        if !content.is_empty() {
-                            input.push(serde_json::json!({
-                                "role": "assistant",
-                                "content": content,
-                            }));
-                        }
+                    if let Some(content) = msg.get("content").and_then(|c| c.as_str())
+                        && !content.is_empty()
+                    {
+                        input.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": content,
+                        }));
                     }
                     // Each tool_call becomes a separate function_call input item
                     for tc in tool_calls {
@@ -947,10 +947,10 @@ fn extract_next_sse_event(buf: &mut String) -> Option<SseEvent> {
             event_type = Some(val.to_string());
         } else if let Some(val) = line.strip_prefix("data: ") {
             data_parts.push(val.to_string());
-        } else if line.starts_with("event:") {
-            event_type = Some(line["event:".len()..].trim().to_string());
-        } else if line.starts_with("data:") {
-            data_parts.push(line["data:".len()..].trim().to_string());
+        } else if let Some(val) = line.strip_prefix("event:") {
+            event_type = Some(val.trim().to_string());
+        } else if let Some(val) = line.strip_prefix("data:") {
+            data_parts.push(val.trim().to_string());
         }
     }
 
@@ -961,13 +961,13 @@ fn extract_next_sse_event(buf: &mut String) -> Option<SseEvent> {
     let data = data_parts.join("\n");
 
     // If no explicit event: header, try to extract type from the JSON data
-    if event_type.is_none() {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
-            event_type = parsed
-                .get("type")
-                .and_then(|t| t.as_str())
-                .map(String::from);
-        }
+    if event_type.is_none()
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data)
+    {
+        event_type = parsed
+            .get("type")
+            .and_then(|t| t.as_str())
+            .map(String::from);
     }
 
     Some(SseEvent { event_type, data })

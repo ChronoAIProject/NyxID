@@ -48,12 +48,13 @@ fn ensure_oauth_provider_configured(provider: &ProviderConfig) -> AppResult<()> 
 
     // For "user" or "both" modes, URLs alone are sufficient (users bring their own credentials)
     // For "admin" (default), admin-level credentials are also required
-    if provider.credential_mode != "user" && provider.credential_mode != "both" {
-        if provider.client_id_encrypted.is_none() || provider.client_secret_encrypted.is_none() {
-            return Err(AppError::BadRequest(
-                OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE.to_string(),
-            ));
-        }
+    if provider.credential_mode != "user"
+        && provider.credential_mode != "both"
+        && (provider.client_id_encrypted.is_none() || provider.client_secret_encrypted.is_none())
+    {
+        return Err(AppError::BadRequest(
+            OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE.to_string(),
+        ));
     }
 
     Ok(())
@@ -762,6 +763,7 @@ pub async fn poll_device_code(
 }
 
 /// Store tokens from a device code flow response (either direct or after code exchange).
+#[allow(clippy::too_many_arguments)]
 async fn store_device_code_tokens(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -1139,17 +1141,17 @@ pub async fn disconnect_provider(
         .await?;
 
     // Best-effort remote revocation for OAuth2 tokens
-    if let Some(ref tok) = token {
-        if tok.token_type == "oauth2" {
-            let provider = db
-                .collection::<ProviderConfig>(PROVIDER_CONFIGS)
-                .find_one(doc! { "_id": provider_id })
-                .await?;
-            if let Some(ref provider) = provider {
-                if provider.revocation_url.is_some() {
-                    let _ = try_revoke_token_remote(db, encryption_keys, provider, tok).await;
-                }
-            }
+    if let Some(ref tok) = token
+        && tok.token_type == "oauth2"
+    {
+        let provider = db
+            .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .find_one(doc! { "_id": provider_id })
+            .await?;
+        if let Some(ref provider) = provider
+            && provider.revocation_url.is_some()
+        {
+            let _ = try_revoke_token_remote(db, encryption_keys, provider, tok).await;
         }
     }
 
@@ -1219,39 +1221,37 @@ async fn try_revoke_token_remote(
     let use_basic_auth = provider.token_endpoint_auth_method == "client_secret_basic";
 
     // Try revoking access token
-    if let Some(ref enc) = token.access_token_encrypted {
-        if let Ok(decrypted) = encryption_keys.decrypt(enc).await {
-            if let Ok(access_token) = String::from_utf8(decrypted) {
-                let _ = send_revocation_request(
-                    revocation_url,
-                    &access_token,
-                    "access_token",
-                    &creds.client_id,
-                    creds.client_secret.as_deref(),
-                    use_basic_auth,
-                    oauth_flow::client_id_param_name(provider),
-                )
-                .await;
-            }
-        }
+    if let Some(ref enc) = token.access_token_encrypted
+        && let Ok(decrypted) = encryption_keys.decrypt(enc).await
+        && let Ok(access_token) = String::from_utf8(decrypted)
+    {
+        let _ = send_revocation_request(
+            revocation_url,
+            &access_token,
+            "access_token",
+            &creds.client_id,
+            creds.client_secret.as_deref(),
+            use_basic_auth,
+            oauth_flow::client_id_param_name(provider),
+        )
+        .await;
     }
 
     // Try revoking refresh token
-    if let Some(ref enc) = token.refresh_token_encrypted {
-        if let Ok(decrypted) = encryption_keys.decrypt(enc).await {
-            if let Ok(refresh_token) = String::from_utf8(decrypted) {
-                let _ = send_revocation_request(
-                    revocation_url,
-                    &refresh_token,
-                    "refresh_token",
-                    &creds.client_id,
-                    creds.client_secret.as_deref(),
-                    use_basic_auth,
-                    oauth_flow::client_id_param_name(provider),
-                )
-                .await;
-            }
-        }
+    if let Some(ref enc) = token.refresh_token_encrypted
+        && let Ok(decrypted) = encryption_keys.decrypt(enc).await
+        && let Ok(refresh_token) = String::from_utf8(decrypted)
+    {
+        let _ = send_revocation_request(
+            revocation_url,
+            &refresh_token,
+            "refresh_token",
+            &creds.client_id,
+            creds.client_secret.as_deref(),
+            use_basic_auth,
+            oauth_flow::client_id_param_name(provider),
+        )
+        .await;
     }
 }
 

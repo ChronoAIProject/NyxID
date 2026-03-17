@@ -118,7 +118,7 @@ pub async fn admin_list_nodes(
             .await?;
         let mut counts = HashMap::new();
         while let Some(result) = cursor.try_next().await? {
-            if let Some(node_id) = result.get_str("_id").ok() {
+            if let Ok(node_id) = result.get_str("_id") {
                 // $sum may return Int32 or Int64 depending on value size
                 let count = result
                     .get("count")

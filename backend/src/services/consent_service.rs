@@ -74,10 +74,10 @@ pub async fn check_consent(
     match consent {
         Some(c) => {
             // Check if the consent has expired
-            if let Some(expires_at) = c.expires_at {
-                if expires_at < Utc::now() {
-                    return Ok(None);
-                }
+            if let Some(expires_at) = c.expires_at
+                && expires_at < Utc::now()
+            {
+                return Ok(None);
             }
 
             let granted: std::collections::HashSet<&str> = c.scopes.split_whitespace().collect();

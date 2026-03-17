@@ -72,10 +72,10 @@ impl FcmAuth {
         // Check cached token
         {
             let guard = self.cached_token.read().await;
-            if let Some(cached) = guard.as_ref() {
-                if Instant::now() < cached.expires_at {
-                    return Ok(cached.access_token.clone());
-                }
+            if let Some(cached) = guard.as_ref()
+                && Instant::now() < cached.expires_at
+            {
+                return Ok(cached.access_token.clone());
             }
         }
 
@@ -88,10 +88,10 @@ impl FcmAuth {
         let mut guard = self.cached_token.write().await;
 
         // Double-check: another task may have refreshed while we waited for the write lock
-        if let Some(cached) = guard.as_ref() {
-            if Instant::now() < cached.expires_at {
-                return Ok(cached.access_token.clone());
-            }
+        if let Some(cached) = guard.as_ref()
+            && Instant::now() < cached.expires_at
+        {
+            return Ok(cached.access_token.clone());
         }
 
         let now = chrono::Utc::now();
@@ -397,10 +397,10 @@ impl ApnsAuth {
     async fn get_token(&self) -> AppResult<String> {
         {
             let guard = self.cached_token.read().await;
-            if let Some(cached) = guard.as_ref() {
-                if Instant::now() < cached.expires_at {
-                    return Ok(cached.access_token.clone());
-                }
+            if let Some(cached) = guard.as_ref()
+                && Instant::now() < cached.expires_at
+            {
+                return Ok(cached.access_token.clone());
             }
         }
 
@@ -412,10 +412,10 @@ impl ApnsAuth {
         let mut guard = self.cached_token.write().await;
 
         // Double-check: another task may have refreshed while we waited
-        if let Some(cached) = guard.as_ref() {
-            if Instant::now() < cached.expires_at {
-                return Ok(cached.access_token.clone());
-            }
+        if let Some(cached) = guard.as_ref()
+            && Instant::now() < cached.expires_at
+        {
+            return Ok(cached.access_token.clone());
         }
 
         let now = chrono::Utc::now();
@@ -458,6 +458,7 @@ pub enum ApnsSendResult {
 ///
 /// Uses a dedicated HTTP/2 client (`APNS_HTTP_CLIENT`) instead of the shared
 /// client to avoid protocol version mismatch errors with Apple's servers.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_apns_notification(
     _http_client: &Client,
     apns_auth: &ApnsAuth,

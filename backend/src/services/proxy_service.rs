@@ -87,12 +87,12 @@ pub async fn resolve_proxy_target(
         .await?;
 
     // If user has explicitly disconnected (is_active: false), block access
-    if let Some(ref conn) = user_conn {
-        if !conn.is_active {
-            return Err(AppError::Forbidden(
-                "You have disconnected from this service".to_string(),
-            ));
-        }
+    if let Some(ref conn) = user_conn
+        && !conn.is_active
+    {
+        return Err(AppError::Forbidden(
+            "You have disconnected from this service".to_string(),
+        ));
     }
 
     // For services requiring user credentials, a connection record is mandatory
@@ -197,12 +197,12 @@ pub async fn resolve_proxy_target_lenient(
         .await?;
 
     // Respect explicit disconnection even in lenient mode
-    if let Some(ref conn) = user_conn {
-        if !conn.is_active {
-            return Err(AppError::Forbidden(
-                "You have disconnected from this service".to_string(),
-            ));
-        }
+    if let Some(ref conn) = user_conn
+        && !conn.is_active
+    {
+        return Err(AppError::Forbidden(
+            "You have disconnected from this service".to_string(),
+        ));
     }
 
     let credential_encrypted = if service.requires_user_credential {

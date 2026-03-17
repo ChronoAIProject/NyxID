@@ -95,55 +95,54 @@ pub async fn register_device(
     }
 
     // Rotation path: replace `previous_token` with the new token on the same device record.
-    if let Some(previous_token) = resolved_prev {
-        if let Some(existing) = channel
+    if let Some(previous_token) = resolved_prev
+        && let Some(existing) = channel
             .push_devices
             .iter()
             .find(|d| d.token == previous_token)
-        {
-            ensure_platform_matches(existing, &body.platform)?;
+    {
+        ensure_platform_matches(existing, &body.platform)?;
 
-            let device_id = existing.device_id.clone();
-            let mut update_doc = doc! {
-                "push_devices.$.token": &body.token,
-                "push_devices.$.platform": &body.platform,
-                "push_devices.$.registered_at": bson_now,
-                "updated_at": bson_now,
-            };
+        let device_id = existing.device_id.clone();
+        let mut update_doc = doc! {
+            "push_devices.$.token": &body.token,
+            "push_devices.$.platform": &body.platform,
+            "push_devices.$.registered_at": bson_now,
+            "updated_at": bson_now,
+        };
 
-            if let Some(ref name) = body.device_name {
-                update_doc.insert("push_devices.$.device_name", name);
-            }
-            if let Some(ref app_id) = body.app_id {
-                update_doc.insert("push_devices.$.app_id", app_id);
-            }
+        if let Some(ref name) = body.device_name {
+            update_doc.insert("push_devices.$.device_name", name);
+        }
+        if let Some(ref app_id) = body.app_id {
+            update_doc.insert("push_devices.$.app_id", app_id);
+        }
 
-            collection
-                .update_one(
-                    doc! {
-                        "_id": &channel.id,
-                        "push_devices.device_id": &device_id,
-                    },
-                    doc! { "$set": update_doc },
-                )
-                .await?;
-
-            remove_duplicate_token_entries(
-                &collection,
-                &channel.id,
-                &body.token,
-                &device_id,
-                bson::DateTime::from_chrono(Utc::now()),
+        collection
+            .update_one(
+                doc! {
+                    "_id": &channel.id,
+                    "push_devices.device_id": &device_id,
+                },
+                doc! { "$set": update_doc },
             )
             .await?;
 
-            return Ok(Json(DeviceResponse {
-                device_id,
-                platform: body.platform.clone(),
-                device_name: body.device_name.clone().or(existing.device_name.clone()),
-                registered_at: now.to_rfc3339(),
-            }));
-        }
+        remove_duplicate_token_entries(
+            &collection,
+            &channel.id,
+            &body.token,
+            &device_id,
+            bson::DateTime::from_chrono(Utc::now()),
+        )
+        .await?;
+
+        return Ok(Json(DeviceResponse {
+            device_id,
+            platform: body.platform.clone(),
+            device_name: body.device_name.clone().or(existing.device_name.clone()),
+            registered_at: now.to_rfc3339(),
+        }));
     }
 
     // Check if device with this token already exists (token refresh)

@@ -130,6 +130,7 @@ struct GetUpdatesResponse {
 
 /// Send an approval request message with Approve/Reject inline keyboard.
 /// Returns the Telegram message_id.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_approval_message(
     http_client: &Client,
     bot_token: &str,

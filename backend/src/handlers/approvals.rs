@@ -133,12 +133,12 @@ pub async fn list_requests(
 ) -> AppResult<Json<ApprovalRequestsResponse>> {
     let user_id = auth_user.user_id.to_string();
 
-    if let Some(ref status) = query.status {
-        if !["pending", "approved", "rejected", "expired"].contains(&status.as_str()) {
-            return Err(crate::errors::AppError::ValidationError(
-                "status must be one of: pending, approved, rejected, expired".to_string(),
-            ));
-        }
+    if let Some(ref status) = query.status
+        && !["pending", "approved", "rejected", "expired"].contains(&status.as_str())
+    {
+        return Err(crate::errors::AppError::ValidationError(
+            "status must be one of: pending, approved, rejected, expired".to_string(),
+        ));
     }
 
     let page = query.page.unwrap_or(1).max(1);
@@ -239,12 +239,12 @@ pub async fn decide_request(
         ));
     }
 
-    if let Some(duration_sec) = body.duration_sec {
-        if duration_sec <= 0 {
-            return Err(crate::errors::AppError::ValidationError(
-                "duration_sec must be positive".to_string(),
-            ));
-        }
+    if let Some(duration_sec) = body.duration_sec
+        && duration_sec <= 0
+    {
+        return Err(crate::errors::AppError::ValidationError(
+            "duration_sec must be positive".to_string(),
+        ));
     }
 
     let updated = approval_service::process_decision(

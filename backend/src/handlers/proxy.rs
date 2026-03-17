@@ -354,15 +354,15 @@ async fn execute_proxy(
                             let mut response_builder = Response::builder().status(status);
                             for (name, value) in &node_response.headers {
                                 let name_lower = name.to_lowercase();
-                                if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str()) {
-                                    if let (Ok(hn), Ok(hv)) = (
+                                if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
+                                    && let (Ok(hn), Ok(hv)) = (
                                         axum::http::header::HeaderName::from_bytes(name.as_bytes()),
                                         axum::http::header::HeaderValue::from_bytes(
                                             value.as_bytes(),
                                         ),
-                                    ) {
-                                        response_builder = response_builder.header(hn, hv);
-                                    }
+                                    )
+                                {
+                                    response_builder = response_builder.header(hn, hv);
                                 }
                             }
                             response_builder
@@ -399,15 +399,15 @@ async fn execute_proxy(
                                 if name_lower == "content-length" {
                                     continue;
                                 }
-                                if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str()) {
-                                    if let (Ok(hn), Ok(hv)) = (
+                                if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
+                                    && let (Ok(hn), Ok(hv)) = (
                                         axum::http::header::HeaderName::from_bytes(name.as_bytes()),
                                         axum::http::header::HeaderValue::from_bytes(
                                             value.as_bytes(),
                                         ),
-                                    ) {
-                                        response_builder = response_builder.header(hn, hv);
-                                    }
+                                    )
+                                {
+                                    response_builder = response_builder.header(hn, hv);
                                 }
                             }
 
@@ -632,10 +632,9 @@ async fn execute_proxy(
     // User-Agent, etc.), while preserving the caller's requested response mode.
     let is_codex = target.service.slug == "llm-openai-codex";
 
-    if is_codex && body.is_some() && is_codex_transport_path(path) {
-        let body_ref = body
-            .as_ref()
-            .expect("body.is_some() checked above for Codex transport");
+    if is_codex && is_codex_transport_path(path)
+        && let Some(body_ref) = body.as_ref()
+    {
         let body_json: serde_json::Value = serde_json::from_slice(body_ref)
             .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
 
@@ -742,16 +741,13 @@ async fn execute_proxy(
         // diagnose premature connection drops.
         let service_id_owned = service_id.to_string();
         let stream = downstream_response.bytes_stream().map(move |chunk| {
-            match &chunk {
-                Err(e) => {
-                    tracing::error!(
-                        service_id = %service_id_owned,
-                        error = %e,
-                        error_debug = ?e,
-                        "SSE stream error from upstream — connection dropped"
-                    );
-                }
-                _ => {}
+            if let Err(e) = &chunk {
+                tracing::error!(
+                    service_id = %service_id_owned,
+                    error = %e,
+                    error_debug = ?e,
+                    "SSE stream error from upstream — connection dropped"
+                );
             }
             chunk
         });

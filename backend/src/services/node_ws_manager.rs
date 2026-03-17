@@ -443,29 +443,29 @@ impl NodeWsManager {
 
     /// Deliver a proxy response from a node. Called by the WS reader task.
     pub fn deliver_proxy_response(&self, node_id: &str, response: NodeProxyResponse) {
-        if let Some(conn) = self.connections.get(node_id) {
-            if let Some((_, pending)) = conn.pending.remove(&response.request_id) {
-                match pending {
-                    PendingRequest::Awaiting(sender) => {
-                        let _ = sender.send(NodeProxyOutcome::Response(
-                            ProxyResponseType::Complete(response),
-                        ));
-                    }
-                    PendingRequest::Streaming(tx) => {
-                        // Unexpected: got a full response for a streaming request.
-                        // Deliver as start + data + end.
-                        let headers = response
-                            .headers
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        let _ = tx.send(StreamChunk::Start {
-                            status: response.status,
-                            headers,
-                        });
-                        let _ = tx.send(StreamChunk::Data(response.body));
-                        let _ = tx.send(StreamChunk::End);
-                    }
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some((_, pending)) = conn.pending.remove(&response.request_id)
+        {
+            match pending {
+                PendingRequest::Awaiting(sender) => {
+                    let _ = sender.send(NodeProxyOutcome::Response(
+                        ProxyResponseType::Complete(response),
+                    ));
+                }
+                PendingRequest::Streaming(tx) => {
+                    // Unexpected: got a full response for a streaming request.
+                    // Deliver as start + data + end.
+                    let headers = response
+                        .headers
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    let _ = tx.send(StreamChunk::Start {
+                        status: response.status,
+                        headers,
+                    });
+                    let _ = tx.send(StreamChunk::Data(response.body));
+                    let _ = tx.send(StreamChunk::End);
                 }
             }
         }
@@ -480,29 +480,29 @@ impl NodeWsManager {
         status: u16,
         retryable: bool,
     ) {
-        if let Some(conn) = self.connections.get(node_id) {
-            if let Some((_, pending)) = conn.pending.remove(request_id) {
-                match pending {
-                    PendingRequest::Awaiting(sender) => {
-                        let outcome = if retryable {
-                            NodeProxyOutcome::RetryableFailure(error.to_string())
-                        } else {
-                            NodeProxyOutcome::Response(ProxyResponseType::Complete(
-                                NodeProxyResponse {
-                                    request_id: request_id.to_string(),
-                                    status,
-                                    headers: vec![],
-                                    body: serde_json::json!({ "error": error })
-                                        .to_string()
-                                        .into_bytes(),
-                                },
-                            ))
-                        };
-                        let _ = sender.send(outcome);
-                    }
-                    PendingRequest::Streaming(tx) => {
-                        let _ = tx.send(StreamChunk::Error(error.to_string()));
-                    }
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some((_, pending)) = conn.pending.remove(request_id)
+        {
+            match pending {
+                PendingRequest::Awaiting(sender) => {
+                    let outcome = if retryable {
+                        NodeProxyOutcome::RetryableFailure(error.to_string())
+                    } else {
+                        NodeProxyOutcome::Response(ProxyResponseType::Complete(
+                            NodeProxyResponse {
+                                request_id: request_id.to_string(),
+                                status,
+                                headers: vec![],
+                                body: serde_json::json!({ "error": error })
+                                    .to_string()
+                                    .into_bytes(),
+                            },
+                        ))
+                    };
+                    let _ = sender.send(outcome);
+                }
+                PendingRequest::Streaming(tx) => {
+                    let _ = tx.send(StreamChunk::Error(error.to_string()));
                 }
             }
         }
@@ -554,23 +554,21 @@ impl NodeWsManager {
 
     /// Deliver a streaming chunk to an active stream.
     pub fn deliver_stream_chunk(&self, node_id: &str, request_id: &str, data: Vec<u8>) {
-        if let Some(conn) = self.connections.get(node_id) {
-            if let Some(pending) = conn.pending.get(request_id) {
-                if let PendingRequest::Streaming(tx) = pending.value() {
-                    let _ = tx.send(StreamChunk::Data(data));
-                }
-            }
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some(pending) = conn.pending.get(request_id)
+            && let PendingRequest::Streaming(tx) = pending.value()
+        {
+            let _ = tx.send(StreamChunk::Data(data));
         }
     }
 
     /// Deliver end-of-stream and remove the pending entry.
     pub fn deliver_stream_end(&self, node_id: &str, request_id: &str) {
-        if let Some(conn) = self.connections.get(node_id) {
-            if let Some((_, pending)) = conn.pending.remove(request_id) {
-                if let PendingRequest::Streaming(tx) = pending {
-                    let _ = tx.send(StreamChunk::End);
-                }
-            }
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some((_, pending)) = conn.pending.remove(request_id)
+            && let PendingRequest::Streaming(tx) = pending
+        {
+            let _ = tx.send(StreamChunk::End);
         }
     }
 }

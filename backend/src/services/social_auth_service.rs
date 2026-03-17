@@ -526,10 +526,10 @@ pub async fn find_or_create_user(
             "last_login_at": bson::DateTime::from_chrono(now),
             "updated_at": bson::DateTime::from_chrono(now),
         };
-        if user.avatar_url.is_none() {
-            if let Some(ref avatar) = profile.avatar_url {
-                update.insert("avatar_url", avatar);
-            }
+        if user.avatar_url.is_none()
+            && let Some(ref avatar) = profile.avatar_url
+        {
+            update.insert("avatar_url", avatar);
         }
         if !user.email_verified {
             update.insert("email_verified", true);

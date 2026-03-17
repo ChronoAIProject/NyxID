@@ -69,19 +69,19 @@ pub async fn update_settings(
     let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
 
     // Validate ranges
-    if let Some(timeout) = body.approval_timeout_secs {
-        if !(10..=300).contains(&timeout) {
-            return Err(AppError::ValidationError(
-                "approval_timeout_secs must be between 10 and 300".to_string(),
-            ));
-        }
+    if let Some(timeout) = body.approval_timeout_secs
+        && !(10..=300).contains(&timeout)
+    {
+        return Err(AppError::ValidationError(
+            "approval_timeout_secs must be between 10 and 300".to_string(),
+        ));
     }
-    if let Some(days) = body.grant_expiry_days {
-        if !(1..=365).contains(&days) {
-            return Err(AppError::ValidationError(
-                "grant_expiry_days must be between 1 and 365".to_string(),
-            ));
-        }
+    if let Some(days) = body.grant_expiry_days
+        && !(1..=365).contains(&days)
+    {
+        return Err(AppError::ValidationError(
+            "grant_expiry_days must be between 1 and 365".to_string(),
+        ));
     }
 
     // Cannot enable Telegram without a linked chat

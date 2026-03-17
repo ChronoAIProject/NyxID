@@ -45,36 +45,36 @@ pub async fn send_approval_notification(
     let mut tokens_to_remove: Vec<String> = Vec::new();
 
     // 1. Telegram (existing behavior)
-    if channel.telegram_enabled {
-        if let Some(chat_id) = channel.telegram_chat_id {
-            let bot_token = config.telegram_bot_token.as_deref();
+    if channel.telegram_enabled
+        && let Some(chat_id) = channel.telegram_chat_id
+    {
+        let bot_token = config.telegram_bot_token.as_deref();
 
-            if let Some(bot_token) = bot_token {
-                let requester_label = request
-                    .requester_label
-                    .as_deref()
-                    .unwrap_or(&request.requester_type);
+        if let Some(bot_token) = bot_token {
+            let requester_label = request
+                .requester_label
+                .as_deref()
+                .unwrap_or(&request.requester_type);
 
-                match telegram_service::send_approval_message(
-                    http_client,
-                    bot_token,
-                    chat_id,
-                    &request.id,
-                    &request.service_name,
-                    &request.service_slug,
-                    requester_label,
-                    &request.operation_summary,
-                    channel.approval_timeout_secs,
-                )
-                .await
-                {
-                    Ok(message_id) => {
-                        channels_used.push("telegram".to_string());
-                        telegram_chat_id = Some(chat_id);
-                        telegram_message_id = Some(message_id);
-                    }
-                    Err(e) => tracing::warn!("Telegram notification failed: {e}"),
+            match telegram_service::send_approval_message(
+                http_client,
+                bot_token,
+                chat_id,
+                &request.id,
+                &request.service_name,
+                &request.service_slug,
+                requester_label,
+                &request.operation_summary,
+                channel.approval_timeout_secs,
+            )
+            .await
+            {
+                Ok(message_id) => {
+                    channels_used.push("telegram".to_string());
+                    telegram_chat_id = Some(chat_id);
+                    telegram_message_id = Some(message_id);
                 }
+                Err(e) => tracing::warn!("Telegram notification failed: {e}"),
             }
         }
     }
@@ -178,25 +178,23 @@ pub async fn notify_decision(
     if request
         .notification_channel
         .as_deref()
-        .map_or(false, |ch| ch.contains("telegram"))
-    {
-        if let (Some(chat_id), Some(message_id)) =
+        .is_some_and(|ch| ch.contains("telegram"))
+        && let (Some(chat_id), Some(message_id)) =
             (request.telegram_chat_id, request.telegram_message_id)
-        {
-            let bot_token = config.telegram_bot_token.as_deref().ok_or_else(|| {
-                AppError::Internal("Telegram bot token not configured".to_string())
-            })?;
+    {
+        let bot_token = config.telegram_bot_token.as_deref().ok_or_else(|| {
+            AppError::Internal("Telegram bot token not configured".to_string())
+        })?;
 
-            telegram_service::edit_message_after_decision(
-                http_client,
-                bot_token,
-                chat_id,
-                message_id,
-                approved,
-                &request.service_name,
-            )
-            .await?;
-        }
+        telegram_service::edit_message_after_decision(
+            http_client,
+            bot_token,
+            chat_id,
+            message_id,
+            approved,
+            &request.service_name,
+        )
+        .await?;
     }
 
     // 2. Send silent push to update mobile app UI
@@ -282,6 +280,7 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
 // ---------------------------------------------------------------------------
 
 /// Send a push notification to a single device via the appropriate platform.
+#[allow(clippy::too_many_arguments)]
 async fn send_push_to_device(
     http_client: &Client,
     fcm_auth: Option<&FcmAuth>,
