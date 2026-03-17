@@ -2,6 +2,8 @@
 
 `nyxid-node` is a lightweight Rust binary that runs on your infrastructure as a credential node agent. It connects to a NyxID server via WebSocket, receives proxy requests, injects locally stored credentials, and forwards requests to downstream services. Credentials never leave your infrastructure.
 
+If you want a Codex-compatible agent to perform the installation for you from this repository checkout, use [`.codex/skills/install-nyxid-node/SKILL.md`](../.codex/skills/install-nyxid-node/SKILL.md). It walks the agent through install, registration, credential setup, validation, and optional background-service setup.
+
 ---
 
 ## Table of Contents

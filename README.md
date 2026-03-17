@@ -754,6 +754,7 @@ NyxID supports user-operated **credential nodes** that keep API keys and tokens 
 For the agent user guide, see **[docs/NYXID_NODE.md](docs/NYXID_NODE.md)**.
 For setup instructions, see **[docs/NODE_PROXY.md](docs/NODE_PROXY.md)**.
 For the WebSocket protocol specification, see **[docs/NODE_PROXY_PROTOCOL.md](docs/NODE_PROXY_PROTOCOL.md)**.
+For AI-assisted host setup from this repository checkout, see **[.codex/skills/install-nyxid-node/SKILL.md](.codex/skills/install-nyxid-node/SKILL.md)**.
 
 ---
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Install NyxID Node"
+  short_description: "Install and register NyxID Node."
+  default_prompt: "Use $install-nyxid-node to install the nyxid-node binary, register it with NyxID, configure credentials, and keep it running on the target host."
