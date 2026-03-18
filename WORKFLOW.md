@@ -64,7 +64,7 @@ agents:
   claude:
     agent_type: claude-cli            # Uses official Claude Code CLI directly.
     command: claude                   # No third-party wrapper needed.
-    model: claude-sonnet-4-6
+    model: opus[1m]
     max_turns: 25
     network_access: true
     turn_timeout_ms: 7200000
