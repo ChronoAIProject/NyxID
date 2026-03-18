@@ -20,7 +20,8 @@ use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
-    approval_service, audit_service, notification_service, proxy_service, ssh_service,
+    approval_service, audit_service, node_routing_service, notification_service, proxy_service,
+    ssh_service,
 };
 
 use super::services_helpers::{fetch_service, require_admin_or_creator};
@@ -338,6 +339,42 @@ async fn handle_ssh_socket(
     let user_id = auth_user.user_id.to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
     let started_at = Instant::now();
+    let node_route = match node_routing_service::resolve_node_route(
+        &state.db,
+        &user_id,
+        &service_id,
+        &state.node_ws_manager,
+    )
+    .await
+    {
+        Ok(route) => route,
+        Err(error) => {
+            tracing::warn!(service_id = %service_id, error = %error, "Failed to resolve SSH node route");
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: "Failed to resolve SSH route".into(),
+                })))
+                .await;
+            return;
+        }
+    };
+
+    if let Some(node_route) = node_route {
+        handle_node_ssh_socket(
+            state,
+            service_id,
+            ssh_service,
+            socket,
+            user_id,
+            session_id,
+            started_at,
+            client_meta,
+            node_route,
+        )
+        .await;
+        return;
+    }
 
     let connect_target = format!("{}:{}", ssh_service.host, ssh_service.port);
     let mut tcp_stream = match tokio::time::timeout(
@@ -477,6 +514,159 @@ async fn handle_ssh_socket(
             "service_id": service_id,
             "session_id": session_id,
             "routed_via": "ssh",
+            "duration_ms": started_at.elapsed().as_millis() as u64,
+            "bytes_from_client": from_client_bytes,
+            "bytes_to_client": to_client_bytes,
+        })),
+        client_meta.ip_address,
+        client_meta.user_agent,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_node_ssh_socket(
+    state: AppState,
+    service_id: String,
+    ssh_service: crate::models::ssh_service::SshService,
+    mut socket: WebSocket,
+    user_id: String,
+    session_id: String,
+    started_at: Instant,
+    client_meta: TunnelClientMeta,
+    node_route: crate::services::node_routing_service::NodeRoute,
+) {
+    let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
+        .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
+        .collect();
+
+    let mut tunnel_rx = None;
+    let mut selected_node_id = None;
+
+    for node_id in all_node_ids {
+        match state
+            .node_ws_manager
+            .open_ssh_tunnel(
+                node_id,
+                crate::services::node_ws_manager::NodeSshTunnelRequest {
+                    session_id: session_id.clone(),
+                    service_id: service_id.clone(),
+                    host: ssh_service.host.clone(),
+                    port: ssh_service.port,
+                },
+            )
+            .await
+        {
+            Ok(rx) => {
+                tunnel_rx = Some(rx);
+                selected_node_id = Some(node_id.to_string());
+                break;
+            }
+            Err(error) => {
+                tracing::warn!(service_id = %service_id, node_id = %node_id, error = %error, "SSH node tunnel open failed");
+            }
+        }
+    }
+
+    let Some(mut tunnel_rx) = tunnel_rx else {
+        let _ = socket
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1011,
+                reason: "Failed to connect downstream SSH target via node".into(),
+            })))
+            .await;
+        audit_service::log_async(
+            state.db.clone(),
+            Some(user_id),
+            "ssh_tunnel_connect_failed".to_string(),
+            Some(serde_json::json!({
+                "service_id": service_id,
+                "session_id": session_id,
+                "routed_via": "node",
+                "target_host": ssh_service.host,
+                "target_port": ssh_service.port,
+                "error": "node_connect_failed",
+            })),
+            client_meta.ip_address,
+            client_meta.user_agent,
+        );
+        return;
+    };
+    let node_id = selected_node_id.expect("selected node id");
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id.clone()),
+        "ssh_tunnel_connected".to_string(),
+        Some(serde_json::json!({
+            "service_id": service_id,
+            "session_id": session_id,
+            "routed_via": "node",
+            "node_id": node_id,
+            "target_host": ssh_service.host,
+            "target_port": ssh_service.port,
+        })),
+        client_meta.ip_address.clone(),
+        client_meta.user_agent.clone(),
+    );
+
+    let mut from_client_bytes: u64 = 0;
+    let mut to_client_bytes: u64 = 0;
+
+    loop {
+        tokio::select! {
+            ws_message = socket.next() => {
+                match ws_message {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        from_client_bytes += bytes.len() as u64;
+                        if state.node_ws_manager.send_ssh_tunnel_data(&node_id, &session_id, &bytes).is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Text(_))) => {
+                        let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                            code: 1003,
+                            reason: "SSH tunnel accepts binary frames only".into(),
+                        }))).await;
+                        break;
+                    }
+                    Some(Err(_)) => break,
+                }
+            }
+            tunnel_message = tunnel_rx.recv() => {
+                match tunnel_message {
+                    Some(crate::services::node_ws_manager::SshTunnelChunk::Data(bytes)) => {
+                        to_client_bytes += bytes.len() as u64;
+                        if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(crate::services::node_ws_manager::SshTunnelChunk::Closed(_)) | None => break,
+                }
+            }
+        }
+    }
+
+    let _ = state
+        .node_ws_manager
+        .close_ssh_tunnel(&node_id, &session_id);
+    let _ = socket.close().await;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "ssh_tunnel_disconnected".to_string(),
+        Some(serde_json::json!({
+            "service_id": service_id,
+            "session_id": session_id,
+            "routed_via": "node",
+            "node_id": node_id,
             "duration_ms": started_at.elapsed().as_millis() as u64,
             "bytes_from_client": from_client_bytes,
             "bytes_to_client": to_client_bytes,

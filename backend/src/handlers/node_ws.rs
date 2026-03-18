@@ -14,7 +14,8 @@ use crate::services::{
     audit_service, node_service,
     node_ws_manager::{
         NodeOutboundMessage, NodeProxyResponse, NodeWsManager, WsProxyResponseChunkMsg,
-        WsProxyResponseEndMsg, WsProxyResponseStartMsg,
+        WsProxyResponseEndMsg, WsProxyResponseStartMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg,
+        WsSshTunnelOpenedMsg,
     },
 };
 
@@ -67,6 +68,12 @@ enum NodeMessage {
         #[allow(dead_code)]
         services_ready: Option<Vec<String>>,
     },
+    #[serde(rename = "ssh_tunnel_opened")]
+    SshTunnelOpened(WsSshTunnelOpenedMsg),
+    #[serde(rename = "ssh_tunnel_data")]
+    SshTunnelData(WsSshTunnelDataMsg),
+    #[serde(rename = "ssh_tunnel_closed")]
+    SshTunnelClosed(WsSshTunnelClosedMsg),
 }
 
 /// GET /api/v1/nodes/ws
@@ -429,6 +436,31 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
             NodeMessage::StatusUpdate { .. } => {
                 // Future: update node metadata / ready services
                 tracing::debug!(node_id = %node_id_reader, "Received status_update");
+            }
+            NodeMessage::SshTunnelOpened(opened) => {
+                if !ws_manager.deliver_ssh_tunnel_opened(&node_id_reader, &opened.session_id) {
+                    tracing::debug!(
+                        node_id = %node_id_reader,
+                        session_id = %opened.session_id,
+                        "Dropped SSH tunnel opened event for unknown session"
+                    );
+                }
+            }
+            NodeMessage::SshTunnelData(data) => {
+                let bytes = data.data.as_deref().map_or_else(Vec::new, |d| {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(d)
+                        .unwrap_or_else(|_| d.as_bytes().to_vec())
+                });
+                ws_manager.deliver_ssh_tunnel_data(&node_id_reader, &data.session_id, bytes);
+            }
+            NodeMessage::SshTunnelClosed(closed) => {
+                ws_manager.deliver_ssh_tunnel_closed(
+                    &node_id_reader,
+                    &closed.session_id,
+                    closed.error,
+                );
             }
             NodeMessage::Register { .. } | NodeMessage::Auth { .. } => {
                 // Already authenticated, ignore duplicate auth messages

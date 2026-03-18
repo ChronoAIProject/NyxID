@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use base64::Engine;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
@@ -20,6 +21,15 @@ pub struct NodeProxyRequest {
     pub headers: Vec<(String, String)>,
     /// Raw bytes (serialized to base64 in WS message)
     pub body: Option<Vec<u8>>,
+}
+
+/// Request sent to a node to open an SSH TCP tunnel.
+#[derive(Clone)]
+pub struct NodeSshTunnelRequest {
+    pub session_id: String,
+    pub service_id: String,
+    pub host: String,
+    pub port: u16,
 }
 
 /// Response received from a node via WebSocket (non-streaming).
@@ -54,6 +64,13 @@ pub enum ProxyResponseType {
     Streaming(mpsc::UnboundedReceiver<StreamChunk>),
 }
 
+/// A chunk in a node-backed SSH tunnel.
+#[derive(Debug)]
+pub enum SshTunnelChunk {
+    Data(Vec<u8>),
+    Closed(Option<String>),
+}
+
 pub(crate) enum NodeProxyOutcome {
     Response(ProxyResponseType),
     RetryableFailure(String),
@@ -66,6 +83,11 @@ pub(crate) enum PendingRequest {
     Awaiting(oneshot::Sender<NodeProxyOutcome>),
     /// Streaming response: sends chunks through an mpsc channel
     Streaming(mpsc::UnboundedSender<StreamChunk>),
+}
+
+pub(crate) enum PendingSshTunnel {
+    Awaiting(oneshot::Sender<AppResult<mpsc::UnboundedReceiver<SshTunnelChunk>>>),
+    Active(mpsc::UnboundedSender<SshTunnelChunk>),
 }
 
 /// Outbound command for a node connection writer task.
@@ -82,6 +104,8 @@ struct NodeConnection {
     tx: mpsc::Sender<NodeOutboundMessage>,
     /// Pending proxy request correlation map
     pending: Arc<DashMap<String, PendingRequest>>,
+    /// Pending and active SSH tunnel sessions keyed by session_id
+    ssh_tunnels: Arc<DashMap<String, PendingSshTunnel>>,
 }
 
 /// In-memory WebSocket connection manager for credential nodes.
@@ -129,6 +153,31 @@ struct WsHeartbeatPing {
     timestamp: String,
 }
 
+#[derive(Debug, Serialize)]
+struct WsSshTunnelOpen {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    session_id: String,
+    service_id: String,
+    host: String,
+    port: u16,
+}
+
+#[derive(Debug, Serialize)]
+struct WsSshTunnelData {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    session_id: String,
+    data: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WsSshTunnelClose {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    session_id: String,
+}
+
 /// JSON proxy_response from node.
 #[derive(Debug, Deserialize)]
 pub struct WsProxyResponseMsg {
@@ -172,6 +221,28 @@ pub struct WsProxyResponseChunkMsg {
 #[derive(Debug, Deserialize)]
 pub struct WsProxyResponseEndMsg {
     pub request_id: String,
+}
+
+/// JSON ssh_tunnel_opened from node.
+#[derive(Debug, Deserialize)]
+pub struct WsSshTunnelOpenedMsg {
+    pub session_id: String,
+}
+
+/// JSON ssh_tunnel_data from node.
+#[derive(Debug, Deserialize)]
+pub struct WsSshTunnelDataMsg {
+    pub session_id: String,
+    #[serde(default)]
+    pub data: Option<String>,
+}
+
+/// JSON ssh_tunnel_closed from node.
+#[derive(Debug, Deserialize)]
+pub struct WsSshTunnelClosedMsg {
+    pub session_id: String,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Compute HMAC-SHA256 signature for a proxy request.
@@ -247,10 +318,17 @@ impl NodeWsManager {
         tx: mpsc::Sender<NodeOutboundMessage>,
     ) -> Arc<DashMap<String, PendingRequest>> {
         let pending = Arc::new(DashMap::new());
+        let ssh_tunnels = Arc::new(DashMap::new());
         let return_pending = pending.clone();
 
-        self.connections
-            .insert(node_id.to_string(), NodeConnection { tx, pending });
+        self.connections.insert(
+            node_id.to_string(),
+            NodeConnection {
+                tx,
+                pending,
+                ssh_tunnels,
+            },
+        );
 
         return_pending
     }
@@ -260,6 +338,7 @@ impl NodeWsManager {
     pub fn unregister_connection(&self, node_id: &str) {
         if let Some((_, conn)) = self.connections.remove(node_id) {
             conn.pending.clear();
+            conn.ssh_tunnels.clear();
         }
     }
 
@@ -407,6 +486,119 @@ impl NodeWsManager {
                 Err(AppError::NodeProxyTimeout)
             }
         }
+    }
+
+    /// Open an SSH tunnel on a connected node and await the open acknowledgement.
+    pub async fn open_ssh_tunnel(
+        &self,
+        node_id: &str,
+        request: NodeSshTunnelRequest,
+    ) -> AppResult<mpsc::UnboundedReceiver<SshTunnelChunk>> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let session_id = request.session_id.clone();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        conn.ssh_tunnels
+            .insert(session_id.clone(), PendingSshTunnel::Awaiting(ready_tx));
+
+        let msg = serde_json::to_string(&WsSshTunnelOpen {
+            msg_type: "ssh_tunnel_open",
+            session_id: request.session_id,
+            service_id: request.service_id,
+            host: request.host,
+            port: request.port,
+        })
+        .map_err(|e| {
+            conn.ssh_tunnels.remove(&session_id);
+            AppError::Internal(format!("Failed to serialize SSH tunnel open request: {e}"))
+        })?;
+
+        match conn.tx.try_send(NodeOutboundMessage::Text(msg)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                conn.ssh_tunnels.remove(&session_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} write buffer full"
+                )));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                conn.ssh_tunnels.remove(&session_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} connection closed"
+                )));
+            }
+        }
+
+        drop(conn);
+
+        let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
+        match tokio::time::timeout(timeout, ready_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(AppError::NodeOffline(format!(
+                "Node {node_id} disconnected during SSH tunnel open"
+            ))),
+            Err(_) => {
+                if let Some(conn) = self.connections.get(node_id) {
+                    conn.ssh_tunnels.remove(&session_id);
+                }
+                Err(AppError::NodeProxyTimeout)
+            }
+        }
+    }
+
+    /// Forward SSH bytes to an active node tunnel session.
+    pub fn send_ssh_tunnel_data(
+        &self,
+        node_id: &str,
+        session_id: &str,
+        data: &[u8],
+    ) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        if !conn.ssh_tunnels.contains_key(session_id) {
+            return Err(AppError::NodeOffline(format!(
+                "SSH tunnel session {session_id} is not active"
+            )));
+        }
+
+        let msg = serde_json::to_string(&WsSshTunnelData {
+            msg_type: "ssh_tunnel_data",
+            session_id: session_id.to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(data),
+        })
+        .map_err(|e| AppError::Internal(format!("Failed to serialize SSH tunnel data: {e}")))?;
+
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(msg))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+
+        Ok(())
+    }
+
+    /// Request closure of an active node SSH tunnel.
+    pub fn close_ssh_tunnel(&self, node_id: &str, session_id: &str) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let msg = serde_json::to_string(&WsSshTunnelClose {
+            msg_type: "ssh_tunnel_close",
+            session_id: session_id.to_string(),
+        })
+        .map_err(|e| AppError::Internal(format!("Failed to serialize SSH tunnel close: {e}")))?;
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(msg))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+        conn.ssh_tunnels.remove(session_id);
+        Ok(())
     }
 
     /// Send a heartbeat ping to a node. Non-blocking.
@@ -567,6 +759,63 @@ impl NodeWsManager {
             && let PendingRequest::Streaming(tx) = pending
         {
             let _ = tx.send(StreamChunk::End);
+        }
+    }
+
+    pub fn deliver_ssh_tunnel_opened(&self, node_id: &str, session_id: &str) -> bool {
+        let Some(conn) = self.connections.get(node_id) else {
+            return false;
+        };
+        let Some((_, pending)) = conn.ssh_tunnels.remove(session_id) else {
+            return false;
+        };
+
+        match pending {
+            PendingSshTunnel::Awaiting(sender) => {
+                let (tx, rx) = mpsc::unbounded_channel();
+                let sent = sender.send(Ok(rx)).is_ok();
+                if sent {
+                    conn.ssh_tunnels
+                        .insert(session_id.to_string(), PendingSshTunnel::Active(tx));
+                }
+                sent
+            }
+            PendingSshTunnel::Active(tx) => {
+                conn.ssh_tunnels
+                    .insert(session_id.to_string(), PendingSshTunnel::Active(tx));
+                true
+            }
+        }
+    }
+
+    pub fn deliver_ssh_tunnel_data(&self, node_id: &str, session_id: &str, data: Vec<u8>) {
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some(pending) = conn.ssh_tunnels.get(session_id)
+            && let PendingSshTunnel::Active(tx) = pending.value()
+        {
+            let _ = tx.send(SshTunnelChunk::Data(data));
+        }
+    }
+
+    pub fn deliver_ssh_tunnel_closed(
+        &self,
+        node_id: &str,
+        session_id: &str,
+        error: Option<String>,
+    ) {
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some((_, pending)) = conn.ssh_tunnels.remove(session_id)
+        {
+            match pending {
+                PendingSshTunnel::Awaiting(sender) => {
+                    let _ = sender.send(Err(AppError::NodeOffline(
+                        error.unwrap_or_else(|| "SSH tunnel closed before opening".to_string()),
+                    )));
+                }
+                PendingSshTunnel::Active(tx) => {
+                    let _ = tx.send(SshTunnelChunk::Closed(error));
+                }
+            }
         }
     }
 }
@@ -791,6 +1040,54 @@ mod tests {
                 assert_eq!(reason, "admin disconnected node");
             }
             other => panic!("expected close message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_ssh_tunnel_delivers_data_and_close() {
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+
+        let open = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move {
+                mgr.open_ssh_tunnel(
+                    "node-1",
+                    NodeSshTunnelRequest {
+                        session_id: "sess-1".to_string(),
+                        service_id: "svc-1".to_string(),
+                        host: "ssh.internal".to_string(),
+                        port: 22,
+                    },
+                )
+                .await
+            }
+        });
+
+        let outbound = rx.recv().await.expect("open message");
+        match outbound {
+            NodeOutboundMessage::Text(text) => {
+                let json: Value = serde_json::from_str(&text).expect("json");
+                assert_eq!(json["type"], "ssh_tunnel_open");
+                assert_eq!(json["session_id"], "sess-1");
+            }
+            other => panic!("unexpected outbound message: {other:?}"),
+        }
+
+        assert!(mgr.deliver_ssh_tunnel_opened("node-1", "sess-1"));
+        let mut tunnel_rx = open.await.expect("join").expect("open tunnel");
+
+        mgr.deliver_ssh_tunnel_data("node-1", "sess-1", b"hello".to_vec());
+        match tunnel_rx.recv().await.expect("data") {
+            SshTunnelChunk::Data(bytes) => assert_eq!(bytes, b"hello"),
+            other => panic!("unexpected ssh tunnel chunk: {other:?}"),
+        }
+
+        mgr.deliver_ssh_tunnel_closed("node-1", "sess-1", Some("done".to_string()));
+        match tunnel_rx.recv().await.expect("close") {
+            SshTunnelChunk::Closed(Some(error)) => assert_eq!(error, "done"),
+            other => panic!("unexpected close chunk: {other:?}"),
         }
     }
 }
