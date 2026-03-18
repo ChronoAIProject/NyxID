@@ -30,6 +30,7 @@ use models::mcp_session::McpSessionStore;
 
 use services::node_ws_manager::NodeWsManager;
 use services::push_service::{ApnsAuth, FcmAuth};
+use services::ssh_service::SshSessionManager;
 
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
@@ -52,6 +53,8 @@ pub struct AppState {
     pub encryption_keys: Arc<EncryptionKeys>,
     /// WebSocket connection manager for credential nodes
     pub node_ws_manager: Arc<NodeWsManager>,
+    /// Concurrent SSH tunnel session limiter
+    pub ssh_session_manager: Arc<SshSessionManager>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -256,6 +259,7 @@ async fn main() {
         config.node_proxy_timeout_secs,
         config.node_max_ws_connections,
     ));
+    let ssh_session_manager = Arc::new(SshSessionManager::new(4));
 
     // Create shared state
     let state = AppState {
@@ -270,6 +274,7 @@ async fn main() {
         apns_auth: apns_auth.clone(),
         encryption_keys: encryption_keys.clone(),
         node_ws_manager,
+        ssh_session_manager,
     };
 
     // Create rate limiters

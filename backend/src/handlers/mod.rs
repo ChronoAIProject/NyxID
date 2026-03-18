@@ -33,6 +33,7 @@ pub mod services;
 pub(crate) mod services_helpers;
 pub mod sessions;
 pub mod social_auth;
+pub mod ssh_tunnel;
 pub mod user_credentials;
 pub mod user_tokens;
 pub mod users;

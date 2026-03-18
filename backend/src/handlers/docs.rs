@@ -26,10 +26,7 @@ pub async fn docs_ui(State(state): State<AppState>, _auth_user: AuthUser) -> imp
         state.config.base_url.trim_end_matches('/')
     );
     html_response_with_csp(
-        api_docs_service::render_scalar_html(
-        "NyxID API Docs",
-        &spec_url,
-        ),
+        api_docs_service::render_scalar_html("NyxID API Docs", &spec_url),
         &api_docs_service::scalar_docs_csp(),
     )
 }

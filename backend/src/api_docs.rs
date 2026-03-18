@@ -12,7 +12,11 @@
         crate::handlers::services::list_services,
         crate::handlers::services::create_service,
         crate::handlers::services::get_service,
-        crate::handlers::services::update_service
+        crate::handlers::services::update_service,
+        crate::handlers::ssh_tunnel::get_ssh_service_config,
+        crate::handlers::ssh_tunnel::upsert_ssh_service_config,
+        crate::handlers::ssh_tunnel::delete_ssh_service_config,
+        crate::handlers::ssh_tunnel::ssh_tunnel_ws
     ),
     components(
         schemas(
@@ -22,14 +26,18 @@
             crate::handlers::services::ServiceResponse,
             crate::handlers::services::ServiceListResponse,
             crate::handlers::proxy::ProxyServiceItem,
-            crate::handlers::proxy::ProxyServicesResponse
+            crate::handlers::proxy::ProxyServicesResponse,
+            crate::handlers::ssh_tunnel::UpsertSshServiceRequest,
+            crate::handlers::ssh_tunnel::SshServiceResponse,
+            crate::handlers::ssh_tunnel::DeleteSshServiceResponse
         )
     ),
     tags(
         (name = "Docs", description = "NyxID API documentation endpoints"),
         (name = "Proxy Docs", description = "Downstream OpenAPI and AsyncAPI catalog endpoints"),
         (name = "Services", description = "Downstream service management"),
-        (name = "Proxy", description = "Authenticated downstream service discovery")
+        (name = "Proxy", description = "Authenticated downstream service discovery"),
+        (name = "SSH", description = "SSH service configuration and WebSocket tunnel endpoints")
     )
 )]
 pub struct ApiDoc;

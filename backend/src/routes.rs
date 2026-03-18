@@ -123,6 +123,12 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route(
             "/{service_id}/requirements/{requirement_id}",
             delete(handlers::service_requirements::remove_requirement),
+        )
+        .route(
+            "/{service_id}/ssh",
+            get(handlers::ssh_tunnel::get_ssh_service_config)
+                .put(handlers::ssh_tunnel::upsert_ssh_service_config)
+                .delete(handlers::ssh_tunnel::delete_ssh_service_config),
         );
 
     let session_routes = Router::new().route("/", get(handlers::sessions::list_sessions));
@@ -517,6 +523,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let api_v1_shared = Router::new()
         .nest("/connections", connection_routes)
         .nest("/providers", provider_routes)
+        .route(
+            "/ssh/{service_id}",
+            get(handlers::ssh_tunnel::ssh_tunnel_ws),
+        )
         .layer(middleware::from_fn(reject_delegated_tokens));
 
     // Routes that BLOCK service account tokens (human-only endpoints)
