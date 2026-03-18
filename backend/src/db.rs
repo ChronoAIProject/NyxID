@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use mongodb::bson::doc;
+use mongodb::bson::{Document, doc};
 use mongodb::options::{ClientOptions, IndexOptions};
 use mongodb::{Client, Database, IndexModel};
 
@@ -651,6 +651,27 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             .build(),
     )
     .await?;
+
+    backfill_downstream_service_types(db).await?;
+
+    Ok(())
+}
+
+async fn backfill_downstream_service_types(db: &Database) -> Result<(), mongodb::error::Error> {
+    let services = db.collection::<Document>("downstream_services");
+    let migration = services
+        .update_many(
+            doc! { "service_type": { "$exists": false } },
+            doc! { "$set": { "service_type": "http" } },
+        )
+        .await?;
+
+    if migration.modified_count > 0 {
+        tracing::info!(
+            count = migration.modified_count,
+            "Backfilled missing downstream service_type to http"
+        );
+    }
 
     Ok(())
 }

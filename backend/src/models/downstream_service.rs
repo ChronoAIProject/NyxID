@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use mongodb::bson::{Document, doc};
 use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "downstream_services";
@@ -116,6 +117,17 @@ pub struct DownstreamService {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Match HTTP services while remaining compatible with legacy documents created
+/// before `service_type` was introduced.
+pub fn legacy_http_service_type_filter() -> Document {
+    doc! {
+        "$or": [
+            { "service_type": "http" },
+            { "service_type": { "$exists": false } },
+        ],
+    }
+}
+
 fn default_service_type() -> String {
     "http".to_string()
 }
@@ -156,6 +168,31 @@ mod tests {
         assert_eq!(default_certificate_ttl_minutes(), 30);
         assert_eq!(default_identity_propagation_mode(), "none");
         assert!(default_true());
+    }
+
+    #[test]
+    fn legacy_http_service_type_filter_matches_missing_field() {
+        let filter = legacy_http_service_type_filter();
+        let clauses = filter.get_array("$or").expect("or clause");
+
+        assert_eq!(clauses.len(), 2);
+        assert_eq!(
+            clauses[0]
+                .as_document()
+                .expect("http clause")
+                .get_str("service_type")
+                .expect("service_type"),
+            "http"
+        );
+        assert!(
+            !clauses[1]
+                .as_document()
+                .expect("legacy clause")
+                .get_document("service_type")
+                .expect("exists clause")
+                .get_bool("$exists")
+                .expect("exists value")
+        );
     }
 
     #[test]

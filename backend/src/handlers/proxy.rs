@@ -14,7 +14,7 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, legacy_http_service_type_filter,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service_connection::{
@@ -951,11 +951,11 @@ pub async fn list_proxy_services(
     let per_page = query.per_page.unwrap_or(50).min(100);
     let offset = (page - 1) * per_page;
 
-    let filter = doc! {
+    let mut filter = doc! {
         "is_active": true,
-        "service_type": "http",
         "service_category": { "$ne": "provider" },
     };
+    filter.extend(legacy_http_service_type_filter());
 
     // Get total count for pagination metadata
     let total = state

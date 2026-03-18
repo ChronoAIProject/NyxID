@@ -6,7 +6,7 @@ use mongodb::bson::doc;
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, legacy_http_service_type_filter,
 };
 use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, ServiceEndpoint};
 use crate::models::user_service_connection::{
@@ -88,14 +88,16 @@ pub async fn load_user_tools(
         .collect();
 
     // 3. Auto-connect: services that don't require user credentials
+    let mut auto_services_filter = doc! {
+        "is_active": true,
+        "requires_user_credential": false,
+        "service_category": { "$ne": "provider" },
+    };
+    auto_services_filter.extend(legacy_http_service_type_filter());
+
     let auto_services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(doc! {
-            "is_active": true,
-            "service_type": "http",
-            "requires_user_credential": false,
-            "service_category": { "$ne": "provider" },
-        })
+        .find(auto_services_filter)
         .await?
         .try_collect()
         .await?;
@@ -788,9 +790,9 @@ pub async fn discover_services(
 
     let mut filter = doc! {
         "is_active": true,
-        "service_type": "http",
         "service_category": { "$ne": "provider" },
     };
+    filter.extend(legacy_http_service_type_filter());
     if let Some(cat) = category {
         if cat == "provider" {
             return Ok(serde_json::json!({ "services": [], "count": 0 }));
