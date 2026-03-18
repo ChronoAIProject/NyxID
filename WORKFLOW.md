@@ -65,6 +65,7 @@ agents:
     agent_type: claude-cli            # Uses official Claude Code CLI directly.
     command: claude                   # No third-party wrapper needed.
     model: opus[1m]
+    reasoning_effort: high
     max_turns: 25
     network_access: true
     turn_timeout_ms: 7200000
