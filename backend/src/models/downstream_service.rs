@@ -24,8 +24,18 @@ pub struct DownstreamService {
     #[serde(default)]
     pub auth_type: Option<String>,
     /// URL to an OpenAPI / Swagger spec describing this service's API
+    #[serde(
+        default,
+        alias = "api_spec_url",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub openapi_spec_url: Option<String>,
+    /// URL to an AsyncAPI spec describing this service's streaming interfaces
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_spec_url: Option<String>,
+    pub asyncapi_spec_url: Option<String>,
+    /// Whether this service supports SSE or other streaming responses.
+    #[serde(default)]
+    pub streaming_supported: bool,
     /// Associated OAuth client ID (set when auth_method is "oidc")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_client_id: Option<String>,
@@ -123,7 +133,9 @@ mod tests {
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1, 2, 3],
             auth_type: Some("bearer".to_string()),
-            api_spec_url: None,
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
             oauth_client_id: None,
             service_category: "connection".to_string(),
             requires_user_credential: true,
@@ -161,7 +173,9 @@ mod tests {
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1],
             auth_type: None,
-            api_spec_url: None,
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
             oauth_client_id: None,
             service_category: "connection".to_string(),
             requires_user_credential: true,

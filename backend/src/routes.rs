@@ -491,6 +491,18 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/approvals/requests/{request_id}/status",
             get(handlers::approvals::get_request_status),
         )
+        .route(
+            "/proxy/services/{service_id}/docs",
+            get(handlers::docs::service_docs_ui),
+        )
+        .route(
+            "/proxy/services/{service_id}/openapi.json",
+            get(handlers::docs::service_openapi_json),
+        )
+        .route(
+            "/proxy/services/{service_id}/asyncapi.json",
+            get(handlers::docs::service_asyncapi_json),
+        )
         .route("/proxy/services", get(handlers::proxy::list_proxy_services))
         .route(
             "/proxy/s/{slug}/{*path}",
@@ -513,6 +525,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest("/users", user_routes)
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)
+        .route("/docs", get(handlers::docs::docs_ui))
+        .route("/docs/catalog", get(handlers::docs::catalog_ui))
+        .route("/docs/openapi.json", get(handlers::docs::openapi_json))
+        .route("/docs/asyncapi.json", get(handlers::docs::asyncapi_json))
         .nest("/sessions", session_routes)
         .nest("/mcp", mcp_routes)
         .nest("/developer", developer_routes)

@@ -155,8 +155,8 @@ export function ServiceDetailPage() {
             <EndpointList
               serviceId={service.id}
               hasApiSpecUrl={
-                service.api_spec_url !== null &&
-                service.api_spec_url !== undefined
+                (service.openapi_spec_url ?? service.api_spec_url) !== null &&
+                (service.openapi_spec_url ?? service.api_spec_url) !== undefined
               }
             />
           </DetailSection>

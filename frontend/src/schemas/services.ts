@@ -60,7 +60,12 @@ export const updateServiceSchema = z.object({
     .optional()
     .or(z.literal("")),
   base_url: z.string().min(1, "Base URL is required").url("Must be a valid URL"),
-  api_spec_url: z
+  openapi_spec_url: z
+    .string()
+    .url("Must be a valid URL")
+    .optional()
+    .or(z.literal("")),
+  asyncapi_spec_url: z
     .string()
     .url("Must be a valid URL")
     .optional()

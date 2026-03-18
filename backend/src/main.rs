@@ -6,6 +6,7 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+mod api_docs;
 mod config;
 mod crypto;
 mod db;

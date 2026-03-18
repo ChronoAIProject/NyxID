@@ -53,7 +53,10 @@ export interface DownstreamService {
   readonly auth_key_name: string;
   readonly is_active: boolean;
   readonly oauth_client_id: string | null;
+  readonly openapi_spec_url?: string | null;
   readonly api_spec_url: string | null;
+  readonly asyncapi_spec_url?: string | null;
+  readonly streaming_supported?: boolean;
   readonly service_category: string;
   readonly requires_user_credential: boolean;
   readonly created_by: string;

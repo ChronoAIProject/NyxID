@@ -6,6 +6,7 @@ use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -16,7 +17,7 @@ use crate::models::downstream_service::{
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, oauth_client_service};
+use crate::services::{api_docs_service, audit_service, oauth_client_service};
 
 use super::services_helpers::{
     DeleteServiceResponse, fetch_service, require_admin, require_admin_or_creator,
@@ -25,7 +26,7 @@ use super::services_helpers::{
 
 // --- Request / Response types ---
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateServiceRequest {
     pub name: String,
     pub slug: Option<String>,
@@ -58,7 +59,7 @@ impl std::fmt::Debug for CreateServiceRequest {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
     pub id: String,
     pub name: String,
@@ -70,7 +71,10 @@ pub struct ServiceResponse {
     pub auth_key_name: String,
     pub is_active: bool,
     pub oauth_client_id: Option<String>,
+    pub openapi_spec_url: Option<String>,
     pub api_spec_url: Option<String>,
+    pub asyncapi_spec_url: Option<String>,
+    pub streaming_supported: bool,
     pub service_category: String,
     pub requires_user_credential: bool,
     pub identity_propagation_mode: String,
@@ -85,18 +89,20 @@ pub struct ServiceResponse {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceListResponse {
     pub services: Vec<ServiceResponse>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateServiceRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub base_url: Option<String>,
     pub is_active: Option<bool>,
-    pub api_spec_url: Option<String>,
+    #[serde(alias = "api_spec_url")]
+    pub openapi_spec_url: Option<String>,
+    pub asyncapi_spec_url: Option<String>,
     pub identity_propagation_mode: Option<String>,
     pub identity_include_user_id: Option<bool>,
     pub identity_include_email: Option<bool>,
@@ -150,6 +156,18 @@ pub struct ListServicesQuery {
 /// GET /api/v1/services
 ///
 /// List all downstream services. Supports optional `?category=` filter.
+#[utoipa::path(
+    get,
+    path = "/api/v1/services",
+    params(
+        ("category" = Option<String>, Query, description = "Optional service category filter")
+    ),
+    responses(
+        (status = 200, description = "List of downstream services", body = ServiceListResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn list_services(
     State(state): State<AppState>,
     _auth_user: AuthUser,
@@ -184,6 +202,18 @@ pub async fn list_services(
 /// POST /api/v1/services
 ///
 /// Register a new downstream service. Requires admin privileges.
+#[utoipa::path(
+    post,
+    path = "/api/v1/services",
+    request_body = CreateServiceRequest,
+    responses(
+        (status = 200, description = "Created downstream service", body = ServiceResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 409, description = "Conflict", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn create_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -309,6 +339,10 @@ pub async fn create_service(
         (enc, None)
     };
 
+    let docs_metadata =
+        api_docs_service::discover_service_docs(&state.http_client, &body.base_url, None, None)
+            .await;
+
     let id = Uuid::new_v4().to_string();
     let now = Utc::now();
 
@@ -348,7 +382,9 @@ pub async fn create_service(
         auth_type: auth_type_original,
         auth_key_name: auth_key_name.clone(),
         credential_encrypted: encrypted_cred,
-        api_spec_url: None,
+        openapi_spec_url: docs_metadata.openapi_spec_url,
+        asyncapi_spec_url: docs_metadata.asyncapi_spec_url,
+        streaming_supported: docs_metadata.streaming_supported,
         oauth_client_id: oauth_client_id.clone(),
         service_category,
         requires_user_credential,
@@ -452,6 +488,18 @@ pub async fn delete_service(
 /// GET /api/v1/services/{service_id}
 ///
 /// Get a single service by ID. Requires authentication.
+#[utoipa::path(
+    get,
+    path = "/api/v1/services/{service_id}",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    responses(
+        (status = 200, description = "Downstream service", body = ServiceResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn get_service(
     State(state): State<AppState>,
     _auth_user: AuthUser,
@@ -464,6 +512,21 @@ pub async fn get_service(
 /// PUT /api/v1/services/{service_id}
 ///
 /// Update a downstream service. Requires admin or original creator.
+#[utoipa::path(
+    put,
+    path = "/api/v1/services/{service_id}",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    request_body = UpdateServiceRequest,
+    responses(
+        (status = 200, description = "Updated downstream service", body = ServiceResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn update_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -472,6 +535,18 @@ pub async fn update_service(
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    let openapi_spec_url = body
+        .openapi_spec_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let asyncapi_spec_url = body
+        .asyncapi_spec_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     // Build the $set document with only provided fields
     let mut set_doc = doc! {};
@@ -508,13 +583,30 @@ pub async fn update_service(
         set_doc.insert("is_active", is_active);
     }
 
-    if let Some(ref api_spec_url) = body.api_spec_url {
-        if api_spec_url.len() > 2048 {
-            return Err(AppError::ValidationError(
-                "api_spec_url must not exceed 2048 characters".to_string(),
-            ));
+    if body.openapi_spec_url.is_some() {
+        if let Some(ref openapi_spec_url) = openapi_spec_url {
+            if openapi_spec_url.len() > 2048 {
+                return Err(AppError::ValidationError(
+                    "openapi_spec_url must not exceed 2048 characters".to_string(),
+                ));
+            }
+            set_doc.insert("openapi_spec_url", openapi_spec_url.as_str());
+        } else {
+            set_doc.insert("openapi_spec_url", bson::Bson::Null);
         }
-        set_doc.insert("api_spec_url", api_spec_url.as_str());
+    }
+
+    if body.asyncapi_spec_url.is_some() {
+        if let Some(ref asyncapi_spec_url) = asyncapi_spec_url {
+            if asyncapi_spec_url.len() > 2048 {
+                return Err(AppError::ValidationError(
+                    "asyncapi_spec_url must not exceed 2048 characters".to_string(),
+                ));
+            }
+            set_doc.insert("asyncapi_spec_url", asyncapi_spec_url.as_str());
+        } else {
+            set_doc.insert("asyncapi_spec_url", bson::Bson::Null);
+        }
     }
 
     if let Some(ref mode) = body.identity_propagation_mode {
@@ -578,6 +670,40 @@ pub async fn update_service(
 
     let now = Utc::now();
     set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
+
+    let docs_base_url = body.base_url.as_deref().unwrap_or(&service.base_url);
+    let explicit_openapi = if body.openapi_spec_url.is_some() {
+        openapi_spec_url.clone()
+    } else {
+        service.openapi_spec_url.clone()
+    };
+    let explicit_asyncapi = if body.asyncapi_spec_url.is_some() {
+        asyncapi_spec_url.clone()
+    } else {
+        service.asyncapi_spec_url.clone()
+    };
+    let docs_metadata = api_docs_service::discover_service_docs(
+        &state.http_client,
+        docs_base_url,
+        explicit_openapi,
+        explicit_asyncapi,
+    )
+    .await;
+    set_doc.insert(
+        "openapi_spec_url",
+        docs_metadata
+            .openapi_spec_url
+            .clone()
+            .map_or(bson::Bson::Null, bson::Bson::String),
+    );
+    set_doc.insert(
+        "asyncapi_spec_url",
+        docs_metadata
+            .asyncapi_spec_url
+            .clone()
+            .map_or(bson::Bson::Null, bson::Bson::String),
+    );
+    set_doc.insert("streaming_supported", docs_metadata.streaming_supported);
 
     state
         .db

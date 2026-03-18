@@ -268,7 +268,7 @@ pub async fn delete_endpoint(
 
 /// POST /api/v1/services/{service_id}/discover-endpoints
 ///
-/// Fetch the service's api_spec_url, parse the OpenAPI/Swagger spec,
+/// Fetch the service's OpenAPI spec URL, parse the OpenAPI/Swagger spec,
 /// and bulk upsert discovered endpoints. Admin or service creator.
 pub async fn discover_endpoints(
     State(state): State<AppState>,
@@ -278,8 +278,8 @@ pub async fn discover_endpoints(
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
-    let api_spec_url = service.api_spec_url.ok_or_else(|| {
-        AppError::BadRequest("Service has no api_spec_url configured".to_string())
+    let api_spec_url = service.openapi_spec_url.ok_or_else(|| {
+        AppError::BadRequest("Service has no openapi_spec_url configured".to_string())
     })?;
 
     let parsed = openapi_parser::parse_openapi_spec(&state.http_client, &api_spec_url).await?;

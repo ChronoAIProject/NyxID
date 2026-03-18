@@ -43,7 +43,8 @@ export function ServiceEditPage() {
       name: "",
       description: "",
       base_url: "",
-      api_spec_url: "",
+      openapi_spec_url: "",
+      asyncapi_spec_url: "",
       identity_propagation_mode: "none",
       identity_include_user_id: false,
       identity_include_email: false,
@@ -60,7 +61,8 @@ export function ServiceEditPage() {
         name: service.name,
         description: service.description ?? "",
         base_url: service.base_url,
-        api_spec_url: service.api_spec_url ?? "",
+        openapi_spec_url: service.openapi_spec_url ?? service.api_spec_url ?? "",
+        asyncapi_spec_url: service.asyncapi_spec_url ?? "",
         identity_propagation_mode:
           (service.identity_propagation_mode as UpdateServiceFormData["identity_propagation_mode"]) ??
           "none",
@@ -200,7 +202,7 @@ export function ServiceEditPage() {
 
             <FormField
               control={form.control}
-              name="api_spec_url"
+              name="openapi_spec_url"
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>OpenAPI Spec URL</FormLabel>
@@ -212,6 +214,26 @@ export function ServiceEditPage() {
                   </FormControl>
                   <p className="text-xs text-muted-foreground">
                     Optional. Used to auto-discover API endpoints.
+                  </p>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="asyncapi_spec_url"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>AsyncAPI Spec URL</FormLabel>
+                  <FormControl>
+                    <Input
+                      placeholder="https://api.example.com/asyncapi.json"
+                      {...field}
+                    />
+                  </FormControl>
+                  <p className="text-xs text-muted-foreground">
+                    Optional. Used to document WebSocket and streaming protocols.
                   </p>
                   <FormMessage />
                 </FormItem>

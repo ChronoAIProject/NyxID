@@ -133,16 +133,17 @@ describe("updateServiceSchema", () => {
   it("accepts empty string for optional URL fields", () => {
     const result = updateServiceSchema.safeParse({
       ...validData,
-      api_spec_url: "",
+      openapi_spec_url: "",
+      asyncapi_spec_url: "",
       description: "",
     });
     expect(result.success).toBe(true);
   });
 
-  it("rejects invalid api_spec_url", () => {
+  it("rejects invalid openapi_spec_url", () => {
     const result = updateServiceSchema.safeParse({
       ...validData,
-      api_spec_url: "not-a-url",
+      openapi_spec_url: "not-a-url",
     });
     expect(result.success).toBe(false);
   });

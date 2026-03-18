@@ -9,6 +9,7 @@ use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -874,7 +875,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProxyServiceItem {
     pub id: String,
     pub name: String,
@@ -891,6 +892,14 @@ pub struct ProxyServiceItem {
     pub proxy_url: String,
     /// Slug-based proxy URL (developer-friendly)
     pub proxy_url_slug: String,
+    /// Whether NyxID can serve a Scalar UI for this service
+    pub docs_url: Option<String>,
+    /// Proxied OpenAPI JSON URL
+    pub openapi_url: Option<String>,
+    /// Proxied AsyncAPI JSON URL
+    pub asyncapi_url: Option<String>,
+    /// Whether the service advertises streaming support
+    pub streaming_supported: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -899,7 +908,7 @@ pub struct ProxyServicesQuery {
     pub per_page: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProxyServicesResponse {
     pub services: Vec<ProxyServiceItem>,
     pub total: u64,
@@ -912,6 +921,19 @@ pub struct ProxyServicesResponse {
 /// List downstream services available for proxying with their proxy URLs.
 /// Excludes "provider" category services (not proxyable).
 /// Supports pagination via `page` and `per_page` query parameters.
+#[utoipa::path(
+    get,
+    path = "/api/v1/proxy/services",
+    params(
+        ("page" = Option<u64>, Query, description = "Page number"),
+        ("per_page" = Option<u64>, Query, description = "Items per page")
+    ),
+    responses(
+        (status = 200, description = "Proxyable downstream services", body = ProxyServicesResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Proxy"
+)]
 pub async fn list_proxy_services(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -989,6 +1011,20 @@ pub async fn list_proxy_services(
             has_node_binding: node_bound_set.contains(s.id.as_str()),
             proxy_url: format!("{base}/api/v1/proxy/{}/{{path}}", s.id),
             proxy_url_slug: format!("{base}/api/v1/proxy/s/{}/{{path}}", s.slug),
+            docs_url: s
+                .openapi_spec_url
+                .as_ref()
+                .or(s.asyncapi_spec_url.as_ref())
+                .map(|_| format!("{base}/api/v1/proxy/services/{}/docs", s.id)),
+            openapi_url: s
+                .openapi_spec_url
+                .as_ref()
+                .map(|_| format!("{base}/api/v1/proxy/services/{}/openapi.json", s.id)),
+            asyncapi_url: s
+                .asyncapi_spec_url
+                .as_ref()
+                .map(|_| format!("{base}/api/v1/proxy/services/{}/asyncapi.json", s.id)),
+            streaming_supported: s.streaming_supported,
         })
         .collect();
 

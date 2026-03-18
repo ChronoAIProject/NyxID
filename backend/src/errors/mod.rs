@@ -1,9 +1,10 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Structured JSON error response returned by all API error paths.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
     /// Machine-readable error category (e.g. "unauthorized")
     pub error: String,
