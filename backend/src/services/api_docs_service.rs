@@ -64,6 +64,14 @@ pub async fn discover_service_docs(
     }
 }
 
+pub fn is_auto_discovered_openapi_spec_url(base_url: &str, spec_url: &str) -> bool {
+    is_probe_url(base_url, spec_url, OPENAPI_PROBE_PATHS)
+}
+
+pub fn is_auto_discovered_asyncapi_spec_url(base_url: &str, spec_url: &str) -> bool {
+    is_probe_url(base_url, spec_url, ASYNCAPI_PROBE_PATHS)
+}
+
 pub async fn fetch_downstream_openapi_spec(
     client: &reqwest::Client,
     service: &DownstreamService,
@@ -122,13 +130,15 @@ pub async fn fetch_downstream_asyncapi_spec(
 }
 
 pub fn render_scalar_html(title: &str, spec_url: &str) -> String {
+    let escaped_title = escape_html(title);
+    let escaped_spec_url = escape_html(spec_url);
     format!(
         r#"<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{title}</title>
+    <title>{escaped_title}</title>
     <style>
       html, body, #app {{ height: 100%; margin: 0; }}
       body {{ background: #0f172a; }}
@@ -137,7 +147,7 @@ pub fn render_scalar_html(title: &str, spec_url: &str) -> String {
   <body>
     <script
       id="api-reference"
-      data-url="{spec_url}"
+      data-url="{escaped_spec_url}"
       data-layout="modern"
     ></script>
     <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
@@ -263,6 +273,20 @@ pub fn render_catalog_html() -> &'static str {
     <script>
       const body = document.getElementById('catalog-body');
       const status = document.getElementById('status');
+      const createMessageRow = (message) => {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 4;
+        cell.textContent = message;
+        row.appendChild(cell);
+        return row;
+      };
+      const createLink = (href, label) => {
+        const link = document.createElement('a');
+        link.href = href;
+        link.textContent = label;
+        return link;
+      };
       fetch('/api/v1/proxy/services', { credentials: 'include' })
         .then(async (response) => {
           if (!response.ok) {
@@ -273,26 +297,62 @@ pub fn render_catalog_html() -> &'static str {
         .then((payload) => {
           status.textContent = `${payload.total} services available`;
           if (!payload.services.length) {
-            body.innerHTML = '<tr><td colspan="4">No proxyable services found.</td></tr>';
+            body.replaceChildren(createMessageRow('No proxyable services found.'));
             return;
           }
-          body.innerHTML = payload.services.map((service) => {
-            const docs = [
-              service.docs_url ? `<a href="${service.docs_url}">Scalar UI</a>` : 'Unavailable',
-              service.openapi_url ? `<small><a href="${service.openapi_url}">OpenAPI</a></small>` : '',
-              service.asyncapi_url ? `<small><a href="${service.asyncapi_url}">AsyncAPI</a></small>` : ''
-            ].join('');
-            return `<tr>
-              <td><strong>${service.name}</strong><small>${service.slug}</small></td>
-              <td>${docs}</td>
-              <td>${service.streaming_supported ? '<span class="badge">Streaming</span>' : 'No'}</td>
-              <td><a href="${service.proxy_url_slug.replace('{path}', '')}">${service.proxy_url_slug}</a></td>
-            </tr>`;
-          }).join('');
+          const rows = payload.services.map((service) => {
+            const row = document.createElement('tr');
+
+            const serviceCell = document.createElement('td');
+            const serviceName = document.createElement('strong');
+            serviceName.textContent = service.name;
+            const serviceSlug = document.createElement('small');
+            serviceSlug.textContent = service.slug;
+            serviceCell.append(serviceName, serviceSlug);
+
+            const docsCell = document.createElement('td');
+            if (service.docs_url) {
+              docsCell.appendChild(createLink(service.docs_url, 'Scalar UI'));
+            } else {
+              docsCell.textContent = 'Unavailable';
+            }
+            if (service.openapi_url) {
+              const openapi = document.createElement('small');
+              openapi.appendChild(createLink(service.openapi_url, 'OpenAPI'));
+              docsCell.appendChild(openapi);
+            }
+            if (service.asyncapi_url) {
+              const asyncapi = document.createElement('small');
+              asyncapi.appendChild(createLink(service.asyncapi_url, 'AsyncAPI'));
+              docsCell.appendChild(asyncapi);
+            }
+
+            const streamingCell = document.createElement('td');
+            if (service.streaming_supported) {
+              const badge = document.createElement('span');
+              badge.className = 'badge';
+              badge.textContent = 'Streaming';
+              streamingCell.appendChild(badge);
+            } else {
+              streamingCell.textContent = 'No';
+            }
+
+            const proxyCell = document.createElement('td');
+            proxyCell.appendChild(
+              createLink(
+                service.proxy_url_slug.replace('{path}', ''),
+                service.proxy_url_slug
+              )
+            );
+
+            row.append(serviceCell, docsCell, streamingCell, proxyCell);
+            return row;
+          });
+          body.replaceChildren(...rows);
         })
         .catch((error) => {
           status.textContent = error.message;
-          body.innerHTML = '<tr><td colspan="4">Failed to load catalog.</td></tr>';
+          body.replaceChildren(createMessageRow('Failed to load catalog.'));
         });
     </script>
   </body>
@@ -510,7 +570,16 @@ async fn discover_spec_url(
     None
 }
 
+fn is_probe_url(base_url: &str, spec_url: &str, candidate_paths: &[&str]) -> bool {
+    let base = base_url.trim_end_matches('/');
+    candidate_paths
+        .iter()
+        .any(|path| format!("{base}{path}") == spec_url)
+}
+
 async fn fetch_json_spec(client: &reqwest::Client, url: &str) -> AppResult<serde_json::Value> {
+    validate_spec_fetch_url(url).await?;
+
     let response = client
         .get(url)
         .timeout(std::time::Duration::from_secs(5))
@@ -573,11 +642,115 @@ fn detect_streaming_from_openapi(spec: &serde_json::Value) -> bool {
     false
 }
 
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#x27;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+async fn validate_spec_fetch_url(url: &str) -> AppResult<()> {
+    let parsed = url::Url::parse(url)
+        .map_err(|_| AppError::BadRequest("Spec URL is invalid".to_string()))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(AppError::BadRequest(
+            "Spec URL must use http or https".to_string(),
+        ));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AppError::BadRequest("Spec URL must include a hostname".to_string()))?;
+    if is_blocked_fetch_hostname(host) {
+        return Err(AppError::BadRequest(
+            "Spec URL must not target a private or internal hostname".to_string(),
+        ));
+    }
+
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| AppError::BadRequest("Spec URL must include a valid port".to_string()))?;
+    let addresses = resolve_fetch_host_ips(host, port).await?;
+    if addresses.is_empty() {
+        return Err(AppError::BadRequest(
+            "Spec URL host did not resolve to any IP addresses".to_string(),
+        ));
+    }
+    if addresses.into_iter().any(is_private_or_internal_ip) {
+        return Err(AppError::BadRequest(
+            "Spec URL must not resolve to private or internal IP addresses".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+async fn resolve_fetch_host_ips(host: &str, port: u16) -> AppResult<Vec<std::net::IpAddr>> {
+    if let Ok(ip) = parse_fetch_host_ip(host) {
+        return Ok(vec![ip]);
+    }
+
+    let resolved = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to resolve spec host: {e}")))?;
+    Ok(resolved.map(|addr| addr.ip()).collect())
+}
+
+fn parse_fetch_host_ip(host: &str) -> Result<std::net::IpAddr, std::net::AddrParseError> {
+    normalize_fetch_host(host).parse()
+}
+
+fn is_blocked_fetch_hostname(host: &str) -> bool {
+    matches!(
+        normalize_fetch_host(host).as_str(),
+        "localhost" | "metadata.google.internal"
+    )
+}
+
+fn normalize_fetch_host(host: &str) -> String {
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            ipv4.is_loopback()
+                || ipv4.is_private()
+                || ipv4.is_link_local()
+                || ipv4.is_unspecified()
+                || ipv4.is_broadcast()
+                || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            ipv6.is_loopback()
+                || ipv6.is_unspecified()
+                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
+                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
+                || ipv6
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ServiceDocumentationMetadata, build_asyncapi_document, catalog_csp,
         detect_streaming_from_openapi, render_scalar_html, scalar_docs_csp,
+        validate_spec_fetch_url,
     };
 
     #[test]
@@ -646,6 +819,14 @@ mod tests {
     }
 
     #[test]
+    fn scalar_html_escapes_untrusted_values() {
+        let html = render_scalar_html("<Docs>", "\"/api/v1/docs/openapi.json\"");
+        assert!(html.contains("&lt;Docs&gt;"));
+        assert!(html.contains("&quot;/api/v1/docs/openapi.json&quot;"));
+        assert!(!html.contains("<title><Docs></title>"));
+    }
+
+    #[test]
     fn documentation_metadata_serializes() {
         let metadata = ServiceDocumentationMetadata {
             openapi_spec_url: Some("https://example.com/openapi.json".to_string()),
@@ -667,5 +848,24 @@ mod tests {
     fn catalog_csp_allows_inline_script_for_embedded_catalog_page() {
         let csp = catalog_csp();
         assert!(csp.contains("script-src 'unsafe-inline'"));
+    }
+
+    #[tokio::test]
+    async fn spec_fetch_validation_rejects_private_targets() {
+        assert!(
+            validate_spec_fetch_url("http://127.0.0.1/openapi.json")
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_spec_fetch_url("https://[::1]/openapi.json")
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_spec_fetch_url("http://metadata.google.internal/openapi.json")
+                .await
+                .is_err()
+        );
     }
 }

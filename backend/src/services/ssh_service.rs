@@ -59,14 +59,14 @@ pub struct SshSessionGuard {
 
 impl Drop for SshSessionGuard {
     fn drop(&mut self) {
-        if let Some(mut entry) = self.manager.get_mut(&self.user_id) {
-            if *entry > 1 {
-                *entry -= 1;
+        let _ = self.manager.remove_if_mut(&self.user_id, |_, count| {
+            if *count > 1 {
+                *count -= 1;
+                false
             } else {
-                drop(entry);
-                self.manager.remove(&self.user_id);
+                true
             }
-        }
+        });
     }
 }
 
@@ -161,6 +161,20 @@ pub fn validate_ssh_target(host: &str, port: u16) -> AppResult<()> {
         ));
     }
 
+    if is_blocked_ssh_hostname(trimmed) {
+        return Err(AppError::ValidationError(
+            "host must not point to a private or internal address".to_string(),
+        ));
+    }
+
+    if let Ok(ip) = parse_ssh_target_ip(trimmed)
+        && is_private_or_internal_ip(ip)
+    {
+        return Err(AppError::ValidationError(
+            "host must not point to a private or internal IP address".to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -218,6 +232,47 @@ fn sanitize_allowed_principals(principals: &[String]) -> Vec<String> {
         .map(|principal| principal.trim().to_string())
         .filter(|principal| !principal.is_empty())
         .collect()
+}
+
+fn is_blocked_ssh_hostname(host: &str) -> bool {
+    matches!(
+        normalize_host(host).as_str(),
+        "localhost" | "metadata.google.internal"
+    )
+}
+
+fn parse_ssh_target_ip(host: &str) -> Result<std::net::IpAddr, std::net::AddrParseError> {
+    normalize_host(host).parse()
+}
+
+fn normalize_host(host: &str) -> String {
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            ipv4.is_loopback()
+                || ipv4.is_private()
+                || ipv4.is_link_local()
+                || ipv4.is_unspecified()
+                || ipv4.is_broadcast()
+                || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            ipv6.is_loopback()
+                || ipv6.is_unspecified()
+                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
+                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
+                || ipv6
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
+        }
+    }
 }
 
 async fn ca_material_for_upsert(
@@ -373,6 +428,9 @@ mod tests {
         assert!(validate_ssh_target("ssh.internal.example", 22).is_ok());
         assert!(validate_ssh_target("", 22).is_err());
         assert!(validate_ssh_target("ssh.internal.example", 0).is_err());
+        assert!(validate_ssh_target("127.0.0.1", 22).is_err());
+        assert!(validate_ssh_target("[::1]", 22).is_err());
+        assert!(validate_ssh_target("metadata.google.internal", 22).is_err());
     }
 
     #[test]

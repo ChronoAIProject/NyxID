@@ -517,14 +517,6 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let api_v1_shared = Router::new()
         .nest("/connections", connection_routes)
         .nest("/providers", provider_routes)
-        .route(
-            "/ssh/{service_id}/certificate",
-            post(handlers::ssh_tunnel::issue_ssh_certificate),
-        )
-        .route(
-            "/ssh/{service_id}",
-            get(handlers::ssh_tunnel::ssh_tunnel_ws),
-        )
         .layer(middleware::from_fn(reject_delegated_tokens));
 
     // Routes that BLOCK service account tokens (human-only endpoints)
@@ -537,6 +529,14 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/docs/catalog", get(handlers::docs::catalog_ui))
         .route("/docs/openapi.json", get(handlers::docs::openapi_json))
         .route("/docs/asyncapi.json", get(handlers::docs::asyncapi_json))
+        .route(
+            "/ssh/{service_id}/certificate",
+            post(handlers::ssh_tunnel::issue_ssh_certificate),
+        )
+        .route(
+            "/ssh/{service_id}",
+            get(handlers::ssh_tunnel::ssh_tunnel_ws),
+        )
         .nest("/sessions", session_routes)
         .nest("/mcp", mcp_routes)
         .nest("/developer", developer_routes)

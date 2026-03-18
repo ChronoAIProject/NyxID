@@ -191,6 +191,8 @@ The same node routing layer can also carry SSH sessions for services that have S
 
 - SSH uses the same per-user service bindings as HTTP proxy traffic
 - The selected node must be online and able to reach the target SSH host from its own network
+- Private, loopback, and metadata SSH targets must be explicitly allowlisted in the node agent config before the node will open them
+- The node agent enforces a bounded `max_tunnels` limit so the server cannot open unbounded concurrent SSH sessions
 - If no healthy bound node can open the SSH target, NyxID falls back to opening the TCP connection itself
 
 For operator-facing setup, see [SSH_TUNNELING.md](./SSH_TUNNELING.md). For the exact message shapes, see [NODE_PROXY_PROTOCOL.md](./NODE_PROXY_PROTOCOL.md).

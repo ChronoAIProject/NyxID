@@ -76,6 +76,30 @@ enum NodeMessage {
     SshTunnelClosed(WsSshTunnelClosedMsg),
 }
 
+fn decode_base64_payload(
+    payload: Option<&str>,
+    message_type: &str,
+    request_id: &str,
+) -> Option<Vec<u8>> {
+    let Some(payload) = payload else {
+        return Some(Vec::new());
+    };
+
+    use base64::Engine;
+    match base64::engine::general_purpose::STANDARD.decode(payload) {
+        Ok(bytes) => Some(bytes),
+        Err(error) => {
+            tracing::warn!(
+                msg_type = message_type,
+                request_id = request_id,
+                error = %error,
+                "Dropping invalid base64 payload from node"
+            );
+            None
+        }
+    }
+}
+
 /// GET /api/v1/nodes/ws
 ///
 /// WebSocket upgrade handler for node agent connections.
@@ -421,14 +445,13 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                 }
             }
             NodeMessage::ProxyResponseChunk(chunk) => {
-                let data = chunk.data.as_deref().map_or_else(Vec::new, |d| {
-                    use base64::Engine;
-                    base64::engine::general_purpose::STANDARD
-                        .decode(d)
-                        .unwrap_or_else(|_| d.as_bytes().to_vec())
-                });
-
-                ws_manager.deliver_stream_chunk(&node_id_reader, &chunk.request_id, data);
+                if let Some(data) = decode_base64_payload(
+                    chunk.data.as_deref(),
+                    "proxy_response_chunk",
+                    &chunk.request_id,
+                ) {
+                    ws_manager.deliver_stream_chunk(&node_id_reader, &chunk.request_id, data);
+                }
             }
             NodeMessage::ProxyResponseEnd(end) => {
                 ws_manager.deliver_stream_end(&node_id_reader, &end.request_id);
@@ -447,13 +470,17 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                 }
             }
             NodeMessage::SshTunnelData(data) => {
-                let bytes = data.data.as_deref().map_or_else(Vec::new, |d| {
-                    use base64::Engine;
-                    base64::engine::general_purpose::STANDARD
-                        .decode(d)
-                        .unwrap_or_else(|_| d.as_bytes().to_vec())
-                });
-                ws_manager.deliver_ssh_tunnel_data(&node_id_reader, &data.session_id, bytes);
+                if let Some(bytes) =
+                    decode_base64_payload(data.data.as_deref(), "ssh_tunnel_data", &data.session_id)
+                {
+                    ws_manager.deliver_ssh_tunnel_data(&node_id_reader, &data.session_id, bytes);
+                } else {
+                    ws_manager.deliver_ssh_tunnel_closed(
+                        &node_id_reader,
+                        &data.session_id,
+                        Some("invalid_base64_payload".to_string()),
+                    );
+                }
             }
             NodeMessage::SshTunnelClosed(closed) => {
                 ws_manager.deliver_ssh_tunnel_closed(

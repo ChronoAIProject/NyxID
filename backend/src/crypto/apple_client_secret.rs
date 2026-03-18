@@ -181,6 +181,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             node_hmac_signing_enabled: true,
             ssh_max_sessions_per_user: 4,
             ssh_connect_timeout_secs: 10,
+            ssh_max_tunnel_duration_secs: 3600,
         }
     }
 

@@ -8,6 +8,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::errors::{AppError, AppResult};
 
+const SSH_TUNNEL_BUFFER_CAPACITY: usize = 256;
+
 /// Request sent to a node via WebSocket.
 #[derive(Clone)]
 pub struct NodeProxyRequest {
@@ -86,8 +88,8 @@ pub(crate) enum PendingRequest {
 }
 
 pub(crate) enum PendingSshTunnel {
-    Awaiting(oneshot::Sender<AppResult<mpsc::UnboundedReceiver<SshTunnelChunk>>>),
-    Active(mpsc::UnboundedSender<SshTunnelChunk>),
+    Awaiting(oneshot::Sender<AppResult<mpsc::Receiver<SshTunnelChunk>>>),
+    Active(mpsc::Sender<SshTunnelChunk>),
 }
 
 /// Outbound command for a node connection writer task.
@@ -493,7 +495,7 @@ impl NodeWsManager {
         &self,
         node_id: &str,
         request: NodeSshTunnelRequest,
-    ) -> AppResult<mpsc::UnboundedReceiver<SshTunnelChunk>> {
+    ) -> AppResult<mpsc::Receiver<SshTunnelChunk>> {
         let conn = self
             .connections
             .get(node_id)
@@ -772,7 +774,7 @@ impl NodeWsManager {
 
         match pending {
             PendingSshTunnel::Awaiting(sender) => {
-                let (tx, rx) = mpsc::unbounded_channel();
+                let (tx, rx) = mpsc::channel(SSH_TUNNEL_BUFFER_CAPACITY);
                 let sent = sender.send(Ok(rx)).is_ok();
                 if sent {
                     conn.ssh_tunnels
@@ -789,11 +791,39 @@ impl NodeWsManager {
     }
 
     pub fn deliver_ssh_tunnel_data(&self, node_id: &str, session_id: &str, data: Vec<u8>) {
-        if let Some(conn) = self.connections.get(node_id)
-            && let Some(pending) = conn.ssh_tunnels.get(session_id)
-            && let PendingSshTunnel::Active(tx) = pending.value()
-        {
-            let _ = tx.send(SshTunnelChunk::Data(data));
+        if let Some(conn) = self.connections.get(node_id) {
+            let send_result = {
+                let Some(pending) = conn.ssh_tunnels.get(session_id) else {
+                    return;
+                };
+                let PendingSshTunnel::Active(tx) = pending.value() else {
+                    return;
+                };
+                tx.try_send(SshTunnelChunk::Data(data))
+            };
+
+            match send_result {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        session_id = %session_id,
+                        capacity = SSH_TUNNEL_BUFFER_CAPACITY,
+                        "Dropping SSH tunnel due to full receive buffer"
+                    );
+                    let close_msg = serde_json::to_string(&WsSshTunnelClose {
+                        msg_type: "ssh_tunnel_close",
+                        session_id: session_id.to_string(),
+                    });
+                    if let Ok(close_msg) = close_msg {
+                        let _ = conn.tx.try_send(NodeOutboundMessage::Text(close_msg));
+                    }
+                    conn.ssh_tunnels.remove(session_id);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    conn.ssh_tunnels.remove(session_id);
+                }
+            }
         }
     }
 
@@ -813,7 +843,7 @@ impl NodeWsManager {
                     )));
                 }
                 PendingSshTunnel::Active(tx) => {
-                    let _ = tx.send(SshTunnelChunk::Closed(error));
+                    let _ = tx.try_send(SshTunnelChunk::Closed(error));
                 }
             }
         }

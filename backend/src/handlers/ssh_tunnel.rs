@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     Json,
@@ -47,6 +47,8 @@ struct TunnelClientMeta {
     ip_address: Option<String>,
     user_agent: Option<String>,
 }
+
+const MAX_SSH_BANNER_BYTES: usize = 4 * 1024;
 
 #[utoipa::path(
     post,
@@ -218,7 +220,7 @@ async fn handle_ssh_socket(
 
     let connect_target = format!("{}:{}", ssh_service.host, ssh_service.port);
     let mut tcp_stream = match tokio::time::timeout(
-        std::time::Duration::from_secs(state.config.ssh_connect_timeout_secs),
+        Duration::from_secs(state.config.ssh_connect_timeout_secs),
         tokio::net::TcpStream::connect(&connect_target),
     )
     .await
@@ -283,6 +285,51 @@ async fn handle_ssh_socket(
         }
     };
 
+    let mut from_client_bytes: u64 = 0;
+    let mut to_client_bytes: u64 = 0;
+    let initial_downstream_bytes = match read_direct_ssh_banner(
+        &mut tcp_stream,
+        state.config.ssh_connect_timeout_secs,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(service_id = %service_id, error = %error, "SSH tunnel target failed banner validation");
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: "Downstream target is not a valid SSH server".into(),
+                })))
+                .await;
+
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user_id),
+                "ssh_tunnel_connect_failed".to_string(),
+                Some(serde_json::json!({
+                    "service_id": service_id,
+                    "session_id": session_id,
+                    "routed_via": "ssh",
+                    "target_host": ssh_service.host,
+                    "target_port": ssh_service.port,
+                    "error": error.to_string(),
+                })),
+                client_meta.ip_address,
+                client_meta.user_agent,
+            );
+            return;
+        }
+    };
+    if socket
+        .send(Message::Binary(initial_downstream_bytes.clone().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    to_client_bytes += initial_downstream_bytes.len() as u64;
+
     audit_service::log_async(
         state.db.clone(),
         Some(user_id.clone()),
@@ -298,51 +345,64 @@ async fn handle_ssh_socket(
         client_meta.user_agent.clone(),
     );
 
-    let mut from_client_bytes: u64 = 0;
-    let mut to_client_bytes: u64 = 0;
     let mut read_buf = vec![0_u8; 16 * 1024];
+    let tunnel_timeout = tokio::time::sleep(Duration::from_secs(
+        state.config.ssh_max_tunnel_duration_secs,
+    ));
+    tokio::pin!(tunnel_timeout);
 
-    loop {
+    let disconnect_reason = loop {
         tokio::select! {
+            _ = &mut tunnel_timeout => {
+                let _ = socket
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1008,
+                        reason: "SSH tunnel reached maximum duration".into(),
+                    })))
+                    .await;
+                break Some("max_tunnel_duration_exceeded");
+            }
             ws_message = socket.next() => {
                 match ws_message {
                     Some(Ok(Message::Binary(bytes))) => {
                         from_client_bytes += bytes.len() as u64;
                         if tcp_stream.write_all(&bytes).await.is_err() {
-                            break;
+                            break Some("downstream_write_failed");
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         if socket.send(Message::Pong(payload)).await.is_err() {
-                            break;
+                            break Some("client_write_failed");
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) | None => {
+                        break Some("client_closed");
+                    }
                     Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Text(_))) => {
                         let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                             code: 1003,
                             reason: "SSH tunnel accepts binary frames only".into(),
                         }))).await;
-                        break;
+                        break Some("invalid_client_frame");
                     }
-                    Some(Err(_)) => break,
+                    Some(Err(_)) => break Some("client_socket_error"),
                 }
             }
             tcp_read = tcp_stream.read(&mut read_buf) => {
                 match tcp_read {
-                    Ok(0) => break,
+                    Ok(0) => break Some("downstream_closed"),
                     Ok(n) => {
                         to_client_bytes += n as u64;
                         if socket.send(Message::Binary(read_buf[..n].to_vec().into())).await.is_err() {
-                            break;
+                            break Some("client_write_failed");
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => break Some("downstream_read_failed"),
                 }
             }
         }
-    }
+    };
 
     let _ = socket.close().await;
 
@@ -357,6 +417,7 @@ async fn handle_ssh_socket(
             "duration_ms": started_at.elapsed().as_millis() as u64,
             "bytes_from_client": from_client_bytes,
             "bytes_to_client": to_client_bytes,
+            "disconnect_reason": disconnect_reason,
         })),
         client_meta.ip_address,
         client_meta.user_agent,
@@ -433,6 +494,57 @@ async fn handle_node_ssh_socket(
     };
     let node_id = selected_node_id.expect("selected node id");
 
+    let mut from_client_bytes: u64 = 0;
+    let mut to_client_bytes: u64 = 0;
+    let initial_downstream_bytes = match read_node_ssh_banner(
+        &mut tunnel_rx,
+        state.config.ssh_connect_timeout_secs,
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(service_id = %service_id, node_id = %node_id, error = %error, "Node-routed SSH tunnel failed banner validation");
+            let _ = state
+                .node_ws_manager
+                .close_ssh_tunnel(&node_id, &session_id);
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: "Downstream target is not a valid SSH server".into(),
+                })))
+                .await;
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user_id),
+                "ssh_tunnel_connect_failed".to_string(),
+                Some(serde_json::json!({
+                    "service_id": service_id,
+                    "session_id": session_id,
+                    "routed_via": "node",
+                    "node_id": node_id,
+                    "target_host": ssh_service.host,
+                    "target_port": ssh_service.port,
+                    "error": error.to_string(),
+                })),
+                client_meta.ip_address,
+                client_meta.user_agent,
+            );
+            return;
+        }
+    };
+    if socket
+        .send(Message::Binary(initial_downstream_bytes.clone().into()))
+        .await
+        .is_err()
+    {
+        let _ = state
+            .node_ws_manager
+            .close_ssh_tunnel(&node_id, &session_id);
+        return;
+    }
+    to_client_bytes += initial_downstream_bytes.len() as u64;
+
     audit_service::log_async(
         state.db.clone(),
         Some(user_id.clone()),
@@ -449,34 +561,47 @@ async fn handle_node_ssh_socket(
         client_meta.user_agent.clone(),
     );
 
-    let mut from_client_bytes: u64 = 0;
-    let mut to_client_bytes: u64 = 0;
+    let tunnel_timeout = tokio::time::sleep(Duration::from_secs(
+        state.config.ssh_max_tunnel_duration_secs,
+    ));
+    tokio::pin!(tunnel_timeout);
 
-    loop {
+    let disconnect_reason = loop {
         tokio::select! {
+            _ = &mut tunnel_timeout => {
+                let _ = socket
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: 1008,
+                        reason: "SSH tunnel reached maximum duration".into(),
+                    })))
+                    .await;
+                break Some("max_tunnel_duration_exceeded");
+            }
             ws_message = socket.next() => {
                 match ws_message {
                     Some(Ok(Message::Binary(bytes))) => {
                         from_client_bytes += bytes.len() as u64;
                         if state.node_ws_manager.send_ssh_tunnel_data(&node_id, &session_id, &bytes).is_err() {
-                            break;
+                            break Some("node_tunnel_send_failed");
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         if socket.send(Message::Pong(payload)).await.is_err() {
-                            break;
+                            break Some("client_write_failed");
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) | None => {
+                        break Some("client_closed");
+                    }
                     Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Text(_))) => {
                         let _ = socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                             code: 1003,
                             reason: "SSH tunnel accepts binary frames only".into(),
                         }))).await;
-                        break;
+                        break Some("invalid_client_frame");
                     }
-                    Some(Err(_)) => break,
+                    Some(Err(_)) => break Some("client_socket_error"),
                 }
             }
             tunnel_message = tunnel_rx.recv() => {
@@ -484,14 +609,21 @@ async fn handle_node_ssh_socket(
                     Some(crate::services::node_ws_manager::SshTunnelChunk::Data(bytes)) => {
                         to_client_bytes += bytes.len() as u64;
                         if socket.send(Message::Binary(bytes.into())).await.is_err() {
-                            break;
+                            break Some("client_write_failed");
                         }
                     }
-                    Some(crate::services::node_ws_manager::SshTunnelChunk::Closed(_)) | None => break,
+                    Some(crate::services::node_ws_manager::SshTunnelChunk::Closed(error)) => {
+                        break if error.is_some() {
+                            Some("node_tunnel_closed_with_error")
+                        } else {
+                            Some("node_tunnel_closed")
+                        };
+                    }
+                    None => break Some("node_tunnel_channel_closed"),
                 }
             }
         }
-    }
+    };
 
     let _ = state
         .node_ws_manager
@@ -510,6 +642,7 @@ async fn handle_node_ssh_socket(
             "duration_ms": started_at.elapsed().as_millis() as u64,
             "bytes_from_client": from_client_bytes,
             "bytes_to_client": to_client_bytes,
+            "disconnect_reason": disconnect_reason,
         })),
         client_meta.ip_address,
         client_meta.user_agent,
@@ -574,4 +707,122 @@ async fn authorize_ssh_access(
     }
 
     Ok(())
+}
+
+async fn read_direct_ssh_banner(
+    stream: &mut tokio::net::TcpStream,
+    timeout_secs: u64,
+) -> AppResult<Vec<u8>> {
+    tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+        let mut buffer = Vec::with_capacity(256);
+        let mut chunk = [0_u8; 512];
+        loop {
+            let read = stream.read(&mut chunk).await.map_err(|error| {
+                AppError::BadRequest(format!(
+                    "Failed to read SSH banner from downstream: {error}"
+                ))
+            })?;
+            if read == 0 {
+                return Err(AppError::BadRequest(
+                    "Downstream target closed before sending an SSH banner".to_string(),
+                ));
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if ssh_banner_validated(&buffer)? {
+                return Ok(buffer);
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        AppError::BadRequest("Timed out waiting for SSH banner from downstream".to_string())
+    })?
+}
+
+async fn read_node_ssh_banner(
+    tunnel_rx: &mut tokio::sync::mpsc::Receiver<crate::services::node_ws_manager::SshTunnelChunk>,
+    timeout_secs: u64,
+) -> AppResult<Vec<u8>> {
+    tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+        let mut buffer = Vec::with_capacity(256);
+        loop {
+            match tunnel_rx.recv().await {
+                Some(crate::services::node_ws_manager::SshTunnelChunk::Data(bytes)) => {
+                    buffer.extend_from_slice(&bytes);
+                    if ssh_banner_validated(&buffer)? {
+                        return Ok(buffer);
+                    }
+                }
+                Some(crate::services::node_ws_manager::SshTunnelChunk::Closed(Some(error))) => {
+                    return Err(AppError::NodeOffline(format!(
+                        "Node tunnel closed before SSH banner: {error}"
+                    )));
+                }
+                Some(crate::services::node_ws_manager::SshTunnelChunk::Closed(None)) | None => {
+                    return Err(AppError::NodeOffline(
+                        "Node tunnel closed before SSH banner".to_string(),
+                    ));
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| AppError::BadRequest("Timed out waiting for SSH banner from node".to_string()))?
+}
+
+fn ssh_banner_validated(buffer: &[u8]) -> AppResult<bool> {
+    let mut offset = 0;
+    while let Some(relative_end) = buffer[offset..].iter().position(|byte| *byte == b'\n') {
+        let end = offset + relative_end + 1;
+        let line = &buffer[offset..end];
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+
+        if line.starts_with(b"SSH-2.0-") || line.starts_with(b"SSH-1.99-") {
+            return Ok(true);
+        }
+        if line.starts_with(b"SSH-") {
+            return Err(AppError::BadRequest(
+                "Downstream target returned an unsupported SSH banner".to_string(),
+            ));
+        }
+
+        offset = end;
+    }
+
+    if buffer.len() >= MAX_SSH_BANNER_BYTES {
+        return Err(AppError::BadRequest(
+            "Downstream target did not present an SSH identification banner".to_string(),
+        ));
+    }
+
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_SSH_BANNER_BYTES, ssh_banner_validated};
+
+    #[test]
+    fn accepts_valid_ssh_banner_after_preamble() {
+        let buffer = b"NOTICE banner\r\nSSH-2.0-OpenSSH_9.7\r\n";
+        assert!(ssh_banner_validated(buffer).expect("valid banner"));
+    }
+
+    #[test]
+    fn rejects_unsupported_ssh_version_banner() {
+        let error = ssh_banner_validated(b"SSH-1.5-legacy\r\n").expect_err("unsupported banner");
+        assert!(error.to_string().contains("unsupported SSH banner"));
+    }
+
+    #[test]
+    fn rejects_non_ssh_target_when_banner_limit_is_exceeded() {
+        let buffer = vec![b'x'; MAX_SSH_BANNER_BYTES];
+        let error = ssh_banner_validated(&buffer).expect_err("missing banner");
+        assert!(
+            error
+                .to_string()
+                .contains("did not present an SSH identification banner")
+        );
+    }
 }

@@ -141,7 +141,7 @@ pub struct UpdateServiceRequest {
     pub ssh_config: Option<SshServiceConfigRequest>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OidcCredentialsResponse {
     pub client_id: String,
     pub client_secret: String,
@@ -155,17 +155,17 @@ pub struct OidcCredentialsResponse {
     pub jwks_uri: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateRedirectUrisRequest {
     pub redirect_uris: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RedirectUrisResponse {
     pub redirect_uris: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RegenerateSecretResponse {
     pub client_secret: String,
     pub message: String,
@@ -225,6 +225,22 @@ fn derive_ssh_service_category(service_category: Option<&str>) -> AppResult<Stri
             "Invalid service_category: {other}. Must be connection or internal"
         ))),
     }
+}
+
+fn should_refresh_openapi_url(service: &DownstreamService, body: &UpdateServiceRequest) -> bool {
+    body.openapi_spec_url.is_some()
+        || service.openapi_spec_url.is_none()
+        || service.openapi_spec_url.as_deref().is_some_and(|url| {
+            api_docs_service::is_auto_discovered_openapi_spec_url(&service.base_url, url)
+        })
+}
+
+fn should_refresh_asyncapi_url(service: &DownstreamService, body: &UpdateServiceRequest) -> bool {
+    body.asyncapi_spec_url.is_some()
+        || service.asyncapi_spec_url.is_none()
+        || service.asyncapi_spec_url.as_deref().is_some_and(|url| {
+            api_docs_service::is_auto_discovered_asyncapi_spec_url(&service.base_url, url)
+        })
 }
 
 // --- Handlers ---
@@ -576,6 +592,19 @@ pub async fn create_service(
 /// DELETE /api/v1/services/:service_id
 ///
 /// Deactivate a downstream service. Requires admin or service creator.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/services/{service_id}",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    responses(
+        (status = 200, description = "Service deactivated", body = DeleteServiceResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn delete_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -720,6 +749,9 @@ pub async fn update_service(
                 ));
             }
 
+            let refresh_openapi_url = should_refresh_openapi_url(&service, &body);
+            let refresh_asyncapi_url = should_refresh_asyncapi_url(&service, &body);
+
             let openapi_spec_url = body
                 .openapi_spec_url
                 .as_deref()
@@ -815,11 +847,15 @@ pub async fn update_service(
             let docs_base_url = body.base_url.as_deref().unwrap_or(&service.base_url);
             let explicit_openapi = if body.openapi_spec_url.is_some() {
                 openapi_spec_url.clone()
+            } else if refresh_openapi_url {
+                None
             } else {
                 service.openapi_spec_url.clone()
             };
             let explicit_asyncapi = if body.asyncapi_spec_url.is_some() {
                 asyncapi_spec_url.clone()
+            } else if refresh_asyncapi_url {
+                None
             } else {
                 service.asyncapi_spec_url.clone()
             };
@@ -892,21 +928,33 @@ pub async fn update_service(
     let now = Utc::now();
     set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
     if let Some(docs_metadata) = http_docs_refresh {
+        let refresh_openapi_url = should_refresh_openapi_url(&service, &body);
+        let refresh_asyncapi_url = should_refresh_asyncapi_url(&service, &body);
+        let next_openapi_spec_url = if refresh_openapi_url {
+            docs_metadata.openapi_spec_url.clone()
+        } else {
+            service.openapi_spec_url.clone()
+        };
+        let next_asyncapi_spec_url = if refresh_asyncapi_url {
+            docs_metadata.asyncapi_spec_url.clone()
+        } else {
+            service.asyncapi_spec_url.clone()
+        };
         set_doc.insert(
             "openapi_spec_url",
-            docs_metadata
-                .openapi_spec_url
+            next_openapi_spec_url
                 .clone()
                 .map_or(bson::Bson::Null, bson::Bson::String),
         );
         set_doc.insert(
             "asyncapi_spec_url",
-            docs_metadata
-                .asyncapi_spec_url
+            next_asyncapi_spec_url
                 .clone()
                 .map_or(bson::Bson::Null, bson::Bson::String),
         );
-        set_doc.insert("streaming_supported", docs_metadata.streaming_supported);
+        if refresh_openapi_url || refresh_asyncapi_url {
+            set_doc.insert("streaming_supported", docs_metadata.streaming_supported);
+        }
     }
 
     state
@@ -945,6 +993,20 @@ pub async fn update_service(
 /// GET /api/v1/services/{service_id}/oidc-credentials
 ///
 /// Retrieve OIDC client credentials. Admin only.
+#[utoipa::path(
+    get,
+    path = "/api/v1/services/{service_id}/oidc-credentials",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    responses(
+        (status = 200, description = "OIDC client credentials", body = OidcCredentialsResponse),
+        (status = 400, description = "Service is not an OIDC service", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn get_oidc_credentials(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -1014,6 +1076,21 @@ pub async fn get_oidc_credentials(
 /// PUT /api/v1/services/{service_id}/redirect-uris
 ///
 /// Update redirect URIs for an OIDC service. Admin only.
+#[utoipa::path(
+    put,
+    path = "/api/v1/services/{service_id}/redirect-uris",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    request_body = UpdateRedirectUrisRequest,
+    responses(
+        (status = 200, description = "Updated redirect URIs", body = RedirectUrisResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn update_redirect_uris(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -1102,6 +1179,20 @@ pub async fn update_redirect_uris(
 /// POST /api/v1/services/{service_id}/regenerate-secret
 ///
 /// Regenerate the OIDC client secret. Admin only.
+#[utoipa::path(
+    post,
+    path = "/api/v1/services/{service_id}/regenerate-secret",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    responses(
+        (status = 200, description = "Regenerated OIDC client secret", body = RegenerateSecretResponse),
+        (status = 400, description = "Service is not an OIDC service", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn regenerate_oidc_secret(
     State(state): State<AppState>,
     auth_user: AuthUser,

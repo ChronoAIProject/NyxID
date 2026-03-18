@@ -678,6 +678,7 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 |----------|---------|-------------|
 | `SSH_MAX_SESSIONS_PER_USER` | `4` | Maximum concurrent SSH tunnel sessions per authenticated user |
 | `SSH_CONNECT_TIMEOUT_SECS` | `10` | Timeout for connecting NyxID or a node agent to the downstream SSH target |
+| `SSH_MAX_TUNNEL_DURATION_SECS` | `3600` | Maximum duration for a single SSH tunnel before NyxID forces it closed |
 
 ### Logging
 

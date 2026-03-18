@@ -150,6 +150,8 @@ pub struct AppConfig {
     pub ssh_max_sessions_per_user: usize,
     /// Timeout for connecting to a downstream SSH target in seconds (default: 10)
     pub ssh_connect_timeout_secs: u64,
+    /// Maximum duration for an SSH tunnel session in seconds (default: 3600)
+    pub ssh_max_tunnel_duration_secs: u64,
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -269,6 +271,10 @@ impl std::fmt::Debug for AppConfig {
             .field("node_hmac_signing_enabled", &self.node_hmac_signing_enabled)
             .field("ssh_max_sessions_per_user", &self.ssh_max_sessions_per_user)
             .field("ssh_connect_timeout_secs", &self.ssh_connect_timeout_secs)
+            .field(
+                "ssh_max_tunnel_duration_secs",
+                &self.ssh_max_tunnel_duration_secs,
+            )
             .finish()
     }
 }
@@ -442,6 +448,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10),
+            ssh_max_tunnel_duration_secs: env::var("SSH_MAX_TUNNEL_DURATION_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3600),
         }
     }
 
@@ -716,6 +726,7 @@ mod tests {
             node_hmac_signing_enabled: true,
             ssh_max_sessions_per_user: 4,
             ssh_connect_timeout_secs: 10,
+            ssh_max_tunnel_duration_secs: 3600,
         }
     }
 

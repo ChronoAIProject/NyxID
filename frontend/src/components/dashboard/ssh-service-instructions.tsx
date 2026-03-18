@@ -1,33 +1,12 @@
-import { useMemo } from "react";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import type { SshServiceConfig } from "@/types/api";
 import { CopyableField } from "@/components/shared/copyable-field";
+import { deriveNyxidBaseUrl } from "@/lib/ssh";
 
 interface SshServiceInstructionsProps {
   readonly serviceId: string;
   readonly serviceSlug: string;
   readonly sshConfig: SshServiceConfig;
-}
-
-function deriveNyxidBaseUrl(nodeWsUrl?: string): string {
-  if (nodeWsUrl) {
-    try {
-      const parsed = new URL(nodeWsUrl);
-      parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
-      parsed.pathname = "";
-      parsed.search = "";
-      parsed.hash = "";
-      return parsed.toString().replace(/\/$/, "");
-    } catch {
-      // Fall through to the browser origin.
-    }
-  }
-
-  if (typeof window !== "undefined") {
-    return window.location.origin;
-  }
-
-  return "https://auth.example.com";
 }
 
 export function SshServiceInstructions({
@@ -37,10 +16,7 @@ export function SshServiceInstructions({
 }: SshServiceInstructionsProps) {
   const { data: publicConfig } = usePublicConfig();
 
-  const nyxidBaseUrl = useMemo(
-    () => deriveNyxidBaseUrl(publicConfig?.node_ws_url),
-    [publicConfig?.node_ws_url],
-  );
+  const nyxidBaseUrl = deriveNyxidBaseUrl(publicConfig?.node_ws_url);
 
   const primaryPrincipal = sshConfig.allowed_principals[0] ?? "ubuntu";
   const certificateFile = `~/.ssh/nyxid/${serviceSlug}-cert.pub`;
@@ -61,7 +37,11 @@ export function SshServiceInstructions({
         </p>
       </div>
       <CopyableField label="Install helper" value={installCommand} size="sm" />
-      <CopyableField label="Export access token" value={tokenCommand} size="sm" />
+      <CopyableField
+        label="Export access token"
+        value={tokenCommand}
+        size="sm"
+      />
       <CopyableField
         label="One-off SSH command"
         value={

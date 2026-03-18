@@ -19,6 +19,7 @@ import {
   SERVICE_CATEGORY_LABELS,
   SERVICE_TYPE_LABELS,
 } from "@/lib/constants";
+import { parseAllowedPrincipals } from "@/lib/ssh";
 import { ApiError } from "@/lib/api-client";
 import { ServiceCard } from "@/components/dashboard/service-card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -53,13 +54,6 @@ import { Switch } from "@/components/ui/switch";
 import { Plus, Server } from "lucide-react";
 import { toast } from "sonner";
 
-function parseAllowedPrincipals(input?: string): string[] {
-  return (input ?? "")
-    .split(/[\n,]/)
-    .map((principal) => principal.trim())
-    .filter(Boolean);
-}
-
 export function ServiceListPage() {
   const navigate = useNavigate();
   const { data: services, isLoading } = useServices();
@@ -86,7 +80,8 @@ export function ServiceListPage() {
   });
 
   const serviceType = form.watch("service_type");
-  const certificateAuthEnabled = form.watch("certificate_auth_enabled") ?? false;
+  const certificateAuthEnabled =
+    form.watch("certificate_auth_enabled") ?? false;
 
   async function onSubmit(data: CreateServiceFormData) {
     try {
@@ -100,9 +95,14 @@ export function ServiceListPage() {
               ssh_config: {
                 host: (data.host ?? "").trim(),
                 port: Number(data.port),
-                certificate_auth_enabled: data.certificate_auth_enabled ?? false,
-                certificate_ttl_minutes: Number(data.certificate_ttl_minutes || "30"),
-                allowed_principals: parseAllowedPrincipals(data.allowed_principals),
+                certificate_auth_enabled:
+                  data.certificate_auth_enabled ?? false,
+                certificate_ttl_minutes: Number(
+                  data.certificate_ttl_minutes || "30",
+                ),
+                allowed_principals: parseAllowedPrincipals(
+                  data.allowed_principals,
+                ),
               },
             })
           : await createMutation.mutateAsync({
@@ -146,7 +146,9 @@ export function ServiceListPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">Services</h2>
+          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
+            Services
+          </h2>
           <p className="text-sm text-muted-foreground">
             Manage downstream services and their authentication.
           </p>
@@ -162,7 +164,8 @@ export function ServiceListPage() {
             <DialogHeader>
               <DialogTitle>Create Service</DialogTitle>
               <DialogDescription>
-                Pick the service type first, then configure the fields NyxID should manage.
+                Pick the service type first, then configure the fields NyxID
+                should manage.
               </DialogDescription>
             </DialogHeader>
 
@@ -255,7 +258,10 @@ export function ServiceListPage() {
                           <FormItem>
                             <FormLabel>SSH Host</FormLabel>
                             <FormControl>
-                              <Input placeholder="ssh.internal.example" {...field} />
+                              <Input
+                                placeholder="ssh.internal.example"
+                                {...field}
+                              />
                             </FormControl>
                             <FormMessage />
                           </FormItem>
@@ -269,7 +275,12 @@ export function ServiceListPage() {
                           <FormItem>
                             <FormLabel>SSH Port</FormLabel>
                             <FormControl>
-                              <Input type="number" min={1} max={65535} {...field} />
+                              <Input
+                                type="number"
+                                min={1}
+                                max={65535}
+                                {...field}
+                              />
                             </FormControl>
                             <FormMessage />
                           </FormItem>
@@ -302,7 +313,12 @@ export function ServiceListPage() {
                             <FormItem>
                               <FormLabel>Certificate TTL (minutes)</FormLabel>
                               <FormControl>
-                                <Input type="number" min={15} max={60} {...field} />
+                                <Input
+                                  type="number"
+                                  min={15}
+                                  max={60}
+                                  {...field}
+                                />
                               </FormControl>
                               <FormMessage />
                             </FormItem>
@@ -316,10 +332,14 @@ export function ServiceListPage() {
                             <FormItem>
                               <FormLabel>Allowed Principals</FormLabel>
                               <FormControl>
-                                <Input placeholder="ubuntu, deploy" {...field} />
+                                <Input
+                                  placeholder="ubuntu, deploy"
+                                  {...field}
+                                />
                               </FormControl>
                               <p className="text-xs text-muted-foreground">
-                                Comma-separated SSH usernames NyxID is allowed to sign.
+                                Comma-separated SSH usernames NyxID is allowed
+                                to sign.
                               </p>
                               <FormMessage />
                             </FormItem>
@@ -362,8 +382,10 @@ export function ServiceListPage() {
                               } else if (value === "none") {
                                 form.setValue("service_category", "internal");
                               } else if (
-                                form.getValues("service_category") === "provider" ||
-                                form.getValues("service_category") === "internal"
+                                form.getValues("service_category") ===
+                                  "provider" ||
+                                form.getValues("service_category") ===
+                                  "internal"
                               ) {
                                 form.setValue("service_category", "connection");
                               }
@@ -387,37 +409,38 @@ export function ServiceListPage() {
                       )}
                     />
 
-                    {form.watch("auth_type") !== "oidc" && form.watch("auth_type") !== "none" && (
-                      <FormField
-                        control={form.control}
-                        name="service_category"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Service Category</FormLabel>
-                            <Select
-                              value={field.value ?? "connection"}
-                              onValueChange={field.onChange}
-                            >
-                              <FormControl>
-                                <SelectTrigger>
-                                  <SelectValue placeholder="Select category" />
-                                </SelectTrigger>
-                              </FormControl>
-                              <SelectContent>
-                                {SERVICE_CATEGORIES.filter(
-                                  (cat) => cat !== "provider",
-                                ).map((cat) => (
-                                  <SelectItem key={cat} value={cat}>
-                                    {SERVICE_CATEGORY_LABELS[cat] ?? cat}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-                    )}
+                    {form.watch("auth_type") !== "oidc" &&
+                      form.watch("auth_type") !== "none" && (
+                        <FormField
+                          control={form.control}
+                          name="service_category"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Service Category</FormLabel>
+                              <Select
+                                value={field.value ?? "connection"}
+                                onValueChange={field.onChange}
+                              >
+                                <FormControl>
+                                  <SelectTrigger>
+                                    <SelectValue placeholder="Select category" />
+                                  </SelectTrigger>
+                                </FormControl>
+                                <SelectContent>
+                                  {SERVICE_CATEGORIES.filter(
+                                    (cat) => cat !== "provider",
+                                  ).map((cat) => (
+                                    <SelectItem key={cat} value={cat}>
+                                      {SERVICE_CATEGORY_LABELS[cat] ?? cat}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      )}
                   </>
                 )}
 

@@ -10,7 +10,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::config::NodeConfig;
+use crate::config::{NodeConfig, SshConfig};
 use crate::credential_store::SharedCredentials;
 use crate::error::{Error, Result};
 use crate::metrics::NodeMetrics;
@@ -21,6 +21,8 @@ enum SshTunnelControl {
     Data(Vec<u8>),
     Close,
 }
+
+const SSH_CONTROL_CHANNEL_SIZE: usize = 256;
 
 /// Exponential backoff state for reconnection.
 struct ExponentialBackoff {
@@ -244,7 +246,7 @@ async fn connect_and_serve(
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let active_ssh_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
         String,
-        mpsc::UnboundedSender<SshTunnelControl>,
+        mpsc::Sender<SshTunnelControl>,
     >::new()));
 
     // Writer task: forwards messages from the channel to the WS sink
@@ -314,9 +316,10 @@ async fn connect_and_serve(
             }
             Some("ssh_tunnel_open") => {
                 let tx_clone = tx.clone();
+                let ssh_config = config.ssh.clone();
                 let active_tunnels = active_ssh_tunnels.clone();
                 tokio::spawn(async move {
-                    handle_ssh_tunnel_open(&parsed, tx_clone, active_tunnels).await;
+                    handle_ssh_tunnel_open(&parsed, &ssh_config, tx_clone, active_tunnels).await;
                 });
             }
             Some("ssh_tunnel_data") => {
@@ -341,10 +344,9 @@ async fn connect_and_serve(
 
 async fn handle_ssh_tunnel_open(
     parsed: &serde_json::Value,
+    ssh_config: &SshConfig,
     tx: mpsc::UnboundedSender<String>,
-    active_tunnels: Arc<
-        tokio::sync::Mutex<HashMap<String, mpsc::UnboundedSender<SshTunnelControl>>>,
-    >,
+    active_tunnels: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<SshTunnelControl>>>>,
 ) {
     let session_id = match parsed["session_id"].as_str() {
         Some(id) if !id.is_empty() => id.to_string(),
@@ -384,11 +386,53 @@ async fn handle_ssh_tunnel_open(
         }
     };
 
+    if let Err(error) = validate_node_ssh_target(ssh_config, &host, port).await {
+        tracing::warn!(session_id = %session_id, host = %host, port, %error, "ssh tunnel target rejected by node policy");
+        let _ = tx.send(
+            serde_json::json!({
+                "type": "ssh_tunnel_closed",
+                "session_id": session_id,
+                "error": format!("target_not_allowed:{error}"),
+            })
+            .to_string(),
+        );
+        return;
+    }
+
+    let (control_tx, mut control_rx) = mpsc::channel(SSH_CONTROL_CHANNEL_SIZE);
+    {
+        let mut guard = active_tunnels.lock().await;
+        if guard.contains_key(&session_id) {
+            let _ = tx.send(
+                serde_json::json!({
+                    "type": "ssh_tunnel_closed",
+                    "session_id": session_id,
+                    "error": "duplicate_session_id",
+                })
+                .to_string(),
+            );
+            return;
+        }
+        if guard.len() >= ssh_config.max_tunnels {
+            let _ = tx.send(
+                serde_json::json!({
+                    "type": "ssh_tunnel_closed",
+                    "session_id": session_id,
+                    "error": "too_many_active_tunnels",
+                })
+                .to_string(),
+            );
+            return;
+        }
+        guard.insert(session_id.clone(), control_tx);
+    }
+
     let address = format!("{host}:{port}");
     let stream = match TcpStream::connect(&address).await {
         Ok(stream) => stream,
         Err(error) => {
             tracing::warn!(session_id = %session_id, %address, %error, "failed to open ssh tunnel tcp stream");
+            active_tunnels.lock().await.remove(&session_id);
             let _ = tx.send(
                 serde_json::json!({
                     "type": "ssh_tunnel_closed",
@@ -400,12 +444,6 @@ async fn handle_ssh_tunnel_open(
             return;
         }
     };
-
-    let (control_tx, mut control_rx) = mpsc::unbounded_channel();
-    active_tunnels
-        .lock()
-        .await
-        .insert(session_id.clone(), control_tx);
 
     let _ = tx.send(
         serde_json::json!({
@@ -468,9 +506,7 @@ async fn handle_ssh_tunnel_open(
 
 async fn handle_ssh_tunnel_data(
     parsed: &serde_json::Value,
-    active_tunnels: &Arc<
-        tokio::sync::Mutex<HashMap<String, mpsc::UnboundedSender<SshTunnelControl>>>,
-    >,
+    active_tunnels: &Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<SshTunnelControl>>>>,
 ) {
     let Some(session_id) = parsed["session_id"].as_str() else {
         tracing::warn!("ssh_tunnel_data missing session_id");
@@ -494,15 +530,26 @@ async fn handle_ssh_tunnel_data(
         guard.get(session_id).cloned()
     };
     if let Some(sender) = sender {
-        let _ = sender.send(SshTunnelControl::Data(bytes));
+        match sender.try_send(SshTunnelControl::Data(bytes)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    session_id,
+                    capacity = SSH_CONTROL_CHANNEL_SIZE,
+                    "ssh tunnel control buffer full"
+                );
+                active_tunnels.lock().await.remove(session_id);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                active_tunnels.lock().await.remove(session_id);
+            }
+        }
     }
 }
 
 async fn handle_ssh_tunnel_close(
     parsed: &serde_json::Value,
-    active_tunnels: &Arc<
-        tokio::sync::Mutex<HashMap<String, mpsc::UnboundedSender<SshTunnelControl>>>,
-    >,
+    active_tunnels: &Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<SshTunnelControl>>>>,
 ) {
     let Some(session_id) = parsed["session_id"].as_str() else {
         tracing::warn!("ssh_tunnel_close missing session_id");
@@ -511,7 +558,92 @@ async fn handle_ssh_tunnel_close(
 
     let sender = active_tunnels.lock().await.remove(session_id);
     if let Some(sender) = sender {
-        let _ = sender.send(SshTunnelControl::Close);
+        let _ = sender.try_send(SshTunnelControl::Close);
+    }
+}
+
+async fn validate_node_ssh_target(ssh_config: &SshConfig, host: &str, port: u16) -> Result<()> {
+    if is_allowlisted_ssh_target(ssh_config, host, port) {
+        return Ok(());
+    }
+
+    let normalized_host = normalize_target_host(host);
+    if matches!(
+        normalized_host.as_str(),
+        "localhost" | "metadata.google.internal"
+    ) {
+        return Err(Error::Validation(
+            "SSH target must be explicitly allowlisted in the node config".to_string(),
+        ));
+    }
+
+    let addresses = resolve_target_ips(host, port).await?;
+    if addresses.is_empty() {
+        return Err(Error::Validation(
+            "SSH target did not resolve to any IP addresses".to_string(),
+        ));
+    }
+    if addresses.iter().copied().any(is_private_or_internal_ip) {
+        return Err(Error::Validation(
+            "SSH target resolves to a private or internal address and must be allowlisted in the node config".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_allowlisted_ssh_target(ssh_config: &SshConfig, host: &str, port: u16) -> bool {
+    let normalized_host = normalize_target_host(host);
+    ssh_config.allowed_targets.iter().any(|target| {
+        normalize_target_host(&target.host) == normalized_host
+            && target.port.is_none_or(|allowed_port| allowed_port == port)
+    })
+}
+
+async fn resolve_target_ips(host: &str, port: u16) -> Result<Vec<std::net::IpAddr>> {
+    if let Ok(ip) = parse_target_ip(host) {
+        return Ok(vec![ip]);
+    }
+
+    let resolved = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| Error::Validation(format!("Failed to resolve SSH target: {error}")))?;
+    Ok(resolved.map(|addr| addr.ip()).collect())
+}
+
+fn parse_target_ip(host: &str) -> Result<std::net::IpAddr> {
+    normalize_target_host(host)
+        .parse()
+        .map_err(|error| Error::Validation(format!("Invalid SSH target host: {error}")))
+}
+
+fn normalize_target_host(host: &str) -> String {
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            ipv4.is_loopback()
+                || ipv4.is_private()
+                || ipv4.is_link_local()
+                || ipv4.is_unspecified()
+                || ipv4.is_broadcast()
+                || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            ipv6.is_loopback()
+                || ipv6.is_unspecified()
+                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
+                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
+                || ipv6
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
+        }
     }
 }
 
@@ -538,7 +670,18 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{SshConfig, SshTargetConfig};
     use tokio::net::TcpListener;
+
+    fn ssh_config_with_allowed_target(host: &str, port: u16) -> SshConfig {
+        SshConfig {
+            max_tunnels: 10,
+            allowed_targets: vec![SshTargetConfig {
+                host: host.to_string(),
+                port: Some(port),
+            }],
+        }
+    }
 
     #[test]
     fn exponential_backoff_increases() {
@@ -589,7 +732,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
             String,
-            mpsc::UnboundedSender<SshTunnelControl>,
+            mpsc::Sender<SshTunnelControl>,
         >::new()));
 
         handle_ssh_tunnel_open(
@@ -598,6 +741,7 @@ mod tests {
                 "host": "127.0.0.1",
                 "port": port,
             }),
+            &ssh_config_with_allowed_target("127.0.0.1", port),
             tx.clone(),
             active_tunnels.clone(),
         )
@@ -638,5 +782,76 @@ mod tests {
         assert_eq!(closed["session_id"], "sess-1");
 
         server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn ssh_tunnel_rejects_private_targets_without_allowlist() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
+            String,
+            mpsc::Sender<SshTunnelControl>,
+        >::new()));
+
+        handle_ssh_tunnel_open(
+            &serde_json::json!({
+                "session_id": "sess-2",
+                "host": "127.0.0.1",
+                "port": 22,
+            }),
+            &SshConfig::default(),
+            tx,
+            active_tunnels.clone(),
+        )
+        .await;
+
+        let closed: serde_json::Value =
+            serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
+        assert_eq!(closed["type"], "ssh_tunnel_closed");
+        assert_eq!(closed["session_id"], "sess-2");
+        assert!(
+            closed["error"]
+                .as_str()
+                .expect("error")
+                .starts_with("target_not_allowed:")
+        );
+        assert!(active_tunnels.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ssh_tunnel_rejects_when_max_tunnels_reached() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
+            String,
+            mpsc::Sender<SshTunnelControl>,
+        >::new()));
+        let (placeholder_tx, _placeholder_rx) = mpsc::channel(SSH_CONTROL_CHANNEL_SIZE);
+        active_tunnels
+            .lock()
+            .await
+            .insert("existing".to_string(), placeholder_tx);
+
+        handle_ssh_tunnel_open(
+            &serde_json::json!({
+                "session_id": "sess-3",
+                "host": "ssh.example.com",
+                "port": 22,
+            }),
+            &SshConfig {
+                max_tunnels: 1,
+                allowed_targets: vec![SshTargetConfig {
+                    host: "ssh.example.com".to_string(),
+                    port: Some(22),
+                }],
+            },
+            tx,
+            active_tunnels.clone(),
+        )
+        .await;
+
+        let closed: serde_json::Value =
+            serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
+        assert_eq!(closed["type"], "ssh_tunnel_closed");
+        assert_eq!(closed["error"], "too_many_active_tunnels");
+        assert_eq!(active_tunnels.lock().await.len(), 1);
     }
 }

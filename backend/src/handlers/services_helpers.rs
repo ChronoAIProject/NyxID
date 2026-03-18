@@ -1,5 +1,6 @@
 use mongodb::bson::doc;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -195,7 +196,7 @@ pub fn require_http_service(service: &DownstreamService) -> AppResult<()> {
 }
 
 /// Typed response for delete operations (CR-16).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteServiceResponse {
     pub message: String,
 }
