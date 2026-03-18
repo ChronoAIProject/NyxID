@@ -66,6 +66,7 @@ agents:
     command: claude                   # No third-party wrapper needed.
     model: opus[1m]
     reasoning_effort: high
+    approval_policy: never
     max_turns: 25
     network_access: true
     turn_timeout_ms: 7200000
