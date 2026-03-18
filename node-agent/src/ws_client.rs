@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -23,6 +23,32 @@ enum SshTunnelControl {
 }
 
 const SSH_CONTROL_CHANNEL_SIZE: usize = 256;
+
+type ActiveSshTunnelMap = Arc<tokio::sync::Mutex<HashMap<String, ActiveSshTunnelEntry>>>;
+
+enum ActiveSshTunnelEntry {
+    Opening {
+        control_tx: mpsc::Sender<SshTunnelControl>,
+    },
+    Active {
+        control_tx: mpsc::Sender<SshTunnelControl>,
+        task_handle: tokio::task::JoinHandle<()>,
+    },
+}
+
+impl ActiveSshTunnelEntry {
+    fn control_tx(&self) -> mpsc::Sender<SshTunnelControl> {
+        match self {
+            Self::Opening { control_tx } | Self::Active { control_tx, .. } => control_tx.clone(),
+        }
+    }
+
+    fn abort(self) {
+        if let Self::Active { task_handle, .. } = self {
+            task_handle.abort();
+        }
+    }
+}
 
 /// Exponential backoff state for reconnection.
 struct ExponentialBackoff {
@@ -246,7 +272,7 @@ async fn connect_and_serve(
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let active_ssh_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
         String,
-        mpsc::Sender<SshTunnelControl>,
+        ActiveSshTunnelEntry,
     >::new()));
 
     // Writer task: forwards messages from the channel to the WS sink
@@ -323,7 +349,7 @@ async fn connect_and_serve(
                 });
             }
             Some("ssh_tunnel_data") => {
-                handle_ssh_tunnel_data(&parsed, &active_ssh_tunnels).await;
+                handle_ssh_tunnel_data(&parsed, &tx, &active_ssh_tunnels).await;
             }
             Some("ssh_tunnel_close") => {
                 handle_ssh_tunnel_close(&parsed, &active_ssh_tunnels).await;
@@ -346,7 +372,7 @@ async fn handle_ssh_tunnel_open(
     parsed: &serde_json::Value,
     ssh_config: &SshConfig,
     tx: mpsc::UnboundedSender<String>,
-    active_tunnels: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<SshTunnelControl>>>>,
+    active_tunnels: ActiveSshTunnelMap,
 ) {
     let session_id = match parsed["session_id"].as_str() {
         Some(id) if !id.is_empty() => id.to_string(),
@@ -424,7 +450,12 @@ async fn handle_ssh_tunnel_open(
             );
             return;
         }
-        guard.insert(session_id.clone(), control_tx);
+        guard.insert(
+            session_id.clone(),
+            ActiveSshTunnelEntry::Opening {
+                control_tx: control_tx.clone(),
+            },
+        );
     }
 
     let address = format!("{host}:{port}");
@@ -432,7 +463,7 @@ async fn handle_ssh_tunnel_open(
         Ok(stream) => stream,
         Err(error) => {
             tracing::warn!(session_id = %session_id, %address, %error, "failed to open ssh tunnel tcp stream");
-            active_tunnels.lock().await.remove(&session_id);
+            let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
             let _ = tx.send(
                 serde_json::json!({
                     "type": "ssh_tunnel_closed",
@@ -445,6 +476,39 @@ async fn handle_ssh_tunnel_open(
         }
     };
 
+    let io_timeout = Duration::from_secs(ssh_config.io_timeout_secs);
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+    let task_session_id = session_id.clone();
+    let task_tx = tx.clone();
+    let task_tunnels = active_tunnels.clone();
+    let task_handle = tokio::spawn(async move {
+        if start_rx.await.is_err() {
+            return;
+        }
+
+        run_ssh_tunnel_task(
+            task_session_id,
+            stream,
+            &mut control_rx,
+            task_tx,
+            task_tunnels,
+            io_timeout,
+        )
+        .await;
+    });
+    {
+        let mut guard = active_tunnels.lock().await;
+        let Some(entry) = guard.get_mut(&session_id) else {
+            task_handle.abort();
+            return;
+        };
+        *entry = ActiveSshTunnelEntry::Active {
+            control_tx: control_tx.clone(),
+            task_handle,
+        };
+    }
+    let _ = start_tx.send(());
+
     let _ = tx.send(
         serde_json::json!({
             "type": "ssh_tunnel_opened",
@@ -452,61 +516,12 @@ async fn handle_ssh_tunnel_open(
         })
         .to_string(),
     );
-
-    tokio::spawn(async move {
-        let mut stream = stream;
-        let mut read_buf = [0u8; 16 * 1024];
-
-        loop {
-            tokio::select! {
-                control = control_rx.recv() => {
-                    match control {
-                        Some(SshTunnelControl::Data(bytes)) => {
-                            if let Err(error) = stream.write_all(&bytes).await {
-                                tracing::warn!(session_id = %session_id, %error, "failed to write ssh tunnel bytes");
-                                break;
-                            }
-                        }
-                        Some(SshTunnelControl::Close) | None => break,
-                    }
-                }
-                read_result = stream.read(&mut read_buf) => {
-                    match read_result {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let _ = tx.send(
-                                serde_json::json!({
-                                    "type": "ssh_tunnel_data",
-                                    "session_id": session_id,
-                                    "data": base64::engine::general_purpose::STANDARD
-                                        .encode(&read_buf[..n]),
-                                })
-                                .to_string(),
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!(session_id = %session_id, %error, "failed reading ssh tunnel bytes");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        active_tunnels.lock().await.remove(&session_id);
-        let _ = tx.send(
-            serde_json::json!({
-                "type": "ssh_tunnel_closed",
-                "session_id": session_id,
-            })
-            .to_string(),
-        );
-    });
 }
 
 async fn handle_ssh_tunnel_data(
     parsed: &serde_json::Value,
-    active_tunnels: &Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<SshTunnelControl>>>>,
+    tx: &mpsc::UnboundedSender<String>,
+    active_tunnels: &ActiveSshTunnelMap,
 ) {
     let Some(session_id) = parsed["session_id"].as_str() else {
         tracing::warn!("ssh_tunnel_data missing session_id");
@@ -527,7 +542,7 @@ async fn handle_ssh_tunnel_data(
 
     let sender = {
         let guard = active_tunnels.lock().await;
-        guard.get(session_id).cloned()
+        guard.get(session_id).map(ActiveSshTunnelEntry::control_tx)
     };
     if let Some(sender) = sender {
         match sender.try_send(SshTunnelControl::Data(bytes)) {
@@ -538,28 +553,162 @@ async fn handle_ssh_tunnel_data(
                     capacity = SSH_CONTROL_CHANNEL_SIZE,
                     "ssh tunnel control buffer full"
                 );
-                active_tunnels.lock().await.remove(session_id);
+                abort_ssh_tunnel(active_tunnels, tx, session_id, Some("control_buffer_full")).await;
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                active_tunnels.lock().await.remove(session_id);
+                abort_ssh_tunnel(
+                    active_tunnels,
+                    tx,
+                    session_id,
+                    Some("control_channel_closed"),
+                )
+                .await;
             }
         }
     }
 }
 
-async fn handle_ssh_tunnel_close(
-    parsed: &serde_json::Value,
-    active_tunnels: &Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<SshTunnelControl>>>>,
-) {
+async fn handle_ssh_tunnel_close(parsed: &serde_json::Value, active_tunnels: &ActiveSshTunnelMap) {
     let Some(session_id) = parsed["session_id"].as_str() else {
         tracing::warn!("ssh_tunnel_close missing session_id");
         return;
     };
 
-    let sender = active_tunnels.lock().await.remove(session_id);
-    if let Some(sender) = sender {
-        let _ = sender.try_send(SshTunnelControl::Close);
+    if let Some(entry) = remove_ssh_tunnel_entry(active_tunnels, session_id).await {
+        match entry {
+            ActiveSshTunnelEntry::Opening { .. } => {}
+            ActiveSshTunnelEntry::Active {
+                control_tx,
+                task_handle,
+            } => match control_tx.try_send(SshTunnelControl::Close) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_))
+                | Err(mpsc::error::TrySendError::Closed(_)) => task_handle.abort(),
+            },
+        }
     }
+}
+
+async fn run_ssh_tunnel_task(
+    session_id: String,
+    mut stream: TcpStream,
+    control_rx: &mut mpsc::Receiver<SshTunnelControl>,
+    tx: mpsc::UnboundedSender<String>,
+    active_tunnels: ActiveSshTunnelMap,
+    io_timeout: Duration,
+) {
+    let mut read_buf = [0u8; 16 * 1024];
+
+    loop {
+        tokio::select! {
+            control = control_rx.recv() => {
+                match control {
+                    Some(SshTunnelControl::Data(bytes)) => {
+                        if let Err(error) = write_ssh_tunnel_stream(&mut stream, &bytes, io_timeout).await {
+                            tracing::warn!(session_id = %session_id, %error, "failed to write ssh tunnel bytes");
+                            break;
+                        }
+                    }
+                    Some(SshTunnelControl::Close) | None => break,
+                }
+            }
+            read_result = read_ssh_tunnel_stream(&mut stream, &mut read_buf, io_timeout) => {
+                match read_result {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let _ = tx.send(
+                            serde_json::json!({
+                                "type": "ssh_tunnel_data",
+                                "session_id": session_id,
+                                "data": base64::engine::general_purpose::STANDARD
+                                    .encode(&read_buf[..n]),
+                            })
+                            .to_string(),
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(session_id = %session_id, %error, "failed reading ssh tunnel bytes");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
+    let _ = tx.send(
+        serde_json::json!({
+            "type": "ssh_tunnel_closed",
+            "session_id": session_id,
+        })
+        .to_string(),
+    );
+}
+
+async fn read_ssh_tunnel_stream<T>(
+    stream: &mut T,
+    buf: &mut [u8],
+    io_timeout: Duration,
+) -> Result<usize>
+where
+    T: AsyncRead + Unpin,
+{
+    tokio::time::timeout(io_timeout, stream.read(buf))
+        .await
+        .map_err(|_| Error::Io(ssh_tunnel_timeout_error("read", io_timeout)))?
+        .map_err(Error::Io)
+}
+
+async fn write_ssh_tunnel_stream<T>(
+    stream: &mut T,
+    bytes: &[u8],
+    io_timeout: Duration,
+) -> Result<()>
+where
+    T: AsyncWrite + Unpin,
+{
+    tokio::time::timeout(io_timeout, stream.write_all(bytes))
+        .await
+        .map_err(|_| Error::Io(ssh_tunnel_timeout_error("write", io_timeout)))?
+        .map_err(Error::Io)
+}
+
+fn ssh_tunnel_timeout_error(operation: &str, io_timeout: Duration) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!(
+            "SSH tunnel {operation} timed out after {}ms",
+            io_timeout.as_millis()
+        ),
+    )
+}
+
+async fn abort_ssh_tunnel(
+    active_tunnels: &ActiveSshTunnelMap,
+    tx: &mpsc::UnboundedSender<String>,
+    session_id: &str,
+    error: Option<&str>,
+) {
+    let Some(entry) = remove_ssh_tunnel_entry(active_tunnels, session_id).await else {
+        return;
+    };
+
+    entry.abort();
+    let _ = tx.send(
+        serde_json::json!({
+            "type": "ssh_tunnel_closed",
+            "session_id": session_id,
+            "error": error,
+        })
+        .to_string(),
+    );
+}
+
+async fn remove_ssh_tunnel_entry(
+    active_tunnels: &ActiveSshTunnelMap,
+    session_id: &str,
+) -> Option<ActiveSshTunnelEntry> {
+    active_tunnels.lock().await.remove(session_id)
 }
 
 async fn validate_node_ssh_target(ssh_config: &SshConfig, host: &str, port: u16) -> Result<()> {
@@ -676,6 +825,7 @@ mod tests {
     fn ssh_config_with_allowed_target(host: &str, port: u16) -> SshConfig {
         SshConfig {
             max_tunnels: 10,
+            io_timeout_secs: 3600,
             allowed_targets: vec![SshTargetConfig {
                 host: host.to_string(),
                 port: Some(port),
@@ -732,7 +882,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
             String,
-            mpsc::Sender<SshTunnelControl>,
+            ActiveSshTunnelEntry,
         >::new()));
 
         handle_ssh_tunnel_open(
@@ -757,6 +907,7 @@ mod tests {
                 "session_id": "sess-1",
                 "data": base64::engine::general_purpose::STANDARD.encode(b"hello"),
             }),
+            &tx,
             &active_tunnels,
         )
         .await;
@@ -789,7 +940,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
             String,
-            mpsc::Sender<SshTunnelControl>,
+            ActiveSshTunnelEntry,
         >::new()));
 
         handle_ssh_tunnel_open(
@@ -822,13 +973,15 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
             String,
-            mpsc::Sender<SshTunnelControl>,
+            ActiveSshTunnelEntry,
         >::new()));
         let (placeholder_tx, _placeholder_rx) = mpsc::channel(SSH_CONTROL_CHANNEL_SIZE);
-        active_tunnels
-            .lock()
-            .await
-            .insert("existing".to_string(), placeholder_tx);
+        active_tunnels.lock().await.insert(
+            "existing".to_string(),
+            ActiveSshTunnelEntry::Opening {
+                control_tx: placeholder_tx,
+            },
+        );
 
         handle_ssh_tunnel_open(
             &serde_json::json!({
@@ -838,6 +991,7 @@ mod tests {
             }),
             &SshConfig {
                 max_tunnels: 1,
+                io_timeout_secs: 3600,
                 allowed_targets: vec![SshTargetConfig {
                     host: "ssh.example.com".to_string(),
                     port: Some(22),
@@ -853,5 +1007,79 @@ mod tests {
         assert_eq!(closed["type"], "ssh_tunnel_closed");
         assert_eq!(closed["error"], "too_many_active_tunnels");
         assert_eq!(active_tunnels.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_ssh_tunnel_stream_times_out() {
+        let (mut stream, _peer) = tokio::io::duplex(64);
+        let mut buffer = [0_u8; 8];
+
+        let error = read_ssh_tunnel_stream(&mut stream, &mut buffer, Duration::from_millis(10))
+            .await
+            .expect_err("timeout");
+
+        match error {
+            Error::Io(io_error) => assert_eq!(io_error.kind(), std::io::ErrorKind::TimedOut),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_ssh_tunnel_stream_times_out() {
+        let (mut stream, _peer) = tokio::io::duplex(1);
+
+        let error = write_ssh_tunnel_stream(&mut stream, b"ab", Duration::from_millis(10))
+            .await
+            .expect_err("timeout");
+
+        match error {
+            Error::Io(io_error) => assert_eq!(io_error.kind(), std::io::ErrorKind::TimedOut),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_tunnel_buffer_overflow_aborts_active_task() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
+            String,
+            ActiveSshTunnelEntry,
+        >::new()));
+        let (control_tx, _control_rx) = mpsc::channel(1);
+        control_tx
+            .try_send(SshTunnelControl::Data(vec![1]))
+            .expect("fill control buffer");
+        let task_handle = tokio::spawn(async {
+            futures::future::pending::<()>().await;
+        });
+        let abort_handle = task_handle.abort_handle();
+
+        active_tunnels.lock().await.insert(
+            "sess-4".to_string(),
+            ActiveSshTunnelEntry::Active {
+                control_tx,
+                task_handle,
+            },
+        );
+
+        handle_ssh_tunnel_data(
+            &serde_json::json!({
+                "session_id": "sess-4",
+                "data": base64::engine::general_purpose::STANDARD.encode(b"hello"),
+            }),
+            &tx,
+            &active_tunnels,
+        )
+        .await;
+
+        tokio::task::yield_now().await;
+
+        let closed: serde_json::Value =
+            serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
+        assert_eq!(closed["type"], "ssh_tunnel_closed");
+        assert_eq!(closed["session_id"], "sess-4");
+        assert_eq!(closed["error"], "control_buffer_full");
+        assert!(active_tunnels.lock().await.is_empty());
+        assert!(abort_handle.is_finished());
     }
 }

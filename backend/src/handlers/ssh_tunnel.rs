@@ -142,6 +142,7 @@ pub async fn ssh_tunnel_ws(
 ) -> AppResult<Response> {
     authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
+    validate_runtime_ssh_target(&service_id, &ssh_service)?;
     let session_guard = state
         .ssh_session_manager
         .try_acquire(&auth_user.user_id.to_string())?;
@@ -799,9 +800,26 @@ fn ssh_banner_validated(buffer: &[u8]) -> AppResult<bool> {
     Ok(false)
 }
 
+fn validate_runtime_ssh_target(
+    service_id: &str,
+    ssh_service: &crate::models::downstream_service::SshServiceConfig,
+) -> AppResult<()> {
+    ssh_service::validate_ssh_target(&ssh_service.host, ssh_service.port).map_err(|error| {
+        tracing::warn!(
+            service_id,
+            host = %ssh_service.host,
+            port = ssh_service.port,
+            error = %error,
+            "Rejected invalid SSH target during tunnel setup"
+        );
+        error
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SSH_BANNER_BYTES, ssh_banner_validated};
+    use super::{MAX_SSH_BANNER_BYTES, ssh_banner_validated, validate_runtime_ssh_target};
+    use crate::models::downstream_service::SshServiceConfig;
 
     #[test]
     fn accepts_valid_ssh_banner_after_preamble() {
@@ -824,5 +842,24 @@ mod tests {
                 .to_string()
                 .contains("did not present an SSH identification banner")
         );
+    }
+
+    #[test]
+    fn rejects_invalid_runtime_ssh_target() {
+        let error = validate_runtime_ssh_target(
+            "svc-1",
+            &SshServiceConfig {
+                host: "127.0.0.1".to_string(),
+                port: 22,
+                certificate_auth_enabled: false,
+                certificate_ttl_minutes: 30,
+                allowed_principals: Vec::new(),
+                ca_private_key_encrypted: None,
+                ca_public_key: None,
+            },
+        )
+        .expect_err("invalid target");
+
+        assert!(error.to_string().contains("private or internal IP address"));
     }
 }

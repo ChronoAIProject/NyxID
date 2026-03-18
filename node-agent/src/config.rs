@@ -51,6 +51,8 @@ pub struct SigningConfig {
 pub struct SshConfig {
     #[serde(default = "default_max_ssh_tunnels")]
     pub max_tunnels: usize,
+    #[serde(default = "default_ssh_io_timeout_secs")]
+    pub io_timeout_secs: u64,
     #[serde(default)]
     pub allowed_targets: Vec<SshTargetConfig>,
 }
@@ -59,6 +61,7 @@ impl Default for SshConfig {
     fn default() -> Self {
         Self {
             max_tunnels: default_max_ssh_tunnels(),
+            io_timeout_secs: default_ssh_io_timeout_secs(),
             allowed_targets: Vec::new(),
         }
     }
@@ -73,6 +76,10 @@ pub struct SshTargetConfig {
 
 fn default_max_ssh_tunnels() -> usize {
     10
+}
+
+fn default_ssh_io_timeout_secs() -> u64 {
+    3600
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -366,6 +373,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.ssh.max_tunnels, 10);
+        assert_eq!(config.ssh.io_timeout_secs, 3600);
         assert!(config.ssh.allowed_targets.is_empty());
     }
 }

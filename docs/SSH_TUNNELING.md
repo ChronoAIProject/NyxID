@@ -157,13 +157,14 @@ If no healthy node route is available, NyxID falls back to opening the TCP conne
 
 Operational requirement: the selected node must be able to reach the target SSH host and port from its own network.
 
-For node-routed SSH, NyxID now validates the downstream banner as SSH before the tunnel is exposed to the client, and the node agent only allows private or loopback targets when you explicitly allowlist them in the node config. Public targets can still be opened without an allowlist entry.
+For node-routed SSH, NyxID now validates the downstream banner as SSH before the tunnel is exposed to the client, and the node agent only allows private or loopback targets when you explicitly allowlist them in the node config. Public targets can still be opened without an allowlist entry. `io_timeout_secs` bounds stalled TCP reads and writes on the node side without changing NyxID's global tunnel lifetime cap.
 
 Example node-agent policy:
 
 ```toml
 [ssh]
 max_tunnels = 10
+io_timeout_secs = 3600
 
 [[ssh.allowed_targets]]
 host = "bastion.internal.example"

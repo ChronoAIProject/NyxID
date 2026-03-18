@@ -1,8 +1,12 @@
 export function parseAllowedPrincipals(input?: string): string[] {
-  return (input ?? "")
-    .split(/[\n,]/)
-    .map((principal) => principal.trim())
-    .filter(Boolean);
+  return Array.from(
+    new Set(
+      (input ?? "")
+        .split(/[\n,]/)
+        .map((principal) => principal.trim())
+        .filter(Boolean),
+    ),
+  );
 }
 
 export function deriveNyxidBaseUrl(nodeWsUrl?: string): string {
