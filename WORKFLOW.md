@@ -1,7 +1,10 @@
 ---
 tracker:
   kind: github
-  api_key: $GITHUB_TOKEN
+  # api_key: $GITHUB_TOKEN             # Option 1: Personal access token
+  app_id: $GITHUB_APP_ID               # Option 2: GitHub App (shows as bot)
+  installation_id: $GITHUB_APP_INSTALLATION_ID
+  private_key_path: $GITHUB_APP_PRIVATE_KEY_PATH
   project_slug: ChronoAIProject/NyxID
   active_states:
     - Todo
