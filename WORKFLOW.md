@@ -39,17 +39,30 @@ hooks:
   timeout_ms: 300000
 
 agent:
+  default: codex
   max_concurrent_agents: 3
   max_turns: 25
   max_retry_backoff_ms: 300000
+  auto_merge: false
 
-codex:
-  command: codex app-server
-  approval_policy: never
-  thread_sandbox: workspace-write
-  turn_timeout_ms: 3600000
-  read_timeout_ms: 5000
-  stall_timeout_ms: 600000
+agents:
+  codex:
+    command: codex app-server
+    model: gpt-5.4
+    reasoning_effort: xhigh
+    approval_policy: never
+    thread_sandbox: workspace-write
+    network_access: true
+    turn_timeout_ms: 3600000
+    read_timeout_ms: 5000
+    stall_timeout_ms: 600000
+  # claude:                             # Uncomment to enable. Add `agent:claude` label to issues.
+  #   agent_type: claude-cli            # Uses official Claude Code CLI directly.
+  #   command: claude                   # No third-party wrapper needed.
+  #   model: claude-sonnet-4-6
+  #   max_turns: 20
+  #   network_access: true
+  #   turn_timeout_ms: 7200000
 
 server:
   port: 8080
