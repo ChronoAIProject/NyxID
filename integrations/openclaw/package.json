@@ -1,0 +1,44 @@
+{
+  "name": "openclaw-plugin-nyxid",
+  "version": "0.1.0",
+  "description": "OpenClaw auth plugin and ClawHub skill for NyxID credential brokering",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "skills",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build && npm test",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "keywords": [
+    "openclaw",
+    "clawhub",
+    "nyxid",
+    "oauth2",
+    "credential-broker"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChronoAIProject/NyxID.git",
+    "directory": "integrations/openclaw"
+  },
+  "homepage": "https://github.com/ChronoAIProject/NyxID/tree/main/integrations/openclaw",
+  "bugs": {
+    "url": "https://github.com/ChronoAIProject/NyxID/issues"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.3"
+  }
+}

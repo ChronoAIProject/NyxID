@@ -8,6 +8,8 @@ node_modules/
 dist/
 build/
 *.tsbuildinfo
+.npm-cache/
+.cargo-home/
 
 # ─── Environment ───
 .env

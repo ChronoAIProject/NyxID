@@ -1,0 +1,40 @@
+{
+  "id": "nyxid",
+  "name": "NyxID Credential Broker",
+  "description": "OAuth login to NyxID and delegated access to user-connected services",
+  "version": "0.1.0",
+  "kind": "auth",
+  "entry": "./dist/index.js",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "baseUrl": {
+        "type": "string",
+        "description": "NyxID instance URL (for example https://auth.nyxid.dev)"
+      },
+      "clientId": {
+        "type": "string",
+        "description": "OAuth client ID from the NyxID developer portal"
+      },
+      "clientSecret": {
+        "type": "string",
+        "description": "OAuth client secret. Required for delegated proxy token exchange."
+      },
+      "defaultScopes": {
+        "type": "string",
+        "default": "openid profile email",
+        "description": "Scopes requested during the NyxID login flow"
+      },
+      "delegationScopes": {
+        "type": "string",
+        "default": "proxy:*",
+        "description": "Scopes requested during RFC 8693 token exchange"
+      }
+    },
+    "required": ["baseUrl", "clientId"]
+  },
+  "providerAuthEnvVars": {
+    "nyxid": "NYXID_ACCESS_TOKEN"
+  },
+  "skills": ["./skills/nyxid"]
+}
