@@ -2,7 +2,7 @@
 
 ## systemd
 
-Use the template at `assets/systemd/nyxid-node.service`.
+Use the template at [`docs/node-agent-install/assets/systemd/nyxid-node.service`](./assets/systemd/nyxid-node.service).
 
 ### Placeholder meanings
 
@@ -24,7 +24,7 @@ sudo journalctl -u nyxid-node.service -n 100 --no-pager
 
 ## launchd
 
-Use the template at `assets/launchd/dev.nyxid.node-agent.plist`.
+Use the template at [`docs/node-agent-install/assets/launchd/dev.nyxid.node-agent.plist`](./assets/launchd/dev.nyxid.node-agent.plist).
 
 ### Placeholder meanings
 
@@ -50,10 +50,10 @@ If the service was already loaded, use `launchctl bootout` on the same label bef
 
 ## Windows
 
-This skill does not bundle a Windows service definition. If the user asks for persistence on Windows:
+No Windows service definition is bundled in this repository. If persistence is needed on Windows:
 
 1. Finish the normal install, registration, and credential setup first.
-2. Confirm whether they want Task Scheduler or a Windows service wrapper.
+2. Confirm whether Task Scheduler or a Windows service wrapper is preferred.
 3. Keep the binary path and config directory explicit so the persistence layer can call:
 
 ```powershell

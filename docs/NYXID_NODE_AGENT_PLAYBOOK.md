@@ -1,30 +1,27 @@
----
-name: install-nyxid-node
-description: Install, register, and operationalize the NyxID Node Agent (`nyxid-node`) on a user workstation or server. Use when Codex needs to set up, repair, or migrate a NyxID credential node, choose between file and keychain secret storage, add service credentials, or configure the agent to stay running via systemd or launchd.
----
+# NyxID Node Agent Install Playbook
 
-# Install NyxID Node
+This playbook is written so a human operator or any coding agent can install, repair, or migrate `nyxid-node` on a workstation or server from this repository checkout.
 
-Implement end-to-end setup of `nyxid-node` on the target host. Treat [`docs/NYXID_NODE.md`](../../../docs/NYXID_NODE.md) as the CLI and local-operations source of truth, and treat [`docs/NODE_PROXY.md`](../../../docs/NODE_PROXY.md) as the server-side routing and binding source of truth. Check [`node-agent/src/cli.rs`](../../../node-agent/src/cli.rs) and [`node-agent/src/main.rs`](../../../node-agent/src/main.rs) before inventing flags or behavior.
+Treat [`docs/NYXID_NODE.md`](./NYXID_NODE.md) as the CLI and local-operations source of truth, and treat [`docs/NODE_PROXY.md`](./NODE_PROXY.md) as the server-side routing and binding source of truth. Check [`node-agent/src/cli.rs`](../node-agent/src/cli.rs) before inventing flags or behavior.
 
 ## Collect Inputs First
 
-Before you touch the host, confirm these inputs:
+Before touching the host, confirm these inputs:
 
-- Target OS and service manager (`systemd`, `launchd`, neither)
+- Target OS and service manager: `systemd`, `launchd`, or neither
 - Whether Rust and Cargo are already installed
-- Desired install mode: keep binary in the repo build output, install with `cargo install --path node-agent`, or copy the release binary to an explicit location
+- Desired install mode: keep the repo build output, install with `cargo install --path node-agent`, or copy the release binary to an explicit location
 - NyxID WebSocket URL
 - One-time registration token (`nyx_nreg_...`)
 - Preferred config directory if the default `~/.nyxid-node` should not be used
 - Secret storage backend: default to `file`; use `keychain` only when an interactive OS keychain is known to be available
 - Service slugs and injection method for each credential to be stored
 
-Do not ask for secrets earlier than necessary. Gather enough context to choose commands, then request the registration token and credential values right before you use them.
+Do not ask for secrets earlier than necessary. Gather enough context to choose commands, then request the registration token and credential values right before they are used.
 
 ## Inspect Before Installing
 
-Start by learning whether this is a fresh install or a repair:
+First determine whether this is a fresh install or a repair:
 
 1. Check for an existing config directory and `config.toml`.
 2. Run `nyxid-node version` if the binary is already present.
@@ -40,16 +37,16 @@ If the host already has a working node, treat the task as repair or migration in
 Default to one of these supported flows:
 
 - `cargo install --path node-agent`
-  Use when the current checkout is trusted and the user wants `nyxid-node` on `PATH`.
+  Use when the current checkout is trusted and the target host should get `nyxid-node` on `PATH`.
 - `cargo build --release -p nyxid-node`
   Use when the user wants a portable binary or does not want Cargo to manage the install location. The binary will be at `target/release/nyxid-node`.
 
-If you copy the release binary into a system location such as `/usr/local/bin`, confirm the destination and keep the copied path consistent with any service unit you later install.
+If the release binary is copied into a system location such as `/usr/local/bin`, keep that destination aligned with any service definition installed later.
 
 ### 2. Choose the storage backend deliberately
 
 - Use the default file backend on headless Linux hosts, CI-like environments, containers, or any machine where a desktop keychain may not exist.
-- Use `--keychain` only when the host is expected to support macOS Keychain, Windows Credential Manager, or Linux Secret Service and the user wants secrets kept out of `config.toml`.
+- Use `--keychain` only when the host is expected to support macOS Keychain, Windows Credential Manager, or Linux Secret Service and the operator wants secrets kept out of `config.toml`.
 - If a keychain-backed registration fails during preflight, fall back to the file backend instead of retrying the same broken path.
 
 ### 3. Register the node
@@ -77,7 +74,7 @@ After registration:
 
 ### 4. Add local service credentials
 
-Prefer the secure prompt-based form over inline secrets:
+Prefer the prompt-based form over inline secrets:
 
 ```bash
 nyxid-node credentials add \
@@ -97,33 +94,33 @@ nyxid-node credentials add \
 Rules:
 
 - The `--service` value must match the NyxID downstream service slug.
-- Avoid inline secret values unless the user explicitly wants automation and accepts shell-history exposure.
-- When repairing an existing node, list credentials first so you do not silently replace the wrong service entry.
+- Avoid inline `--value` secrets unless the operator explicitly wants automation and accepts shell-history exposure.
+- When repairing an existing node, list credentials first so the wrong service entry is not replaced silently.
 
 ### 5. Make the agent persistent
 
-If the user wants the node to survive reboots, install a service definition:
+If the node should survive reboots, install a service definition:
 
-- Linux with `systemd`: use [`assets/systemd/nyxid-node.service`](./assets/systemd/nyxid-node.service)
-- macOS with `launchd`: use [`assets/launchd/dev.nyxid.node-agent.plist`](./assets/launchd/dev.nyxid.node-agent.plist)
+- Linux with `systemd`: use [`docs/node-agent-install/assets/systemd/nyxid-node.service`](./node-agent-install/assets/systemd/nyxid-node.service)
+- macOS with `launchd`: use [`docs/node-agent-install/assets/launchd/dev.nyxid.node-agent.plist`](./node-agent-install/assets/launchd/dev.nyxid.node-agent.plist)
 
-Replace the placeholders before loading the unit. Keep the `BINARY_PATH`, `CONFIG_DIR`, and `WORKING_DIRECTORY` aligned with the install method you chose earlier.
+Replace the placeholders before loading the unit. Keep `BINARY_PATH`, `CONFIG_DIR`, and `WORKING_DIRECTORY` aligned with the install method chosen earlier.
 
-On Windows, keep the install to the binary, registration, and credential flow unless the user explicitly asks for persistence. No Windows service template is bundled here; use the platform-native scheduler or service manager only after confirming the user's preference.
+On Windows, finish the binary install, registration, and credential flow first. If persistence is needed, choose the platform-native scheduler or service manager explicitly before wiring it up.
 
 If neither `systemd` nor `launchd` is available, call out that a foreground process or terminal multiplexer is only a fallback, not a durable install.
 
-## Validate Before You Finish
+## Validate Before Finishing
 
 Run the smallest set of checks that prove the install is real:
 
 1. `nyxid-node version`
 2. `nyxid-node status`
-3. Service-manager status if you installed one
+3. Service-manager status if one was installed
 4. A log check if startup fails
 5. Confirmation in the NyxID UI or API that the node is online
 
-Use [`references/install-and-validate.md`](./references/install-and-validate.md) for command patterns and [`references/background-services.md`](./references/background-services.md) for service-manager steps.
+Use [`docs/node-agent-install/install-and-validate.md`](./node-agent-install/install-and-validate.md) for command patterns and [`docs/node-agent-install/background-services.md`](./node-agent-install/background-services.md) for service-manager steps.
 
 ## Troubleshooting Rules
 
@@ -137,4 +134,4 @@ Use [`references/install-and-validate.md`](./references/install-and-validate.md)
 
 - Do not invent unsupported CLI flags or config fields.
 - Do not edit the NyxID server to compensate for a host-local install problem unless the evidence points to a server-side bug.
-- Do not destroy an existing config or stored credentials without explicit user approval.
+- Do not destroy an existing config or stored credentials without explicit approval.

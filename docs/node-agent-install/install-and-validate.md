@@ -2,9 +2,9 @@
 
 ## Source Of Truth
 
-- CLI behavior: `docs/NYXID_NODE.md`
-- Node routing and bindings: `docs/NODE_PROXY.md`
-- Supported flags: `node-agent/src/cli.rs`
+- CLI behavior: [`docs/NYXID_NODE.md`](../NYXID_NODE.md)
+- Node routing and bindings: [`docs/NODE_PROXY.md`](../NODE_PROXY.md)
+- Supported flags: [`node-agent/src/cli.rs`](../../node-agent/src/cli.rs)
 
 ## Install Commands
 
@@ -26,7 +26,7 @@ Result:
 
 - Binary path: `target/release/nyxid-node`
 
-Use this when you need an explicit artifact to copy into `/usr/local/bin`, a service directory, or another managed location.
+Use this when an explicit artifact is needed to copy into `/usr/local/bin`, a service directory, or another managed location.
 
 ## Registration Commands
 
