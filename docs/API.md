@@ -11,11 +11,13 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
 - [Error Codes](#error-codes)
 - [Endpoints](#endpoints)
   - [Health](#health)
+  - [Interactive Documentation](#interactive-documentation)
   - [Auth](#auth)
   - [Social Auth](#social-auth)
   - [Users](#users)
   - [API Keys](#api-keys)
   - [Downstream Services](#downstream-services)
+  - [SSH](#ssh)
   - [Service Connections](#service-connections)
   - [Service Provider Requirements](#service-provider-requirements)
   - [Providers](#providers)
@@ -145,6 +147,72 @@ Returns service health status. No authentication required.
 ```bash
 curl http://localhost:3001/health
 ```
+
+---
+
+### Interactive Documentation
+
+NyxID serves authenticated interactive documentation for both its own API and downstream proxied services.
+
+#### GET /api/v1/docs
+
+Serve the Scalar UI for NyxID's OpenAPI 3.1 document.
+
+**Auth:** Required
+
+**Response:** HTML page
+
+#### GET /api/v1/docs/openapi.json
+
+Return the raw OpenAPI 3.1 document for NyxID.
+
+**Auth:** Required
+
+**Response:** JSON OpenAPI document
+
+#### GET /api/v1/docs/asyncapi.json
+
+Return the raw AsyncAPI 3.0 document for NyxID's streaming transports, including node WebSockets, SSH-over-WebSocket, MCP streamable HTTP, proxy SSE, and LLM SSE.
+
+**Auth:** Required
+
+**Response:** JSON AsyncAPI document
+
+#### GET /api/v1/docs/catalog
+
+Serve the unified downstream API catalog page. The catalog fetches `GET /api/v1/proxy/services` and displays docs availability plus streaming support for each service.
+
+**Auth:** Required
+
+**Response:** HTML page
+
+#### GET /api/v1/proxy/services/{service_id}/docs
+
+Serve the Scalar UI for a downstream service. NyxID selects the service's proxied OpenAPI document when available and falls back to the proxied AsyncAPI document otherwise.
+
+**Auth:** Required
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Response:** HTML page
+
+#### GET /api/v1/proxy/services/{service_id}/openapi.json
+
+Return the downstream OpenAPI document after NyxID rewrites `servers[].url` to point at the authenticated proxy route.
+
+**Auth:** Required
+
+#### GET /api/v1/proxy/services/{service_id}/asyncapi.json
+
+Return the downstream AsyncAPI document with NyxID metadata attached.
+
+**Auth:** Required
+
+See also [API_DISCOVERY.md](./API_DISCOVERY.md) for the operator workflow around discovery, overrides, and proxy-aware testing.
 
 ---
 
@@ -901,7 +969,10 @@ List all active downstream services. Supports optional filtering by service cate
       "auth_key_name": "Authorization",
       "is_active": true,
       "oauth_client_id": null,
+      "openapi_spec_url": null,
       "api_spec_url": null,
+      "asyncapi_spec_url": null,
+      "streaming_supported": false,
       "service_category": "connection",
       "requires_user_credential": true,
       "identity_propagation_mode": "none",
@@ -1020,7 +1091,10 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
   "auth_key_name": "X-API-Key",
   "is_active": true,
   "oauth_client_id": null,
+  "openapi_spec_url": null,
   "api_spec_url": null,
+  "asyncapi_spec_url": null,
+  "streaming_supported": false,
   "service_category": "connection",
   "requires_user_credential": true,
   "identity_propagation_mode": "none",
@@ -1035,6 +1109,7 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 ```
 
 For OIDC services, `oauth_client_id` will contain the auto-provisioned OAuth client ID and `service_category` will be `"provider"`.
+NyxID also probes the service's `base_url` for OpenAPI and AsyncAPI documents at creation time and populates `openapi_spec_url`, `asyncapi_spec_url`, and `streaming_supported` when discovery succeeds.
 
 **Errors:**
 - `1002 forbidden` -- User is not an admin
@@ -1084,7 +1159,10 @@ Get a single downstream service by ID.
   "auth_key_name": "X-API-Key",
   "is_active": true,
   "oauth_client_id": null,
+  "openapi_spec_url": null,
   "api_spec_url": null,
+  "asyncapi_spec_url": null,
+  "streaming_supported": false,
   "service_category": "connection",
   "requires_user_credential": true,
   "identity_propagation_mode": "none",
@@ -1130,7 +1208,8 @@ Update a downstream service. Only the provided fields are updated (partial updat
 | `description`  | string  | No       | New description (max 500 chars)                                         |
 | `base_url`     | string  | No       | New base URL (max 2048 chars, SSRF-validated)                           |
 | `is_active`    | boolean | No       | Enable or disable the service                                           |
-| `api_spec_url` | string  | No       | URL to an OpenAPI/Swagger spec for endpoint discovery (max 2048 chars)  |
+| `openapi_spec_url` | string  | No       | URL to an OpenAPI/Swagger spec for endpoint discovery (max 2048 chars). The legacy alias `api_spec_url` is also accepted. |
+| `asyncapi_spec_url` | string  | No       | URL to an AsyncAPI spec for WebSocket or SSE documentation (max 2048 chars) |
 | `identity_propagation_mode` | string | No | Identity propagation mode: `none` (default), `headers`, `jwt`, or `both` |
 | `identity_include_user_id`  | boolean | No | Include `X-NyxID-User-Id` header when propagating identity |
 | `identity_include_email`    | boolean | No | Include `X-NyxID-User-Email` header when propagating identity |
@@ -1144,7 +1223,8 @@ At least one field must be provided.
   "name": "Updated Analytics API",
   "description": "Updated description",
   "base_url": "https://new-analytics.example.com",
-  "api_spec_url": "https://analytics.example.com/openapi.json"
+  "openapi_spec_url": "https://analytics.example.com/openapi.json",
+  "asyncapi_spec_url": "https://analytics.example.com/asyncapi.json"
 }
 ```
 
@@ -1152,10 +1232,12 @@ At least one field must be provided.
 
 Returns the full updated service object (same shape as GET response).
 
+When `base_url`, `openapi_spec_url`, or `asyncapi_spec_url` changes, NyxID re-runs documentation discovery and updates `streaming_supported`.
+
 **Errors:**
 - `1002 forbidden` -- User is not admin and not the service creator
 - `1003 not_found` -- Service does not exist
-- `1008 validation_error` -- Name empty or too long, description too long, base_url too long or SSRF-blocked, or no fields provided
+- `1008 validation_error` -- Name empty or too long, description too long, base_url too long or SSRF-blocked, spec URL invalid, or no fields provided
 
 **Example:**
 
@@ -1330,6 +1412,113 @@ Regenerate the OIDC client secret for a service. The previous secret is immediat
 curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/regenerate-secret \
   -H "Authorization: Bearer <admin_access_token>"
 ```
+
+---
+
+### SSH
+
+NyxID supports authenticated SSH-over-WebSocket tunnels plus short-lived SSH certificate issuance for downstream services.
+
+#### GET /api/v1/services/{service_id}/ssh
+
+Return the SSH tunnel configuration for a service.
+
+**Auth:** Admin (or service creator)
+
+**Path Parameters:**
+
+| Parameter    | Type | Description    |
+|--------------|------|----------------|
+| `service_id` | UUID | The service ID |
+
+**Response (200):**
+
+```json
+{
+  "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+  "host": "ssh.internal.example",
+  "port": 22,
+  "enabled": true,
+  "certificate_auth_enabled": true,
+  "certificate_ttl_minutes": 30,
+  "allowed_principals": ["ubuntu"],
+  "ca_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
+  "created_by": "550e8400-e29b-41d4-a716-446655440000",
+  "created_at": "2026-03-18T10:10:00+00:00",
+  "updated_at": "2026-03-18T10:10:00+00:00"
+}
+```
+
+#### PUT /api/v1/services/{service_id}/ssh
+
+Create or update a service's SSH tunnel configuration.
+
+**Auth:** Admin (or service creator)
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `host` | string | Yes | Downstream SSH host |
+| `port` | int | Yes | Downstream SSH port |
+| `certificate_auth_enabled` | boolean | No | Enable NyxID-issued SSH user certificates |
+| `certificate_ttl_minutes` | int | No | Certificate TTL in minutes (`15`-`60`, default `30`) |
+| `allowed_principals` | string[] | No | Allowed SSH principals. Required when certificate auth is enabled |
+
+**Errors:**
+- `1002 forbidden` -- User is not admin and not the service creator
+- `1008 validation_error` -- Invalid host, port, certificate TTL, or principal list
+
+#### DELETE /api/v1/services/{service_id}/ssh
+
+Disable SSH tunneling for the service.
+
+**Auth:** Admin (or service creator)
+
+**Response (200):**
+
+```json
+{
+  "message": "SSH service disabled"
+}
+```
+
+#### POST /api/v1/ssh/{service_id}/certificate
+
+Issue a short-lived OpenSSH user certificate for the authenticated caller.
+
+**Auth:** Required
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `public_key` | string | Yes | OpenSSH public key to sign |
+| `principal` | string | Yes | SSH principal to embed in the certificate |
+
+**Response (200):**
+
+```json
+{
+  "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
+  "key_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef:user-1:ubuntu:1742292000",
+  "principal": "ubuntu",
+  "certificate": "ssh-ed25519-cert-v01@openssh.com AAAAI...",
+  "ca_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
+  "valid_after": "2026-03-18T10:20:00+00:00",
+  "valid_before": "2026-03-18T10:50:00+00:00"
+}
+```
+
+#### GET /api/v1/ssh/{service_id}
+
+Upgrade the request to WebSocket and carry raw SSH TCP payloads over binary frames. This endpoint is intended for the built-in `nyxid ssh proxy` helper and OpenSSH `ProxyCommand` integration rather than direct browser use.
+
+**Auth:** Required
+
+**Response:** `101 Switching Protocols`
+
+For full operator setup, certificate trust, and `ProxyCommand` examples, see [SSH_TUNNELING.md](./SSH_TUNNELING.md).
 
 ---
 
@@ -1536,7 +1725,7 @@ curl -X DELETE http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567
 
 #### POST /api/v1/services/{service_id}/discover-endpoints
 
-Fetch the service's `api_spec_url`, parse the OpenAPI/Swagger specification, and bulk upsert discovered endpoints. Existing endpoints matched by name are updated; new ones are created; endpoints not in the spec are soft-deleted (set `is_active = false`).
+Fetch the service's `openapi_spec_url` (or legacy `api_spec_url` alias), parse the OpenAPI/Swagger specification, and bulk upsert discovered endpoints. Existing endpoints matched by name are updated; new ones are created; endpoints not in the spec are soft-deleted (set `is_active = false`).
 
 **Auth:** Admin (or service creator)
 
@@ -1546,7 +1735,7 @@ Fetch the service's `api_spec_url`, parse the OpenAPI/Swagger specification, and
 |--------------|------|----------------|
 | `service_id` | UUID | The service ID |
 
-**Prerequisites:** The service must have `api_spec_url` set (via PUT /api/v1/services/{service_id}).
+**Prerequisites:** The service must have `openapi_spec_url` set (via `PUT /api/v1/services/{service_id}`).
 
 **Supported Specs:** OpenAPI 3.x and Swagger 2.0 in JSON format.
 
@@ -1575,7 +1764,7 @@ Fetch the service's `api_spec_url`, parse the OpenAPI/Swagger specification, and
 ```
 
 **Errors:**
-- `1000 bad_request` -- Service has no `api_spec_url`, spec fetch failed, invalid spec format, or spec is not JSON
+- `1000 bad_request` -- Service has no `openapi_spec_url`, spec fetch failed, invalid spec format, or spec is not JSON
 - `1002 forbidden` -- User is not admin and not the service creator
 - `1003 not_found` -- Service does not exist
 
@@ -2684,6 +2873,8 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Response:** The downstream service's response status code, allowed headers, and body are returned directly. Only a safe allowlist of response headers is forwarded.
 
+**Streaming:** If the client sends `Accept: text/event-stream` or the upstream responds with `Content-Type: text/event-stream`, NyxID forwards the SSE stream without buffering and strips `content-length`.
+
 **Transaction Approval:** If the resource owner has `approval_required` enabled and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing approval grant. If no grant exists, an approval request is created (with Telegram notification if configured) and the **HTTP connection is held open** until the user approves/rejects or the configured timeout expires. If approved, the request proceeds and the downstream response is returned. If rejected or timed out, a `403 Forbidden` is returned. Direct browser sessions (session cookie auth) bypass approval.
 
 **Limits:** Request body is limited to 10 MB for proxy requests.
@@ -2779,8 +2970,13 @@ Services with `service_category = "provider"` are excluded (not proxyable). Only
       "service_category": "connection",
       "connected": true,
       "requires_connection": true,
+      "has_node_binding": false,
       "proxy_url": "http://localhost:3001/api/v1/proxy/d1e2f3a4-b5c6-7890-1234-567890abcdef/{path}",
-      "proxy_url_slug": "http://localhost:3001/api/v1/proxy/s/stripe/{path}"
+      "proxy_url_slug": "http://localhost:3001/api/v1/proxy/s/stripe/{path}",
+      "docs_url": "http://localhost:3001/api/v1/proxy/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/docs",
+      "openapi_url": "http://localhost:3001/api/v1/proxy/services/d1e2f3a4-b5c6-7890-1234-567890abcdef/openapi.json",
+      "asyncapi_url": null,
+      "streaming_supported": true
     },
     {
       "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -2790,8 +2986,13 @@ Services with `service_category = "provider"` are excluded (not proxyable). Only
       "service_category": "internal",
       "connected": false,
       "requires_connection": false,
+      "has_node_binding": true,
       "proxy_url": "http://localhost:3001/api/v1/proxy/a1b2c3d4-e5f6-7890-abcd-ef1234567890/{path}",
-      "proxy_url_slug": "http://localhost:3001/api/v1/proxy/s/analytics/{path}"
+      "proxy_url_slug": "http://localhost:3001/api/v1/proxy/s/analytics/{path}",
+      "docs_url": null,
+      "openapi_url": null,
+      "asyncapi_url": null,
+      "streaming_supported": false
     }
   ],
   "total": 2,
@@ -2811,8 +3012,13 @@ Services with `service_category = "provider"` are excluded (not proxyable). Only
 | `services[].service_category` | string  | `"connection"` or `"internal"`                            |
 | `services[].connected`        | bool    | Whether the authenticated user has an active connection   |
 | `services[].requires_connection` | bool | Whether a connection is required before proxying          |
+| `services[].has_node_binding` | bool    | Whether the authenticated user currently has a viable node route for the service |
 | `services[].proxy_url`        | string  | UUID-based proxy URL template (replace `{path}`)         |
 | `services[].proxy_url_slug`   | string  | Slug-based proxy URL template (replace `{path}`)         |
+| `services[].docs_url`         | string? | Scalar UI URL for the downstream service                  |
+| `services[].openapi_url`      | string? | Proxied downstream OpenAPI document URL                   |
+| `services[].asyncapi_url`     | string? | Proxied downstream AsyncAPI document URL                  |
+| `services[].streaming_supported` | bool | Whether the service advertises SSE or other streaming support |
 | `total`                       | int     | Total number of matching services                         |
 | `page`                        | int     | Current page number                                       |
 | `per_page`                    | int     | Results per page                                          |
@@ -2843,7 +3049,7 @@ Three access modes are available:
 2. **OpenAI-compatible gateway** -- Routes by model name and translates between API formats
 3. **Status endpoint** -- Check which providers are ready for the current user
 
-Streaming (`"stream": true`) is not yet supported. All requests must set `stream: false` or omit the field.
+Streaming is supported for providers that expose SSE-compatible streaming APIs. When the request sets `"stream": true`, NyxID returns `text/event-stream` and forwards or translates provider SSE events on the fly.
 
 **Transaction Approval:** The same blocking approval flow applies to LLM gateway endpoints as to the proxy. If the resource owner has `approval_required` enabled and the request uses a non-session auth method (API key, delegated token, service account, or access token), the connection is held open until the user approves/rejects or the timeout expires. See the [Proxy](#proxy) section for details.
 
@@ -2979,7 +3185,7 @@ The request body must be valid JSON with a `model` field. The gateway uses the m
 | `messages`  | array  | Yes      | Chat messages in OpenAI format                     |
 | `max_tokens`| number | No       | Maximum tokens to generate (defaults to 4096 for Anthropic) |
 | `temperature`| number| No       | Sampling temperature                               |
-| `stream`    | boolean| No       | Must be `false` or omitted (streaming not yet supported) |
+| `stream`    | boolean| No       | When `true`, return an SSE stream if the selected provider supports streaming |
 
 **Model-to-Provider Routing:**
 
@@ -3037,7 +3243,7 @@ When the upstream provider returns an error, the gateway wraps it in OpenAI erro
 
 **Errors:**
 - `1008 validation_error` -- Request body missing or `model` field not present
-- `1000 bad_request` -- Unknown model (cannot determine provider), provider not connected, streaming not supported, or invalid JSON body
+- `1000 bad_request` -- Unknown model (cannot determine provider), provider not connected, or invalid JSON body
 
 **Example (OpenAI model):**
 

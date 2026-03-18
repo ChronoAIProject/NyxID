@@ -16,6 +16,7 @@
 - [Configuration File](#configuration-file)
 - [HMAC Request Signing](#hmac-request-signing)
 - [Streaming Proxy Responses](#streaming-proxy-responses)
+- [Serving SSH Tunnels](#serving-ssh-tunnels)
 - [Reconnection and Resilience](#reconnection-and-resilience)
 - [Graceful Shutdown](#graceful-shutdown)
 - [Security](#security)
@@ -121,7 +122,7 @@ The agent:
 3. Loads all stored credentials from the configured backend
 4. Connects to the NyxID server via WebSocket
 5. Authenticates with its node ID and auth token
-6. Begins serving proxy requests and responding to heartbeats
+6. Begins serving proxy requests, SSH tunnel requests, and responding to heartbeats
 
 #### Options
 
@@ -372,6 +373,28 @@ The agent supports streaming proxy responses for SSE (Server-Sent Events) endpoi
 3. The agent sends `proxy_response_end` when the stream completes
 
 NyxID reconstructs the streaming response and forwards it to the client as a standard SSE stream. This enables real-time streaming from LLM APIs (e.g., OpenAI chat completions with `stream=true`) through the node proxy.
+
+---
+
+## Serving SSH Tunnels
+
+The agent also participates in NyxID's SSH-over-WebSocket flow when a bound service has SSH tunneling enabled.
+
+### SSH Tunnel Flow
+
+1. NyxID sends `ssh_tunnel_open` with a `session_id`, `host`, and `port`
+2. The agent opens a TCP connection to `host:port` from the node's network
+3. The agent acknowledges success with `ssh_tunnel_opened`
+4. SSH payload bytes move in both directions through `ssh_tunnel_data`
+5. Either side ends the session with `ssh_tunnel_close` or `ssh_tunnel_closed`
+
+### Operational Notes
+
+- No SSH private keys are stored on the node for this feature; the node only bridges TCP
+- The target SSH service must be reachable from the node host
+- If the TCP connect attempt fails, the agent returns `ssh_tunnel_closed` with an error payload and NyxID records an SSH connect failure audit event
+
+For end-user setup, certificate issuance, and OpenSSH `ProxyCommand` examples, see [SSH_TUNNELING.md](./SSH_TUNNELING.md).
 
 ---
 
