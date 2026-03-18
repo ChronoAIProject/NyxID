@@ -44,6 +44,7 @@ agent:
   max_turns: 25
   max_retry_backoff_ms: 300000
   auto_merge: false
+  require_label: symphony               # Only dispatch issues with this label.
 
 agents:
   codex:
