@@ -46,7 +46,7 @@ codex:
   thread_sandbox: workspace-write
   turn_timeout_ms: 3600000
   read_timeout_ms: 5000
-  stall_timeout_ms: 300000
+  stall_timeout_ms: 600000
 
 server:
   port: 8080
