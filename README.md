@@ -18,6 +18,7 @@ It provides a complete identity layer: user registration, session management, Op
 - [Security](#security)
 - [Credential Nodes (Node Proxy)](#credential-nodes-node-proxy)
 - [MCP Integration](#mcp-integration)
+- [OpenClaw Integration](#openclaw-integration)
 - [Contributing](#contributing)
 - [Development Guide](#development-guide)
 - [Project Structure](#project-structure)
@@ -230,6 +231,14 @@ See [docs/NYXID_NODE.md](docs/NYXID_NODE.md) for the agent user guide, [docs/NOD
 - `@nyxids/oauth-react`: React context provider + `useNyxID()` hook
 - Storage-agnostic: works with `localStorage` (browser) or custom backends
 - Zero runtime dependencies in the core package
+
+### OpenClaw Integration
+- OpenClaw plugin + skill bundle shipped in [`integrations/openclaw`](integrations/openclaw)
+- Default hosted base URL is `https://nyx-api.chrono-ai.fun`
+- Supports OAuth 2.0 + PKCE login, refresh, and RFC 8693 token exchange for delegated proxy access
+- Supports direct NyxID API key auth for self-hosted OpenClaw installs via `NYXID_API_KEY` or `plugins.nyxid.apiKey`
+- ClawHub-ready `nyxid` skill bundle with helper scripts for service discovery and proxy calls
+- Setup guide: [`docs/OPENCLAW_INTEGRATION.md`](docs/OPENCLAW_INTEGRATION.md)
 
 ---
 
