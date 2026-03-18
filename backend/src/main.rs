@@ -259,7 +259,7 @@ async fn main() {
         config.node_proxy_timeout_secs,
         config.node_max_ws_connections,
     ));
-    let ssh_session_manager = Arc::new(SshSessionManager::new(4));
+    let ssh_session_manager = Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user));
 
     // Create shared state
     let state = AppState {

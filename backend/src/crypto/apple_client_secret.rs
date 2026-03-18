@@ -179,6 +179,8 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             node_max_ws_connections: 100,
             node_max_stream_duration_secs: 300,
             node_hmac_signing_enabled: true,
+            ssh_max_sessions_per_user: 4,
+            ssh_connect_timeout_secs: 10,
         }
     }
 

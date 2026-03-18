@@ -16,6 +16,7 @@
         crate::handlers::ssh_tunnel::get_ssh_service_config,
         crate::handlers::ssh_tunnel::upsert_ssh_service_config,
         crate::handlers::ssh_tunnel::delete_ssh_service_config,
+        crate::handlers::ssh_tunnel::issue_ssh_certificate,
         crate::handlers::ssh_tunnel::ssh_tunnel_ws
     ),
     components(
@@ -29,7 +30,9 @@
             crate::handlers::proxy::ProxyServicesResponse,
             crate::handlers::ssh_tunnel::UpsertSshServiceRequest,
             crate::handlers::ssh_tunnel::SshServiceResponse,
-            crate::handlers::ssh_tunnel::DeleteSshServiceResponse
+            crate::handlers::ssh_tunnel::DeleteSshServiceResponse,
+            crate::handlers::ssh_tunnel::IssueSshCertificateRequest,
+            crate::handlers::ssh_tunnel::IssueSshCertificateResponse
         )
     ),
     tags(

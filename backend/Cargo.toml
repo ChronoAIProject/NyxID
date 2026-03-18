@@ -49,6 +49,7 @@ tokio-stream = "0.1"
 dashmap = "6"
 hmac = "0.12"
 async-stream = "0.3"
+ssh-key = { version = "0.6.7", features = ["ed25519", "getrandom"] }
 
 # Optional KMS provider dependencies (behind feature flags)
 aws-config = { version = "1", optional = true }

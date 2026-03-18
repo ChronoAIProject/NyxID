@@ -524,6 +524,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest("/connections", connection_routes)
         .nest("/providers", provider_routes)
         .route(
+            "/ssh/{service_id}/certificate",
+            post(handlers::ssh_tunnel::issue_ssh_certificate),
+        )
+        .route(
             "/ssh/{service_id}",
             get(handlers::ssh_tunnel::ssh_tunnel_ws),
         )

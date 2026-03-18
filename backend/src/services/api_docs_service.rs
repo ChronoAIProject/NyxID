@@ -317,7 +317,7 @@ pub fn build_asyncapi_document(base_url: &str) -> serde_json::Value {
         "info": {
             "title": "NyxID Streaming and WebSocket API",
             "version": env!("CARGO_PKG_VERSION"),
-            "description": "AsyncAPI document for NyxID streaming protocols, including node agent WebSockets, MCP SSE transport, and downstream proxy streaming."
+            "description": "AsyncAPI document for NyxID streaming protocols, including node agent WebSockets, SSH tunnels, MCP SSE transport, and downstream proxy streaming."
         },
         "servers": {
             "nyxid": {
@@ -335,6 +335,12 @@ pub fn build_asyncapi_document(base_url: &str) -> serde_json::Value {
                     "proxyResponseStart": { "$ref": "#/components/messages/ProxyResponseStart" },
                     "proxyResponseChunk": { "$ref": "#/components/messages/ProxyResponseChunk" },
                     "proxyResponseEnd": { "$ref": "#/components/messages/ProxyResponseEnd" }
+                }
+            },
+            "sshTunnel": {
+                "address": "/api/v1/ssh/{service_id}",
+                "messages": {
+                    "sshBinaryFrame": { "$ref": "#/components/messages/SshBinaryFrame" }
                 }
             },
             "mcpHttp": {
@@ -366,6 +372,16 @@ pub fn build_asyncapi_document(base_url: &str) -> serde_json::Value {
                 "action": "receive",
                 "channel": { "$ref": "#/channels/nodeAgent" },
                 "summary": "Receive streaming proxy chunks from the node agent"
+            },
+            "openSshTunnel": {
+                "action": "send",
+                "channel": { "$ref": "#/channels/sshTunnel" },
+                "summary": "Open an authenticated SSH-over-WebSocket tunnel"
+            },
+            "consumeSshTunnel": {
+                "action": "receive",
+                "channel": { "$ref": "#/channels/sshTunnel" },
+                "summary": "Exchange raw SSH bytes over WebSocket binary frames"
             },
             "consumeMcpSse": {
                 "action": "receive",
@@ -450,6 +466,14 @@ pub fn build_asyncapi_document(base_url: &str) -> serde_json::Value {
                             "type": { "type": "string", "const": "proxy_response_end" },
                             "request_id": { "type": "string" }
                         }
+                    }
+                },
+                "SshBinaryFrame": {
+                    "name": "ssh_binary_frame",
+                    "payload": {
+                        "type": "string",
+                        "format": "binary",
+                        "description": "Raw SSH TCP payload encoded as a WebSocket binary frame"
                     }
                 },
                 "McpSseStream": {
@@ -608,6 +632,10 @@ mod tests {
     fn asyncapi_document_uses_requested_base_url() {
         let doc = build_asyncapi_document("https://nyxid.example.com");
         assert_eq!(doc["servers"]["nyxid"]["host"], "https://nyxid.example.com");
+        assert_eq!(
+            doc["channels"]["sshTunnel"]["address"],
+            "/api/v1/ssh/{service_id}"
+        );
     }
 
     #[test]

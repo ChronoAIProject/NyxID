@@ -146,6 +146,10 @@ pub struct AppConfig {
     pub node_max_stream_duration_secs: u64,
     /// Enable HMAC request signing for node proxy requests (default: true)
     pub node_hmac_signing_enabled: bool,
+    /// Maximum concurrent SSH WebSocket tunnel sessions per user (default: 4)
+    pub ssh_max_sessions_per_user: usize,
+    /// Timeout for connecting to a downstream SSH target in seconds (default: 10)
+    pub ssh_connect_timeout_secs: u64,
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -263,6 +267,8 @@ impl std::fmt::Debug for AppConfig {
                 &self.node_max_stream_duration_secs,
             )
             .field("node_hmac_signing_enabled", &self.node_hmac_signing_enabled)
+            .field("ssh_max_sessions_per_user", &self.ssh_max_sessions_per_user)
+            .field("ssh_connect_timeout_secs", &self.ssh_connect_timeout_secs)
             .finish()
     }
 }
@@ -428,6 +434,14 @@ impl AppConfig {
                 .ok()
                 .map(|v| v != "false" && v != "0")
                 .unwrap_or(true),
+            ssh_max_sessions_per_user: env::var("SSH_MAX_SESSIONS_PER_USER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4),
+            ssh_connect_timeout_secs: env::var("SSH_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
         }
     }
 
@@ -700,6 +714,8 @@ mod tests {
             node_max_ws_connections: 100,
             node_max_stream_duration_secs: 300,
             node_hmac_signing_enabled: true,
+            ssh_max_sessions_per_user: 4,
+            ssh_connect_timeout_secs: 10,
         }
     }
 

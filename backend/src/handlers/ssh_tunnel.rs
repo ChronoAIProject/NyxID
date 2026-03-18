@@ -3,18 +3,21 @@ use std::time::Instant;
 use axum::{
     Json,
     extract::{
-        Path, State,
+        ConnectInfo, Path, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::HeaderMap,
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt, StreamExt};
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
     approval_service, audit_service, notification_service, proxy_service, ssh_service,
@@ -26,6 +29,12 @@ use super::services_helpers::{fetch_service, require_admin_or_creator};
 pub struct UpsertSshServiceRequest {
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub certificate_auth_enabled: bool,
+    #[serde(default = "default_certificate_ttl_minutes")]
+    pub certificate_ttl_minutes: u32,
+    #[serde(default)]
+    pub allowed_principals: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -34,6 +43,10 @@ pub struct SshServiceResponse {
     pub host: String,
     pub port: u16,
     pub enabled: bool,
+    pub certificate_auth_enabled: bool,
+    pub certificate_ttl_minutes: u32,
+    pub allowed_principals: Vec<String>,
+    pub ca_public_key: Option<String>,
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -42,6 +55,33 @@ pub struct SshServiceResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteSshServiceResponse {
     pub message: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct IssueSshCertificateRequest {
+    pub public_key: String,
+    pub principal: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IssueSshCertificateResponse {
+    pub service_id: String,
+    pub key_id: String,
+    pub principal: String,
+    pub certificate: String,
+    pub ca_public_key: String,
+    pub valid_after: String,
+    pub valid_before: String,
+}
+
+#[derive(Clone)]
+struct TunnelClientMeta {
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+}
+
+fn default_certificate_ttl_minutes() -> u32 {
+    30
 }
 
 #[utoipa::path(
@@ -90,13 +130,24 @@ pub async fn upsert_ssh_service_config(
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
     ssh_service::validate_ssh_target(&body.host, body.port)?;
+    ssh_service::validate_certificate_settings(
+        body.certificate_auth_enabled,
+        body.certificate_ttl_minutes,
+        &body.allowed_principals,
+    )?;
 
     let ssh_service = ssh_service::upsert_ssh_service(
         &state.db,
+        &state.encryption_keys,
         &service_id,
-        body.host.trim(),
-        body.port,
         &auth_user.user_id.to_string(),
+        ssh_service::UpsertSshServiceInput {
+            host: body.host.trim(),
+            port: body.port,
+            certificate_auth_enabled: body.certificate_auth_enabled,
+            certificate_ttl_minutes: body.certificate_ttl_minutes,
+            allowed_principals: &body.allowed_principals,
+        },
     )
     .await?;
 
@@ -108,6 +159,9 @@ pub async fn upsert_ssh_service_config(
             "service_id": service_id,
             "host": ssh_service.host,
             "port": ssh_service.port,
+            "certificate_auth_enabled": ssh_service.certificate_auth_enabled,
+            "certificate_ttl_minutes": ssh_service.certificate_ttl_minutes,
+            "allowed_principals": ssh_service.allowed_principals,
         })),
         None,
         None,
@@ -154,6 +208,75 @@ pub async fn delete_ssh_service_config(
 }
 
 #[utoipa::path(
+    post,
+    path = "/api/v1/ssh/{service_id}/certificate",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    request_body = IssueSshCertificateRequest,
+    responses(
+        (status = 200, description = "Issued short-lived SSH certificate", body = IssueSshCertificateResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 404, description = "SSH service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "SSH"
+)]
+pub async fn issue_ssh_certificate(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(service_id): Path<String>,
+    Json(body): Json<IssueSshCertificateRequest>,
+) -> AppResult<Json<IssueSshCertificateResponse>> {
+    authorize_ssh_access(&state, &auth_user, &service_id).await?;
+    let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
+    let user_id = auth_user.user_id.to_string();
+    let user = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    let issued = ssh_service::issue_certificate(
+        &state.encryption_keys,
+        &ssh_service,
+        &service_id,
+        &user_id,
+        &user.email,
+        &body.public_key,
+        body.principal.trim(),
+    )
+    .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id),
+        "ssh_certificate_issued".to_string(),
+        Some(serde_json::json!({
+            "service_id": service_id,
+            "key_id": issued.key_id,
+            "principal": issued.principal,
+            "routed_via": "ssh",
+            "valid_after": issued.valid_after,
+            "valid_before": issued.valid_before,
+        })),
+        None,
+        None,
+    );
+
+    Ok(Json(IssueSshCertificateResponse {
+        service_id,
+        key_id: issued.key_id,
+        principal: issued.principal,
+        certificate: issued.certificate,
+        ca_public_key: issued.ca_public_key,
+        valid_after: issued.valid_after.to_rfc3339(),
+        valid_before: issued.valid_before.to_rfc3339(),
+    }))
+}
+
+#[utoipa::path(
     get,
     path = "/api/v1/ssh/{service_id}",
     params(
@@ -170,6 +293,8 @@ pub async fn ssh_tunnel_ws(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(service_id): Path<String>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
     authorize_ssh_access(&state, &auth_user, &service_id).await?;
@@ -177,6 +302,13 @@ pub async fn ssh_tunnel_ws(
     let session_guard = state
         .ssh_session_manager
         .try_acquire(&auth_user.user_id.to_string())?;
+    let client_meta = TunnelClientMeta {
+        ip_address: Some(addr.ip().to_string()),
+        user_agent: headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+    };
 
     Ok(ws
         .on_upgrade(move |socket| async move {
@@ -187,6 +319,7 @@ pub async fn ssh_tunnel_ws(
                 ssh_service,
                 socket,
                 session_guard,
+                client_meta,
             )
             .await;
         })
@@ -200,15 +333,21 @@ async fn handle_ssh_socket(
     ssh_service: crate::models::ssh_service::SshService,
     mut socket: WebSocket,
     _session_guard: ssh_service::SshSessionGuard,
+    client_meta: TunnelClientMeta,
 ) {
     let user_id = auth_user.user_id.to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
     let started_at = Instant::now();
 
     let connect_target = format!("{}:{}", ssh_service.host, ssh_service.port);
-    let mut tcp_stream = match tokio::net::TcpStream::connect(&connect_target).await {
-        Ok(stream) => stream,
-        Err(error) => {
+    let mut tcp_stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(state.config.ssh_connect_timeout_secs),
+        tokio::net::TcpStream::connect(&connect_target),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
             tracing::warn!(service_id = %service_id, error = %error, "SSH tunnel connect failed");
             let _ = socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -229,8 +368,39 @@ async fn handle_ssh_socket(
                     "target_port": ssh_service.port,
                     "error": error.to_string(),
                 })),
-                None,
-                None,
+                client_meta.ip_address,
+                client_meta.user_agent,
+            );
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                service_id = %service_id,
+                timeout_secs = state.config.ssh_connect_timeout_secs,
+                "SSH tunnel connect timed out"
+            );
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011,
+                    reason: "SSH target connect timed out".into(),
+                })))
+                .await;
+
+            audit_service::log_async(
+                state.db.clone(),
+                Some(user_id),
+                "ssh_tunnel_connect_failed".to_string(),
+                Some(serde_json::json!({
+                    "service_id": service_id,
+                    "session_id": session_id,
+                    "routed_via": "ssh",
+                    "target_host": ssh_service.host,
+                    "target_port": ssh_service.port,
+                    "error": "connect_timeout",
+                    "timeout_secs": state.config.ssh_connect_timeout_secs,
+                })),
+                client_meta.ip_address,
+                client_meta.user_agent,
             );
             return;
         }
@@ -247,8 +417,8 @@ async fn handle_ssh_socket(
             "target_host": ssh_service.host,
             "target_port": ssh_service.port,
         })),
-        None,
-        None,
+        client_meta.ip_address.clone(),
+        client_meta.user_agent.clone(),
     );
 
     let mut from_client_bytes: u64 = 0;
@@ -311,8 +481,8 @@ async fn handle_ssh_socket(
             "bytes_from_client": from_client_bytes,
             "bytes_to_client": to_client_bytes,
         })),
-        None,
-        None,
+        client_meta.ip_address,
+        client_meta.user_agent,
     );
 }
 
@@ -389,6 +559,10 @@ fn ssh_service_to_response(model: crate::models::ssh_service::SshService) -> Ssh
         host: model.host,
         port: model.port,
         enabled: model.enabled,
+        certificate_auth_enabled: model.certificate_auth_enabled,
+        certificate_ttl_minutes: model.certificate_ttl_minutes,
+        allowed_principals: model.allowed_principals,
+        ca_public_key: model.ca_public_key,
         created_by: model.created_by,
         created_at: model.created_at.to_rfc3339(),
         updated_at: model.updated_at.to_rfc3339(),
@@ -408,6 +582,11 @@ mod tests {
             host: "ssh.internal".to_string(),
             port: 22,
             enabled: true,
+            certificate_auth_enabled: true,
+            certificate_ttl_minutes: 30,
+            allowed_principals: vec!["ubuntu".to_string()],
+            ca_private_key_encrypted: Some(vec![1, 2, 3]),
+            ca_public_key: Some("ssh-ed25519 AAAATEST ssh-ca".to_string()),
             created_by: "admin".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -415,5 +594,6 @@ mod tests {
 
         assert_eq!(response.service_id, "service-1");
         assert_eq!(response.port, 22);
+        assert!(response.certificate_auth_enabled);
     }
 }
