@@ -30,9 +30,16 @@ hooks:
     cd ../frontend && npm install
   before_run: |
     git fetch origin
-    git checkout main && git pull
     BRANCH="symphony/issue-${SYMPHONY_ISSUE_NUMBER}"
-    git checkout -B "$BRANCH" origin/main
+    if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+      git checkout "$BRANCH"
+      git pull origin "$BRANCH"
+    elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      git checkout "$BRANCH"
+    else
+      git checkout main && git pull
+      git checkout -b "$BRANCH" origin/main
+    fi
     cd backend && source "$HOME/.cargo/env" 2>/dev/null && cargo build
     cd ../frontend && npm install
   after_run: |
