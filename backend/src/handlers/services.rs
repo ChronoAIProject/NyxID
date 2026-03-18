@@ -21,7 +21,7 @@ use crate::services::{api_docs_service, audit_service, oauth_client_service};
 
 use super::services_helpers::{
     DeleteServiceResponse, fetch_service, require_admin, require_admin_or_creator,
-    service_to_response, validate_base_url,
+    service_to_response, validate_base_url, validate_optional_spec_url,
 };
 
 // --- Request / Response types ---
@@ -585,11 +585,7 @@ pub async fn update_service(
 
     if body.openapi_spec_url.is_some() {
         if let Some(ref openapi_spec_url) = openapi_spec_url {
-            if openapi_spec_url.len() > 2048 {
-                return Err(AppError::ValidationError(
-                    "openapi_spec_url must not exceed 2048 characters".to_string(),
-                ));
-            }
+            validate_optional_spec_url(openapi_spec_url, state.config.is_development())?;
             set_doc.insert("openapi_spec_url", openapi_spec_url.as_str());
         } else {
             set_doc.insert("openapi_spec_url", bson::Bson::Null);
@@ -598,11 +594,7 @@ pub async fn update_service(
 
     if body.asyncapi_spec_url.is_some() {
         if let Some(ref asyncapi_spec_url) = asyncapi_spec_url {
-            if asyncapi_spec_url.len() > 2048 {
-                return Err(AppError::ValidationError(
-                    "asyncapi_spec_url must not exceed 2048 characters".to_string(),
-                ));
-            }
+            validate_optional_spec_url(asyncapi_spec_url, state.config.is_development())?;
             set_doc.insert("asyncapi_spec_url", asyncapi_spec_url.as_str());
         } else {
             set_doc.insert("asyncapi_spec_url", bson::Bson::Null);

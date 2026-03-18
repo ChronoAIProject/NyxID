@@ -11,6 +11,7 @@ const OPENAPI_PROBE_PATHS: &[&str] = &[
 ];
 
 const ASYNCAPI_PROBE_PATHS: &[&str] = &["/asyncapi.json", "/.well-known/asyncapi"];
+const SCALAR_SCRIPT_SRC: &str = "https://cdn.jsdelivr.net";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceDocumentationMetadata {
@@ -298,6 +299,17 @@ pub fn render_catalog_html() -> &'static str {
 </html>"#
 }
 
+pub fn scalar_docs_csp() -> String {
+    format!(
+        "default-src 'none'; script-src {}; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'",
+        SCALAR_SCRIPT_SRC
+    )
+}
+
+pub fn catalog_csp() -> &'static str {
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"
+}
+
 pub fn build_asyncapi_document(base_url: &str) -> serde_json::Value {
     let base = base_url.trim_end_matches('/');
     serde_json::json!({
@@ -540,8 +552,8 @@ fn detect_streaming_from_openapi(spec: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ServiceDocumentationMetadata, build_asyncapi_document, detect_streaming_from_openapi,
-        render_scalar_html,
+        ServiceDocumentationMetadata, build_asyncapi_document, catalog_csp,
+        detect_streaming_from_openapi, render_scalar_html, scalar_docs_csp,
     };
 
     #[test]
@@ -614,5 +626,18 @@ mod tests {
         };
         let json = serde_json::to_value(metadata).expect("serialize metadata");
         assert_eq!(json["streaming_supported"], true);
+    }
+
+    #[test]
+    fn scalar_docs_csp_allows_scalar_script_source() {
+        let csp = scalar_docs_csp();
+        assert!(csp.contains("https://cdn.jsdelivr.net"));
+        assert!(csp.contains("connect-src 'self'"));
+    }
+
+    #[test]
+    fn catalog_csp_allows_inline_script_for_embedded_catalog_page() {
+        let csp = catalog_csp();
+        assert!(csp.contains("script-src 'unsafe-inline'"));
     }
 }

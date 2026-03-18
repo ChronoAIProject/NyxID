@@ -164,8 +164,39 @@ pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
     Ok(())
 }
 
+/// Validate an optional documentation spec URL using the same SSRF rules as base_url.
+pub fn validate_optional_spec_url(url: &str, allow_private: bool) -> AppResult<()> {
+    if url.len() > 2048 {
+        return Err(AppError::ValidationError(
+            "Spec URL must not exceed 2048 characters".to_string(),
+        ));
+    }
+
+    validate_base_url(url, allow_private)
+}
+
 /// Typed response for delete operations (CR-16).
 #[derive(Debug, Serialize)]
 pub struct DeleteServiceResponse {
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_base_url, validate_optional_spec_url};
+
+    #[test]
+    fn validate_optional_spec_url_accepts_public_https_url() {
+        assert!(validate_optional_spec_url("https://example.com/openapi.json", false).is_ok());
+    }
+
+    #[test]
+    fn validate_optional_spec_url_rejects_private_host() {
+        assert!(validate_optional_spec_url("http://127.0.0.1/openapi.json", false).is_err());
+    }
+
+    #[test]
+    fn validate_base_url_accepts_private_hosts_in_development() {
+        assert!(validate_base_url("http://127.0.0.1:3000", true).is_ok());
+    }
 }

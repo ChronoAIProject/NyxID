@@ -1,7 +1,8 @@
 use axum::{
     Json,
     extract::{Path, State},
-    response::{Html, IntoResponse},
+    http::header,
+    response::{Html, IntoResponse, Response},
 };
 use utoipa::OpenApi;
 
@@ -24,10 +25,13 @@ pub async fn docs_ui(State(state): State<AppState>, _auth_user: AuthUser) -> imp
         "{}/api/v1/docs/openapi.json",
         state.config.base_url.trim_end_matches('/')
     );
-    Html(api_docs_service::render_scalar_html(
+    html_response_with_csp(
+        api_docs_service::render_scalar_html(
         "NyxID API Docs",
         &spec_url,
-    ))
+        ),
+        &api_docs_service::scalar_docs_csp(),
+    )
 }
 
 #[utoipa::path(
@@ -39,7 +43,10 @@ pub async fn docs_ui(State(state): State<AppState>, _auth_user: AuthUser) -> imp
     tag = "Docs"
 )]
 pub async fn catalog_ui(_state: State<AppState>, _auth_user: AuthUser) -> impl IntoResponse {
-    Html(api_docs_service::render_catalog_html())
+    html_response_with_csp(
+        api_docs_service::render_catalog_html().to_string(),
+        api_docs_service::catalog_csp(),
+    )
 }
 
 #[utoipa::path(
@@ -99,7 +106,7 @@ pub async fn service_docs_ui(
     State(state): State<AppState>,
     _auth_user: AuthUser,
     Path(service_id): Path<String>,
-) -> AppResult<Html<String>> {
+) -> AppResult<Response> {
     let service = fetch_service(&state, &service_id).await?;
     let base = state.config.base_url.trim_end_matches('/');
 
@@ -113,10 +120,10 @@ pub async fn service_docs_ui(
         ));
     };
 
-    Ok(Html(api_docs_service::render_scalar_html(
-        &format!("{} API Docs", service.name),
-        &spec_url,
-    )))
+    Ok(html_response_with_csp(
+        api_docs_service::render_scalar_html(&format!("{} API Docs", service.name), &spec_url),
+        &api_docs_service::scalar_docs_csp(),
+    ))
 }
 
 #[utoipa::path(
@@ -173,4 +180,13 @@ pub async fn service_asyncapi_json(
     .await?;
 
     Ok(Json(spec))
+}
+
+fn html_response_with_csp(html: String, csp: &str) -> Response {
+    let mut response = Html(html).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        csp.parse().expect("valid docs CSP header"),
+    );
+    response
 }
