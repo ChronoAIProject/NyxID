@@ -71,6 +71,20 @@ export interface DownstreamService {
   readonly delegation_token_scope?: string;
 }
 
+export interface SshServiceConfig {
+  readonly service_id: string;
+  readonly host: string;
+  readonly port: number;
+  readonly enabled: boolean;
+  readonly certificate_auth_enabled: boolean;
+  readonly certificate_ttl_minutes: number;
+  readonly allowed_principals: readonly string[];
+  readonly ca_public_key: string | null;
+  readonly created_by: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
 export interface ServiceEndpoint {
   readonly id: string;
   readonly service_id: string;

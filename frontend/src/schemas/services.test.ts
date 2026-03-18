@@ -3,6 +3,7 @@ import {
   createServiceSchema,
   updateServiceSchema,
   redirectUriSchema,
+  sshServiceConfigSchema,
   AUTH_TYPES,
   SERVICE_CATEGORIES,
   IDENTITY_PROPAGATION_MODES,
@@ -146,6 +147,38 @@ describe("updateServiceSchema", () => {
       openapi_spec_url: "not-a-url",
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("sshServiceConfigSchema", () => {
+  const validData = {
+    host: "ssh.internal.example",
+    port: "22",
+    certificate_auth_enabled: false,
+    certificate_ttl_minutes: "30",
+    allowed_principals: "",
+  };
+
+  it("accepts a transport-only SSH tunnel config", () => {
+    const result = sshServiceConfigSchema.safeParse(validData);
+    expect(result.success).toBe(true);
+  });
+
+  it("requires principals when certificate auth is enabled", () => {
+    const result = sshServiceConfigSchema.safeParse({
+      ...validData,
+      certificate_auth_enabled: true,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts comma separated principals when certificate auth is enabled", () => {
+    const result = sshServiceConfigSchema.safeParse({
+      ...validData,
+      certificate_auth_enabled: true,
+      allowed_principals: "ubuntu, deploy",
+    });
+    expect(result.success).toBe(true);
   });
 });
 

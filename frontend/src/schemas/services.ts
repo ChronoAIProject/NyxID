@@ -39,6 +39,53 @@ export const createServiceSchema = z.object({
 
 export type CreateServiceFormData = z.infer<typeof createServiceSchema>;
 
+export const sshServiceConfigSchema = z
+  .object({
+    host: z
+      .string()
+      .trim()
+      .min(1, "Host is required")
+      .max(255, "Host must be at most 255 characters"),
+    port: z
+      .string()
+      .min(1, "Port is required")
+      .refine((value) => {
+        const port = Number(value);
+        return Number.isInteger(port) && port >= 1 && port <= 65535;
+      }, "Port must be an integer between 1 and 65535"),
+    certificate_auth_enabled: z.boolean(),
+    certificate_ttl_minutes: z
+      .string()
+      .min(1, "Certificate TTL is required")
+      .refine((value) => {
+        const ttl = Number(value);
+        return Number.isInteger(ttl) && ttl >= 15 && ttl <= 60;
+      }, "Certificate TTL must be an integer between 15 and 60 minutes"),
+    allowed_principals: z
+      .string()
+      .max(500, "Allowed principals must be at most 500 characters"),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.certificate_auth_enabled) {
+      return;
+    }
+
+    const principals = (value.allowed_principals ?? "")
+      .split(/[\n,]/)
+      .map((principal) => principal.trim())
+      .filter(Boolean);
+
+    if (principals.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["allowed_principals"],
+        message: "At least one SSH principal is required when certificate auth is enabled",
+      });
+    }
+  });
+
+export type SshServiceConfigFormData = z.infer<typeof sshServiceConfigSchema>;
+
 export const IDENTITY_PROPAGATION_MODES = [
   "none",
   "headers",

@@ -4,6 +4,8 @@ NyxID can proxy SSH connections the same way it proxies HTTP: the user authentic
 
 This guide covers service setup, short-lived SSH certificates, and the built-in `nyxid ssh` helper used for OpenSSH `ProxyCommand` integration.
 
+Once SSH access is configured, the service detail and edit pages in the NyxID frontend expose copyable `nyxid ssh` commands for operators.
+
 ---
 
 ## Endpoints
@@ -17,6 +19,31 @@ This guide covers service setup, short-lived SSH certificates, and the built-in 
 | `GET /api/v1/ssh/{service_id}` | Open the SSH-over-WebSocket tunnel |
 
 `GET /api/v1/ssh/{service_id}` upgrades to WebSocket and accepts binary frames only. In practice you should use the `nyxid ssh proxy` helper instead of speaking to the tunnel directly.
+
+---
+
+## Install the Helper
+
+The SSH helper ships with the main `nyxid` backend binary.
+
+From the repository root:
+
+```bash
+cargo install --path backend
+nyxid ssh --help
+```
+
+For local development without installing the binary globally:
+
+```bash
+cargo run -p nyxid -- ssh --help
+```
+
+Before using the helper, export a NyxID access token in the shell where you plan to run `ssh`:
+
+```bash
+export NYXID_ACCESS_TOKEN=<access_token>
+```
 
 ---
 
@@ -148,4 +175,3 @@ Relevant environment variables:
 | `SSH_CONNECT_TIMEOUT_SECS` | `10` | Timeout when NyxID or a node opens the downstream TCP connection |
 
 Every disconnect audit entry includes session duration plus byte counts in each direction.
-

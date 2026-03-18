@@ -13,8 +13,10 @@ import { DetailRow } from "@/components/shared/detail-row";
 import { OidcCredentialsSection } from "@/components/dashboard/oidc-credentials-section";
 import { EndpointList } from "@/components/dashboard/endpoint-list";
 import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
+import { SshAccessPanel } from "@/components/dashboard/ssh-access-panel";
 import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
 import { useMyProviderTokens } from "@/hooks/use-providers";
+import { useAuthStore } from "@/stores/auth-store";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -34,6 +36,7 @@ export function ServiceDetailPage() {
   const { data: service, isLoading, error } = useService(serviceId);
   const deleteMutation = useDeleteService();
   const { data: tokens } = useMyProviderTokens();
+  const user = useAuthStore((state) => state.user);
 
   async function handleDelete() {
     if (!service) return;
@@ -75,6 +78,9 @@ export function ServiceDetailPage() {
   }
 
   const oidc = isOidcService(service);
+  const canManageSsh = Boolean(
+    user && (user.is_admin || user.id === service.created_by),
+  );
 
   return (
     <div className="space-y-8">
@@ -145,6 +151,16 @@ export function ServiceDetailPage() {
               oauthClientId={service.oauth_client_id}
             />
           </DetailSection>
+        </>
+      )}
+
+      {canManageSsh && (
+        <>
+          <Separator />
+          <SshAccessPanel
+            serviceId={service.id}
+            serviceSlug={service.slug}
+          />
         </>
       )}
 

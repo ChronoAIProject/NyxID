@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -46,6 +47,7 @@ import { Plus, Server } from "lucide-react";
 import { toast } from "sonner";
 
 export function ServiceListPage() {
+  const navigate = useNavigate();
   const { data: services, isLoading } = useServices();
   const createMutation = useCreateService();
   const deleteMutation = useDeleteService();
@@ -65,10 +67,14 @@ export function ServiceListPage() {
 
   async function onSubmit(data: CreateServiceFormData) {
     try {
-      await createMutation.mutateAsync(data);
+      const created = await createMutation.mutateAsync(data);
       toast.success("Service created successfully");
       setCreateOpen(false);
       form.reset();
+      void navigate({
+        to: "/services/$serviceId",
+        params: { serviceId: created.id },
+      });
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });

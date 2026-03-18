@@ -12,6 +12,7 @@ import { ApiError } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
 import { IdentityPropagationConfig } from "@/components/dashboard/identity-propagation-config";
+import { SshAccessPanel } from "@/components/dashboard/ssh-access-panel";
 import { Separator } from "@/components/ui/separator";
 import {
   Form,
@@ -124,6 +125,10 @@ export function ServiceEditPage() {
       </div>
     );
   }
+
+  const canManageSsh = Boolean(
+    user && (user.is_admin || user.id === service.created_by),
+  );
 
   return (
     <div className="space-y-8">
@@ -373,6 +378,15 @@ export function ServiceEditPage() {
             </div>
           </form>
         </Form>
+
+        {canManageSsh && (
+          <div className="mt-6">
+            <SshAccessPanel
+              serviceId={service.id}
+              serviceSlug={service.slug}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
