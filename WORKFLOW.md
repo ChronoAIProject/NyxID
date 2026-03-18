@@ -100,21 +100,32 @@ URL: {{ issue.url }}
 4. Include `Closes {{ issue.identifier }}` in the PR description.
 5. Add the `symphony` label to the PR.
 
+## Symphony Workpad (Single Persistent Comment)
+
+Use exactly ONE persistent comment on issue {{ issue.identifier }} as your workpad. NEVER create additional comments for progress updates.
+
+**Finding or creating the workpad:**
+1. Search existing comments: `gh api repos/ChronoAIProject/NyxID/issues/{{ issue.identifier | remove: "#" }}/comments --jq '.[] | select(.body | contains("## Symphony Workpad")) | .id'`
+2. If found, reuse that comment ID for ALL updates.
+3. If not found, create it once: `gh issue comment {{ issue.identifier }} --body "$(cat <<'WORKPAD'\n## Symphony Workpad\n- [ ] Planning\n- [ ] Implementation\n- [ ] Tests\n- [ ] Validation\nWORKPAD\n)"`
+4. Save the comment ID.
+
+**Updating the workpad (NEVER create a new comment):**
+```bash
+gh api repos/ChronoAIProject/NyxID/issues/comments/{comment_id} -X PATCH -f body="## Symphony Workpad
+- [x] Completed task
+- [ ] Next task"
+```
+
 ## Execution Flow (Todo / In Progress)
 
-1. Post a progress comment on issue {{ issue.identifier }} with a plan:
-   ```
-   ## Symphony Workpad
-   - [ ] Task 1
-   - [ ] Task 2
-   - [ ] Tests
-   - [ ] Validation
-   ```
-2. Implement against the plan. Update the comment as tasks complete.
-3. Run validation before pushing (see Quality Checklist).
-4. Push branch and create PR targeting `main`.
-5. Run the PR feedback sweep (see below).
-6. Add label `human-review` to issue {{ issue.identifier }}.
+1. Find or create the Symphony Workpad comment (see above).
+2. Write your plan as a checklist in the workpad.
+3. Implement against the plan. Update the SAME comment as tasks complete.
+4. Run validation before pushing (see Quality Checklist).
+5. Push branch and create PR targeting `main`.
+6. Run the PR feedback sweep (see below).
+7. Add label `human-review` to issue {{ issue.identifier }}.
 
 ## PR Feedback Sweep (Required Before Human Review)
 
