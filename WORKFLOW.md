@@ -100,8 +100,9 @@ URL: {{ issue.url }}
 |-------|---------|
 | `todo` | Queued for work. Move to `in-progress` before starting. |
 | `in-progress` | Implementation underway. |
-| `human-review` | PR attached and validated. Waiting on human approval. |
-| `rework` | Reviewer requested changes. Address feedback and return to `human-review`. |
+| `code-review` | PR created. Automated review in progress (by review agent). |
+| `human-review` | Automated review passed. Waiting on human approval. |
+| `rework` | Reviewer requested changes. Address feedback. |
 | `done` | Terminal. No further action. |
 
 ## Step 0: Determine Current State and Route
@@ -110,9 +111,10 @@ URL: {{ issue.url }}
 2. Route:
    - **Todo** -> Move to `in-progress`, then start execution.
      - If a PR already exists for this branch, run the PR feedback sweep first.
-   - **In Progress** -> Continue execution from current state.
+   - **In Progress** -> Continue execution. When done, add label `code-review`.
+   - **Code Review** -> You are the **review agent**. Review the PR, then approve (`human-review`) or request changes (`rework`).
    - **Human Review** -> Do not code. Poll for review updates.
-   - **Rework** -> Run the rework flow (see below).
+   - **Rework** -> Address review feedback, then add label `code-review`.
    - **Done / Closed** -> Do nothing, shut down.
 
 ## Git Workflow
@@ -148,20 +150,7 @@ gh api repos/ChronoAIProject/NyxID/issues/comments/{comment_id} -X PATCH -f body
 4. Run validation before pushing (see Quality Checklist).
 5. Push branch and create PR targeting `main`.
 6. Run the PR feedback sweep (see below).
-7. Add label `human-review` to issue {{ issue.identifier }}.
-
-## PR Feedback Sweep (Required Before Human Review)
-
-Before moving to `human-review`, check all PR feedback:
-
-1. Read top-level PR comments: `gh pr view --comments`
-2. Read inline review comments: `gh api repos/ChronoAIProject/NyxID/pulls/$(gh pr view --json number -q .number)/comments`
-3. Read review states: `gh pr view --json reviews`
-4. For each actionable comment:
-   - Either update code/tests to address it, OR
-   - Post an explicit, justified reply explaining why no change is needed.
-5. Re-run validation after feedback-driven changes.
-6. Push updates and repeat until no outstanding comments remain.
+7. Add label `code-review` to issue {{ issue.identifier }} (triggers automated review).
 
 ## Rework Flow
 
@@ -172,8 +161,7 @@ When issue state is `rework`, a reviewer has requested changes:
 3. Address each comment: fix the code or reply with justification.
 4. Run the full test suite again.
 5. Push the fixes to the same branch.
-6. Run the PR feedback sweep to confirm all comments are addressed.
-7. Change issue label from `rework` to `human-review`.
+6. Add label `code-review` to the issue (triggers another automated review).
 
 ## Project Context
 
@@ -226,7 +214,7 @@ This is a **refactoring task**:
 
 ## Quality Checklist
 
-Before moving to `human-review`:
+Before moving to `code-review`:
 - [ ] All tests pass (`cargo test` and `npm run test`)
 - [ ] No clippy warnings (`cargo clippy`)
 - [ ] Frontend builds cleanly (`npm run build` in frontend/)
@@ -234,5 +222,4 @@ Before moving to `human-review`:
 - [ ] Error handling uses `AppError`/`AppResult`
 - [ ] Conventional commit messages
 - [ ] PR created with `Closes {{ issue.identifier }}`
-- [ ] PR feedback sweep completed (no unresolved comments)
 - [ ] Progress comment updated with final status
