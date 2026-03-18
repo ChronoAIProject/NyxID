@@ -1,9 +1,10 @@
 export interface NyxIdPluginConfig {
   baseUrl: string;
-  clientId: string;
+  clientId?: string;
   clientSecret?: string;
   defaultScopes?: string;
   delegationScopes?: string;
+  apiKey?: string;
 }
 
 export interface OAuthTokenSet {
@@ -49,20 +50,25 @@ export interface NyxIdApiError {
 }
 
 export interface TokenProfile {
-  accessToken: string;
+  accessToken?: string;
   refreshToken?: string;
   delegatedAccessToken?: string;
   accessTokenExpiresAt?: number;
   delegatedAccessTokenExpiresAt?: number;
   tokenType?: string;
   scope?: string;
+  apiKey?: string;
 }
 
 export interface OpenClawProviderRegistration {
   id: string;
   name: string;
   type: string;
-  authorize: (input: { redirectUri: string; state?: string; scope?: string }) => Promise<{
+  authorize: (input: {
+    redirectUri: string;
+    state?: string;
+    scope?: string;
+  }) => Promise<{
     authorizationUrl: string;
     verifier: string;
     state: string;

@@ -6,30 +6,26 @@ if [[ $# -lt 3 ]]; then
   exit 1
 fi
 
-if [[ -z "${NYXID_BASE_URL:-}" ]]; then
-  echo "NYXID_BASE_URL is required" >&2
-  exit 1
-fi
-
-if [[ -z "${NYXID_ACCESS_TOKEN:-}" ]]; then
-  echo "NYXID_ACCESS_TOKEN is required" >&2
-  exit 1
-fi
-
 SERVICE="$1"
 METHOD="$2"
-PATH_PART="${3#/}"
+PATH_PART="$3"
 BODY="${4:-}"
-URL="${NYXID_BASE_URL%/}/api/v1/proxy/s/${SERVICE}/${PATH_PART}"
+BASE_URL="${NYXID_BASE_URL:-https://nyx-api.chrono-ai.fun}"
 
-if [[ -n "$BODY" ]]; then
-  curl -fsS -X "$METHOD" \
-    -H "Authorization: Bearer ${NYXID_ACCESS_TOKEN}" \
-    -H "Content-Type: application/json" \
-    "$URL" \
-    --data "$BODY"
+auth_args=()
+if [[ -n "${NYXID_API_KEY:-}" ]]; then
+  auth_args=(-H "X-API-Key: ${NYXID_API_KEY}")
+elif [[ -n "${NYXID_ACCESS_TOKEN:-}" ]]; then
+  auth_args=(-H "Authorization: Bearer ${NYXID_ACCESS_TOKEN}")
 else
-  curl -fsS -X "$METHOD" \
-    -H "Authorization: Bearer ${NYXID_ACCESS_TOKEN}" \
-    "$URL"
+  echo "Set NYXID_API_KEY or NYXID_ACCESS_TOKEN before calling NyxID." >&2
+  exit 1
+fi
+
+url="${BASE_URL%/}/api/v1/proxy/s/${SERVICE}/${PATH_PART#/}"
+
+if [[ -n "${BODY}" ]]; then
+  curl -fsS -X "${METHOD}" "${auth_args[@]}" -H "Content-Type: application/json" "${url}" -d "${BODY}"
+else
+  curl -fsS -X "${METHOD}" "${auth_args[@]}" "${url}"
 fi

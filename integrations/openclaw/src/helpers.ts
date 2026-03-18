@@ -4,6 +4,7 @@ import type { NyxIdApiError, NyxIdPluginConfig, TokenProfile, ToolContext } from
 
 const DEFAULT_SCOPE = "openid profile email";
 const DEFAULT_DELEGATION_SCOPE = "proxy:*";
+const DEFAULT_BASE_URL = "https://nyx-api.chrono-ai.fun";
 const EXPIRY_SKEW_SECONDS = 30;
 
 export function normalizeBaseUrl(input: string): string {
@@ -11,17 +12,20 @@ export function normalizeBaseUrl(input: string): string {
 }
 
 export function normalizeConfig(input: Partial<NyxIdPluginConfig> | undefined): NyxIdPluginConfig {
-  if (!input?.baseUrl || !input.clientId) {
-    throw new Error("NyxID plugin requires both baseUrl and clientId.");
-  }
-
   return {
-    baseUrl: normalizeBaseUrl(input.baseUrl),
-    clientId: input.clientId,
-    clientSecret: input.clientSecret,
-    defaultScopes: input.defaultScopes?.trim() || DEFAULT_SCOPE,
-    delegationScopes: input.delegationScopes?.trim() || DEFAULT_DELEGATION_SCOPE,
+    baseUrl: normalizeBaseUrl(input?.baseUrl?.trim() || DEFAULT_BASE_URL),
+    clientId: input?.clientId?.trim() || undefined,
+    clientSecret: input?.clientSecret?.trim() || undefined,
+    defaultScopes: input?.defaultScopes?.trim() || DEFAULT_SCOPE,
+    delegationScopes: input?.delegationScopes?.trim() || DEFAULT_DELEGATION_SCOPE,
+    apiKey: input?.apiKey?.trim() || undefined,
   };
+}
+
+export function requireOAuthClient(config: NyxIdPluginConfig): asserts config is NyxIdPluginConfig & { clientId: string } {
+  if (!config.clientId) {
+    throw new Error("NyxID OAuth login requires clientId.");
+  }
 }
 
 export function createPkcePair(): { verifier: string; challenge: string } {
@@ -38,6 +42,8 @@ export function buildAuthorizeUrl(
   config: NyxIdPluginConfig,
   input: { redirectUri: string; state: string; challenge: string; scope?: string },
 ): string {
+  requireOAuthClient(config);
+
   const url = new URL("/oauth/authorize", config.baseUrl);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("client_id", config.clientId);
@@ -98,7 +104,7 @@ export function mapNyxIdError(error: NyxIdApiError): string {
     case 1000:
       return `NyxID rejected the request: ${error.message}`;
     case 1001:
-      return "NyxID authentication failed. Reconnect the NyxID account or refresh the token.";
+      return "NyxID authentication failed. Reconnect the NyxID account, replace the API key, or refresh the token.";
     case 1002:
       return `NyxID denied the request: ${error.message}`;
     case 3000:
@@ -133,7 +139,10 @@ export function asNyxIdError(value: unknown): NyxIdApiError | null {
   return null;
 }
 
-export async function loadProfile(context: ToolContext): Promise<TokenProfile> {
+export async function loadProfile(
+  context: ToolContext,
+  config?: NyxIdPluginConfig,
+): Promise<TokenProfile> {
   const profileFromAuth = context.auth?.profile;
   if (profileFromAuth) {
     return profileFromAuth;
@@ -154,7 +163,12 @@ export async function loadProfile(context: ToolContext): Promise<TokenProfile> {
     return { accessToken: envAccessToken, tokenType: "Bearer" };
   }
 
-  throw new Error("No NyxID auth profile is available. Connect NyxID first.");
+  const envApiKey = context.env?.NYXID_API_KEY ?? config?.apiKey;
+  if (envApiKey) {
+    return { apiKey: envApiKey };
+  }
+
+  throw new Error("No NyxID auth profile is available. Connect NyxID with OAuth or provide NYXID_API_KEY.");
 }
 
 export async function saveProfile(context: ToolContext, profile: TokenProfile): Promise<void> {

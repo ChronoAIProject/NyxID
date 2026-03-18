@@ -1,41 +1,58 @@
-# OpenClaw NyxID Integration
+# NyxID OpenClaw Integration
 
-`openclaw-plugin-nyxid` packages two OpenClaw extensions together:
+`openclaw-plugin-nyxid` lets OpenClaw agents discover and call user-connected services through NyxID's credential brokering proxy.
 
-- A ClawHub skill at [`skills/nyxid`](./skills/nyxid) for declarative agent usage
-- An auth/runtime plugin that logs into NyxID and exchanges delegated proxy tokens
+## What it supports
 
-## What It Supports
+- OAuth 2.0 + PKCE login against NyxID
+- Refresh token handling
+- RFC 8693 token exchange when a confidential client is configured
+- Direct proxy access with an existing NyxID access token
+- Direct proxy access with a NyxID API key for self-hosted installs
+- A ClawHub-ready `nyxid` skill with helper scripts
 
-- OAuth 2.0 Authorization Code + PKCE against NyxID
-- Access token refresh using NyxID's `refresh_token` grant
-- RFC 8693 token exchange for short-lived delegated proxy access
-- `nyxid_list_services` tool for service discovery
-- `nyxid_proxy` tool for slug-based proxy requests through NyxID
+## Default base URL
 
-## Important NyxID Runtime Behavior
+The default hosted NyxID base URL for this integration is:
 
-- Service discovery uses the user's direct NyxID access token because delegated
-  tokens are restricted to proxy, LLM gateway, and delegation refresh endpoints.
-- Proxy calls use a delegated token obtained from `POST /oauth/token` with the
-  token-exchange grant.
-- NyxID's current approval flow is blocking. Proxy requests wait for approval
-  and either complete or return `403`; they do not return `202 Accepted`.
+`https://nyx-api.chrono-ai.fun`
 
-## Local Development
+## Configuration
 
-```bash
-cd integrations/openclaw
-npm install
-npm test
+```json
+{
+  "plugins": {
+    "nyxid": {
+      "enabled": true,
+      "baseUrl": "https://nyx-api.chrono-ai.fun",
+      "clientId": "your-nyxid-client-id",
+      "clientSecret": "your-nyxid-client-secret",
+      "delegationScopes": "proxy:*"
+    }
+  }
+}
 ```
 
-## Publish
+## Auth modes
 
-```bash
-cd integrations/openclaw
-npm publish --access public
-```
+### OAuth mode
 
-After the npm package is published, publish the skill bundle to ClawHub using
-the same `nyxid` slug and point the listing to this directory.
+Provide `baseUrl` and `clientId`. Add `clientSecret` if you want the plugin to perform RFC 8693 token exchange for delegated proxy calls.
+
+### API key mode
+
+Set either:
+
+- `NYXID_API_KEY`
+- `plugins.nyxid.apiKey`
+
+You can also provide a NyxID bearer token through `NYXID_ACCESS_TOKEN`.
+
+When the plugin has an API key but not an OAuth client, it calls the proxy directly with `X-API-Key`.
+
+## Skill helpers
+
+- `skills/nyxid/tools/services.sh`: list available proxy services
+- `skills/nyxid/tools/proxy.sh`: send a proxied request through NyxID
+
+Both scripts accept either `NYXID_ACCESS_TOKEN` or `NYXID_API_KEY`.

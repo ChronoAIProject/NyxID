@@ -2,6 +2,7 @@ import {
   ensureBaseToken,
   ensureDelegatedToken,
   exchangeAuthorizationCode,
+  getProxyCredentialProfile,
   listServices,
   proxyRequest,
 } from "./client.js";
@@ -9,11 +10,16 @@ import {
   buildAuthorizeUrl,
   createOpaqueState,
   createPkcePair,
-  normalizeConfig,
   loadProfile,
+  normalizeConfig,
+  requireOAuthClient,
   saveProfile,
 } from "./helpers.js";
-import type { OpenClawPluginApi, ToolContext, TokenProfile } from "./types.js";
+import type { OpenClawPluginApi, TokenProfile, ToolContext } from "./types.js";
+
+declare global {
+  var OPENCLAW_NYXID_CONFIG: Record<string, unknown> | undefined;
+}
 
 function getFetch(context?: ToolContext): typeof fetch {
   return context?.fetch ?? fetch;
@@ -31,10 +37,11 @@ export default function register(api: OpenClawPluginApi): void {
       name: "NyxID",
       type: "oauth2",
       authorize: async ({ redirectUri, state, scope }) => {
-        const config = normalizeConfig((globalThis as { OPENCLAW_NYXID_CONFIG?: unknown }).OPENCLAW_NYXID_CONFIG as Record<string, string> | undefined);
+        const config = normalizeConfig(globalThis.OPENCLAW_NYXID_CONFIG as Record<string, unknown>);
+        requireOAuthClient(config);
+
         const pkce = createPkcePair();
         const finalState = state || createOpaqueState();
-
         return {
           authorizationUrl: buildAuthorizeUrl(config, {
             redirectUri,
@@ -47,7 +54,7 @@ export default function register(api: OpenClawPluginApi): void {
         };
       },
       exchangeCode: async ({ code, redirectUri, codeVerifier }) => {
-        const config = normalizeConfig((globalThis as { OPENCLAW_NYXID_CONFIG?: unknown }).OPENCLAW_NYXID_CONFIG as Record<string, string> | undefined);
+        const config = normalizeConfig(globalThis.OPENCLAW_NYXID_CONFIG as Record<string, unknown>);
         return exchangeAuthorizationCode(getFetch(), config, {
           code,
           redirectUri,
@@ -55,8 +62,12 @@ export default function register(api: OpenClawPluginApi): void {
         });
       },
       refresh: async (token) => {
-        const config = normalizeConfig((globalThis as { OPENCLAW_NYXID_CONFIG?: unknown }).OPENCLAW_NYXID_CONFIG as Record<string, string> | undefined);
+        const config = normalizeConfig(globalThis.OPENCLAW_NYXID_CONFIG as Record<string, unknown>);
         const refreshed = await ensureBaseToken(getFetch(), config, token);
+        if (!refreshed.accessToken) {
+          throw new Error("NyxID refresh requires an OAuth token profile.");
+        }
+
         return {
           access_token: refreshed.accessToken,
           token_type: refreshed.tokenType || "Bearer",
@@ -66,15 +77,17 @@ export default function register(api: OpenClawPluginApi): void {
         };
       },
       tokenExchange: async (token) => {
-        const config = normalizeConfig((globalThis as { OPENCLAW_NYXID_CONFIG?: unknown }).OPENCLAW_NYXID_CONFIG as Record<string, string> | undefined);
+        const config = normalizeConfig(globalThis.OPENCLAW_NYXID_CONFIG as Record<string, unknown>);
         const delegated = await ensureDelegatedToken(getFetch(), config, token);
+        const proxyProfile = getProxyCredentialProfile(delegated);
+        if (!proxyProfile.accessToken) {
+          throw new Error("NyxID delegated proxy access requires an OAuth token profile.");
+        }
+
         return {
-          access_token: delegated.delegatedAccessToken || "",
+          access_token: proxyProfile.accessToken,
           token_type: delegated.tokenType || "Bearer",
-          expires_in: Math.max(
-            (delegated.delegatedAccessTokenExpiresAt || 0) - Math.floor(Date.now() / 1000),
-            0,
-          ),
+          expires_in: Math.max((delegated.delegatedAccessTokenExpiresAt || delegated.accessTokenExpiresAt || 0) - Math.floor(Date.now() / 1000), 0),
           scope: config.delegationScopes,
         };
       },
@@ -86,11 +99,10 @@ export default function register(api: OpenClawPluginApi): void {
     description: "List services available through the current user's NyxID account.",
     execute: async (_params, context) => {
       const config = normalizeConfig(context.config);
-      const profile = await loadProfile(context);
+      const profile = await loadProfile(context, config);
       const updatedProfile = await ensureBaseToken(getFetch(context), config, profile);
       await saveProfile(context, updatedProfile);
-
-      const response = await listServices(getFetch(context), config, updatedProfile.accessToken);
+      const response = await listServices(getFetch(context), config, updatedProfile);
       return {
         services: response.services.map((service) => ({
           id: service.id,
@@ -116,7 +128,7 @@ export default function register(api: OpenClawPluginApi): void {
         service: { type: "string", description: "NyxID service slug such as twitter or github" },
         method: {
           type: "string",
-          enum: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+          enum: ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
           description: "HTTP method to send to the downstream service",
         },
         path: { type: "string", description: "Downstream API path such as /2/tweets" },
@@ -126,12 +138,11 @@ export default function register(api: OpenClawPluginApi): void {
     },
     execute: async (params, context) => {
       const config = normalizeConfig(context.config);
-      const profile = await loadProfile(context);
-      const delegatedProfile = await ensureDelegatedToken(getFetch(context), config, profile);
-      await saveProfile(context, mergeProfile(profile, delegatedProfile));
-
+      const profile = await loadProfile(context, config);
+      const proxyReadyProfile = await ensureDelegatedToken(getFetch(context), config, profile);
+      await saveProfile(context, mergeProfile(profile, proxyReadyProfile));
       return proxyRequest(getFetch(context), config, {
-        delegatedToken: delegatedProfile.delegatedAccessToken || "",
+        profile: getProxyCredentialProfile(proxyReadyProfile),
         service: String(params.service),
         method: String(params.method || "GET"),
         path: String(params.path),

@@ -1,40 +1,50 @@
 {
   "id": "nyxid",
   "name": "NyxID Credential Broker",
-  "description": "OAuth login to NyxID and delegated access to user-connected services",
+  "description": "OAuth login to NyxID and delegated access to user-connected services, with API key fallback for self-hosted installs.",
   "version": "0.1.0",
   "kind": "auth",
-  "entry": "./dist/index.js",
+  "entry": "./dist/src/index.js",
   "configSchema": {
     "type": "object",
     "properties": {
       "baseUrl": {
         "type": "string",
-        "description": "NyxID instance URL (for example https://auth.nyxid.dev)"
+        "default": "https://nyx-api.chrono-ai.fun",
+        "description": "NyxID instance URL."
       },
       "clientId": {
         "type": "string",
-        "description": "OAuth client ID from the NyxID developer portal"
+        "description": "OAuth client ID from the NyxID developer portal. Required for OAuth login."
       },
       "clientSecret": {
         "type": "string",
-        "description": "OAuth client secret. Required for delegated proxy token exchange."
+        "description": "OAuth client secret. Required for confidential-client token exchange."
       },
       "defaultScopes": {
         "type": "string",
         "default": "openid profile email",
-        "description": "Scopes requested during the NyxID login flow"
+        "description": "Scopes requested during NyxID OAuth login."
       },
       "delegationScopes": {
         "type": "string",
         "default": "proxy:*",
-        "description": "Scopes requested during RFC 8693 token exchange"
+        "description": "Scopes requested for delegated proxy access."
+      },
+      "apiKey": {
+        "type": "string",
+        "description": "Optional NyxID API key for installs that do not use OAuth."
       }
     },
-    "required": ["baseUrl", "clientId"]
+    "required": [
+      "baseUrl"
+    ]
   },
   "providerAuthEnvVars": {
-    "nyxid": "NYXID_ACCESS_TOKEN"
+    "nyxid": "NYXID_ACCESS_TOKEN",
+    "nyxidApiKey": "NYXID_API_KEY"
   },
-  "skills": ["./skills/nyxid"]
+  "skills": [
+    "./skills/nyxid"
+  ]
 }
