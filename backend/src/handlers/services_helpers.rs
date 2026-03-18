@@ -9,7 +9,7 @@ use crate::models::downstream_service::{
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 
-use super::services::ServiceResponse;
+use super::services::{ServiceResponse, SshServiceConfigResponse};
 
 /// Verify that the authenticated user has admin privileges.
 pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
@@ -71,6 +71,7 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
         slug: s.slug,
         description: s.description,
         base_url: s.base_url,
+        service_type: s.service_type,
         auth_method: s.auth_method,
         auth_type: s.auth_type,
         auth_key_name: s.auth_key_name,
@@ -80,6 +81,14 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
         api_spec_url: s.openapi_spec_url,
         asyncapi_spec_url: s.asyncapi_spec_url,
         streaming_supported: s.streaming_supported,
+        ssh_config: s.ssh_config.map(|ssh| SshServiceConfigResponse {
+            host: ssh.host,
+            port: ssh.port,
+            certificate_auth_enabled: ssh.certificate_auth_enabled,
+            certificate_ttl_minutes: ssh.certificate_ttl_minutes,
+            allowed_principals: ssh.allowed_principals,
+            ca_public_key: ssh.ca_public_key,
+        }),
         service_category: s.service_category,
         requires_user_credential: s.requires_user_credential,
         identity_propagation_mode: s.identity_propagation_mode,
@@ -173,6 +182,16 @@ pub fn validate_optional_spec_url(url: &str, allow_private: bool) -> AppResult<(
     }
 
     validate_base_url(url, allow_private)
+}
+
+pub fn require_http_service(service: &DownstreamService) -> AppResult<()> {
+    if service.service_type != "http" {
+        return Err(AppError::BadRequest(
+            "This operation is only supported for HTTP services".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Typed response for delete operations (CR-16).

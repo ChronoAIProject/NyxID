@@ -123,12 +123,6 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route(
             "/{service_id}/requirements/{requirement_id}",
             delete(handlers::service_requirements::remove_requirement),
-        )
-        .route(
-            "/{service_id}/ssh",
-            get(handlers::ssh_tunnel::get_ssh_service_config)
-                .put(handlers::ssh_tunnel::upsert_ssh_service_config)
-                .delete(handlers::ssh_tunnel::delete_ssh_service_config),
         );
 
     let session_routes = Router::new().route("/", get(handlers::sessions::list_sessions));

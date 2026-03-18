@@ -70,6 +70,12 @@ pub async fn resolve_proxy_target(
         return Err(AppError::BadRequest("Service is inactive".to_string()));
     }
 
+    if service.service_type != "http" {
+        return Err(AppError::BadRequest(
+            "SSH services are not available through the HTTP proxy".to_string(),
+        ));
+    }
+
     // Provider services cannot be proxied to
     if service.service_category == "provider" {
         return Err(AppError::BadRequest(
@@ -165,6 +171,12 @@ pub async fn resolve_proxy_target_lenient(
 
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
+    }
+
+    if service.service_type != "http" {
+        return Err(AppError::BadRequest(
+            "SSH services are not available through the HTTP proxy".to_string(),
+        ));
     }
 
     if service.service_category == "provider" {

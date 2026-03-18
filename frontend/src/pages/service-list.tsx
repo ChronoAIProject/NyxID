@@ -12,8 +12,13 @@ import {
   type CreateServiceFormData,
   AUTH_TYPES,
   SERVICE_CATEGORIES,
+  SERVICE_TYPES,
 } from "@/schemas/services";
-import { AUTH_TYPE_LABELS, SERVICE_CATEGORY_LABELS } from "@/lib/constants";
+import {
+  AUTH_TYPE_LABELS,
+  SERVICE_CATEGORY_LABELS,
+  SERVICE_TYPE_LABELS,
+} from "@/lib/constants";
 import { ApiError } from "@/lib/api-client";
 import { ServiceCard } from "@/components/dashboard/service-card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -36,6 +41,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -43,8 +49,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Plus, Server } from "lucide-react";
 import { toast } from "sonner";
+
+function parseAllowedPrincipals(input?: string): string[] {
+  return (input ?? "")
+    .split(/[\n,]/)
+    .map((principal) => principal.trim())
+    .filter(Boolean);
+}
 
 export function ServiceListPage() {
   const navigate = useNavigate();
@@ -59,15 +73,47 @@ export function ServiceListPage() {
     defaultValues: {
       name: "",
       description: "",
+      service_type: "http",
       base_url: "",
       auth_type: "api_key",
       service_category: "connection",
+      host: "",
+      port: "22",
+      certificate_auth_enabled: false,
+      certificate_ttl_minutes: "30",
+      allowed_principals: "",
     },
   });
 
+  const serviceType = form.watch("service_type");
+  const certificateAuthEnabled = form.watch("certificate_auth_enabled") ?? false;
+
   async function onSubmit(data: CreateServiceFormData) {
     try {
-      const created = await createMutation.mutateAsync(data);
+      const created =
+        data.service_type === "ssh"
+          ? await createMutation.mutateAsync({
+              name: data.name,
+              description: data.description || undefined,
+              service_type: "ssh",
+              service_category: data.service_category ?? "internal",
+              ssh_config: {
+                host: (data.host ?? "").trim(),
+                port: Number(data.port),
+                certificate_auth_enabled: data.certificate_auth_enabled ?? false,
+                certificate_ttl_minutes: Number(data.certificate_ttl_minutes || "30"),
+                allowed_principals: parseAllowedPrincipals(data.allowed_principals),
+              },
+            })
+          : await createMutation.mutateAsync({
+              name: data.name,
+              description: data.description || undefined,
+              service_type: "http",
+              base_url: data.base_url ?? "",
+              auth_type: data.auth_type ?? "api_key",
+              service_category: data.service_category ?? "connection",
+            });
+
       toast.success("Service created successfully");
       setCreateOpen(false);
       form.reset();
@@ -116,7 +162,7 @@ export function ServiceListPage() {
             <DialogHeader>
               <DialogTitle>Create Service</DialogTitle>
               <DialogDescription>
-                Register a new downstream service to connect with NyxID.
+                Pick the service type first, then configure the fields NyxID should manage.
               </DialogDescription>
             </DialogHeader>
 
@@ -130,6 +176,42 @@ export function ServiceListPage() {
                     {form.formState.errors.root.message}
                   </div>
                 )}
+
+                <FormField
+                  control={form.control}
+                  name="service_type"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Service Type</FormLabel>
+                      <Select
+                        value={field.value}
+                        onValueChange={(value) => {
+                          field.onChange(value);
+                          form.clearErrors();
+                          if (value === "ssh") {
+                            form.setValue("service_category", "internal");
+                          } else {
+                            form.setValue("service_category", "connection");
+                          }
+                        }}
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select service type" />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {SERVICE_TYPES.map((type) => (
+                            <SelectItem key={type} value={type}>
+                              {SERVICE_TYPE_LABELS[type] ?? type}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
 
                 <FormField
                   control={form.control}
@@ -163,94 +245,180 @@ export function ServiceListPage() {
                   )}
                 />
 
-                <FormField
-                  control={form.control}
-                  name="base_url"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Base URL</FormLabel>
-                      <FormControl>
-                        <Input
-                          placeholder="https://api.example.com"
-                          {...field}
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                {serviceType === "ssh" ? (
+                  <>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <FormField
+                        control={form.control}
+                        name="host"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>SSH Host</FormLabel>
+                            <FormControl>
+                              <Input placeholder="ssh.internal.example" {...field} />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
 
-                <FormField
-                  control={form.control}
-                  name="auth_type"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Auth Type</FormLabel>
-                      <Select
-                        value={field.value}
-                        onValueChange={(value) => {
-                          field.onChange(value);
-                          // Auto-set category based on auth type
-                          if (value === "oidc") {
-                            form.setValue("service_category", "provider");
-                          } else if (value === "none") {
-                            form.setValue("service_category", "internal");
-                          } else if (
-                            form.getValues("service_category") === "provider" ||
-                            form.getValues("service_category") === "internal"
-                          ) {
-                            form.setValue("service_category", "connection");
-                          }
-                        }}
+                      <FormField
+                        control={form.control}
+                        name="port"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>SSH Port</FormLabel>
+                            <FormControl>
+                              <Input type="number" min={1} max={65535} {...field} />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-[10px] border border-border p-3">
+                      <Label
+                        htmlFor="create-ssh-cert-auth"
+                        className="text-sm font-normal"
                       >
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select auth type" />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          {AUTH_TYPES.map((type) => (
-                            <SelectItem key={type} value={type}>
-                              {AUTH_TYPE_LABELS[type] ?? type}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                        Enable short-lived SSH certificates
+                      </Label>
+                      <Switch
+                        id="create-ssh-cert-auth"
+                        checked={certificateAuthEnabled}
+                        onCheckedChange={(checked) =>
+                          form.setValue("certificate_auth_enabled", checked)
+                        }
+                      />
+                    </div>
 
-                {form.watch("auth_type") !== "oidc" && form.watch("auth_type") !== "none" && (
-                  <FormField
-                    control={form.control}
-                    name="service_category"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Service Category</FormLabel>
-                        <Select
-                          value={field.value ?? "connection"}
-                          onValueChange={field.onChange}
-                        >
-                          <FormControl>
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select category" />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            {SERVICE_CATEGORIES.filter(
-                              (cat) => cat !== "provider",
-                            ).map((cat) => (
-                              <SelectItem key={cat} value={cat}>
-                                {SERVICE_CATEGORY_LABELS[cat] ?? cat}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <FormMessage />
-                      </FormItem>
+                    {certificateAuthEnabled && (
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <FormField
+                          control={form.control}
+                          name="certificate_ttl_minutes"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Certificate TTL (minutes)</FormLabel>
+                              <FormControl>
+                                <Input type="number" min={15} max={60} {...field} />
+                              </FormControl>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+
+                        <FormField
+                          control={form.control}
+                          name="allowed_principals"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Allowed Principals</FormLabel>
+                              <FormControl>
+                                <Input placeholder="ubuntu, deploy" {...field} />
+                              </FormControl>
+                              <p className="text-xs text-muted-foreground">
+                                Comma-separated SSH usernames NyxID is allowed to sign.
+                              </p>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      </div>
                     )}
-                  />
+                  </>
+                ) : (
+                  <>
+                    <FormField
+                      control={form.control}
+                      name="base_url"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Base URL</FormLabel>
+                          <FormControl>
+                            <Input
+                              placeholder="https://api.example.com"
+                              {...field}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name="auth_type"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Auth Type</FormLabel>
+                          <Select
+                            value={field.value}
+                            onValueChange={(value) => {
+                              field.onChange(value);
+                              if (value === "oidc") {
+                                form.setValue("service_category", "provider");
+                              } else if (value === "none") {
+                                form.setValue("service_category", "internal");
+                              } else if (
+                                form.getValues("service_category") === "provider" ||
+                                form.getValues("service_category") === "internal"
+                              ) {
+                                form.setValue("service_category", "connection");
+                              }
+                            }}
+                          >
+                            <FormControl>
+                              <SelectTrigger>
+                                <SelectValue placeholder="Select auth type" />
+                              </SelectTrigger>
+                            </FormControl>
+                            <SelectContent>
+                              {AUTH_TYPES.map((type) => (
+                                <SelectItem key={type} value={type}>
+                                  {AUTH_TYPE_LABELS[type] ?? type}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    {form.watch("auth_type") !== "oidc" && form.watch("auth_type") !== "none" && (
+                      <FormField
+                        control={form.control}
+                        name="service_category"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Service Category</FormLabel>
+                            <Select
+                              value={field.value ?? "connection"}
+                              onValueChange={field.onChange}
+                            >
+                              <FormControl>
+                                <SelectTrigger>
+                                  <SelectValue placeholder="Select category" />
+                                </SelectTrigger>
+                              </FormControl>
+                              <SelectContent>
+                                {SERVICE_CATEGORIES.filter(
+                                  (cat) => cat !== "provider",
+                                ).map((cat) => (
+                                  <SelectItem key={cat} value={cat}>
+                                    {SERVICE_CATEGORY_LABELS[cat] ?? cat}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    )}
+                  </>
                 )}
 
                 <DialogFooter>

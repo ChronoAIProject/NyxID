@@ -6,6 +6,7 @@ import {
   sshServiceConfigSchema,
   AUTH_TYPES,
   SERVICE_CATEGORIES,
+  SERVICE_TYPES,
   IDENTITY_PROPAGATION_MODES,
 } from "./services";
 
@@ -16,6 +17,10 @@ describe("constants", () => {
 
   it("SERVICE_CATEGORIES contains expected values", () => {
     expect(SERVICE_CATEGORIES).toEqual(["provider", "connection", "internal"]);
+  });
+
+  it("SERVICE_TYPES contains expected values", () => {
+    expect(SERVICE_TYPES).toEqual(["http", "ssh"]);
   });
 
   it("IDENTITY_PROPAGATION_MODES contains expected values", () => {
@@ -31,6 +36,7 @@ describe("constants", () => {
 describe("createServiceSchema", () => {
   const validData = {
     name: "My Service",
+    service_type: "http" as const,
     base_url: "https://api.example.com",
     auth_type: "api_key" as const,
   };
@@ -106,10 +112,25 @@ describe("createServiceSchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("accepts valid ssh service data", () => {
+    const result = createServiceSchema.safeParse({
+      name: "SSH Bastion",
+      service_type: "ssh" as const,
+      host: "ssh.internal.example",
+      port: "22",
+      certificate_auth_enabled: true,
+      certificate_ttl_minutes: "30",
+      allowed_principals: "ubuntu, deploy",
+    });
+
+    expect(result.success).toBe(true);
+  });
 });
 
 describe("updateServiceSchema", () => {
   const validData = {
+    service_type: "http" as const,
     name: "Updated Service",
     base_url: "https://api.example.com",
   };
@@ -147,6 +168,21 @@ describe("updateServiceSchema", () => {
       openapi_spec_url: "not-a-url",
     });
     expect(result.success).toBe(false);
+  });
+
+  it("accepts ssh service updates", () => {
+    const result = updateServiceSchema.safeParse({
+      service_type: "ssh" as const,
+      name: "SSH Bastion",
+      description: "",
+      host: "ssh.internal.example",
+      port: "22",
+      certificate_auth_enabled: false,
+      certificate_ttl_minutes: "30",
+      allowed_principals: "",
+    });
+
+    expect(result.success).toBe(true);
   });
 });
 

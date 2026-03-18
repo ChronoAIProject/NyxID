@@ -3,6 +3,7 @@ import type { DownstreamService } from "@/types/api";
 import {
   getAuthTypeLabel,
   isOidcService,
+  SERVICE_TYPE_LABELS,
 } from "@/lib/constants";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,10 @@ export function ServiceCard({
   isDeleting,
 }: ServiceCardProps) {
   const navigate = useNavigate();
+  const secondaryLabel =
+    service.service_type === "ssh"
+      ? `${service.ssh_config?.host ?? "ssh"}:${String(service.ssh_config?.port ?? 22)}`
+      : service.base_url;
 
   return (
     <div
@@ -53,10 +58,15 @@ export function ServiceCard({
           {service.name}
         </h3>
         <div className="flex shrink-0 items-center gap-1.5">
+          <Badge variant="secondary">
+            {SERVICE_TYPE_LABELS[service.service_type] ?? service.service_type}
+          </Badge>
           {isOidcService(service) && (
             <Badge variant="accent">OIDC</Badge>
           )}
-          <Badge variant="info">{getAuthTypeLabel(service)}</Badge>
+          {service.service_type === "http" && (
+            <Badge variant="info">{getAuthTypeLabel(service)}</Badge>
+          )}
         </div>
       </div>
 
@@ -67,9 +77,9 @@ export function ServiceCard({
         </p>
       )}
 
-      {/* Base URL */}
+      {/* Target */}
       <span className="text-xs text-text-tertiary">
-        {service.base_url}
+        {secondaryLabel}
       </span>
     </div>
   );

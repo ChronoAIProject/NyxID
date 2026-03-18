@@ -46,6 +46,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
   const availableServices = (allServices ?? []).filter(
     (s) =>
       s.is_active &&
+      s.service_type === "http" &&
       s.service_category !== "provider" &&
       !connectedServiceIds.has(s.id),
   );

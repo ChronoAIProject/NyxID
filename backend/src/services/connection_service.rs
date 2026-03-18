@@ -42,6 +42,12 @@ pub async fn connect_user(
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
+    if service.service_type != "http" {
+        return Err(AppError::BadRequest(
+            "SSH services do not support credential connections".to_string(),
+        ));
+    }
+
     // Validate by category
     match service.service_category.as_str() {
         "provider" => {
@@ -238,6 +244,12 @@ pub async fn update_credential(
         .find_one(doc! { "_id": service_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+
+    if service.service_type != "http" {
+        return Err(AppError::BadRequest(
+            "SSH services do not support credential updates".to_string(),
+        ));
+    }
 
     if !service.requires_user_credential {
         return Err(AppError::BadRequest(

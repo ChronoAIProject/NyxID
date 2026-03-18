@@ -5,18 +5,19 @@ import {
   isConnectable,
   getAuthTypeLabel,
   SERVICE_CATEGORY_LABELS,
+  SERVICE_TYPE_LABELS,
 } from "@/lib/constants";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
+import { CopyableField } from "@/components/shared/copyable-field";
 import { OidcCredentialsSection } from "@/components/dashboard/oidc-credentials-section";
 import { EndpointList } from "@/components/dashboard/endpoint-list";
 import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
-import { SshAccessPanel } from "@/components/dashboard/ssh-access-panel";
+import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
 import { useMyProviderTokens } from "@/hooks/use-providers";
-import { useAuthStore } from "@/stores/auth-store";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -36,7 +37,6 @@ export function ServiceDetailPage() {
   const { data: service, isLoading, error } = useService(serviceId);
   const deleteMutation = useDeleteService();
   const { data: tokens } = useMyProviderTokens();
-  const user = useAuthStore((state) => state.user);
 
   async function handleDelete() {
     if (!service) return;
@@ -78,9 +78,7 @@ export function ServiceDetailPage() {
   }
 
   const oidc = isOidcService(service);
-  const canManageSsh = Boolean(
-    user && (user.is_admin || user.id === service.created_by),
-  );
+  const isSshService = service.service_type === "ssh";
 
   return (
     <div className="space-y-8">
@@ -121,10 +119,9 @@ export function ServiceDetailPage() {
 
       <DetailSection title="General">
         <DetailRow label="Slug" value={service.slug} />
-        <DetailRow label="Base URL" value={service.base_url} copyable />
         <DetailRow
-          label="Auth Type"
-          value={getAuthTypeLabel(service)}
+          label="Service Type"
+          value={SERVICE_TYPE_LABELS[service.service_type] ?? service.service_type}
           badge
         />
         <DetailRow
@@ -132,6 +129,16 @@ export function ServiceDetailPage() {
           value={SERVICE_CATEGORY_LABELS[service.service_category] ?? service.service_category}
           badge
         />
+        {!isSshService && (
+          <>
+            <DetailRow label="Base URL" value={service.base_url} copyable />
+            <DetailRow
+              label="Auth Type"
+              value={getAuthTypeLabel(service)}
+              badge
+            />
+          </>
+        )}
         <DetailRow
           label="Status"
           value={service.is_active ? "Active" : "Inactive"}
@@ -142,107 +149,168 @@ export function ServiceDetailPage() {
         <DetailRow label="Updated" value={formatDate(service.updated_at)} />
       </DetailSection>
 
-      {oidc && (
+      {isSshService ? (
         <>
           <Separator />
-          <DetailSection title="OIDC Configuration">
-            <OidcCredentialsSection
-              serviceId={service.id}
-              oauthClientId={service.oauth_client_id}
-            />
+          <DetailSection title="SSH Configuration">
+            {service.ssh_config ? (
+              <>
+                <DetailRow
+                  label="Target"
+                  value={`${service.ssh_config.host}:${String(service.ssh_config.port)}`}
+                  copyable
+                  mono
+                />
+                <DetailRow
+                  label="Certificate Auth"
+                  value={
+                    service.ssh_config.certificate_auth_enabled
+                      ? "Enabled"
+                      : "Transport only"
+                  }
+                  badge
+                  badgeVariant={
+                    service.ssh_config.certificate_auth_enabled
+                      ? "success"
+                      : "secondary"
+                  }
+                />
+                {service.ssh_config.certificate_auth_enabled && (
+                  <>
+                    <DetailRow
+                      label="Certificate TTL"
+                      value={`${String(service.ssh_config.certificate_ttl_minutes)} minutes`}
+                    />
+                    <DetailRow
+                      label="Allowed Principals"
+                      value={service.ssh_config.allowed_principals.join(", ")}
+                      copyable
+                    />
+                  </>
+                )}
+                {service.ssh_config.ca_public_key && (
+                  <CopyableField
+                    label="SSH CA Public Key"
+                    value={service.ssh_config.ca_public_key}
+                    size="sm"
+                  />
+                )}
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                SSH configuration is missing for this service.
+              </p>
+            )}
           </DetailSection>
-        </>
-      )}
 
-      {canManageSsh && (
-        <>
-          <Separator />
-          <SshAccessPanel
-            serviceId={service.id}
-            serviceSlug={service.slug}
-          />
+          {service.ssh_config && (
+            <>
+              <Separator />
+              <DetailSection title="Connection Instructions">
+                <SshServiceInstructions
+                  serviceId={service.id}
+                  serviceSlug={service.slug}
+                  sshConfig={service.ssh_config}
+                />
+              </DetailSection>
+            </>
+          )}
         </>
-      )}
-
-      {isConnectable(service) && !oidc && (
+      ) : (
         <>
+          {oidc && (
+            <>
+              <Separator />
+              <DetailSection title="OIDC Configuration">
+                <OidcCredentialsSection
+                  serviceId={service.id}
+                  oauthClientId={service.oauth_client_id}
+                />
+              </DetailSection>
+            </>
+          )}
+
+          {isConnectable(service) && !oidc && (
+            <>
+              <Separator />
+              <DetailSection title="API Endpoints">
+                <EndpointList
+                  serviceId={service.id}
+                  hasApiSpecUrl={
+                    (service.openapi_spec_url ?? service.api_spec_url) !== null &&
+                    (service.openapi_spec_url ?? service.api_spec_url) !== undefined
+                  }
+                />
+              </DetailSection>
+
+              <Separator />
+              <DetailSection title="MCP Connection">
+                <McpConnectionInfo />
+              </DetailSection>
+            </>
+          )}
+
+          {service.identity_propagation_mode &&
+            service.identity_propagation_mode !== "none" && (
+              <>
+                <Separator />
+                <DetailSection title="Identity Propagation">
+                  <DetailRow
+                    label="Mode"
+                    value={
+                      PROPAGATION_MODE_LABELS[service.identity_propagation_mode] ??
+                      service.identity_propagation_mode
+                    }
+                    badge
+                  />
+                  {service.identity_include_user_id && (
+                    <DetailRow label="User ID" value="Included" badge badgeVariant="success" />
+                  )}
+                  {service.identity_include_email && (
+                    <DetailRow label="Email" value="Included" badge badgeVariant="success" />
+                  )}
+                  {service.identity_include_name && (
+                    <DetailRow label="Display Name" value="Included" badge badgeVariant="success" />
+                  )}
+                  {service.identity_jwt_audience && (
+                    <DetailRow label="JWT Audience" value={service.identity_jwt_audience} />
+                  )}
+                </DetailSection>
+              </>
+            )}
+
+          {service.inject_delegation_token && (
+            <>
+              <Separator />
+              <DetailSection title="Delegation Token Injection">
+                <DetailRow
+                  label="Status"
+                  value="Enabled"
+                  badge
+                  badgeVariant="success"
+                />
+                <DetailRow
+                  label="Token Scope"
+                  value={service.delegation_token_scope || "llm:proxy"}
+                  mono
+                />
+              </DetailSection>
+            </>
+          )}
+
           <Separator />
-          <DetailSection title="API Endpoints">
-            <EndpointList
+          <DetailSection title="Provider Requirements">
+            <ServiceRequirementsView
               serviceId={service.id}
-              hasApiSpecUrl={
-                (service.openapi_spec_url ?? service.api_spec_url) !== null &&
-                (service.openapi_spec_url ?? service.api_spec_url) !== undefined
+              userTokenProviderIds={
+                tokens
+                  ? new Set(tokens.map((t) => t.provider_id))
+                  : undefined
               }
             />
           </DetailSection>
-
-          <Separator />
-          <DetailSection title="MCP Connection">
-            <McpConnectionInfo />
-          </DetailSection>
         </>
       )}
-
-      {service.identity_propagation_mode &&
-        service.identity_propagation_mode !== "none" && (
-          <>
-            <Separator />
-            <DetailSection title="Identity Propagation">
-              <DetailRow
-                label="Mode"
-                value={
-                  PROPAGATION_MODE_LABELS[service.identity_propagation_mode] ??
-                  service.identity_propagation_mode
-                }
-                badge
-              />
-              {service.identity_include_user_id && (
-                <DetailRow label="User ID" value="Included" badge badgeVariant="success" />
-              )}
-              {service.identity_include_email && (
-                <DetailRow label="Email" value="Included" badge badgeVariant="success" />
-              )}
-              {service.identity_include_name && (
-                <DetailRow label="Display Name" value="Included" badge badgeVariant="success" />
-              )}
-              {service.identity_jwt_audience && (
-                <DetailRow label="JWT Audience" value={service.identity_jwt_audience} />
-              )}
-            </DetailSection>
-          </>
-        )}
-
-      {service.inject_delegation_token && (
-        <>
-          <Separator />
-          <DetailSection title="Delegation Token Injection">
-            <DetailRow
-              label="Status"
-              value="Enabled"
-              badge
-              badgeVariant="success"
-            />
-            <DetailRow
-              label="Token Scope"
-              value={service.delegation_token_scope || "llm:proxy"}
-              mono
-            />
-          </DetailSection>
-        </>
-      )}
-
-      <Separator />
-      <DetailSection title="Provider Requirements">
-        <ServiceRequirementsView
-          serviceId={service.id}
-          userTokenProviderIds={
-            tokens
-              ? new Set(tokens.map((t) => t.provider_id))
-              : undefined
-          }
-        />
-      </DetailSection>
     </div>
   );
 }

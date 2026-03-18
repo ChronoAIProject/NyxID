@@ -90,7 +90,7 @@ It provides a complete identity layer: user registration, session management, Op
 
 ### SSH Tunneling
 - Authenticated SSH-over-WebSocket tunnel at `GET /api/v1/ssh/{service_id}`
-- Per-service SSH target configuration at `GET/PUT/DELETE /api/v1/services/{service_id}/ssh`
+- First-class SSH services created with `service_type: "ssh"` and embedded `ssh_config`
 - Short-lived OpenSSH user certificates signed by a NyxID-managed per-service CA
 - Built-in `nyxid ssh` helper for certificate issuance, ProxyCommand tunneling, and config generation
 - Per-user concurrent SSH session limiting with audit logs for connect, disconnect, duration, and byte counts
@@ -442,9 +442,6 @@ For the full API reference with request/response schemas and example curl comman
 | POST   | `/api/v1/api-keys/{key_id}/rotate`   | Required | Rotate an API key                    |
 | GET    | `/api/v1/services`                   | Required | List downstream services (`?category=` filter) |
 | POST   | `/api/v1/services`                   | Admin    | Register a downstream service        |
-| GET    | `/api/v1/services/{service_id}/ssh`  | Admin / Creator | Get SSH tunnel configuration |
-| PUT    | `/api/v1/services/{service_id}/ssh`  | Admin / Creator | Create or update SSH tunnel configuration |
-| DELETE | `/api/v1/services/{service_id}/ssh`  | Admin / Creator | Disable SSH tunnel configuration |
 | DELETE | `/api/v1/services/{service_id}`      | Admin    | Deactivate a downstream service      |
 | GET    | `/api/v1/connections`                | Required | List user's service connections      |
 | POST   | `/api/v1/connections/{service_id}`   | Required | Connect to a service (with credentials) |
@@ -702,7 +699,7 @@ NyxID uses 30 MongoDB collections:
 | `authorization_codes`      | Short-lived OIDC authorization codes                 |
 | `refresh_tokens`           | Issued refresh tokens with rotation chain tracking   |
 | `api_keys`                 | User-scoped API keys (hashed, with prefix)           |
-| `downstream_services`      | Registered downstream services for proxying (includes auto-seeded LLM services via `provider_config_id`, `inject_delegation_token` and `delegation_token_scope` for delegated access) |
+| `downstream_services`      | Registered HTTP and SSH services (includes auto-seeded LLM services via `provider_config_id`, `inject_delegation_token` and `delegation_token_scope`, plus embedded SSH target configuration and encrypted SSH CA material) |
 | `user_service_connections` | Per-user connections and encrypted credentials for downstream services |
 | `mfa_factors`              | TOTP factors and encrypted recovery codes            |
 | `service_endpoints`        | Registered API endpoints per service (MCP tools)     |
@@ -719,7 +716,6 @@ NyxID uses 30 MongoDB collections:
 | `approval_requests`        | Pending/resolved approval requests for proxy access  |
 | `approval_grants`          | Cached approval grants (time-limited, revocable)     |
 | `service_approval_configs` | Per-service approval overrides (per user)            |
-| `ssh_services`             | Per-service SSH target configuration and encrypted SSH CA material |
 | `notification_channels`    | Per-user notification preferences, Telegram links, and push device tokens |
 | `nodes`                    | Registered credential nodes (per user, with auth token hash and status) |
 | `node_service_bindings`    | Service-to-node routing bindings (which services a node handles) |

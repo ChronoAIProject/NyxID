@@ -15,8 +15,14 @@ export const AUTH_TYPE_LABELS: Readonly<Record<string, string>> = {
   basic: "Basic Auth",
   bearer: "Bearer Token",
   oidc: "OIDC / SSO",
+  ssh: "SSH Tunnel",
   header: "API Key",
   query: "Query Param",
+};
+
+export const SERVICE_TYPE_LABELS: Readonly<Record<string, string>> = {
+  http: "HTTP / API",
+  ssh: "SSH",
 };
 
 export const SERVICE_CATEGORY_LABELS: Readonly<Record<string, string>> = {
@@ -63,11 +69,17 @@ export function scopeRiskLabel(risk: OAuthScopeRisk): string {
 }
 
 export function getAuthTypeLabel(service: DownstreamService): string {
+  if (service.service_type === "ssh") {
+    return "SSH Tunnel";
+  }
   const key = service.auth_type ?? service.auth_method;
   return AUTH_TYPE_LABELS[key] ?? key;
 }
 
 export function isOidcService(service: DownstreamService): boolean {
+  if (service.service_type !== "http") {
+    return false;
+  }
   return (
     service.auth_method === "oidc" ||
     service.auth_type === "oidc" ||
@@ -76,6 +88,9 @@ export function isOidcService(service: DownstreamService): boolean {
 }
 
 export function isConnectable(service: DownstreamService): boolean {
+  if (service.service_type !== "http") {
+    return false;
+  }
   return (
     service.service_category === "connection" ||
     service.service_category === "internal"
@@ -144,6 +159,9 @@ export function getCredentialInputType(service: DownstreamService): {
   readonly label: string;
   readonly placeholder: string;
 } {
+  if (service.service_type !== "http") {
+    return { type: "none", label: "", placeholder: "" };
+  }
   if (!service.requires_user_credential) {
     return { type: "none", label: "", placeholder: "" };
   }

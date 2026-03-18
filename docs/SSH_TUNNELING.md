@@ -2,9 +2,9 @@
 
 NyxID can proxy SSH connections the same way it proxies HTTP: the user authenticates with NyxID first, then NyxID opens a WebSocket-backed TCP tunnel to the registered SSH target.
 
-This guide covers service setup, short-lived SSH certificates, and the built-in `nyxid ssh` helper used for OpenSSH `ProxyCommand` integration.
+This guide covers SSH service setup, short-lived SSH certificates, and the built-in `nyxid ssh` helper used for OpenSSH `ProxyCommand` integration.
 
-Once SSH access is configured, the service detail and edit pages in the NyxID frontend expose copyable `nyxid ssh` commands for operators.
+SSH is a first-class service type in NyxID. Create the service with `service_type: "ssh"` and an embedded `ssh_config`; the service detail page then renders the SSH target, certificate settings, CA public key, and copyable `nyxid ssh` commands inline.
 
 ---
 
@@ -12,9 +12,6 @@ Once SSH access is configured, the service detail and edit pages in the NyxID fr
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/v1/services/{service_id}/ssh` | Read a service's SSH tunnel configuration |
-| `PUT /api/v1/services/{service_id}/ssh` | Create or update SSH tunnel configuration |
-| `DELETE /api/v1/services/{service_id}/ssh` | Disable SSH tunneling for the service |
 | `POST /api/v1/ssh/{service_id}/certificate` | Issue a short-lived OpenSSH user certificate |
 | `GET /api/v1/ssh/{service_id}` | Open the SSH-over-WebSocket tunnel |
 
@@ -47,20 +44,25 @@ export NYXID_ACCESS_TOKEN=<access_token>
 
 ---
 
-## 1. Configure the Service
+## 1. Create an SSH Service
 
-An admin or the original service creator can attach SSH settings to any downstream service:
+Create the service as `service_type: "ssh"` instead of bolting SSH onto an HTTP service later:
 
 ```bash
-curl -X PUT http://localhost:3001/api/v1/services/<service_id>/ssh \
+curl -X POST http://localhost:3001/api/v1/services \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '{
-    "host": "ssh.internal.example",
-    "port": 22,
-    "certificate_auth_enabled": true,
-    "certificate_ttl_minutes": 30,
-    "allowed_principals": ["ubuntu"]
+    "name": "Production Bastion",
+    "service_type": "ssh",
+    "service_category": "internal",
+    "ssh_config": {
+      "host": "ssh.internal.example",
+      "port": 22,
+      "certificate_auth_enabled": true,
+      "certificate_ttl_minutes": 30,
+      "allowed_principals": ["ubuntu"]
+    }
   }'
 ```
 
@@ -70,7 +72,7 @@ Rules enforced by NyxID:
 - `certificate_ttl_minutes` must be between `15` and `60`
 - `allowed_principals` is required when certificate auth is enabled
 
-Use `GET /api/v1/services/{service_id}/ssh` to verify the stored config and retrieve the current CA public key.
+To update an SSH service later, use `PUT /api/v1/services/{service_id}` with a replacement `ssh_config` object. `GET /api/v1/services/{service_id}` returns the current SSH config and CA public key.
 
 ---
 
@@ -160,8 +162,7 @@ Operational requirement: the selected node must be able to reach the target SSH 
 ## 6. Audit and Limits
 
 NyxID emits audit events for:
-- `ssh_service_upserted`
-- `ssh_service_disabled`
+- `service_created` and `service_updated` when SSH services are created or edited
 - `ssh_certificate_issued`
 - `ssh_tunnel_connected`
 - `ssh_tunnel_disconnected`

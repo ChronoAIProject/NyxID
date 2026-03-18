@@ -10,7 +10,7 @@ use crate::mw::auth::AuthUser;
 use crate::services::service_endpoint_service::{EndpointInput, EndpointUpdate};
 use crate::services::{openapi_parser, service_endpoint_service};
 
-use super::services_helpers::{fetch_service, require_admin_or_creator};
+use super::services_helpers::{fetch_service, require_admin_or_creator, require_http_service};
 
 // --- Request / Response types ---
 
@@ -150,7 +150,8 @@ pub async fn list_endpoints(
     Path(service_id): Path<String>,
 ) -> AppResult<Json<EndpointListResponse>> {
     // Verify service exists
-    let _service = fetch_service(&state, &service_id).await?;
+    let service = fetch_service(&state, &service_id).await?;
+    require_http_service(&service)?;
 
     let endpoints = service_endpoint_service::list_endpoints(&state.db, &service_id).await?;
     let items: Vec<EndpointResponse> = endpoints.into_iter().map(endpoint_to_response).collect();
@@ -168,6 +169,7 @@ pub async fn create_endpoint(
     Json(body): Json<CreateEndpointRequest>,
 ) -> AppResult<Json<EndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
+    require_http_service(&service)?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
     validate_endpoint_name(&body.name)?;
@@ -206,6 +208,7 @@ pub async fn update_endpoint(
     Json(body): Json<UpdateEndpointRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let service = fetch_service(&state, &service_id).await?;
+    require_http_service(&service)?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
     if let Some(ref name) = body.name {
@@ -250,6 +253,7 @@ pub async fn delete_endpoint(
     Path((service_id, endpoint_id)): Path<(String, String)>,
 ) -> AppResult<Json<DeleteEndpointResponse>> {
     let service = fetch_service(&state, &service_id).await?;
+    require_http_service(&service)?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
     service_endpoint_service::delete_endpoint(&state.db, &endpoint_id).await?;
@@ -276,6 +280,7 @@ pub async fn discover_endpoints(
     Path(service_id): Path<String>,
 ) -> AppResult<Json<DiscoverEndpointsResponse>> {
     let service = fetch_service(&state, &service_id).await?;
+    require_http_service(&service)?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
     let api_spec_url = service.openapi_spec_url.ok_or_else(|| {

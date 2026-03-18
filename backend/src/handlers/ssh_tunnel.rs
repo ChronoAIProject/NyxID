@@ -20,43 +20,10 @@ use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
-    approval_service, audit_service, node_routing_service, notification_service, proxy_service,
-    ssh_service,
+    approval_service, audit_service, node_routing_service, notification_service, ssh_service,
 };
 
-use super::services_helpers::{fetch_service, require_admin_or_creator};
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct UpsertSshServiceRequest {
-    pub host: String,
-    pub port: u16,
-    #[serde(default)]
-    pub certificate_auth_enabled: bool,
-    #[serde(default = "default_certificate_ttl_minutes")]
-    pub certificate_ttl_minutes: u32,
-    #[serde(default)]
-    pub allowed_principals: Vec<String>,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SshServiceResponse {
-    pub service_id: String,
-    pub host: String,
-    pub port: u16,
-    pub enabled: bool,
-    pub certificate_auth_enabled: bool,
-    pub certificate_ttl_minutes: u32,
-    pub allowed_principals: Vec<String>,
-    pub ca_public_key: Option<String>,
-    pub created_by: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct DeleteSshServiceResponse {
-    pub message: String,
-}
+use super::services_helpers::fetch_service;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct IssueSshCertificateRequest {
@@ -79,133 +46,6 @@ pub struct IssueSshCertificateResponse {
 struct TunnelClientMeta {
     ip_address: Option<String>,
     user_agent: Option<String>,
-}
-
-fn default_certificate_ttl_minutes() -> u32 {
-    30
-}
-
-#[utoipa::path(
-    get,
-    path = "/api/v1/services/{service_id}/ssh",
-    params(
-        ("service_id" = String, Path, description = "Downstream service ID")
-    ),
-    responses(
-        (status = 200, description = "SSH tunnel configuration", body = SshServiceResponse),
-        (status = 404, description = "SSH service not found", body = crate::errors::ErrorResponse)
-    ),
-    tag = "SSH"
-)]
-pub async fn get_ssh_service_config(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path(service_id): Path<String>,
-) -> AppResult<Json<SshServiceResponse>> {
-    let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
-    let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    Ok(Json(ssh_service_to_response(ssh_service)))
-}
-
-#[utoipa::path(
-    put,
-    path = "/api/v1/services/{service_id}/ssh",
-    params(
-        ("service_id" = String, Path, description = "Downstream service ID")
-    ),
-    request_body = UpsertSshServiceRequest,
-    responses(
-        (status = 200, description = "Updated SSH tunnel configuration", body = SshServiceResponse),
-        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
-        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse)
-    ),
-    tag = "SSH"
-)]
-pub async fn upsert_ssh_service_config(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path(service_id): Path<String>,
-    Json(body): Json<UpsertSshServiceRequest>,
-) -> AppResult<Json<SshServiceResponse>> {
-    let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
-    ssh_service::validate_ssh_target(&body.host, body.port)?;
-    ssh_service::validate_certificate_settings(
-        body.certificate_auth_enabled,
-        body.certificate_ttl_minutes,
-        &body.allowed_principals,
-    )?;
-
-    let ssh_service = ssh_service::upsert_ssh_service(
-        &state.db,
-        &state.encryption_keys,
-        &service_id,
-        &auth_user.user_id.to_string(),
-        ssh_service::UpsertSshServiceInput {
-            host: body.host.trim(),
-            port: body.port,
-            certificate_auth_enabled: body.certificate_auth_enabled,
-            certificate_ttl_minutes: body.certificate_ttl_minutes,
-            allowed_principals: &body.allowed_principals,
-        },
-    )
-    .await?;
-
-    audit_service::log_async(
-        state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "ssh_service_upserted".to_string(),
-        Some(serde_json::json!({
-            "service_id": service_id,
-            "host": ssh_service.host,
-            "port": ssh_service.port,
-            "certificate_auth_enabled": ssh_service.certificate_auth_enabled,
-            "certificate_ttl_minutes": ssh_service.certificate_ttl_minutes,
-            "allowed_principals": ssh_service.allowed_principals,
-        })),
-        None,
-        None,
-    );
-
-    Ok(Json(ssh_service_to_response(ssh_service)))
-}
-
-#[utoipa::path(
-    delete,
-    path = "/api/v1/services/{service_id}/ssh",
-    params(
-        ("service_id" = String, Path, description = "Downstream service ID")
-    ),
-    responses(
-        (status = 200, description = "SSH tunnel configuration disabled", body = DeleteSshServiceResponse),
-        (status = 404, description = "SSH service not found", body = crate::errors::ErrorResponse)
-    ),
-    tag = "SSH"
-)]
-pub async fn delete_ssh_service_config(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path(service_id): Path<String>,
-) -> AppResult<Json<DeleteSshServiceResponse>> {
-    let service = fetch_service(&state, &service_id).await?;
-    require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
-    ssh_service::disable_ssh_service(&state.db, &service_id).await?;
-
-    audit_service::log_async(
-        state.db.clone(),
-        Some(auth_user.user_id.to_string()),
-        "ssh_service_disabled".to_string(),
-        Some(serde_json::json!({
-            "service_id": service_id,
-        })),
-        None,
-        None,
-    );
-
-    Ok(Json(DeleteSshServiceResponse {
-        message: "SSH service disabled".to_string(),
-    }))
 }
 
 #[utoipa::path(
@@ -331,7 +171,7 @@ async fn handle_ssh_socket(
     state: AppState,
     auth_user: AuthUser,
     service_id: String,
-    ssh_service: crate::models::ssh_service::SshService,
+    ssh_service: crate::models::downstream_service::SshServiceConfig,
     mut socket: WebSocket,
     _session_guard: ssh_service::SshSessionGuard,
     client_meta: TunnelClientMeta,
@@ -527,7 +367,7 @@ async fn handle_ssh_socket(
 async fn handle_node_ssh_socket(
     state: AppState,
     service_id: String,
-    ssh_service: crate::models::ssh_service::SshService,
+    ssh_service: crate::models::downstream_service::SshServiceConfig,
     mut socket: WebSocket,
     user_id: String,
     session_id: String,
@@ -681,16 +521,9 @@ async fn authorize_ssh_access(
     auth_user: &AuthUser,
     service_id: &str,
 ) -> AppResult<()> {
-    let user_id = auth_user.user_id.to_string();
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
-
-    let target = proxy_service::resolve_proxy_target(
-        &state.db,
-        &state.encryption_keys,
-        &user_id,
-        service_id,
-    )
-    .await?;
+    let service = fetch_service(state, service_id).await?;
+    ssh_service::ensure_ssh_service(&service)?;
 
     let requires_approval = approval_service::requires_approval_for_service(
         &state.db,
@@ -725,8 +558,8 @@ async fn authorize_ssh_access(
                 state.apns_auth.as_deref(),
                 &approval_owner_user_id,
                 service_id,
-                &target.service.name,
-                &target.service.slug,
+                &service.name,
+                &service.slug,
                 requester_type,
                 &auth_user.approval_requester_id(),
                 None,
@@ -741,49 +574,4 @@ async fn authorize_ssh_access(
     }
 
     Ok(())
-}
-
-fn ssh_service_to_response(model: crate::models::ssh_service::SshService) -> SshServiceResponse {
-    SshServiceResponse {
-        service_id: model.id,
-        host: model.host,
-        port: model.port,
-        enabled: model.enabled,
-        certificate_auth_enabled: model.certificate_auth_enabled,
-        certificate_ttl_minutes: model.certificate_ttl_minutes,
-        allowed_principals: model.allowed_principals,
-        ca_public_key: model.ca_public_key,
-        created_by: model.created_by,
-        created_at: model.created_at.to_rfc3339(),
-        updated_at: model.updated_at.to_rfc3339(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ssh_service_to_response;
-    use crate::models::ssh_service::SshService;
-    use chrono::Utc;
-
-    #[test]
-    fn maps_ssh_service_response() {
-        let response = ssh_service_to_response(SshService {
-            id: "service-1".to_string(),
-            host: "ssh.internal".to_string(),
-            port: 22,
-            enabled: true,
-            certificate_auth_enabled: true,
-            certificate_ttl_minutes: 30,
-            allowed_principals: vec!["ubuntu".to_string()],
-            ca_private_key_encrypted: Some(vec![1, 2, 3]),
-            ca_public_key: Some("ssh-ed25519 AAAATEST ssh-ca".to_string()),
-            created_by: "admin".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        });
-
-        assert_eq!(response.service_id, "service-1");
-        assert_eq!(response.port, 22);
-        assert!(response.certificate_auth_enabled);
-    }
 }

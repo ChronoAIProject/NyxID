@@ -13,9 +13,6 @@
         crate::handlers::services::create_service,
         crate::handlers::services::get_service,
         crate::handlers::services::update_service,
-        crate::handlers::ssh_tunnel::get_ssh_service_config,
-        crate::handlers::ssh_tunnel::upsert_ssh_service_config,
-        crate::handlers::ssh_tunnel::delete_ssh_service_config,
         crate::handlers::ssh_tunnel::issue_ssh_certificate,
         crate::handlers::ssh_tunnel::ssh_tunnel_ws
     ),
@@ -23,14 +20,13 @@
         schemas(
             crate::errors::ErrorResponse,
             crate::handlers::services::CreateServiceRequest,
+            crate::handlers::services::SshServiceConfigRequest,
+            crate::handlers::services::SshServiceConfigResponse,
             crate::handlers::services::UpdateServiceRequest,
             crate::handlers::services::ServiceResponse,
             crate::handlers::services::ServiceListResponse,
             crate::handlers::proxy::ProxyServiceItem,
             crate::handlers::proxy::ProxyServicesResponse,
-            crate::handlers::ssh_tunnel::UpsertSshServiceRequest,
-            crate::handlers::ssh_tunnel::SshServiceResponse,
-            crate::handlers::ssh_tunnel::DeleteSshServiceResponse,
             crate::handlers::ssh_tunnel::IssueSshCertificateRequest,
             crate::handlers::ssh_tunnel::IssueSshCertificateResponse
         )
@@ -40,7 +36,7 @@
         (name = "Proxy Docs", description = "Downstream OpenAPI and AsyncAPI catalog endpoints"),
         (name = "Services", description = "Downstream service management"),
         (name = "Proxy", description = "Authenticated downstream service discovery"),
-        (name = "SSH", description = "SSH service configuration and WebSocket tunnel endpoints")
+        (name = "SSH", description = "SSH certificate issuance and WebSocket tunnel endpoints")
     )
 )]
 pub struct ApiDoc;

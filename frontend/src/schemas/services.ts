@@ -11,6 +11,10 @@ export const AUTH_TYPES = [
 
 export type AuthType = (typeof AUTH_TYPES)[number];
 
+export const SERVICE_TYPES = ["http", "ssh"] as const;
+
+export type ServiceType = (typeof SERVICE_TYPES)[number];
+
 export const SERVICE_CATEGORIES = [
   "provider",
   "connection",
@@ -19,25 +23,8 @@ export const SERVICE_CATEGORIES = [
 
 export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
 
-// CR-6: Aligned with backend max length of 200 characters
-export const createServiceSchema = z.object({
-  name: z
-    .string()
-    .min(1, "Name is required")
-    .max(200, "Name must be at most 200 characters"),
-  description: z
-    .string()
-    .max(500, "Description must be at most 500 characters")
-    .optional(),
-  base_url: z
-    .string()
-    .min(1, "Base URL is required")
-    .url("Must be a valid URL"),
-  auth_type: z.enum(AUTH_TYPES),
-  service_category: z.enum(SERVICE_CATEGORIES).optional(),
-});
-
-export type CreateServiceFormData = z.infer<typeof createServiceSchema>;
+const optionalString = z.string().optional().or(z.literal(""));
+const urlField = z.string().url("Must be a valid URL");
 
 export const sshServiceConfigSchema = z
   .object({
@@ -86,6 +73,96 @@ export const sshServiceConfigSchema = z
 
 export type SshServiceConfigFormData = z.infer<typeof sshServiceConfigSchema>;
 
+function applySshFieldValidation(
+  value: {
+    readonly host?: string;
+    readonly port?: string;
+    readonly certificate_auth_enabled?: boolean;
+    readonly certificate_ttl_minutes?: string;
+    readonly allowed_principals?: string;
+  },
+  ctx: z.RefinementCtx,
+) {
+  const sshResult = sshServiceConfigSchema.safeParse({
+    host: value.host ?? "",
+    port: value.port ?? "",
+    certificate_auth_enabled: value.certificate_auth_enabled ?? false,
+    certificate_ttl_minutes: value.certificate_ttl_minutes ?? "30",
+    allowed_principals: value.allowed_principals ?? "",
+  });
+
+  if (!sshResult.success) {
+    for (const issue of sshResult.error.issues) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: issue.path,
+        message: issue.message,
+      });
+    }
+  }
+}
+
+// CR-6: Aligned with backend max length of 200 characters
+export const createServiceSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1, "Name is required")
+      .max(200, "Name must be at most 200 characters"),
+    description: z
+      .string()
+      .max(500, "Description must be at most 500 characters")
+      .optional(),
+    service_type: z.enum(SERVICE_TYPES),
+    base_url: optionalString,
+    auth_type: z.enum(AUTH_TYPES).optional(),
+    service_category: z.enum(SERVICE_CATEGORIES).optional(),
+    host: optionalString,
+    port: optionalString,
+    certificate_auth_enabled: z.boolean().optional(),
+    certificate_ttl_minutes: optionalString,
+    allowed_principals: optionalString,
+  })
+  .superRefine((value, ctx) => {
+    if (value.service_type === "http") {
+      if (!value.base_url) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["base_url"],
+          message: "Base URL is required",
+        });
+      } else if (!urlField.safeParse(value.base_url).success) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["base_url"],
+          message: "Must be a valid URL",
+        });
+      }
+
+      if (!value.auth_type) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["auth_type"],
+          message: "Auth type is required",
+        });
+      }
+      return;
+    }
+
+    applySshFieldValidation(
+      {
+        host: value.host,
+        port: value.port,
+        certificate_auth_enabled: value.certificate_auth_enabled,
+        certificate_ttl_minutes: value.certificate_ttl_minutes,
+        allowed_principals: value.allowed_principals,
+      },
+      ctx,
+    );
+  });
+
+export type CreateServiceFormData = z.infer<typeof createServiceSchema>;
+
 export const IDENTITY_PROPAGATION_MODES = [
   "none",
   "headers",
@@ -96,41 +173,77 @@ export const IDENTITY_PROPAGATION_MODES = [
 export type IdentityPropagationMode =
   (typeof IDENTITY_PROPAGATION_MODES)[number];
 
-export const updateServiceSchema = z.object({
-  name: z
-    .string()
-    .min(1, "Name is required")
-    .max(200, "Name must be at most 200 characters"),
-  description: z
-    .string()
-    .max(500, "Description must be at most 500 characters")
-    .optional()
-    .or(z.literal("")),
-  base_url: z.string().min(1, "Base URL is required").url("Must be a valid URL"),
-  openapi_spec_url: z
-    .string()
-    .url("Must be a valid URL")
-    .optional()
-    .or(z.literal("")),
-  asyncapi_spec_url: z
-    .string()
-    .url("Must be a valid URL")
-    .optional()
-    .or(z.literal("")),
-  identity_propagation_mode: z
-    .enum(IDENTITY_PROPAGATION_MODES)
-    .optional(),
-  identity_include_user_id: z.boolean().optional(),
-  identity_include_email: z.boolean().optional(),
-  identity_include_name: z.boolean().optional(),
-  identity_jwt_audience: z.string().max(500).optional().or(z.literal("")),
-  inject_delegation_token: z.boolean().optional(),
-  delegation_token_scope: z
-    .string()
-    .max(200, "Scope must be at most 200 characters")
-    .optional()
-    .or(z.literal("")),
-});
+export const updateServiceSchema = z
+  .object({
+    service_type: z.enum(SERVICE_TYPES),
+    name: z
+      .string()
+      .min(1, "Name is required")
+      .max(200, "Name must be at most 200 characters"),
+    description: z
+      .string()
+      .max(500, "Description must be at most 500 characters")
+      .optional()
+      .or(z.literal("")),
+    base_url: optionalString,
+    openapi_spec_url: z
+      .string()
+      .url("Must be a valid URL")
+      .optional()
+      .or(z.literal("")),
+    asyncapi_spec_url: z
+      .string()
+      .url("Must be a valid URL")
+      .optional()
+      .or(z.literal("")),
+    identity_propagation_mode: z
+      .enum(IDENTITY_PROPAGATION_MODES)
+      .optional(),
+    identity_include_user_id: z.boolean().optional(),
+    identity_include_email: z.boolean().optional(),
+    identity_include_name: z.boolean().optional(),
+    identity_jwt_audience: z.string().max(500).optional().or(z.literal("")),
+    inject_delegation_token: z.boolean().optional(),
+    delegation_token_scope: z
+      .string()
+      .max(200, "Scope must be at most 200 characters")
+      .optional()
+      .or(z.literal("")),
+    host: optionalString,
+    port: optionalString,
+    certificate_auth_enabled: z.boolean().optional(),
+    certificate_ttl_minutes: optionalString,
+    allowed_principals: optionalString,
+  })
+  .superRefine((value, ctx) => {
+    if (value.service_type === "http") {
+      if (!value.base_url) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["base_url"],
+          message: "Base URL is required",
+        });
+      } else if (!urlField.safeParse(value.base_url).success) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["base_url"],
+          message: "Must be a valid URL",
+        });
+      }
+      return;
+    }
+
+    applySshFieldValidation(
+      {
+        host: value.host,
+        port: value.port,
+        certificate_auth_enabled: value.certificate_auth_enabled,
+        certificate_ttl_minutes: value.certificate_ttl_minutes,
+        allowed_principals: value.allowed_principals,
+      },
+      ctx,
+    );
+  });
 
 export type UpdateServiceFormData = z.infer<typeof updateServiceSchema>;
 

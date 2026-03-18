@@ -8,7 +8,9 @@ use ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey, certificate};
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
-use crate::models::ssh_service::{COLLECTION_NAME as SSH_SERVICES, SshService};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, SshServiceConfig,
+};
 
 #[derive(Debug)]
 pub struct SshSessionManager {
@@ -77,7 +79,7 @@ pub struct IssuedSshCertificate {
     pub valid_before: chrono::DateTime<Utc>,
 }
 
-pub struct UpsertSshServiceInput<'a> {
+pub struct SshConfigInput<'a> {
     pub host: &'a str,
     pub port: u16,
     pub certificate_auth_enabled: bool,
@@ -85,30 +87,36 @@ pub struct UpsertSshServiceInput<'a> {
     pub allowed_principals: &'a [String],
 }
 
-pub async fn get_ssh_service(db: &mongodb::Database, service_id: &str) -> AppResult<SshService> {
-    db.collection::<SshService>(SSH_SERVICES)
-        .find_one(doc! { "_id": service_id, "enabled": true })
+pub async fn get_ssh_service(
+    db: &mongodb::Database,
+    service_id: &str,
+) -> AppResult<SshServiceConfig> {
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": service_id, "is_active": true })
         .await?
+        .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))?;
+
+    ensure_ssh_service(&service).cloned()
+}
+
+pub fn ensure_ssh_service(service: &DownstreamService) -> AppResult<&SshServiceConfig> {
+    if service.service_type != "ssh" {
+        return Err(AppError::NotFound("SSH service not found".to_string()));
+    }
+
+    service
+        .ssh_config
+        .as_ref()
         .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))
 }
 
-pub async fn get_ssh_service_optional(
-    db: &mongodb::Database,
-    service_id: &str,
-) -> AppResult<Option<SshService>> {
-    db.collection::<SshService>(SSH_SERVICES)
-        .find_one(doc! { "_id": service_id })
-        .await
-        .map_err(Into::into)
-}
-
-pub async fn upsert_ssh_service(
-    db: &mongodb::Database,
+pub async fn build_ssh_config(
     encryption_keys: &EncryptionKeys,
     service_id: &str,
-    created_by: &str,
-    input: UpsertSshServiceInput<'_>,
-) -> AppResult<SshService> {
+    existing: Option<&SshServiceConfig>,
+    input: SshConfigInput<'_>,
+) -> AppResult<SshServiceConfig> {
     validate_ssh_target(input.host, input.port)?;
     validate_certificate_settings(
         input.certificate_auth_enabled,
@@ -116,74 +124,27 @@ pub async fn upsert_ssh_service(
         input.allowed_principals,
     )?;
 
-    let now = Utc::now();
-    let existing = get_ssh_service_optional(db, service_id).await?;
     let (ca_private_key_encrypted, ca_public_key) = ca_material_for_upsert(
         encryption_keys,
         service_id,
-        existing.as_ref(),
+        existing,
         input.certificate_auth_enabled,
     )
     .await?;
 
-    let service = match existing {
-        Some(existing) => SshService {
-            id: existing.id,
-            host: input.host.trim().to_string(),
-            port: input.port,
-            enabled: true,
-            certificate_auth_enabled: input.certificate_auth_enabled,
-            certificate_ttl_minutes: input.certificate_ttl_minutes,
-            allowed_principals: input.allowed_principals.to_vec(),
-            ca_private_key_encrypted,
-            ca_public_key,
-            created_by: existing.created_by,
-            created_at: existing.created_at,
-            updated_at: now,
-        },
-        None => SshService {
-            id: service_id.to_string(),
-            host: input.host.trim().to_string(),
-            port: input.port,
-            enabled: true,
-            certificate_auth_enabled: input.certificate_auth_enabled,
-            certificate_ttl_minutes: input.certificate_ttl_minutes,
-            allowed_principals: input.allowed_principals.to_vec(),
-            ca_private_key_encrypted,
-            ca_public_key,
-            created_by: created_by.to_string(),
-            created_at: now,
-            updated_at: now,
-        },
-    };
-
-    db.collection::<SshService>(SSH_SERVICES)
-        .replace_one(doc! { "_id": service_id }, &service)
-        .upsert(true)
-        .await?;
-
-    Ok(service)
+    Ok(SshServiceConfig {
+        host: input.host.trim().to_string(),
+        port: input.port,
+        certificate_auth_enabled: input.certificate_auth_enabled,
+        certificate_ttl_minutes: input.certificate_ttl_minutes,
+        allowed_principals: sanitize_allowed_principals(input.allowed_principals),
+        ca_private_key_encrypted,
+        ca_public_key,
+    })
 }
 
-pub async fn disable_ssh_service(db: &mongodb::Database, service_id: &str) -> AppResult<()> {
-    let result = db
-        .collection::<SshService>(SSH_SERVICES)
-        .update_one(
-            doc! { "_id": service_id },
-            doc! {
-                "$set": {
-                    "enabled": false,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
-            },
-        )
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("SSH service not found".to_string()));
-    }
-
-    Ok(())
+pub fn target_base_url(host: &str, port: u16) -> String {
+    format!("ssh://{}:{port}", host.trim())
 }
 
 pub fn validate_ssh_target(host: &str, port: u16) -> AppResult<()> {
@@ -251,10 +212,18 @@ pub fn validate_principal(principal: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn sanitize_allowed_principals(principals: &[String]) -> Vec<String> {
+    principals
+        .iter()
+        .map(|principal| principal.trim().to_string())
+        .filter(|principal| !principal.is_empty())
+        .collect()
+}
+
 async fn ca_material_for_upsert(
     encryption_keys: &EncryptionKeys,
     service_id: &str,
-    existing: Option<&SshService>,
+    existing: Option<&SshServiceConfig>,
     certificate_auth_enabled: bool,
 ) -> AppResult<(Option<Vec<u8>>, Option<String>)> {
     if let Some(existing) = existing
@@ -296,17 +265,13 @@ async fn generate_service_ca(
 
 pub async fn issue_certificate(
     encryption_keys: &EncryptionKeys,
-    ssh_service: &SshService,
+    ssh_service: &SshServiceConfig,
     service_id: &str,
     user_id: &str,
     user_email: &str,
     public_key_openssh: &str,
     principal: &str,
 ) -> AppResult<IssuedSshCertificate> {
-    if !ssh_service.enabled {
-        return Err(AppError::BadRequest("SSH service is disabled".to_string()));
-    }
-
     if !ssh_service.certificate_auth_enabled {
         return Err(AppError::BadRequest(
             "SSH certificate auth is not enabled for this service".to_string(),
@@ -360,44 +325,32 @@ pub async fn issue_certificate(
         valid_before_secs,
     )
     .map_err(|e| AppError::Internal(format!("Failed to initialize SSH certificate: {e}")))?;
-
-    let key_id = format!("{service_id}:{user_id}:{principal}:{valid_after_secs}");
     cert_builder
         .serial(rand::random::<u64>())
-        .map_err(|e| AppError::Internal(format!("Failed to set SSH cert serial: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate serial: {e}")))?;
+    cert_builder
+        .key_id(format!("nyxid:{service_id}:{user_id}:{principal}"))
+        .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate key id: {e}")))?;
     cert_builder
         .cert_type(certificate::CertType::User)
-        .map_err(|e| AppError::Internal(format!("Failed to set SSH cert type: {e}")))?;
-    cert_builder
-        .key_id(key_id.clone())
-        .map_err(|e| AppError::Internal(format!("Failed to set SSH cert key id: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate type: {e}")))?;
     cert_builder
         .valid_principal(principal)
-        .map_err(|e| AppError::Internal(format!("Failed to set SSH cert principal: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate principal: {e}")))?;
     cert_builder
-        .comment(user_email)
-        .map_err(|e| AppError::Internal(format!("Failed to set SSH cert comment: {e}")))?;
-
-    for extension in [
-        "permit-agent-forwarding",
-        "permit-port-forwarding",
-        "permit-pty",
-        "permit-user-rc",
-    ] {
-        cert_builder
-            .extension(extension, "")
-            .map_err(|e| AppError::Internal(format!("Failed to set SSH cert extension: {e}")))?;
-    }
-
+        .comment(format!("NyxID SSH certificate for {user_email}"))
+        .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate comment: {e}")))?;
     let certificate = cert_builder
         .sign(&ca_private_key)
-        .and_then(|certificate| certificate.to_openssh())
         .map_err(|e| AppError::Internal(format!("Failed to sign SSH certificate: {e}")))?;
+    let certificate_openssh = certificate
+        .to_openssh()
+        .map_err(|e| AppError::Internal(format!("Failed to encode SSH certificate: {e}")))?;
 
     Ok(IssuedSshCertificate {
-        key_id,
+        key_id: format!("nyxid:{service_id}:{user_id}:{principal}"),
         principal: principal.to_string(),
-        certificate,
+        certificate: certificate_openssh,
         ca_public_key,
         valid_after: chrono::DateTime::<Utc>::from(valid_after_time),
         valid_before: chrono::DateTime::<Utc>::from(valid_before_time),
@@ -407,85 +360,140 @@ pub async fn issue_certificate(
 #[cfg(test)]
 mod tests {
     use super::{
-        SshSessionManager, generate_service_ca, issue_certificate, validate_certificate_settings,
-        validate_ssh_target,
+        SshConfigInput, SshSessionManager, build_ssh_config, issue_certificate, target_base_url,
+        validate_certificate_settings, validate_principal, validate_ssh_target,
     };
     use crate::crypto::aes::EncryptionKeys;
     use crate::crypto::local_key_provider::LocalKeyProvider;
-    use crate::models::ssh_service::SshService;
-    use chrono::Utc;
-    use ssh_key::{Algorithm, PrivateKey};
+    use crate::models::downstream_service::SshServiceConfig;
     use std::sync::Arc;
 
     #[test]
     fn validates_ssh_target() {
-        assert!(validate_ssh_target("ssh.internal", 22).is_ok());
+        assert!(validate_ssh_target("ssh.internal.example", 22).is_ok());
         assert!(validate_ssh_target("", 22).is_err());
-    }
-
-    #[test]
-    fn enforces_concurrent_session_limit() {
-        let manager = SshSessionManager::new(1);
-        let guard = manager.try_acquire("user-1").expect("first acquire");
-        assert_eq!(manager.active_sessions_for_user("user-1"), 1);
-        assert!(manager.try_acquire("user-1").is_err());
-        drop(guard);
+        assert!(validate_ssh_target("ssh.internal.example", 0).is_err());
     }
 
     #[test]
     fn validates_certificate_settings() {
+        assert!(validate_certificate_settings(false, 30, &[]).is_ok());
         assert!(validate_certificate_settings(true, 30, &[String::from("ubuntu")]).is_ok());
         assert!(validate_certificate_settings(true, 10, &[String::from("ubuntu")]).is_err());
         assert!(validate_certificate_settings(true, 30, &[]).is_err());
     }
 
+    #[test]
+    fn validates_principal() {
+        assert!(validate_principal("ubuntu").is_ok());
+        assert!(validate_principal("deploy.user@example.com").is_ok());
+        assert!(validate_principal("bad principal").is_err());
+    }
+
+    #[test]
+    fn tracks_concurrent_sessions_per_user() {
+        let manager = SshSessionManager::new(2);
+        let guard1 = manager.try_acquire("user-1").expect("first");
+        let guard2 = manager.try_acquire("user-1").expect("second");
+        assert_eq!(manager.active_sessions_for_user("user-1"), 2);
+        assert!(manager.try_acquire("user-1").is_err());
+        drop(guard1);
+        assert_eq!(manager.active_sessions_for_user("user-1"), 1);
+        drop(guard2);
+        assert_eq!(manager.active_sessions_for_user("user-1"), 0);
+    }
+
     #[tokio::test]
-    async fn issues_certificate_for_allowed_principal() {
+    async fn builds_ssh_config_and_preserves_existing_ca() {
         let encryption_keys =
             EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([7_u8; 32], None)));
-        let (ca_private_key_encrypted, ca_public_key) =
-            generate_service_ca(&encryption_keys, "svc-1")
-                .await
-                .expect("generate ca");
-
-        let ssh_service = SshService {
-            id: "svc-1".to_string(),
-            host: "ssh.internal.example".to_string(),
+        let existing = SshServiceConfig {
+            host: "old.example".to_string(),
             port: 22,
-            enabled: true,
             certificate_auth_enabled: true,
             certificate_ttl_minutes: 30,
             allowed_principals: vec!["ubuntu".to_string()],
-            ca_private_key_encrypted,
-            ca_public_key,
-            created_by: "admin".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            ca_private_key_encrypted: Some(vec![1, 2, 3]),
+            ca_public_key: Some("ssh-ed25519 AAAAexisting".to_string()),
         };
 
+        let updated = build_ssh_config(
+            &encryption_keys,
+            "service-1",
+            Some(&existing),
+            SshConfigInput {
+                host: "ssh.internal.example",
+                port: 2222,
+                certificate_auth_enabled: true,
+                certificate_ttl_minutes: 45,
+                allowed_principals: &[String::from("ubuntu"), String::from(" deploy ")],
+            },
+        )
+        .await
+        .expect("config");
+
+        assert_eq!(updated.host, "ssh.internal.example");
+        assert_eq!(updated.port, 2222);
+        assert_eq!(updated.allowed_principals, vec!["ubuntu", "deploy"]);
+        assert_eq!(updated.ca_public_key, existing.ca_public_key);
+        assert_eq!(
+            updated.ca_private_key_encrypted,
+            existing.ca_private_key_encrypted
+        );
+    }
+
+    #[tokio::test]
+    async fn issues_short_lived_certificate() {
+        let encryption_keys =
+            EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([42_u8; 32], None)));
+        let ssh_service = build_ssh_config(
+            &encryption_keys,
+            "service-1",
+            None,
+            SshConfigInput {
+                host: "ssh.internal.example",
+                port: 22,
+                certificate_auth_enabled: true,
+                certificate_ttl_minutes: 30,
+                allowed_principals: &[String::from("ubuntu")],
+            },
+        )
+        .await
+        .expect("ssh config");
+
         let mut rng = rand::rngs::OsRng;
-        let mut subject_key =
-            PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("subject key");
-        subject_key.set_comment("user@example.com");
-        let subject_public_key = subject_key
+        let public_key = ssh_key::PrivateKey::random(&mut rng, ssh_key::Algorithm::Ed25519)
+            .expect("subject key")
             .public_key()
             .to_openssh()
-            .expect("encode public key");
+            .expect("openssh");
 
         let issued = issue_certificate(
             &encryption_keys,
             &ssh_service,
-            "svc-1",
+            "service-1",
             "user-1",
-            "user@example.com",
-            &subject_public_key,
+            "operator@example.com",
+            &public_key,
             "ubuntu",
         )
         .await
-        .expect("issue certificate");
+        .expect("certificate");
 
-        assert!(issued.certificate.contains("-cert-v01@openssh.com"));
-        assert_eq!(issued.principal, "ubuntu");
+        assert!(
+            issued
+                .certificate
+                .starts_with("ssh-ed25519-cert-v01@openssh.com")
+        );
+        assert!(issued.ca_public_key.starts_with("ssh-ed25519 "));
         assert!(issued.valid_before > issued.valid_after);
+    }
+
+    #[test]
+    fn derives_ssh_base_url() {
+        assert_eq!(
+            target_base_url("ssh.internal.example", 22),
+            "ssh://ssh.internal.example:22"
+        );
     }
 }

@@ -1,14 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError, api } from "@/lib/api-client";
+import { api } from "@/lib/api-client";
 import type {
+  CreateServicePayload,
   DownstreamService,
   OidcCredentials,
   RedirectUrisResponse,
   RegenerateSecretResponse,
-  SshServiceConfig,
+  UpdateServicePayload,
   UserServiceConnection,
 } from "@/types/api";
-import type { CreateServiceFormData, UpdateServiceFormData } from "@/schemas/services";
 
 export function useServices() {
   return useQuery({
@@ -37,7 +37,7 @@ export function useCreateService() {
 
   return useMutation({
     mutationFn: async (
-      data: CreateServiceFormData,
+      data: CreateServicePayload,
     ): Promise<DownstreamService> => {
       return api.post<DownstreamService>("/services", data);
     },
@@ -56,7 +56,7 @@ export function useUpdateService() {
       data,
     }: {
       readonly serviceId: string;
-      readonly data: UpdateServiceFormData;
+      readonly data: UpdateServicePayload;
     }): Promise<DownstreamService> => {
       return api.put<DownstreamService>(`/services/${serviceId}`, data);
     },
@@ -78,68 +78,6 @@ export function useDeleteService() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["services"] });
-    },
-  });
-}
-
-interface UpsertSshServiceConfigInput {
-  readonly serviceId: string;
-  readonly data: {
-    readonly host: string;
-    readonly port: number;
-    readonly certificate_auth_enabled: boolean;
-    readonly certificate_ttl_minutes: number;
-    readonly allowed_principals: readonly string[];
-  };
-}
-
-export function useSshServiceConfig(serviceId: string) {
-  return useQuery({
-    queryKey: ["services", serviceId, "ssh"],
-    queryFn: async (): Promise<SshServiceConfig | null> => {
-      try {
-        return await api.get<SshServiceConfig>(`/services/${serviceId}/ssh`);
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 404) {
-          return null;
-        }
-        throw error;
-      }
-    },
-    enabled: serviceId.length > 0,
-    retry: false,
-  });
-}
-
-export function useUpsertSshServiceConfig() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async ({
-      serviceId,
-      data,
-    }: UpsertSshServiceConfigInput): Promise<SshServiceConfig> => {
-      return api.put<SshServiceConfig>(`/services/${serviceId}/ssh`, data);
-    },
-    onSuccess: (_data, variables) => {
-      void queryClient.invalidateQueries({
-        queryKey: ["services", variables.serviceId, "ssh"],
-      });
-    },
-  });
-}
-
-export function useDeleteSshServiceConfig() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async (serviceId: string): Promise<void> => {
-      return api.delete<void>(`/services/${serviceId}/ssh`);
-    },
-    onSuccess: (_data, serviceId) => {
-      void queryClient.invalidateQueries({
-        queryKey: ["services", serviceId, "ssh"],
-      });
     },
   });
 }

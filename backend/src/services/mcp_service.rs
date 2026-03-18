@@ -92,6 +92,7 @@ pub async fn load_user_tools(
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(doc! {
             "is_active": true,
+            "service_type": "http",
             "requires_user_credential": false,
             "service_category": { "$ne": "provider" },
         })
@@ -116,7 +117,7 @@ pub async fn load_user_tools(
 
     // Add explicitly connected services (credential check)
     for svc in &connected_services {
-        if svc.service_category == "provider" {
+        if svc.service_type != "http" || svc.service_category == "provider" {
             continue;
         }
         if svc.requires_user_credential {
@@ -785,7 +786,11 @@ pub async fn discover_services(
 
     let connected_ids: HashSet<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
 
-    let mut filter = doc! { "is_active": true, "service_category": { "$ne": "provider" } };
+    let mut filter = doc! {
+        "is_active": true,
+        "service_type": "http",
+        "service_category": { "$ne": "provider" },
+    };
     if let Some(cat) = category {
         if cat == "provider" {
             return Ok(serde_json::json!({ "services": [], "count": 0 }));

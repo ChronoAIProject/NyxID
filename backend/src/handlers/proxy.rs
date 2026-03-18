@@ -953,6 +953,7 @@ pub async fn list_proxy_services(
 
     let filter = doc! {
         "is_active": true,
+        "service_type": "http",
         "service_category": { "$ne": "provider" },
     };
 

@@ -1006,6 +1006,8 @@ curl "http://localhost:3001/api/v1/services?category=connection" \
 
 Register a new downstream service. The credential is encrypted with AES-256-GCM before storage.
 
+Set `service_type` to `"http"` for the existing HTTP/API flow or `"ssh"` for first-class SSH services. HTTP services use `base_url`, `auth_type`, and optional spec URLs; SSH services use an embedded `ssh_config` object instead.
+
 When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically provisions an OAuth client for the service, generates a client secret, and sets the default redirect URI to `{base_url}/callback`. No `credential` field is needed for OIDC services.
 
 **Auth:** Admin
@@ -1017,11 +1019,13 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 | `name`             | string | Yes      | Service display name (max 200 chars)                                                  |
 | `slug`             | string | No       | URL-safe identifier (max 100 chars, unique). Auto-derived from `name` if omitted.     |
 | `description`      | string | No       | Service description                                                                   |
-| `base_url`         | string | Yes      | Downstream service base URL (max 2048 chars). Must not point to private/internal IPs. |
-| `auth_type`        | string | No       | One of: `api_key`, `oauth2`/`bearer`, `basic`, `oidc`, `header`, `query`. Default: `header`. Alias: `auth_method`. |
-| `auth_key_name`    | string | No       | Header or query param name. Defaults based on `auth_type`.                            |
-| `credential`       | string | No       | API key, token, or `user:password` for basic. Not needed for OIDC services.           |
-| `service_category` | string | No       | `"connection"` (default), `"internal"`, or `"provider"` (OIDC only). See below.       |
+| `service_type`     | string | No       | `"http"` (default) or `"ssh"`                                                         |
+| `base_url`         | string | HTTP only | Downstream service base URL (max 2048 chars). Must not point to private/internal IPs. |
+| `auth_type`        | string | HTTP only | One of: `api_key`, `oauth2`/`bearer`, `basic`, `oidc`, `header`, `query`. Default: `header`. Alias: `auth_method`. |
+| `auth_key_name`    | string | HTTP only | Header or query param name. Defaults based on `auth_type`.                            |
+| `credential`       | string | HTTP only | API key, token, or `user:password` for basic. Not needed for OIDC services.           |
+| `service_category` | string | No       | `"connection"` or `"internal"` for SSH services; `"connection"` (default), `"internal"`, or `"provider"` for HTTP. |
+| `ssh_config`       | object | SSH only | SSH target configuration with `host`, `port`, `certificate_auth_enabled`, `certificate_ttl_minutes`, and `allowed_principals` |
 
 **Auth Type Mapping:**
 
@@ -1077,6 +1081,23 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 }
 ```
 
+**Example (SSH service):**
+
+```json
+{
+  "name": "Production Bastion",
+  "service_type": "ssh",
+  "service_category": "internal",
+  "ssh_config": {
+    "host": "ssh.internal.example",
+    "port": 22,
+    "certificate_auth_enabled": true,
+    "certificate_ttl_minutes": 30,
+    "allowed_principals": ["ubuntu"]
+  }
+}
+```
+
 **Response (200):**
 
 ```json
@@ -1086,6 +1107,7 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
   "slug": "stripe",
   "description": "Payment processing",
   "base_url": "https://api.stripe.com",
+  "service_type": "http",
   "auth_method": "header",
   "auth_type": "api_key",
   "auth_key_name": "X-API-Key",
@@ -1095,6 +1117,7 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
   "api_spec_url": null,
   "asyncapi_spec_url": null,
   "streaming_supported": false,
+  "ssh_config": null,
   "service_category": "connection",
   "requires_user_credential": true,
   "identity_propagation_mode": "none",
@@ -1109,6 +1132,7 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 ```
 
 For OIDC services, `oauth_client_id` will contain the auto-provisioned OAuth client ID and `service_category` will be `"provider"`.
+For SSH services, `service_type` is `"ssh"`, `auth_method` is `"none"`, `auth_type` is `"ssh"`, `base_url` is derived as `ssh://host:port`, `requires_user_credential` is `false`, and `ssh_config` contains the live SSH settings plus the CA public key.
 NyxID also probes the service's `base_url` for OpenAPI and AsyncAPI documents at creation time and populates `openapi_spec_url`, `asyncapi_spec_url`, and `streaming_supported` when discovery succeeds.
 
 **Errors:**
@@ -1190,7 +1214,7 @@ curl http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-567890abcdef 
 
 #### PUT /api/v1/services/{service_id}
 
-Update a downstream service. Only the provided fields are updated (partial update). If the service is an OIDC service and `base_url` is changed, the default redirect URI on the associated OAuth client is automatically updated.
+Update a downstream service. Only the provided fields are updated (partial update). HTTP services accept the existing `base_url`, docs, and identity propagation fields; SSH services accept a replacement `ssh_config` object. If the service is an OIDC service and `base_url` is changed, the default redirect URI on the associated OAuth client is automatically updated.
 
 **Auth:** Admin (or service creator)
 
@@ -1210,6 +1234,7 @@ Update a downstream service. Only the provided fields are updated (partial updat
 | `is_active`    | boolean | No       | Enable or disable the service                                           |
 | `openapi_spec_url` | string  | No       | URL to an OpenAPI/Swagger spec for endpoint discovery (max 2048 chars). The legacy alias `api_spec_url` is also accepted. |
 | `asyncapi_spec_url` | string  | No       | URL to an AsyncAPI spec for WebSocket or SSE documentation (max 2048 chars) |
+| `ssh_config`   | object  | No       | Replacement SSH configuration for SSH services (`host`, `port`, `certificate_auth_enabled`, `certificate_ttl_minutes`, `allowed_principals`) |
 | `identity_propagation_mode` | string | No | Identity propagation mode: `none` (default), `headers`, `jwt`, or `both` |
 | `identity_include_user_id`  | boolean | No | Include `X-NyxID-User-Id` header when propagating identity |
 | `identity_include_email`    | boolean | No | Include `X-NyxID-User-Email` header when propagating identity |
@@ -1232,7 +1257,7 @@ At least one field must be provided.
 
 Returns the full updated service object (same shape as GET response).
 
-When `base_url`, `openapi_spec_url`, or `asyncapi_spec_url` changes, NyxID re-runs documentation discovery and updates `streaming_supported`.
+When `base_url`, `openapi_spec_url`, or `asyncapi_spec_url` changes on an HTTP service, NyxID re-runs documentation discovery and updates `streaming_supported`.
 
 **Errors:**
 - `1002 forbidden` -- User is not admin and not the service creator
@@ -1419,69 +1444,7 @@ curl -X POST http://localhost:3001/api/v1/services/d1e2f3a4-b5c6-7890-1234-56789
 
 NyxID supports authenticated SSH-over-WebSocket tunnels plus short-lived SSH certificate issuance for downstream services.
 
-#### GET /api/v1/services/{service_id}/ssh
-
-Return the SSH tunnel configuration for a service.
-
-**Auth:** Admin (or service creator)
-
-**Path Parameters:**
-
-| Parameter    | Type | Description    |
-|--------------|------|----------------|
-| `service_id` | UUID | The service ID |
-
-**Response (200):**
-
-```json
-{
-  "service_id": "d1e2f3a4-b5c6-7890-1234-567890abcdef",
-  "host": "ssh.internal.example",
-  "port": 22,
-  "enabled": true,
-  "certificate_auth_enabled": true,
-  "certificate_ttl_minutes": 30,
-  "allowed_principals": ["ubuntu"],
-  "ca_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
-  "created_by": "550e8400-e29b-41d4-a716-446655440000",
-  "created_at": "2026-03-18T10:10:00+00:00",
-  "updated_at": "2026-03-18T10:10:00+00:00"
-}
-```
-
-#### PUT /api/v1/services/{service_id}/ssh
-
-Create or update a service's SSH tunnel configuration.
-
-**Auth:** Admin (or service creator)
-
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `host` | string | Yes | Downstream SSH host |
-| `port` | int | Yes | Downstream SSH port |
-| `certificate_auth_enabled` | boolean | No | Enable NyxID-issued SSH user certificates |
-| `certificate_ttl_minutes` | int | No | Certificate TTL in minutes (`15`-`60`, default `30`) |
-| `allowed_principals` | string[] | No | Allowed SSH principals. Required when certificate auth is enabled |
-
-**Errors:**
-- `1002 forbidden` -- User is not admin and not the service creator
-- `1008 validation_error` -- Invalid host, port, certificate TTL, or principal list
-
-#### DELETE /api/v1/services/{service_id}/ssh
-
-Disable SSH tunneling for the service.
-
-**Auth:** Admin (or service creator)
-
-**Response (200):**
-
-```json
-{
-  "message": "SSH service disabled"
-}
-```
+SSH configuration is embedded directly in the service object under `ssh_config` when `service_type` is `"ssh"`. Create SSH services with `POST /api/v1/services` and update them with `PUT /api/v1/services/{service_id}` instead of calling separate SSH-specific CRUD endpoints.
 
 #### POST /api/v1/ssh/{service_id}/certificate
 
