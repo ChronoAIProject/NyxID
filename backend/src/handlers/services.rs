@@ -243,6 +243,21 @@ fn should_refresh_asyncapi_url(service: &DownstreamService, body: &UpdateService
         })
 }
 
+fn resolve_spec_url_update(
+    explicit_update: Option<Option<String>>,
+    current_url: Option<&String>,
+    discovered_url: Option<&String>,
+    should_refresh: bool,
+) -> Option<String> {
+    if let Some(explicit_url) = explicit_update {
+        explicit_url
+    } else if should_refresh {
+        discovered_url.cloned()
+    } else {
+        current_url.cloned()
+    }
+}
+
 // --- Handlers ---
 // TODO(SEC-7): Credential endpoints (get_oidc_credentials, update_redirect_uris,
 // regenerate_oidc_secret) should have stricter per-endpoint rate limiting (e.g.,
@@ -718,6 +733,8 @@ pub async fn update_service(
     // Build the $set document with only provided fields
     let mut set_doc = doc! {};
     let mut http_docs_refresh: Option<api_docs_service::ServiceDocumentationMetadata> = None;
+    let mut explicit_openapi_spec_url: Option<Option<String>> = None;
+    let mut explicit_asyncapi_spec_url: Option<Option<String>> = None;
 
     if let Some(ref name) = body.name {
         if name.is_empty() || name.len() > 200 {
@@ -776,6 +793,7 @@ pub async fn update_service(
             }
 
             if body.openapi_spec_url.is_some() {
+                explicit_openapi_spec_url = Some(openapi_spec_url.clone());
                 if let Some(ref openapi_spec_url) = openapi_spec_url {
                     validate_optional_spec_url(openapi_spec_url, state.config.is_development())?;
                     set_doc.insert("openapi_spec_url", openapi_spec_url.as_str());
@@ -785,6 +803,7 @@ pub async fn update_service(
             }
 
             if body.asyncapi_spec_url.is_some() {
+                explicit_asyncapi_spec_url = Some(asyncapi_spec_url.clone());
                 if let Some(ref asyncapi_spec_url) = asyncapi_spec_url {
                     validate_optional_spec_url(asyncapi_spec_url, state.config.is_development())?;
                     set_doc.insert("asyncapi_spec_url", asyncapi_spec_url.as_str());
@@ -930,16 +949,18 @@ pub async fn update_service(
     if let Some(docs_metadata) = http_docs_refresh {
         let refresh_openapi_url = should_refresh_openapi_url(&service, &body);
         let refresh_asyncapi_url = should_refresh_asyncapi_url(&service, &body);
-        let next_openapi_spec_url = if refresh_openapi_url {
-            docs_metadata.openapi_spec_url.clone()
-        } else {
-            service.openapi_spec_url.clone()
-        };
-        let next_asyncapi_spec_url = if refresh_asyncapi_url {
-            docs_metadata.asyncapi_spec_url.clone()
-        } else {
-            service.asyncapi_spec_url.clone()
-        };
+        let next_openapi_spec_url = resolve_spec_url_update(
+            explicit_openapi_spec_url,
+            service.openapi_spec_url.as_ref(),
+            docs_metadata.openapi_spec_url.as_ref(),
+            refresh_openapi_url,
+        );
+        let next_asyncapi_spec_url = resolve_spec_url_update(
+            explicit_asyncapi_spec_url,
+            service.asyncapi_spec_url.as_ref(),
+            docs_metadata.asyncapi_spec_url.as_ref(),
+            refresh_asyncapi_url,
+        );
         set_doc.insert(
             "openapi_spec_url",
             next_openapi_spec_url
@@ -1272,4 +1293,47 @@ pub async fn regenerate_oidc_secret(
         client_secret: new_secret,
         message: "Previous secret is now invalidated. Store this secret securely.".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_spec_url_update;
+
+    #[test]
+    fn resolve_spec_url_update_prefers_explicit_url() {
+        let current = "https://current.example/openapi.json".to_string();
+        let discovered = "https://discovered.example/openapi.json".to_string();
+
+        assert_eq!(
+            resolve_spec_url_update(
+                Some(Some("https://admin.example/openapi.json".to_string())),
+                Some(&current),
+                Some(&discovered),
+                true,
+            ),
+            Some("https://admin.example/openapi.json".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_spec_url_update_respects_explicit_clear() {
+        let current = "https://current.example/openapi.json".to_string();
+        let discovered = "https://discovered.example/openapi.json".to_string();
+
+        assert_eq!(
+            resolve_spec_url_update(Some(None), Some(&current), Some(&discovered), true),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_spec_url_update_uses_discovered_url_for_refreshes() {
+        let current = "https://current.example/openapi.json".to_string();
+        let discovered = "https://discovered.example/openapi.json".to_string();
+
+        assert_eq!(
+            resolve_spec_url_update(None, Some(&current), Some(&discovered), true),
+            Some("https://discovered.example/openapi.json".to_string())
+        );
+    }
 }

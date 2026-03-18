@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::errors::{AppError, AppResult};
 
+const STREAM_BUFFER_CAPACITY: usize = 256;
 const SSH_TUNNEL_BUFFER_CAPACITY: usize = 256;
 
 /// Request sent to a node via WebSocket.
@@ -63,7 +64,7 @@ pub enum ProxyResponseType {
     /// Standard request/response (v1 behavior)
     Complete(NodeProxyResponse),
     /// Streaming response: chunks arrive through the channel
-    Streaming(mpsc::UnboundedReceiver<StreamChunk>),
+    Streaming(mpsc::Receiver<StreamChunk>),
 }
 
 /// A chunk in a node-backed SSH tunnel.
@@ -84,7 +85,7 @@ pub(crate) enum PendingRequest {
     /// or a live streaming receiver.
     Awaiting(oneshot::Sender<NodeProxyOutcome>),
     /// Streaming response: sends chunks through an mpsc channel
-    Streaming(mpsc::UnboundedSender<StreamChunk>),
+    Streaming(mpsc::Sender<StreamChunk>),
 }
 
 pub(crate) enum PendingSshTunnel {
@@ -283,6 +284,28 @@ pub fn compute_hmac_signature(
 }
 
 impl NodeWsManager {
+    fn handle_stream_send_result(
+        result: Result<(), mpsc::error::TrySendError<StreamChunk>>,
+        node_id: &str,
+        request_id: &str,
+        chunk_kind: &'static str,
+    ) -> bool {
+        match result {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    node_id = %node_id,
+                    request_id = %request_id,
+                    chunk_kind,
+                    capacity = STREAM_BUFFER_CAPACITY,
+                    "Dropping node proxy stream due to full receive buffer"
+                );
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    }
+
     pub fn new(proxy_timeout_secs: u64, max_connections: usize) -> Self {
         Self {
             connections: DashMap::new(),
@@ -649,17 +672,30 @@ impl NodeWsManager {
                 PendingRequest::Streaming(tx) => {
                     // Unexpected: got a full response for a streaming request.
                     // Deliver as start + data + end.
-                    let headers = response
-                        .headers
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    let _ = tx.send(StreamChunk::Start {
-                        status: response.status,
+                    let NodeProxyResponse {
+                        request_id,
+                        status,
                         headers,
-                    });
-                    let _ = tx.send(StreamChunk::Data(response.body));
-                    let _ = tx.send(StreamChunk::End);
+                        body,
+                    } = response;
+                    if Self::handle_stream_send_result(
+                        tx.try_send(StreamChunk::Start { status, headers }),
+                        node_id,
+                        &request_id,
+                        "start",
+                    ) && Self::handle_stream_send_result(
+                        tx.try_send(StreamChunk::Data(body)),
+                        node_id,
+                        &request_id,
+                        "data",
+                    ) {
+                        let _ = Self::handle_stream_send_result(
+                            tx.try_send(StreamChunk::End),
+                            node_id,
+                            &request_id,
+                            "end",
+                        );
+                    }
                 }
             }
         }
@@ -694,7 +730,12 @@ impl NodeWsManager {
                     let _ = sender.send(outcome);
                 }
                 PendingRequest::Streaming(tx) => {
-                    let _ = tx.send(StreamChunk::Error(error.to_string()));
+                    let _ = Self::handle_stream_send_result(
+                        tx.try_send(StreamChunk::Error(error.to_string())),
+                        node_id,
+                        request_id,
+                        "error",
+                    );
                 }
             }
         }
@@ -719,8 +760,15 @@ impl NodeWsManager {
 
         match old_pending {
             PendingRequest::Awaiting(response_tx) => {
-                let (stream_tx, stream_rx) = mpsc::unbounded_channel();
-                let _ = stream_tx.send(StreamChunk::Start { status, headers });
+                let (stream_tx, stream_rx) = mpsc::channel(STREAM_BUFFER_CAPACITY);
+                if !Self::handle_stream_send_result(
+                    stream_tx.try_send(StreamChunk::Start { status, headers }),
+                    node_id,
+                    request_id,
+                    "start",
+                ) {
+                    return false;
+                }
                 if response_tx
                     .send(NodeProxyOutcome::Response(ProxyResponseType::Streaming(
                         stream_rx,
@@ -736,21 +784,50 @@ impl NodeWsManager {
             }
             PendingRequest::Streaming(tx) => {
                 // Already streaming (duplicate start?). Send the start chunk and re-insert.
-                let _ = tx.send(StreamChunk::Start { status, headers });
-                conn.pending
-                    .insert(request_id.to_string(), PendingRequest::Streaming(tx));
-                true
+                if Self::handle_stream_send_result(
+                    tx.try_send(StreamChunk::Start { status, headers }),
+                    node_id,
+                    request_id,
+                    "start",
+                ) {
+                    conn.pending
+                        .insert(request_id.to_string(), PendingRequest::Streaming(tx));
+                    true
+                } else {
+                    false
+                }
             }
         }
     }
 
     /// Deliver a streaming chunk to an active stream.
     pub fn deliver_stream_chunk(&self, node_id: &str, request_id: &str, data: Vec<u8>) {
-        if let Some(conn) = self.connections.get(node_id)
-            && let Some(pending) = conn.pending.get(request_id)
-            && let PendingRequest::Streaming(tx) = pending.value()
-        {
-            let _ = tx.send(StreamChunk::Data(data));
+        if let Some(conn) = self.connections.get(node_id) {
+            let send_result = {
+                let Some(pending) = conn.pending.get(request_id) else {
+                    return;
+                };
+                let PendingRequest::Streaming(tx) = pending.value() else {
+                    return;
+                };
+                tx.try_send(StreamChunk::Data(data))
+            };
+
+            match send_result {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        request_id = %request_id,
+                        capacity = STREAM_BUFFER_CAPACITY,
+                        "Dropping node proxy stream due to full receive buffer"
+                    );
+                    conn.pending.remove(request_id);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    conn.pending.remove(request_id);
+                }
+            }
         }
     }
 
@@ -760,7 +837,12 @@ impl NodeWsManager {
             && let Some((_, pending)) = conn.pending.remove(request_id)
             && let PendingRequest::Streaming(tx) = pending
         {
-            let _ = tx.send(StreamChunk::End);
+            let _ = Self::handle_stream_send_result(
+                tx.try_send(StreamChunk::End),
+                node_id,
+                request_id,
+                "end",
+            );
         }
     }
 
@@ -991,6 +1073,75 @@ mod tests {
                     other => panic!("expected stream data, got {other:?}"),
                 }
                 assert!(matches!(stream.recv().await, Some(StreamChunk::End)));
+            }
+            ProxyResponseType::Complete(_) => panic!("expected streaming response"),
+        }
+
+        responder.await.expect("responder task");
+    }
+
+    #[tokio::test]
+    async fn send_proxy_request_drops_stream_when_buffer_fills() {
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+
+        let mgr_clone = mgr.clone();
+        let responder = tokio::spawn(async move {
+            let Some(NodeOutboundMessage::Text(msg)) = rx.recv().await else {
+                panic!("expected outbound proxy request");
+            };
+            let parsed: Value = serde_json::from_str(&msg).expect("valid json");
+            let request_id = parsed["request_id"].as_str().expect("request id");
+
+            assert!(mgr_clone.deliver_stream_start(
+                "node-1",
+                request_id,
+                200,
+                vec![("content-type".to_string(), "text/event-stream".to_string())],
+            ));
+
+            for index in 0..STREAM_BUFFER_CAPACITY {
+                mgr_clone.deliver_stream_chunk("node-1", request_id, vec![index as u8]);
+            }
+            mgr_clone.deliver_stream_end("node-1", request_id);
+        });
+
+        let response = mgr
+            .send_proxy_request(
+                "node-1",
+                NodeProxyRequest {
+                    request_id: "req-buffer".to_string(),
+                    service_id: "svc-1".to_string(),
+                    service_slug: "demo".to_string(),
+                    base_url: "https://api.example.com".to_string(),
+                    method: "GET".to_string(),
+                    path: "/stream".to_string(),
+                    query: None,
+                    headers: vec![],
+                    body: None,
+                },
+                None,
+            )
+            .await
+            .expect("streaming response");
+
+        match response {
+            ProxyResponseType::Streaming(mut stream) => {
+                assert!(matches!(
+                    stream.recv().await,
+                    Some(StreamChunk::Start { status: 200, .. })
+                ));
+
+                let mut data_chunks = 0usize;
+                while let Some(chunk) = stream.recv().await {
+                    match chunk {
+                        StreamChunk::Data(_) => data_chunks += 1,
+                        other => panic!("expected data chunk after start, got {other:?}"),
+                    }
+                }
+
+                assert_eq!(data_chunks, STREAM_BUFFER_CAPACITY - 1);
             }
             ProxyResponseType::Complete(_) => panic!("expected streaming response"),
         }

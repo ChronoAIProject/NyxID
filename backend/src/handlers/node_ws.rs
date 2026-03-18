@@ -381,12 +381,18 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                 }
             }
             NodeMessage::ProxyResponse(resp) => {
-                let body = resp.body.as_deref().map_or_else(Vec::new, |b| {
-                    use base64::Engine;
-                    base64::engine::general_purpose::STANDARD
-                        .decode(b)
-                        .unwrap_or_else(|_| b.as_bytes().to_vec())
-                });
+                let Some(body) =
+                    decode_base64_payload(resp.body.as_deref(), "proxy_response", &resp.request_id)
+                else {
+                    ws_manager.deliver_proxy_error(
+                        &node_id_reader,
+                        &resp.request_id,
+                        "invalid_base64_payload",
+                        502,
+                        false,
+                    );
+                    continue;
+                };
 
                 let headers: Vec<(String, String)> = resp
                     .headers
@@ -589,5 +595,28 @@ pub async fn node_ws_manager_heartbeat_sweep(
                 tracing::warn!(node_id = %node_id, error = %e, "Failed to set node offline after ping failure");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_base64_payload;
+    use base64::Engine;
+
+    #[test]
+    fn decode_base64_payload_decodes_valid_body() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        assert_eq!(
+            decode_base64_payload(Some(&encoded), "proxy_response", "req-1"),
+            Some(b"hello".to_vec())
+        );
+    }
+
+    #[test]
+    fn decode_base64_payload_rejects_invalid_body() {
+        assert_eq!(
+            decode_base64_payload(Some("%%%not-base64%%%"), "proxy_response", "req-1"),
+            None
+        );
     }
 }
