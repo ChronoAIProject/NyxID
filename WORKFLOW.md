@@ -9,6 +9,7 @@ tracker:
   active_states:
     - Todo
     - In Progress
+    - Code Review
     - Human Review
     - Rework
   terminal_states:
@@ -44,6 +45,9 @@ agent:
   max_turns: 25
   max_retry_backoff_ms: 300000
   auto_merge: false
+  by_state:
+    code-review: claude               # Claude reviews after Codex implements.
+    rework: codex                     # Codex fixes after review feedback.
   require_label: symphony               # Only dispatch issues with this label.
 
 agents:
@@ -57,13 +61,13 @@ agents:
     turn_timeout_ms: 3600000
     read_timeout_ms: 5000
     stall_timeout_ms: 600000
-  # claude:                             # Uncomment to enable. Add `agent:claude` label to issues.
-  #   agent_type: claude-cli            # Uses official Claude Code CLI directly.
-  #   command: claude                   # No third-party wrapper needed.
-  #   model: claude-sonnet-4-6
-  #   max_turns: 20
-  #   network_access: true
-  #   turn_timeout_ms: 7200000
+  claude:
+    agent_type: claude-cli            # Uses official Claude Code CLI directly.
+    command: claude                   # No third-party wrapper needed.
+    model: claude-sonnet-4-6
+    max_turns: 25
+    network_access: true
+    turn_timeout_ms: 7200000
 
 server:
   port: 8080
