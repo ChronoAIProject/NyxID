@@ -327,6 +327,21 @@ async fn handle_ssh_socket(
         .await
         .is_err()
     {
+        audit_service::log_async(
+            state.db.clone(),
+            Some(user_id.clone()),
+            "ssh_tunnel_connect_failed".to_string(),
+            Some(serde_json::json!({
+                "service_id": service_id,
+                "session_id": session_id,
+                "routed_via": "ssh",
+                "target_host": ssh_service.host,
+                "target_port": ssh_service.port,
+                "error": "banner_send_failed",
+            })),
+            client_meta.ip_address.clone(),
+            client_meta.user_agent.clone(),
+        );
         return;
     }
     to_client_bytes += initial_downstream_bytes.len() as u64;
@@ -542,6 +557,22 @@ async fn handle_node_ssh_socket(
         let _ = state
             .node_ws_manager
             .close_ssh_tunnel(&node_id, &session_id);
+        audit_service::log_async(
+            state.db.clone(),
+            Some(user_id.clone()),
+            "ssh_tunnel_connect_failed".to_string(),
+            Some(serde_json::json!({
+                "service_id": service_id,
+                "session_id": session_id,
+                "routed_via": "node",
+                "node_id": node_id,
+                "target_host": ssh_service.host,
+                "target_port": ssh_service.port,
+                "error": "banner_send_failed",
+            })),
+            client_meta.ip_address.clone(),
+            client_meta.user_agent.clone(),
+        );
         return;
     }
     to_client_bytes += initial_downstream_bytes.len() as u64;

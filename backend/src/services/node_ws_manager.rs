@@ -898,6 +898,9 @@ impl NodeWsManager {
                         session_id: session_id.to_string(),
                     });
                     if let Ok(close_msg) = close_msg {
+                        // TODO: This close signal is best-effort because the node write queue is
+                        // also bounded. If try_send fails here, the node-side tunnel relies on
+                        // its I/O timeout to clean up.
                         let _ = conn.tx.try_send(NodeOutboundMessage::Text(close_msg));
                     }
                     conn.ssh_tunnels.remove(session_id);
