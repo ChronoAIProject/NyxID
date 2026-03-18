@@ -1,5 +1,5 @@
 use axum::{extract::DefaultBodyLimit, extract::Extension, middleware as axum_mw};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
@@ -16,6 +16,7 @@ mod models;
 mod mw;
 mod routes;
 mod services;
+mod ssh_cli;
 
 use std::sync::Arc;
 
@@ -64,6 +65,14 @@ struct Cli {
     /// Promote an existing user to admin by email address, then exit.
     #[arg(long = "promote-admin", value_name = "EMAIL")]
     promote_admin: Option<String>,
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// SSH client helper commands for certificate issuance and ProxyCommand integration.
+    Ssh(ssh_cli::SshCli),
 }
 
 #[tokio::main]
@@ -81,6 +90,14 @@ async fn main() {
         )
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
+
+    if let Some(Commands::Ssh(ssh_cli)) = cli.command {
+        if let Err(error) = ssh_cli::run(ssh_cli).await {
+            eprintln!("SSH helper failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Load configuration
     let mut config = AppConfig::from_env();
