@@ -159,3 +159,8 @@ export const AdminNodesPage = lazy(() =>
     default: m.AdminNodesPage,
   })),
 );
+export const SshTerminalPage = lazy(() =>
+  import("@/pages/ssh-terminal").then((m) => ({
+    default: m.SshTerminalPage,
+  })),
+);

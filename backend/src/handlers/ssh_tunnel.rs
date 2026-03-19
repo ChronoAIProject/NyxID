@@ -747,7 +747,7 @@ async fn handle_node_ssh_socket(
     );
 }
 
-async fn authorize_ssh_access(
+pub(crate) async fn authorize_ssh_access(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,

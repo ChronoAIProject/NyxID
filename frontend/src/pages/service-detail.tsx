@@ -21,7 +21,7 @@ import { useMyProviderTokens } from "@/hooks/use-providers";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
-import { Pencil, Trash2, AlertCircle } from "lucide-react";
+import { Pencil, Trash2, AlertCircle, Terminal } from "lucide-react";
 import { toast } from "sonner";
 
 const PROPAGATION_MODE_LABELS: Readonly<Record<string, string>> = {
@@ -91,6 +91,22 @@ export function ServiceDetailPage() {
         description={service.description ?? undefined}
         actions={
           <>
+            {isSshService && service.ssh_config?.certificate_auth_enabled && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  void navigate({
+                    to: "/ssh/$serviceId/terminal",
+                    params: { serviceId },
+                    search: { principal: service.ssh_config?.allowed_principals[0] },
+                  })
+                }
+              >
+                <Terminal className="mr-1 h-3 w-3" />
+                Terminal
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"

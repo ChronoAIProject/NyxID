@@ -538,6 +538,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/ssh/{service_id}",
             get(handlers::ssh_tunnel::ssh_tunnel_ws),
         )
+        .route(
+            "/ssh/{service_id}/terminal",
+            get(handlers::ssh_web_terminal::ssh_web_terminal),
+        )
         .nest("/sessions", session_routes)
         .nest("/mcp", mcp_routes)
         .nest("/developer", developer_routes)
