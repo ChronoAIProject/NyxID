@@ -302,7 +302,7 @@ async fn handle_web_terminal(
     }
 
     // ----- Open channel, PTY, shell -----
-    let mut channel = match ssh_handle.channel_open_session().await {
+    let channel = match ssh_handle.channel_open_session().await {
         Ok(ch) => ch,
         Err(error) => {
             tracing::warn!(service_id = %service_id, error = %error, "Web terminal: channel open failed");
@@ -312,7 +312,7 @@ async fn handle_web_terminal(
     };
 
     if let Err(error) = channel
-        .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
+        .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
         .await
     {
         tracing::warn!(service_id = %service_id, error = %error, "Web terminal: PTY request failed");
@@ -320,7 +320,7 @@ async fn handle_web_terminal(
         return;
     }
 
-    if let Err(error) = channel.request_shell(true).await {
+    if let Err(error) = channel.request_shell(false).await {
         tracing::warn!(service_id = %service_id, error = %error, "Web terminal: shell request failed");
         send_error_and_close(&mut socket, "Failed to start shell").await;
         return;
@@ -352,11 +352,18 @@ async fn handle_web_terminal(
         user_agent.clone(),
     );
 
-    // ----- Bridge loop -----
+    // ----- Bridge loop using split() -----
+    // channel.wait() doesn't reliably pump interactive PTY data in russh 0.58.
+    // split() gives us a read half (with make_reader for AsyncRead) and a
+    // write half (with data() for writing and window_change() for resize).
+    let (mut read_half, write_half) = channel.split();
+    let mut ssh_reader = read_half.make_reader();
+
     let idle_timeout = Duration::from_secs(DEFAULT_WEB_TERMINAL_IDLE_TIMEOUT_SECS);
     let max_duration = Duration::from_secs(state.config.ssh_max_tunnel_duration_secs);
     let mut from_client_bytes: u64 = 0;
     let mut to_client_bytes: u64 = 0;
+    let mut ssh_buf = vec![0u8; 8192];
 
     let max_timer = tokio::time::sleep(max_duration);
     tokio::pin!(max_timer);
@@ -378,13 +385,17 @@ async fn handle_web_terminal(
                 match ws_msg {
                     Some(Ok(Message::Binary(data))) => {
                         from_client_bytes += data.len() as u64;
-                        if channel.data(&data[..]).await.is_err() {
+                        if write_half.data(&data[..]).await.is_err() {
                             break "ssh_write_failed";
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
-                        if let Ok(ClientControl::Resize { cols: c, rows: r }) = serde_json::from_str::<ClientControl>(&text) {
-                            let _ = channel.window_change(c.clamp(10, 500), r.clamp(2, 200), 0, 0).await;
+                        if let Ok(ClientControl::Resize { cols: c, rows: r }) =
+                            serde_json::from_str::<ClientControl>(&text)
+                        {
+                            let _ = write_half
+                                .window_change(c.clamp(10, 500), r.clamp(2, 200), 0, 0)
+                                .await;
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
@@ -397,32 +408,22 @@ async fn handle_web_terminal(
                     Some(Err(_)) => break "client_error",
                 }
             }
-            ssh_msg = channel.wait() => {
+            n = tokio::io::AsyncReadExt::read(&mut ssh_reader, &mut ssh_buf) => {
                 idle_timer.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
-                match ssh_msg {
-                    Some(russh::ChannelMsg::Data { ref data }) => {
-                        to_client_bytes += data.len() as u64;
-                        if socket.send(Message::Binary(data.to_vec().into())).await.is_err() {
+                match n {
+                    Ok(0) => break "ssh_eof",
+                    Ok(n) => {
+                        to_client_bytes += n as u64;
+                        if socket.send(Message::Binary(ssh_buf[..n].to_vec().into())).await.is_err() {
                             break "client_write_failed";
                         }
                     }
-                    Some(russh::ChannelMsg::ExtendedData { ref data, .. }) => {
-                        to_client_bytes += data.len() as u64;
-                        if socket.send(Message::Binary(data.to_vec().into())).await.is_err() {
-                            break "client_write_failed";
-                        }
-                    }
-                    Some(russh::ChannelMsg::ExitStatus { .. }) => break "shell_exited",
-                    Some(russh::ChannelMsg::Eof) => break "ssh_eof",
-                    Some(russh::ChannelMsg::Close) => break "ssh_closed",
-                    Some(_) => {}
-                    None => break "ssh_dropped",
+                    Err(_) => break "ssh_read_error",
                 }
             }
         }
     };
 
-    let _ = channel.eof().await;
     let _ = ssh_handle
         .disconnect(russh::Disconnect::ByApplication, "", "English")
         .await;
