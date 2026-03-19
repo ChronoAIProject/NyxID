@@ -20,7 +20,7 @@ pub async fn execute_proxy_request(
     signing_secret: Option<&str>,
     replay_guard: &tokio::sync::Mutex<ReplayGuard>,
     metrics: &NodeMetrics,
-    tx: &mpsc::UnboundedSender<String>,
+    tx: &mpsc::Sender<String>,
 ) {
     let request_id = request["request_id"].as_str().unwrap_or("");
     let service_slug = request["service_slug"].as_str().unwrap_or("");
@@ -34,23 +34,26 @@ pub async fn execute_proxy_request(
         if timestamp.is_some() || nonce.is_some() || signature.is_some() {
             let Some(signature) = signature else {
                 metrics.record_error();
-                let _ = tx.send(proxy_error_response(
-                    request_id,
-                    "Missing HMAC signature",
-                    403,
-                    false,
-                ));
+                let _ = send_ws_message(
+                    tx,
+                    proxy_error_response(request_id, "Missing HMAC signature", 403, false),
+                )
+                .await;
                 return;
             };
 
             if !signing::verify_request_signature(request, secret, signature) {
                 metrics.record_error();
-                let _ = tx.send(proxy_error_response(
-                    request_id,
-                    "HMAC signature verification failed",
-                    403,
-                    false,
-                ));
+                let _ = send_ws_message(
+                    tx,
+                    proxy_error_response(
+                        request_id,
+                        "HMAC signature verification failed",
+                        403,
+                        false,
+                    ),
+                )
+                .await;
                 return;
             }
 
@@ -60,12 +63,16 @@ pub async fn execute_proxy_request(
             let mut guard = replay_guard.lock().await;
             if !guard.check(timestamp, nonce) {
                 metrics.record_error();
-                let _ = tx.send(proxy_error_response(
-                    request_id,
-                    "Request rejected: replay or expired timestamp",
-                    403,
-                    false,
-                ));
+                let _ = send_ws_message(
+                    tx,
+                    proxy_error_response(
+                        request_id,
+                        "Request rejected: replay or expired timestamp",
+                        403,
+                        false,
+                    ),
+                )
+                .await;
                 return;
             }
         }
@@ -76,12 +83,16 @@ pub async fn execute_proxy_request(
         Some(c) => c,
         None => {
             metrics.record_error();
-            let _ = tx.send(proxy_error_response(
-                request_id,
-                &format!("No credentials configured for service '{service_slug}'"),
-                502,
-                true,
-            ));
+            let _ = send_ws_message(
+                tx,
+                proxy_error_response(
+                    request_id,
+                    &format!("No credentials configured for service '{service_slug}'"),
+                    502,
+                    true,
+                ),
+            )
+            .await;
             return;
         }
     };
@@ -94,12 +105,16 @@ pub async fn execute_proxy_request(
 
     if base_url.is_empty() {
         metrics.record_error();
-        let _ = tx.send(proxy_error_response(
-            request_id,
-            "Missing downstream base URL in proxy request",
-            502,
-            false,
-        ));
+        let _ = send_ws_message(
+            tx,
+            proxy_error_response(
+                request_id,
+                "Missing downstream base URL in proxy request",
+                502,
+                false,
+            ),
+        )
+        .await;
         return;
     }
 
@@ -165,7 +180,8 @@ pub async fn execute_proxy_request(
                     Ok(body) => {
                         let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body);
                         metrics.record_success();
-                        let _ = tx.send(
+                        let _ = send_ws_message(
+                            tx,
                             serde_json::json!({
                                 "type": "proxy_response",
                                 "request_id": request_id,
@@ -174,28 +190,37 @@ pub async fn execute_proxy_request(
                                 "body": body_b64,
                             })
                             .to_string(),
-                        );
+                        )
+                        .await;
                     }
                     Err(e) => {
                         metrics.record_error();
-                        let _ = tx.send(proxy_error_response(
-                            request_id,
-                            &format!("Failed to read response body: {e}"),
-                            502,
-                            false,
-                        ));
+                        let _ = send_ws_message(
+                            tx,
+                            proxy_error_response(
+                                request_id,
+                                &format!("Failed to read response body: {e}"),
+                                502,
+                                false,
+                            ),
+                        )
+                        .await;
                     }
                 }
             }
         }
         Err(e) => {
             metrics.record_error();
-            let _ = tx.send(proxy_error_response(
-                request_id,
-                &format!("Downstream request failed: {e}"),
-                502,
-                false,
-            ));
+            let _ = send_ws_message(
+                tx,
+                proxy_error_response(
+                    request_id,
+                    &format!("Downstream request failed: {e}"),
+                    502,
+                    false,
+                ),
+            )
+            .await;
         }
     }
 }
@@ -205,7 +230,7 @@ async fn stream_proxy_response(
     request_id: &str,
     status: u16,
     response: reqwest::Response,
-    tx: &mpsc::UnboundedSender<String>,
+    tx: &mpsc::Sender<String>,
     metrics: &NodeMetrics,
 ) {
     let headers = extract_response_headers(&response);
@@ -217,7 +242,7 @@ async fn stream_proxy_response(
         "status": status,
         "headers": headers,
     });
-    if tx.send(start_msg.to_string()).is_err() {
+    if !send_ws_message(tx, start_msg.to_string()).await {
         metrics.record_error();
         return;
     }
@@ -236,7 +261,7 @@ async fn stream_proxy_response(
                         "request_id": request_id,
                         "data": base64::engine::general_purpose::STANDARD.encode(sub_chunk),
                     });
-                    if tx.send(chunk_msg.to_string()).is_err() {
+                    if !send_ws_message(tx, chunk_msg.to_string()).await {
                         had_error = true;
                         break;
                     }
@@ -252,7 +277,7 @@ async fn stream_proxy_response(
                     "error": format!("Stream error: {e}"),
                     "status": 502,
                 });
-                let _ = tx.send(err_msg.to_string());
+                let _ = send_ws_message(tx, err_msg.to_string()).await;
                 metrics.record_error();
                 return;
             }
@@ -269,8 +294,12 @@ async fn stream_proxy_response(
         "type": "proxy_response_end",
         "request_id": request_id,
     });
-    let _ = tx.send(end_msg.to_string());
+    let _ = send_ws_message(tx, end_msg.to_string()).await;
     metrics.record_success();
+}
+
+async fn send_ws_message(tx: &mpsc::Sender<String>, message: String) -> bool {
+    tx.send(message).await.is_ok()
 }
 
 /// Extract response headers as a JSON object.

@@ -717,6 +717,8 @@ async fn execute_proxy(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/event-stream"));
+    // `streaming_supported` is discovery metadata only; runtime passthrough
+    // follows the upstream response on each request.
     let is_sse = upstream_is_sse;
 
     let mut response_builder = Response::builder().status(status);

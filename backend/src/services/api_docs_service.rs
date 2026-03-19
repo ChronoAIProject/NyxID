@@ -1,3 +1,8 @@
+use std::net::SocketAddr;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{AppError, AppResult};
@@ -12,6 +17,29 @@ const OPENAPI_PROBE_PATHS: &[&str] = &[
 
 const ASYNCAPI_PROBE_PATHS: &[&str] = &["/asyncapi.json", "/.well-known/asyncapi"];
 const SCALAR_SCRIPT_SRC: &str = "https://cdn.jsdelivr.net";
+const SPEC_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+const SPEC_CACHE_TTL: Duration = Duration::from_secs(60);
+
+static SPEC_CACHE: LazyLock<DashMap<String, CachedSpecEntry>> = LazyLock::new(DashMap::new);
+
+#[derive(Clone)]
+struct CachedSpecEntry {
+    spec: serde_json::Value,
+    expires_at: Instant,
+}
+
+impl CachedSpecEntry {
+    fn is_fresh(&self, now: Instant) -> bool {
+        self.expires_at > now
+    }
+}
+
+struct ValidatedSpecFetchTarget {
+    url: url::Url,
+    host: String,
+    resolved_addrs: Vec<SocketAddr>,
+    requires_dns_pinning: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceDocumentationMetadata {
@@ -578,11 +606,21 @@ fn is_probe_url(base_url: &str, spec_url: &str, candidate_paths: &[&str]) -> boo
 }
 
 async fn fetch_json_spec(client: &reqwest::Client, url: &str) -> AppResult<serde_json::Value> {
-    validate_spec_fetch_url(url).await?;
+    let target = validate_spec_fetch_target(url).await?;
+    let cache_key = target.url.to_string();
+    if let Some(spec) = get_cached_spec(&cache_key) {
+        return Ok(spec);
+    }
 
-    let response = client
-        .get(url)
-        .timeout(std::time::Duration::from_secs(5))
+    let request = if target.requires_dns_pinning {
+        build_pinned_spec_fetch_client(&target)?
+            .get(target.url.clone())
+            .timeout(SPEC_FETCH_TIMEOUT)
+    } else {
+        client.get(target.url.clone()).timeout(SPEC_FETCH_TIMEOUT)
+    };
+
+    let response = request
         .send()
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to fetch spec: {e}")))?;
@@ -599,8 +637,10 @@ async fn fetch_json_spec(client: &reqwest::Client, url: &str) -> AppResult<serde
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to read spec body: {e}")))?;
 
-    serde_json::from_str(&body)
-        .map_err(|e| AppError::BadRequest(format!("Spec was not valid JSON: {e}")))
+    let spec = serde_json::from_str(&body)
+        .map_err(|e| AppError::BadRequest(format!("Spec was not valid JSON: {e}")))?;
+    cache_spec(&cache_key, &spec);
+    Ok(spec)
 }
 
 fn detect_streaming_from_openapi(spec: &serde_json::Value) -> bool {
@@ -657,7 +697,7 @@ fn escape_html(value: &str) -> String {
     escaped
 }
 
-async fn validate_spec_fetch_url(url: &str) -> AppResult<()> {
+async fn validate_spec_fetch_target(url: &str) -> AppResult<ValidatedSpecFetchTarget> {
     let parsed = url::Url::parse(url)
         .map_err(|_| AppError::BadRequest("Spec URL is invalid".to_string()))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -669,7 +709,8 @@ async fn validate_spec_fetch_url(url: &str) -> AppResult<()> {
     let host = parsed
         .host_str()
         .ok_or_else(|| AppError::BadRequest("Spec URL must include a hostname".to_string()))?;
-    if is_blocked_fetch_hostname(host) {
+    let normalized_host = normalize_fetch_host(host);
+    if is_blocked_fetch_hostname(&normalized_host) {
         return Err(AppError::BadRequest(
             "Spec URL must not target a private or internal hostname".to_string(),
         ));
@@ -678,30 +719,47 @@ async fn validate_spec_fetch_url(url: &str) -> AppResult<()> {
     let port = parsed
         .port_or_known_default()
         .ok_or_else(|| AppError::BadRequest("Spec URL must include a valid port".to_string()))?;
-    let addresses = resolve_fetch_host_ips(host, port).await?;
-    if addresses.is_empty() {
+    let (resolved_addrs, requires_dns_pinning) =
+        resolve_fetch_host_socket_addrs(&normalized_host, port).await?;
+    if resolved_addrs.is_empty() {
         return Err(AppError::BadRequest(
             "Spec URL host did not resolve to any IP addresses".to_string(),
         ));
     }
-    if addresses.into_iter().any(is_private_or_internal_ip) {
+    if resolved_addrs
+        .iter()
+        .map(SocketAddr::ip)
+        .any(is_private_or_internal_ip)
+    {
         return Err(AppError::BadRequest(
             "Spec URL must not resolve to private or internal IP addresses".to_string(),
         ));
     }
 
-    Ok(())
+    let mut url = parsed;
+    url.set_host(Some(&normalized_host))
+        .map_err(|_| AppError::BadRequest("Spec URL hostname is invalid".to_string()))?;
+
+    Ok(ValidatedSpecFetchTarget {
+        url,
+        host: normalized_host,
+        resolved_addrs,
+        requires_dns_pinning,
+    })
 }
 
-async fn resolve_fetch_host_ips(host: &str, port: u16) -> AppResult<Vec<std::net::IpAddr>> {
+async fn resolve_fetch_host_socket_addrs(
+    host: &str,
+    port: u16,
+) -> AppResult<(Vec<SocketAddr>, bool)> {
     if let Ok(ip) = parse_fetch_host_ip(host) {
-        return Ok(vec![ip]);
+        return Ok((vec![SocketAddr::new(ip, port)], false));
     }
 
     let resolved = tokio::net::lookup_host((host, port))
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to resolve spec host: {e}")))?;
-    Ok(resolved.map(|addr| addr.ip()).collect())
+    Ok((resolved.collect(), true))
 }
 
 fn parse_fetch_host_ip(host: &str) -> Result<std::net::IpAddr, std::net::AddrParseError> {
@@ -721,6 +779,37 @@ fn normalize_fetch_host(host: &str) -> String {
         .trim_end_matches(']')
         .trim_end_matches('.')
         .to_ascii_lowercase()
+}
+
+fn get_cached_spec(url: &str) -> Option<serde_json::Value> {
+    let now = Instant::now();
+    let entry = SPEC_CACHE.get(url)?;
+    if entry.is_fresh(now) {
+        return Some(entry.spec.clone());
+    }
+
+    drop(entry);
+    SPEC_CACHE.remove(url);
+    None
+}
+
+fn cache_spec(url: &str, spec: &serde_json::Value) {
+    SPEC_CACHE.insert(
+        url.to_string(),
+        CachedSpecEntry {
+            spec: spec.clone(),
+            expires_at: Instant::now() + SPEC_CACHE_TTL,
+        },
+    );
+}
+
+fn build_pinned_spec_fetch_client(target: &ValidatedSpecFetchTarget) -> AppResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .resolve_to_addrs(&target.host, &target.resolved_addrs)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build pinned spec fetch client: {e}")))
 }
 
 fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
@@ -748,10 +837,11 @@ fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ServiceDocumentationMetadata, build_asyncapi_document, catalog_csp,
-        detect_streaming_from_openapi, render_scalar_html, scalar_docs_csp,
-        validate_spec_fetch_url,
+        CachedSpecEntry, ServiceDocumentationMetadata, build_asyncapi_document, cache_spec,
+        catalog_csp, detect_streaming_from_openapi, get_cached_spec, render_scalar_html,
+        scalar_docs_csp, validate_spec_fetch_target,
     };
+    use std::time::{Duration, Instant};
 
     #[test]
     fn detects_streaming_media_type_in_openapi() {
@@ -853,19 +943,43 @@ mod tests {
     #[tokio::test]
     async fn spec_fetch_validation_rejects_private_targets() {
         assert!(
-            validate_spec_fetch_url("http://127.0.0.1/openapi.json")
+            validate_spec_fetch_target("http://127.0.0.1/openapi.json")
                 .await
                 .is_err()
         );
         assert!(
-            validate_spec_fetch_url("https://[::1]/openapi.json")
+            validate_spec_fetch_target("https://[::1]/openapi.json")
                 .await
                 .is_err()
         );
         assert!(
-            validate_spec_fetch_url("http://metadata.google.internal/openapi.json")
+            validate_spec_fetch_target("http://metadata.google.internal/openapi.json")
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn cached_specs_are_returned_while_fresh() {
+        let url = "https://example.com/openapi.json";
+        let spec = serde_json::json!({ "openapi": "3.1.0" });
+        cache_spec(url, &spec);
+
+        assert_eq!(get_cached_spec(url), Some(spec));
+    }
+
+    #[test]
+    fn stale_cache_entries_are_evicted() {
+        let url = "https://example.com/stale-openapi.json";
+        super::SPEC_CACHE.insert(
+            url.to_string(),
+            CachedSpecEntry {
+                spec: serde_json::json!({ "openapi": "3.1.0" }),
+                expires_at: Instant::now() - Duration::from_secs(1),
+            },
+        );
+
+        assert!(get_cached_spec(url).is_none());
+        assert!(!super::SPEC_CACHE.contains_key(url));
     }
 }
