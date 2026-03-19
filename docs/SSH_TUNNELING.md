@@ -185,6 +185,8 @@ AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
 - `TrustedUserCAKeys` tells sshd to accept certificates signed by this CA
 - `AuthorizedPrincipalsFile` controls which principals can log in as which Unix users (`%u` expands to the target username)
 
+The sshd_config path is the same on Linux and macOS (`/etc/ssh/sshd_config`). On newer macOS versions, you may also check `/etc/ssh/sshd_config.d/` for drop-in config files.
+
 ### Step 3: Create authorized principals files
 
 For each Unix user that should be accessible, create a principals file listing which certificate principals can log in as that user:
@@ -202,8 +204,24 @@ This means:
 
 ### Step 4: Restart sshd
 
+**Linux:**
+
 ```bash
 sudo systemctl restart sshd
+```
+
+**macOS:**
+
+Ensure Remote Login is enabled in **System Settings > General > Sharing > Remote Login**, then restart sshd:
+
+```bash
+sudo launchctl kickstart -k system/com.openssh.sshd
+```
+
+If Remote Login is not enabled, toggle it on in System Settings or via:
+
+```bash
+sudo systemsetup -setremotelogin on
 ```
 
 ### Security model

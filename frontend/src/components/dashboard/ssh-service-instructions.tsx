@@ -40,12 +40,14 @@ export function SshServiceInstructions({
     "TrustedUserCAKeys /etc/ssh/nyxid_ca.pub",
     `AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u`,
   ].join("\n");
-  const principalsCommand = sshConfig.allowed_principals.length > 0
-    ? sshConfig.allowed_principals
-        .map((p) => `echo '${p}' | sudo tee -a /etc/ssh/auth_principals/${p}`)
-        .join(" && ")
-    : `sudo mkdir -p /etc/ssh/auth_principals && echo '${primaryPrincipal}' | sudo tee /etc/ssh/auth_principals/${primaryPrincipal}`;
-  const restartSshdCommand = "sudo systemctl restart sshd";
+  const principalsCommand = [
+    "sudo mkdir -p /etc/ssh/auth_principals",
+    ...(sshConfig.allowed_principals.length > 0
+      ? sshConfig.allowed_principals.map((p) => `echo '${p}' | sudo tee /etc/ssh/auth_principals/${p}`)
+      : [`echo '${primaryPrincipal}' | sudo tee /etc/ssh/auth_principals/${primaryPrincipal}`]),
+  ].join(" && ");
+  const restartSshdLinux = "sudo systemctl restart sshd";
+  const restartSshdMac = "sudo launchctl kickstart -k system/com.openssh.sshd";
 
   // Node-agent setup (for targets not directly reachable from NyxID server)
   const nodeRegisterCommand = `nyxid-node register --token <registration-token> --url ${nyxidBaseUrl.replace("http://", "ws://").replace("https://", "wss://")}/api/v1/nodes/ws`;
@@ -112,10 +114,23 @@ export function SshServiceInstructions({
             size="sm"
           />
           <CopyableField
-            label="4. Restart SSH daemon"
-            value={restartSshdCommand}
+            label="4. Restart SSH daemon (Linux)"
+            value={restartSshdLinux}
             size="sm"
           />
+          <CopyableField
+            label="4. Restart SSH daemon (macOS)"
+            value={restartSshdMac}
+            size="sm"
+          />
+          <p className="text-xs text-muted-foreground">
+            macOS: ensure Remote Login is enabled in System Settings &gt; General &gt; Sharing.
+            The sshd_config path on macOS is{" "}
+            <code className="rounded bg-muted px-1 text-[10px]">/etc/ssh/sshd_config</code>{" "}
+            (same as Linux). On older macOS versions, check{" "}
+            <code className="rounded bg-muted px-1 text-[10px]">/etc/ssh/sshd_config.d/</code>{" "}
+            for drop-in configs.
+          </p>
           <p className="text-xs text-muted-foreground">
             How it works: NyxID signs short-lived certificates with a specific principal
             (e.g., &quot;{primaryPrincipal}&quot;). The target machine checks that the
