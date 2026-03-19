@@ -399,13 +399,7 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
     // -- Request body schema --
     let body_mode = request_body_mode(endpoint);
     if let Some(body_schema) = &endpoint.request_body_schema {
-        let is_object = body_schema.get("type").and_then(|v| v.as_str()) == Some("object");
-        let has_props = body_schema
-            .get("properties")
-            .and_then(|v| v.as_object())
-            .is_some();
-
-        if matches!(body_mode, RequestBodyMode::Json) && is_object && has_props {
+        if json_body_is_flattened(body_mode, body_schema) {
             // Merge object properties directly into the tool's inputSchema
             if let Some(props) = body_schema.get("properties").and_then(|v| v.as_object()) {
                 for (key, value) in props {
@@ -760,7 +754,7 @@ pub fn build_proxy_args(
 
 fn build_request_body(
     endpoint: &McpToolEndpoint,
-    mut body_fields: serde_json::Map<String, serde_json::Value>,
+    body_fields: serde_json::Map<String, serde_json::Value>,
 ) -> AppResult<Option<bytes::Bytes>> {
     if body_fields.is_empty() {
         return Ok(None);
@@ -768,8 +762,8 @@ fn build_request_body(
 
     match request_body_mode(endpoint) {
         RequestBodyMode::Json => {
-            let body_value = if body_fields.len() == 1 && body_fields.contains_key("body") {
-                body_fields.remove("body").unwrap()
+            let body_value = if json_body_uses_wrapper(endpoint) {
+                extract_single_body_field(body_fields, endpoint, "a JSON value")?
             } else {
                 serde_json::Value::Object(body_fields)
             };
@@ -832,6 +826,25 @@ fn extract_single_body_field(
         request_content_type_or_default(endpoint),
         expected_shape
     )))
+}
+
+fn json_body_is_flattened(body_mode: RequestBodyMode, body_schema: &serde_json::Value) -> bool {
+    matches!(body_mode, RequestBodyMode::Json)
+        && body_schema.get("type").and_then(|v| v.as_str()) == Some("object")
+        && body_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .is_some()
+}
+
+fn json_body_uses_wrapper(endpoint: &McpToolEndpoint) -> bool {
+    let body_mode = request_body_mode(endpoint);
+
+    if let Some(body_schema) = endpoint.request_body_schema.as_ref() {
+        !json_body_is_flattened(body_mode, body_schema)
+    } else {
+        endpoint.request_content_type.is_some() && matches!(body_mode, RequestBodyMode::Json)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1544,6 +1557,66 @@ mod tests {
         .expect("binary body should decode");
 
         assert_eq!(body.unwrap().as_ref(), b"ustar");
+    }
+
+    #[test]
+    fn build_proxy_args_preserves_flattened_json_body_named_body_property() {
+        let endpoint = McpToolEndpoint {
+            name: "submit_payload".to_string(),
+            description: Some("Submit a JSON object with a body field".to_string()),
+            method: "POST".to_string(),
+            path: "/payloads".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "body": { "type": "string" }
+                },
+                "required": ["body"]
+            })),
+            request_content_type: Some("application/json".to_string()),
+        };
+
+        let (_, _, _, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "body": "hello"
+            }),
+        )
+        .expect("flattened JSON body should serialize as an object");
+
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(body.unwrap().as_ref()).unwrap(),
+            serde_json::json!({ "body": "hello" })
+        );
+    }
+
+    #[test]
+    fn build_proxy_args_rejects_extra_fields_for_wrapped_json_body() {
+        let endpoint = McpToolEndpoint {
+            name: "submit_message".to_string(),
+            description: Some("Submit a JSON string body".to_string()),
+            method: "POST".to_string(),
+            path: "/messages".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "string"
+            })),
+            request_content_type: Some("application/json".to_string()),
+        };
+
+        let error = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "body": "hello",
+                "extra": true
+            }),
+        )
+        .expect_err("wrapped JSON body should reject extra fields");
+
+        assert!(
+            matches!(error, AppError::BadRequest(message) if message.contains("must be provided as a JSON value in the `body` field"))
+        );
     }
 
     #[test]
