@@ -21,14 +21,16 @@ export function SshServiceInstructions({
   const certificateFile = `~/.ssh/nyxid/${serviceSlug}-cert.pub`;
   const caPublicKeyFile = `~/.ssh/nyxid/${serviceSlug}-ca.pub`;
   const sshTarget = `${primaryPrincipal}@${serviceSlug}`;
+  const keyPlaceholder = "<your-key>";
+  const keyHint = "~/.ssh/id_ed25519, ~/.ssh/id_rsa, etc.";
 
   const installCommand = "cargo install --path backend";
   const loginCommand = `nyxid login --base-url ${nyxidBaseUrl}`;
   const apiKeyCommand = 'export NYXID_ACCESS_TOKEN="nyx_..."';
 
   const transportCommand = `ssh -o ProxyCommand='nyxid ssh proxy --base-url ${nyxidBaseUrl} --service-id ${serviceId}' ${sshTarget}`;
-  const certificateCommand = `ssh -o ProxyCommand='nyxid ssh proxy --base-url ${nyxidBaseUrl} --service-id ${serviceId} --issue-certificate --public-key-file ~/.ssh/id_ed25519.pub --principal ${primaryPrincipal} --certificate-file ${certificateFile} --ca-public-key-file ${caPublicKeyFile}' -o CertificateFile=${certificateFile} -o IdentityFile=~/.ssh/id_ed25519 ${sshTarget}`;
-  const configCommand = `nyxid ssh config --host-alias ${serviceSlug} --base-url ${nyxidBaseUrl} --service-id ${serviceId} --principal ${primaryPrincipal} --identity-file ~/.ssh/id_ed25519 --certificate-file ${certificateFile} --ca-public-key-file ${caPublicKeyFile}`;
+  const certificateCommand = `ssh -o ProxyCommand='nyxid ssh proxy --base-url ${nyxidBaseUrl} --service-id ${serviceId} --issue-certificate --public-key-file ${keyPlaceholder}.pub --principal ${primaryPrincipal} --certificate-file ${certificateFile} --ca-public-key-file ${caPublicKeyFile}' -o CertificateFile=${certificateFile} -o IdentityFile=${keyPlaceholder} ${sshTarget}`;
+  const configCommand = `nyxid ssh config --host-alias ${serviceSlug} --base-url ${nyxidBaseUrl} --service-id ${serviceId} --principal ${primaryPrincipal} --identity-file ${keyPlaceholder} --certificate-file ${certificateFile} --ca-public-key-file ${caPublicKeyFile}`;
 
   // Target machine setup commands
   const caPublicKey = sshConfig.ca_public_key ?? "<CA public key from above>";
@@ -73,7 +75,13 @@ export function SshServiceInstructions({
           size="sm"
         />
         {sshConfig.certificate_auth_enabled && (
-          <CopyableField label="Optional: Generate SSH config stanza" value={configCommand} size="sm" />
+          <>
+            <p className="text-xs text-muted-foreground">
+              Replace <code className="rounded bg-muted px-1 text-[10px]">{keyPlaceholder}</code> with
+              your SSH private key path ({keyHint}).
+            </p>
+            <CopyableField label="Optional: Generate SSH config stanza" value={configCommand} size="sm" />
+          </>
         )}
       </div>
 
@@ -115,6 +123,8 @@ export function SshServiceInstructions({
             <code className="rounded bg-muted px-1 text-[10px]">/etc/ssh/auth_principals/{primaryPrincipal}</code>.
             This means even if someone has a valid NyxID certificate, they can only access
             accounts whose principals file includes their certificate&apos;s principal.
+            NyxID verifies the user&apos;s identity (via JWT or API key) before signing
+            any certificate, and only signs principals from the service&apos;s allowed list.
           </p>
         </div>
       )}
