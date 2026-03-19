@@ -230,7 +230,7 @@ fn run_config(args: ConfigArgs) -> Result<()> {
     }
 
     println!("Host {}", args.host_alias);
-    println!("  HostName ssh.invalid");
+    println!("  HostName {}", args.host_alias);
     println!("  User {}", args.principal);
     println!("  IdentityFile {}", identity_file);
     println!("  CertificateFile {}", args.certificate_file.display());

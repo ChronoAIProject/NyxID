@@ -51,6 +51,7 @@ import {
   NodesPage,
   NodeDetailPage,
   AdminNodesPage,
+  CliAuthPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
@@ -124,6 +125,12 @@ const privacyRoute = createRoute({
   path: "/privacy",
   getParentRoute: () => rootRoute,
   component: PrivacyPage,
+});
+
+const cliAuthRoute = createRoute({
+  path: "/cli-auth",
+  getParentRoute: () => rootRoute,
+  component: CliAuthPage,
 });
 
 const dashboardLayout = createRoute({
@@ -356,6 +363,7 @@ const routeTree = rootRoute.addChildren([
   oauthConsentRoute,
   oauthErrorRoute,
   privacyRoute,
+  cliAuthRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
     apiKeysRoute,
