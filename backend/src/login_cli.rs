@@ -41,8 +41,8 @@ pub async fn run(args: LoginArgs) -> Result<()> {
 async fn run_browser_login(base_url: &str) -> Result<()> {
     let base_url = base_url.trim_end_matches('/');
 
-    // Derive frontend URL from base URL (same origin by default)
-    let frontend_url = derive_frontend_url(base_url);
+    // Ask the backend for the correct frontend URL
+    let frontend_url = fetch_frontend_url(base_url).await?;
 
     // Bind to a random available port
     let listener =
@@ -162,17 +162,28 @@ fn callback_success_html() -> &'static str {
 </html>"#
 }
 
-fn derive_frontend_url(base_url: &str) -> String {
-    // If base URL points to backend port 3001, assume frontend is on 3000
-    if let Ok(url) = url::Url::parse(base_url)
-        && url.port() == Some(3001)
-        && let Ok(mut frontend) = url::Url::parse(base_url)
-    {
-        let _ = frontend.set_port(Some(3000));
-        return frontend.as_str().trim_end_matches('/').to_string();
+async fn fetch_frontend_url(base_url: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct PublicConfig {
+        frontend_url: String,
     }
-    // Otherwise assume frontend is at the same origin
-    base_url.to_string()
+
+    let config_url = format!("{base_url}/api/v1/public/config");
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("Failed to build HTTP client")?;
+
+    let config: PublicConfig = client
+        .get(&config_url)
+        .send()
+        .await
+        .context("Failed to reach NyxID server")?
+        .json()
+        .await
+        .context("Failed to parse server config")?;
+
+    Ok(config.frontend_url.trim_end_matches('/').to_string())
 }
 
 /// Email/password login fallback for headless environments.
@@ -275,9 +286,7 @@ fn token_file_path() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        callback_success_html, derive_frontend_url, parse_callback_request, token_file_path,
-    };
+    use super::{callback_success_html, parse_callback_request, token_file_path};
 
     #[test]
     fn token_path_is_under_home() {
@@ -307,22 +316,6 @@ mod tests {
     fn rejects_non_callback_path() {
         let request = "GET /other?access_token=tok_abc123&state=deadbeef HTTP/1.1\r\n";
         assert_eq!(parse_callback_request(request, "deadbeef"), None);
-    }
-
-    #[test]
-    fn derives_frontend_url_for_dev() {
-        assert_eq!(
-            derive_frontend_url("http://localhost:3001"),
-            "http://localhost:3000"
-        );
-    }
-
-    #[test]
-    fn derives_frontend_url_for_production() {
-        assert_eq!(
-            derive_frontend_url("https://auth.nyxid.dev"),
-            "https://auth.nyxid.dev"
-        );
     }
 
     #[test]
