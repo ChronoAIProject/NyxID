@@ -399,7 +399,7 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
     // -- Request body schema --
     let body_mode = request_body_mode(endpoint);
     if let Some(body_schema) = &endpoint.request_body_schema {
-        if json_body_is_flattened(body_mode, body_schema) {
+        if json_body_is_flattened(endpoint, body_mode, body_schema) {
             // Merge object properties directly into the tool's inputSchema
             if let Some(props) = body_schema.get("properties").and_then(|v| v.as_object()) {
                 for (key, value) in props {
@@ -828,20 +828,38 @@ fn extract_single_body_field(
     )))
 }
 
-fn json_body_is_flattened(body_mode: RequestBodyMode, body_schema: &serde_json::Value) -> bool {
-    matches!(body_mode, RequestBodyMode::Json)
-        && body_schema.get("type").and_then(|v| v.as_str()) == Some("object")
-        && body_schema
-            .get("properties")
-            .and_then(|v| v.as_object())
-            .is_some()
+fn json_body_is_flattened(
+    endpoint: &McpToolEndpoint,
+    body_mode: RequestBodyMode,
+    body_schema: &serde_json::Value,
+) -> bool {
+    if !matches!(body_mode, RequestBodyMode::Json)
+        || body_schema.get("type").and_then(|v| v.as_str()) != Some("object")
+    {
+        return false;
+    }
+
+    let Some(properties) = body_schema.get("properties").and_then(|v| v.as_object()) else {
+        return false;
+    };
+
+    let has_param_collision = endpoint
+        .parameters
+        .as_ref()
+        .and_then(|params| params.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|param| param.get("name").and_then(|v| v.as_str()))
+        .any(|name| properties.contains_key(name));
+
+    !has_param_collision
 }
 
 fn json_body_uses_wrapper(endpoint: &McpToolEndpoint) -> bool {
     let body_mode = request_body_mode(endpoint);
 
     if let Some(body_schema) = endpoint.request_body_schema.as_ref() {
-        !json_body_is_flattened(body_mode, body_schema)
+        !json_body_is_flattened(endpoint, body_mode, body_schema)
     } else {
         endpoint.request_content_type.is_some() && matches!(body_mode, RequestBodyMode::Json)
     }
@@ -1433,6 +1451,42 @@ mod tests {
     }
 
     #[test]
+    fn build_input_schema_wraps_json_body_when_properties_collide_with_params() {
+        let endpoint = McpToolEndpoint {
+            name: "update_user".to_string(),
+            description: Some("Update a user".to_string()),
+            method: "POST".to_string(),
+            path: "/users/{id}".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "id",
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "display_name": { "type": "string" }
+                },
+                "required": ["id", "display_name"]
+            })),
+            request_content_type: Some("application/json".to_string()),
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert_eq!(schema["properties"]["id"]["type"], "string");
+        assert_eq!(schema["properties"]["body"]["type"], "object");
+        assert_eq!(
+            schema["properties"]["body"]["properties"]["id"]["type"],
+            "string"
+        );
+        assert_eq!(schema["required"], serde_json::json!(["id", "body"]));
+    }
+
+    #[test]
     fn build_input_schema_defaults_binary_media_type_when_missing() {
         let endpoint = McpToolEndpoint {
             name: "upload_skill".to_string(),
@@ -1588,6 +1642,54 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(body.unwrap().as_ref()).unwrap(),
             serde_json::json!({ "body": "hello" })
+        );
+    }
+
+    #[test]
+    fn build_proxy_args_wraps_json_body_when_properties_collide_with_params() {
+        let endpoint = McpToolEndpoint {
+            name: "update_user".to_string(),
+            description: Some("Update a user".to_string()),
+            method: "POST".to_string(),
+            path: "/users/{id}".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "id",
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "display_name": { "type": "string" }
+                },
+                "required": ["id", "display_name"]
+            })),
+            request_content_type: Some("application/json".to_string()),
+        };
+
+        let (_, path, _, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "id": "path-user",
+                "body": {
+                    "id": "body-user",
+                    "display_name": "Nyx"
+                }
+            }),
+        )
+        .expect("wrapped JSON body should serialize with path param intact");
+
+        assert_eq!(path, "users/path-user");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(body.unwrap().as_ref()).unwrap(),
+            serde_json::json!({
+                "id": "body-user",
+                "display_name": "Nyx"
+            })
         );
     }
 
