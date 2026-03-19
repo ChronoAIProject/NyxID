@@ -512,6 +512,12 @@ fn schema_contains_binary_field(schema: Option<&serde_json::Value>) -> bool {
         return true;
     }
 
+    if let Some(additional_properties) = schema.get("additionalProperties")
+        && schema_contains_binary_field(Some(additional_properties))
+    {
+        return true;
+    }
+
     for key in ["allOf", "anyOf", "oneOf"] {
         if let Some(variants) = schema.get(key).and_then(|value| value.as_array())
             && variants
@@ -816,6 +822,36 @@ mod tests {
         assert_eq!(body.content_type.as_deref(), Some("multipart/form-data"));
         assert_eq!(
             body.schema.unwrap()["properties"]["file"]["format"],
+            "binary"
+        );
+    }
+
+    #[test]
+    fn extract_request_body_openapi3_prefers_multipart_binary_additional_properties_over_json() {
+        let op = serde_json::json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object"
+                        }
+                    },
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string",
+                                "format": "binary"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let body = extract_request_body_openapi3(&op);
+        assert_eq!(body.content_type.as_deref(), Some("multipart/form-data"));
+        assert_eq!(
+            body.schema.unwrap()["additionalProperties"]["format"],
             "binary"
         );
     }
