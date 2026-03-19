@@ -71,8 +71,18 @@ struct ProxyArgs {
     /// Issue or refresh an SSH certificate before opening the tunnel.
     #[arg(long, default_value_t = false)]
     issue_certificate: bool,
-    #[command(flatten)]
-    cert: Option<CertArgs>,
+    /// OpenSSH public key file (required with --issue-certificate).
+    #[arg(long)]
+    public_key_file: Option<PathBuf>,
+    /// SSH principal (required with --issue-certificate).
+    #[arg(long)]
+    principal: Option<String>,
+    /// Where to write the issued OpenSSH certificate (required with --issue-certificate).
+    #[arg(long)]
+    certificate_file: Option<PathBuf>,
+    /// Optional path to also write the SSH CA public key.
+    #[arg(long)]
+    ca_public_key_file: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -137,12 +147,22 @@ async fn run_issue_cert(args: IssueCertArgs) -> Result<()> {
 async fn run_proxy(args: ProxyArgs) -> Result<()> {
     let token = resolve_access_token(&args.auth)?;
     if args.issue_certificate {
-        let cert = args.cert.as_ref().context(
-            "--issue-certificate requires --public-key-file, --principal, and --certificate-file",
-        )?;
-        issue_certificate(&args.auth.base_url, &args.auth.service_id, &token, cert).await?;
-    } else if args.cert.is_some() {
-        bail!("certificate arguments require --issue-certificate when using `nyxid ssh proxy`");
+        let public_key_file = args
+            .public_key_file
+            .context("--issue-certificate requires --public-key-file")?;
+        let principal = args
+            .principal
+            .context("--issue-certificate requires --principal")?;
+        let certificate_file = args
+            .certificate_file
+            .context("--issue-certificate requires --certificate-file")?;
+        let cert = CertArgs {
+            public_key_file,
+            principal,
+            certificate_file,
+            ca_public_key_file: args.ca_public_key_file,
+        };
+        issue_certificate(&args.auth.base_url, &args.auth.service_id, &token, &cert).await?;
     }
 
     let ws_url = build_ws_url(&args.auth.base_url, &args.auth.service_id)?;
