@@ -124,12 +124,17 @@ export function SshServiceInstructions({
             size="sm"
           />
           <p className="text-xs text-muted-foreground">
-            macOS: ensure Remote Login is enabled in System Settings &gt; General &gt; Sharing.
-            The sshd_config path on macOS is{" "}
+            macOS: ensure Remote Login is enabled in System Settings &gt; General &gt;
+            Sharing (&nbsp;or{" "}
+            <code className="rounded bg-muted px-1 text-[10px]">sudo systemsetup -setremotelogin on</code>
+            ). The sshd_config path is{" "}
             <code className="rounded bg-muted px-1 text-[10px]">/etc/ssh/sshd_config</code>{" "}
-            (same as Linux). On older macOS versions, check{" "}
-            <code className="rounded bg-muted px-1 text-[10px]">/etc/ssh/sshd_config.d/</code>{" "}
-            for drop-in configs.
+            (same as Linux). On recent macOS, SIP may restrict direct edits to /etc/ssh/ --
+            use <code className="rounded bg-muted px-1 text-[10px]">sudo</code> to write
+            config files. Ensure CA key file permissions are{" "}
+            <code className="rounded bg-muted px-1 text-[10px]">644</code> and
+            auth_principals directories are{" "}
+            <code className="rounded bg-muted px-1 text-[10px]">755</code>.
           </p>
           <p className="text-xs text-muted-foreground">
             How it works: NyxID signs short-lived certificates with a specific principal

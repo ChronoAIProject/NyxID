@@ -224,6 +224,14 @@ If Remote Login is not enabled, toggle it on in System Settings or via:
 sudo systemsetup -setremotelogin on
 ```
 
+### macOS-specific notes
+
+- **SIP (System Integrity Protection)**: Recent macOS versions restrict direct edits to `/etc/ssh/`. Use `sudo` to write config files. If SIP blocks modifications, you may need to create a custom launchd plist pointing to a config copy.
+- **File permissions**: CA public key files need `644` (readable by all, writable by root). The `auth_principals/` directory needs `755`, and individual principals files need `644`. Loose permissions cause sshd to silently ignore keys.
+- **Keychain integration**: Use `ssh-add --apple-use-keychain ~/.ssh/id_ed25519` to persist your private key across reboots via macOS Keychain, avoiding repeated passphrase prompts.
+- **Debugging**: If certificate auth fails, check `/var/log/system.log` for sshd errors, or connect with `ssh -v` to see the certificate validation handshake.
+- **`AuthorizedPrincipalsFile`**: macOS OpenSSH supports this directive identically to Linux. Both `%u` (username) and absolute paths work.
+
 ### Security model
 
 The security is layered:
