@@ -415,16 +415,18 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
             }
         } else {
             // Non-object body: wrap as a single `body` property
+            let body_field_name = request_body_field_name(endpoint);
             let body_prop = build_body_property(endpoint, body_schema, body_mode);
-            properties.insert("body".to_string(), body_prop);
-            push_required(&mut required, "body");
+            properties.insert(body_field_name.clone(), body_prop);
+            push_required(&mut required, &body_field_name);
         }
     } else if endpoint.request_content_type.is_some() {
+        let body_field_name = request_body_field_name(endpoint);
         properties.insert(
-            "body".to_string(),
+            body_field_name.clone(),
             build_default_body_property(endpoint, body_mode),
         );
-        push_required(&mut required, "body");
+        push_required(&mut required, &body_field_name);
     }
 
     let mut schema = serde_json::json!({
@@ -558,6 +560,8 @@ fn push_required(required: &mut Vec<serde_json::Value>, name: &str) {
     }
 }
 
+const REQUEST_BODY_FIELD_CANDIDATES: &[&str] = &["body", "request_body", "requestBody", "payload"];
+
 const BLOCKED_MCP_HEADER_PARAMETER_NAMES: &[&str] = &[
     "host",
     "authorization",
@@ -592,6 +596,32 @@ fn supported_parameter_name_for_mcp(param: &serde_json::Value) -> Option<&str> {
     match param.get("in").and_then(|v| v.as_str()) {
         Some("header") if is_blocked_mcp_header_parameter(name) => None,
         _ => Some(name),
+    }
+}
+
+fn request_body_field_name(endpoint: &McpToolEndpoint) -> String {
+    let used_names: HashSet<&str> = endpoint
+        .parameters
+        .as_ref()
+        .and_then(|params| params.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(supported_parameter_name_for_mcp)
+        .collect();
+
+    for candidate in REQUEST_BODY_FIELD_CANDIDATES {
+        if !used_names.contains(candidate) {
+            return (*candidate).to_string();
+        }
+    }
+
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("body_{suffix}");
+        if !used_names.contains(candidate.as_str()) {
+            return candidate;
+        }
+        suffix += 1;
     }
 }
 
@@ -833,7 +863,7 @@ fn build_request_body(
     match request_body_mode(endpoint) {
         RequestBodyMode::Json => {
             let body_value = if json_body_uses_wrapper(endpoint) {
-                extract_single_body_field(body_fields, endpoint, "a JSON value")?
+                extract_body_field(body_fields, endpoint, "a JSON value")?
             } else {
                 serde_json::Value::Object(body_fields)
             };
@@ -843,11 +873,13 @@ fn build_request_body(
             Ok(Some(bytes::Bytes::from(bytes)))
         }
         RequestBodyMode::Binary => {
-            let body = extract_single_body_field(body_fields, endpoint, "a base64-encoded string")?;
+            let body = extract_body_field(body_fields, endpoint, "a base64-encoded string")?;
+            let body_field_name = request_body_field_name(endpoint);
             let encoded = body.as_str().ok_or_else(|| {
                 AppError::BadRequest(format!(
-                    "Request body for {} must be a base64-encoded string in the `body` field",
-                    request_content_type_or_default(endpoint)
+                    "Request body for {} must be a base64-encoded string in the `{}` field",
+                    request_content_type_or_default(endpoint),
+                    body_field_name
                 ))
             })?;
 
@@ -865,36 +897,44 @@ fn build_request_body(
             Ok(Some(bytes::Bytes::from(decoded)))
         }
         RequestBodyMode::Raw => {
-            let body = extract_single_body_field(body_fields, endpoint, "a raw string")?;
+            let body = extract_body_field(body_fields, endpoint, "a raw string")?;
+            let body_field_name = request_body_field_name(endpoint);
             let text = body.as_str().ok_or_else(|| {
                 AppError::BadRequest(format!(
-                    "Request body for {} must be a raw string in the `body` field",
-                    request_content_type_or_default(endpoint)
+                    "Request body for {} must be a raw string in the `{}` field",
+                    request_content_type_or_default(endpoint),
+                    body_field_name
                 ))
             })?;
 
             Ok(Some(bytes::Bytes::from(text.to_owned())))
         }
-        RequestBodyMode::Multipart => Err(AppError::BadRequest(format!(
-            "multipart/form-data request bodies are not yet supported by the NyxID MCP proxy for {}",
-            request_content_type_or_default(endpoint)
-        ))),
+        RequestBodyMode::Multipart => {
+            let body_field_name = request_body_field_name(endpoint);
+            Err(AppError::BadRequest(format!(
+                "multipart/form-data request bodies are not yet supported by the NyxID MCP proxy for {}. Use the `{}` field for the body payload when support is added.",
+                request_content_type_or_default(endpoint),
+                body_field_name
+            )))
+        }
     }
 }
 
-fn extract_single_body_field(
+fn extract_body_field(
     mut body_fields: serde_json::Map<String, serde_json::Value>,
     endpoint: &McpToolEndpoint,
     expected_shape: &str,
 ) -> AppResult<serde_json::Value> {
-    if body_fields.len() == 1 && body_fields.contains_key("body") {
-        return Ok(body_fields.remove("body").unwrap());
+    let body_field_name = request_body_field_name(endpoint);
+    if body_fields.len() == 1 && body_fields.contains_key(&body_field_name) {
+        return Ok(body_fields.remove(&body_field_name).unwrap());
     }
 
     Err(AppError::BadRequest(format!(
-        "Request body for {} must be provided as {} in the `body` field",
+        "Request body for {} must be provided as {} in the `{}` field",
         request_content_type_or_default(endpoint),
-        expected_shape
+        expected_shape,
+        body_field_name
     )))
 }
 
@@ -1607,6 +1647,38 @@ mod tests {
     }
 
     #[test]
+    fn build_input_schema_uses_alternate_body_field_when_body_param_exists() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_archive".to_string(),
+            description: Some("Upload an archive".to_string()),
+            method: "POST".to_string(),
+            path: "/archives".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "body",
+                    "in": "query",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: Some("application/zip".to_string()),
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert_eq!(schema["properties"]["body"]["type"], "string");
+        assert_eq!(schema["properties"]["request_body"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["request_body"]["contentEncoding"],
+            "base64"
+        );
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["body", "request_body"])
+        );
+    }
+
+    #[test]
     fn build_input_schema_wraps_json_body_when_properties_collide_with_params() {
         let endpoint = McpToolEndpoint {
             name: "update_user".to_string(),
@@ -1882,6 +1954,40 @@ mod tests {
     }
 
     #[test]
+    fn build_proxy_args_uses_alternate_body_field_when_body_param_exists() {
+        use base64::Engine as _;
+
+        let endpoint = McpToolEndpoint {
+            name: "upload_archive".to_string(),
+            description: Some("Upload an archive".to_string()),
+            method: "POST".to_string(),
+            path: "/archives".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "body",
+                    "in": "query",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: Some("application/zip".to_string()),
+        };
+
+        let (_, _, query, _, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "body": "metadata",
+                "request_body": base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04")
+            }),
+        )
+        .expect("alternate body field should be accepted");
+
+        assert_eq!(query.as_deref(), Some("body=metadata"));
+        assert_eq!(body.unwrap().as_ref(), b"PK\x03\x04");
+    }
+
+    #[test]
     fn build_proxy_args_wraps_json_body_when_properties_collide_with_params() {
         let endpoint = McpToolEndpoint {
             name: "update_user".to_string(),
@@ -2063,6 +2169,39 @@ mod tests {
             error
                 .to_string()
                 .contains("multipart/form-data request bodies are not yet supported")
+        );
+    }
+
+    #[test]
+    fn build_proxy_args_error_mentions_alternate_body_field_name() {
+        let endpoint = McpToolEndpoint {
+            name: "submit_text".to_string(),
+            description: Some("Submit text".to_string()),
+            method: "POST".to_string(),
+            path: "/texts".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "body",
+                    "in": "query",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: Some("text/plain".to_string()),
+        };
+
+        let error = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "body": "metadata",
+                "payload": "hello"
+            }),
+        )
+        .expect_err("missing alternate body field should be rejected");
+
+        assert!(
+            matches!(error, AppError::BadRequest(message) if message.contains("`request_body` field"))
         );
     }
 
