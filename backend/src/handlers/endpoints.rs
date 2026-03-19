@@ -128,6 +128,20 @@ fn validate_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_request_content_type(content_type: &str) -> AppResult<()> {
+    if content_type.trim().is_empty() {
+        return Err(AppError::ValidationError(
+            "request_content_type must not be empty".to_string(),
+        ));
+    }
+
+    reqwest::header::HeaderValue::from_str(content_type).map_err(|_| {
+        AppError::ValidationError("request_content_type must be a valid HTTP content type".into())
+    })?;
+
+    Ok(())
+}
+
 fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> EndpointResponse {
     let request_body_required = e.effective_request_body_required();
 
@@ -183,6 +197,9 @@ pub async fn create_endpoint(
     validate_endpoint_name(&body.name)?;
     validate_method(&body.method)?;
     validate_path(&body.path)?;
+    if let Some(content_type) = body.request_content_type.as_deref() {
+        validate_request_content_type(content_type)?;
+    }
 
     let input = EndpointInput {
         request_body_required: body.request_body_required.unwrap_or(
@@ -230,6 +247,9 @@ pub async fn update_endpoint(
     }
     if let Some(ref path) = body.path {
         validate_path(path)?;
+    }
+    if let Some(Some(content_type)) = body.request_content_type.as_ref() {
+        validate_request_content_type(content_type)?;
     }
 
     let updates = EndpointUpdate {
@@ -300,6 +320,12 @@ pub async fn discover_endpoints(
 
     let parsed = openapi_parser::parse_openapi_spec(&state.http_client, &api_spec_url).await?;
 
+    for endpoint in &parsed {
+        if let Some(content_type) = endpoint.request_content_type.as_deref() {
+            validate_request_content_type(content_type)?;
+        }
+    }
+
     let inputs: Vec<EndpointInput> = parsed
         .into_iter()
         .map(|p| EndpointInput {
@@ -338,8 +364,28 @@ pub async fn discover_endpoints(
 mod tests {
     use chrono::Utc;
 
-    use super::endpoint_to_response;
+    use super::{endpoint_to_response, validate_request_content_type};
+    use crate::errors::AppError;
     use crate::models::service_endpoint::ServiceEndpoint;
+
+    #[test]
+    fn validate_request_content_type_accepts_valid_values() {
+        validate_request_content_type("application/zip").expect("zip should be valid");
+        validate_request_content_type("application/json; charset=utf-8")
+            .expect("parameterized content type should be valid");
+        validate_request_content_type("*/*").expect("wildcard content type should be valid");
+    }
+
+    #[test]
+    fn validate_request_content_type_rejects_invalid_values() {
+        let empty = validate_request_content_type("   ")
+            .expect_err("empty content types should be rejected");
+        assert!(matches!(empty, AppError::ValidationError(message) if message.contains("must not be empty")));
+
+        let invalid = validate_request_content_type("application/json\nx-bad: nope")
+            .expect_err("invalid header values should be rejected");
+        assert!(matches!(invalid, AppError::ValidationError(message) if message.contains("valid HTTP content type")));
+    }
 
     #[test]
     fn endpoint_to_response_uses_effective_request_body_required() {
