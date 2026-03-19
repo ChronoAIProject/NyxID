@@ -929,6 +929,10 @@ pub fn build_proxy_args(
         return Err(error);
     }
 
+    if let Some(error) = unresolved_path_parameter_error(endpoint, &path) {
+        return Err(error);
+    }
+
     let method = match endpoint.method.to_uppercase().as_str() {
         "GET" => reqwest::Method::GET,
         "POST" => reqwest::Method::POST,
@@ -1088,6 +1092,38 @@ fn missing_required_parameter_error(
         endpoint.name,
         location,
         missing_params.join(", ")
+    )))
+}
+
+fn unresolved_path_parameter_error(endpoint: &McpToolEndpoint, path: &str) -> Option<AppError> {
+    let mut remaining = path;
+    let mut unresolved_params = Vec::new();
+
+    while let Some(start) = remaining.find('{') {
+        let after_start = &remaining[start + 1..];
+        let Some(end) = after_start.find('}') else {
+            break;
+        };
+
+        let name = after_start[..end].trim();
+        if !name.is_empty() && !name.contains('/') {
+            unresolved_params.push(name.to_string());
+        }
+
+        remaining = &after_start[end + 1..];
+    }
+
+    if unresolved_params.is_empty() {
+        return None;
+    }
+
+    unresolved_params.sort_unstable();
+    unresolved_params.dedup();
+
+    Some(AppError::BadRequest(format!(
+        "Endpoint {} has unresolved path parameter(s): {}",
+        endpoint.name,
+        unresolved_params.join(", ")
     )))
 }
 
@@ -2843,6 +2879,37 @@ mod tests {
             error,
             AppError::BadRequest(message)
                 if message.contains("missing required path parameter(s)")
+                    && message.contains("id")
+        ));
+    }
+
+    #[test]
+    fn build_proxy_args_rejects_unresolved_path_templates_without_required_metadata() {
+        let endpoint = McpToolEndpoint {
+            name: "get_user".to_string(),
+            description: Some("Get a user".to_string()),
+            method: "GET".to_string(),
+            path: "/users/{id}".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "id",
+                    "in": "path",
+                    "required": false,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: false,
+        };
+
+        let error = build_proxy_args(&endpoint, &serde_json::json!({}))
+            .expect_err("unresolved path templates should be rejected");
+
+        assert!(matches!(
+            error,
+            AppError::BadRequest(message)
+                if message.contains("unresolved path parameter(s)")
                     && message.contains("id")
         ));
     }
