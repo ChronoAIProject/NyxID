@@ -13,11 +13,13 @@ import {
   AUTH_TYPES,
   SERVICE_CATEGORIES,
   SERVICE_TYPES,
+  VISIBILITY_OPTIONS,
 } from "@/schemas/services";
 import {
   AUTH_TYPE_LABELS,
   SERVICE_CATEGORY_LABELS,
   SERVICE_TYPE_LABELS,
+  VISIBILITY_LABELS,
 } from "@/lib/constants";
 import { parseAllowedPrincipals } from "@/lib/ssh";
 import { ApiError } from "@/lib/api-client";
@@ -91,6 +93,7 @@ export function ServiceListPage() {
               name: data.name,
               description: data.description || undefined,
               service_type: "ssh",
+              visibility: data.visibility ?? "private",
               service_category: data.service_category ?? "internal",
               ssh_config: {
                 host: (data.host ?? "").trim(),
@@ -109,6 +112,7 @@ export function ServiceListPage() {
               name: data.name,
               description: data.description || undefined,
               service_type: "http",
+              visibility: data.visibility ?? "public",
               base_url: data.base_url ?? "",
               auth_type: data.auth_type ?? "api_key",
               service_category: data.service_category ?? "connection",
@@ -193,8 +197,10 @@ export function ServiceListPage() {
                           form.clearErrors();
                           if (value === "ssh") {
                             form.setValue("service_category", "internal");
+                            form.setValue("visibility", "private");
                           } else {
                             form.setValue("service_category", "connection");
+                            form.setValue("visibility", "public");
                           }
                         }}
                       >
@@ -443,6 +449,37 @@ export function ServiceListPage() {
                       )}
                   </>
                 )}
+
+                <FormField
+                  control={form.control}
+                  name="visibility"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Visibility</FormLabel>
+                      <Select
+                        value={field.value ?? (serviceType === "ssh" ? "private" : "public")}
+                        onValueChange={field.onChange}
+                      >
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select visibility" />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {VISIBILITY_OPTIONS.map((opt) => (
+                            <SelectItem key={opt} value={opt}>
+                              {VISIBILITY_LABELS[opt] ?? opt}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Private services are only visible to you.
+                      </p>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
 
                 <DialogFooter>
                   <Button

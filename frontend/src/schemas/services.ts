@@ -21,6 +21,10 @@ export const SERVICE_CATEGORIES = [
   "internal",
 ] as const;
 
+export const VISIBILITY_OPTIONS = ["public", "private"] as const;
+
+export type Visibility = (typeof VISIBILITY_OPTIONS)[number];
+
 export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
 
 const optionalString = z.string().optional().or(z.literal(""));
@@ -114,6 +118,7 @@ export const createServiceSchema = z
       .max(500, "Description must be at most 500 characters")
       .optional(),
     service_type: z.enum(SERVICE_TYPES),
+    visibility: z.enum(VISIBILITY_OPTIONS).optional(),
     base_url: optionalString,
     auth_type: z.enum(AUTH_TYPES).optional(),
     service_category: z.enum(SERVICE_CATEGORIES).optional(),
@@ -176,6 +181,7 @@ export type IdentityPropagationMode =
 export const updateServiceSchema = z
   .object({
     service_type: z.enum(SERVICE_TYPES),
+    visibility: z.enum(VISIBILITY_OPTIONS).optional(),
     name: z
       .string()
       .min(1, "Name is required")

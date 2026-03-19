@@ -129,14 +129,12 @@ export function ServiceDetailPage() {
           value={SERVICE_CATEGORY_LABELS[service.service_category] ?? service.service_category}
           badge
         />
-        {isSshService && (
-          <DetailRow
-            label="Visibility"
-            value="Private (only visible to you)"
-            badge
-            badgeVariant="outline"
-          />
-        )}
+        <DetailRow
+          label="Visibility"
+          value={service.visibility === "private" ? "Private (only visible to you)" : "Public"}
+          badge
+          badgeVariant={service.visibility === "private" ? "outline" : "secondary"}
+        />
         {!isSshService && (
           <>
             <DetailRow label="Base URL" value={service.base_url} copyable />

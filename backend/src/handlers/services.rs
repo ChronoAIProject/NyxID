@@ -41,6 +41,8 @@ pub struct CreateServiceRequest {
     pub credential: Option<String>,
     /// "provider", "connection", or "internal". Defaults to "connection".
     pub service_category: Option<String>,
+    /// "public" or "private". Defaults to "public" for HTTP, "private" for SSH.
+    pub visibility: Option<String>,
     pub ssh_config: Option<SshServiceConfigRequest>,
 }
 
@@ -59,6 +61,7 @@ impl std::fmt::Debug for CreateServiceRequest {
                 &self.credential.as_ref().map(|_| "[REDACTED]"),
             )
             .field("service_category", &self.service_category)
+            .field("visibility", &self.visibility)
             .field("ssh_config", &self.ssh_config)
             .finish()
     }
@@ -94,6 +97,7 @@ pub struct ServiceResponse {
     pub description: Option<String>,
     pub base_url: String,
     pub service_type: String,
+    pub visibility: String,
     pub auth_method: String,
     pub auth_type: Option<String>,
     pub auth_key_name: String,
@@ -129,6 +133,8 @@ pub struct UpdateServiceRequest {
     pub description: Option<String>,
     pub base_url: Option<String>,
     pub is_active: Option<bool>,
+    /// "public" or "private"
+    pub visibility: Option<String>,
     #[serde(alias = "api_spec_url")]
     pub openapi_spec_url: Option<String>,
     pub asyncapi_spec_url: Option<String>,
@@ -228,6 +234,22 @@ fn derive_ssh_service_category(service_category: Option<&str>) -> AppResult<Stri
     }
 }
 
+fn derive_visibility(service_type: &str, explicit: Option<&str>) -> String {
+    match explicit {
+        Some("private") => "private".to_string(),
+        Some("public") => "public".to_string(),
+        Some(_) => "public".to_string(),
+        // Default: SSH services are private, HTTP services are public
+        None => {
+            if service_type == "ssh" {
+                "private".to_string()
+            } else {
+                "public".to_string()
+            }
+        }
+    }
+}
+
 fn should_refresh_openapi_url(service: &DownstreamService, body: &UpdateServiceRequest) -> bool {
     body.openapi_spec_url.is_some()
         || service.openapi_spec_url.is_none()
@@ -293,17 +315,17 @@ pub async fn list_services(
         .await?
         .is_some_and(|u| u.is_admin);
 
-    // SSH services are private -- only visible to their creator (or admins).
-    // HTTP services remain visible to all authenticated users.
+    // Private services are only visible to their creator (or admins).
+    // Public services (and legacy services without a visibility field) remain visible to all.
     let mut filter = if is_admin {
         doc! { "is_active": true }
     } else {
         doc! {
             "is_active": true,
             "$or": [
-                { "service_type": { "$ne": "ssh" } },
-                { "service_type": { "$exists": false } },
-                { "service_type": "ssh", "created_by": &user_id_str },
+                { "visibility": { "$ne": "private" } },
+                { "visibility": { "$exists": false } },
+                { "visibility": "private", "created_by": &user_id_str },
             ],
         }
     };
@@ -579,7 +601,8 @@ pub async fn create_service(
         slug: slug.clone(),
         description: body.description.clone(),
         base_url,
-        service_type,
+        service_type: service_type.clone(),
+        visibility: derive_visibility(&service_type, body.visibility.as_deref()),
         auth_method: auth_method.clone(),
         auth_type,
         auth_key_name,
@@ -778,6 +801,19 @@ pub async fn update_service(
 
     if let Some(is_active) = body.is_active {
         set_doc.insert("is_active", is_active);
+    }
+
+    if let Some(ref visibility) = body.visibility {
+        match visibility.as_str() {
+            "public" | "private" => {
+                set_doc.insert("visibility", visibility.as_str());
+            }
+            other => {
+                return Err(AppError::ValidationError(format!(
+                    "Invalid visibility: {other}. Must be public or private"
+                )));
+            }
+        }
     }
 
     match service.service_type.as_str() {

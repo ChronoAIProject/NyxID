@@ -15,6 +15,7 @@ function makeService(
     description: "Example",
     base_url: "https://api.example.com",
     service_type: "http",
+    visibility: "public",
     auth_method: "header",
     auth_type: "api_key",
     auth_key_name: "X-API-Key",

@@ -6,11 +6,13 @@ import { useService, useUpdateService } from "@/hooks/use-services";
 import {
   updateServiceSchema,
   type UpdateServiceFormData,
+  VISIBILITY_OPTIONS,
 } from "@/schemas/services";
 import {
   getAuthTypeLabel,
   SERVICE_CATEGORY_LABELS,
   SERVICE_TYPE_LABELS,
+  VISIBILITY_LABELS,
 } from "@/lib/constants";
 import { parseAllowedPrincipals } from "@/lib/ssh";
 import { ApiError } from "@/lib/api-client";
@@ -28,6 +30,13 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -70,6 +79,7 @@ export function ServiceEditPage() {
     if (service) {
       form.reset({
         service_type: service.service_type === "ssh" ? "ssh" : "http",
+        visibility: service.visibility === "private" ? "private" : "public",
         name: service.name,
         description: service.description ?? "",
         base_url: service.service_type === "http" ? service.base_url : "",
@@ -109,6 +119,7 @@ export function ServiceEditPage() {
             ? {
                 name: data.name,
                 description: data.description || "",
+                visibility: data.visibility,
                 ssh_config: {
                   host: (data.host ?? "").trim(),
                   port: Number(data.port),
@@ -125,6 +136,7 @@ export function ServiceEditPage() {
             : {
                 name: data.name,
                 description: data.description || "",
+                visibility: data.visibility,
                 base_url: data.base_url || "",
                 openapi_spec_url: data.openapi_spec_url || "",
                 asyncapi_spec_url: data.asyncapi_spec_url || "",
@@ -243,6 +255,37 @@ export function ServiceEditPage() {
                       {...field}
                     />
                   </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="visibility"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Visibility</FormLabel>
+                  <Select
+                    value={field.value ?? "public"}
+                    onValueChange={field.onChange}
+                  >
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select visibility" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {VISIBILITY_OPTIONS.map((opt) => (
+                        <SelectItem key={opt} value={opt}>
+                          {VISIBILITY_LABELS[opt] ?? opt}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Private services are only visible to you.
+                  </p>
                   <FormMessage />
                 </FormItem>
               )}

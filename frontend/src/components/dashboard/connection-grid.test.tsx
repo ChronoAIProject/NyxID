@@ -42,6 +42,7 @@ const service: DownstreamService = {
   description: "External API",
   base_url: "https://api.openai.com/v1",
   service_type: "http",
+  visibility: "public",
   auth_method: "header",
   auth_type: "api_key",
   auth_key_name: "Authorization",

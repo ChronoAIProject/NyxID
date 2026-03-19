@@ -31,6 +31,11 @@ export const SERVICE_CATEGORY_LABELS: Readonly<Record<string, string>> = {
   internal: "Internal Service",
 };
 
+export const VISIBILITY_LABELS: Readonly<Record<string, string>> = {
+  public: "Public",
+  private: "Private",
+};
+
 export const OAUTH_SCOPE_META: Readonly<Record<string, OAuthScopeMeta>> = {
   openid: {
     title: "Authenticate your identity",

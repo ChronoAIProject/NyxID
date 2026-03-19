@@ -74,6 +74,7 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
         description: s.description,
         base_url: s.base_url,
         service_type: s.service_type,
+        visibility: s.visibility,
         auth_method: s.auth_method,
         auth_type: s.auth_type,
         auth_key_name: s.auth_key_name,

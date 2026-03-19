@@ -1190,6 +1190,7 @@ pub async fn seed_default_services(
             description: Some(description),
             base_url: seed.base_url.to_string(),
             service_type: "http".to_string(),
+            visibility: "public".to_string(),
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: empty_credential,

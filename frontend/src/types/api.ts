@@ -49,6 +49,7 @@ export interface DownstreamService {
   readonly description: string | null;
   readonly base_url: string;
   readonly service_type: string;
+  readonly visibility: string;
   readonly auth_method: string;
   readonly auth_type: string | null;
   readonly auth_key_name: string;
@@ -95,6 +96,7 @@ export type CreateServicePayload =
       readonly name: string;
       readonly description?: string;
       readonly service_type: "http";
+      readonly visibility?: string;
       readonly base_url: string;
       readonly auth_type: string;
       readonly service_category?: string;
@@ -103,6 +105,7 @@ export type CreateServicePayload =
       readonly name: string;
       readonly description?: string;
       readonly service_type: "ssh";
+      readonly visibility?: string;
       readonly service_category?: string;
       readonly ssh_config: SshServiceConfigInput;
     };
@@ -111,6 +114,7 @@ export type UpdateServicePayload =
   | {
       readonly name?: string;
       readonly description?: string;
+      readonly visibility?: string;
       readonly base_url?: string;
       readonly is_active?: boolean;
       readonly openapi_spec_url?: string;
@@ -126,6 +130,7 @@ export type UpdateServicePayload =
   | {
       readonly name?: string;
       readonly description?: string;
+      readonly visibility?: string;
       readonly is_active?: boolean;
       readonly ssh_config?: SshServiceConfigInput;
     };

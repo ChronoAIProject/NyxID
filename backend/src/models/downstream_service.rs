@@ -37,6 +37,9 @@ pub struct DownstreamService {
     /// "http" | "ssh"
     #[serde(default = "default_service_type")]
     pub service_type: String,
+    /// "public" | "private" -- controls who can see this service in listings
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
     /// How credentials are injected: "header", "query", "body"
     pub auth_method: String,
     /// Header name or query param name for the credential
@@ -132,6 +135,10 @@ fn default_service_type() -> String {
     "http".to_string()
 }
 
+fn default_visibility() -> String {
+    "public".to_string()
+}
+
 fn default_service_category() -> String {
     "connection".to_string()
 }
@@ -204,6 +211,7 @@ mod tests {
             description: Some("A test service".to_string()),
             base_url: "https://api.example.com".to_string(),
             service_type: "http".to_string(),
+            visibility: "public".to_string(),
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1, 2, 3],
@@ -247,6 +255,7 @@ mod tests {
             description: None,
             base_url: "https://example.com".to_string(),
             service_type: "http".to_string(),
+            visibility: "public".to_string(),
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1],
@@ -274,6 +283,7 @@ mod tests {
         let mut doc = bson::to_document(&svc).expect("serialize");
         // Remove the fields that have #[serde(default = ...)]
         doc.remove("service_type");
+        doc.remove("visibility");
         doc.remove("service_category");
         doc.remove("requires_user_credential");
         doc.remove("identity_propagation_mode");
@@ -281,6 +291,7 @@ mod tests {
         doc.remove("delegation_token_scope");
         let restored: DownstreamService = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.service_type, "http");
+        assert_eq!(restored.visibility, "public");
         assert_eq!(restored.service_category, "connection");
         assert_eq!(restored.identity_propagation_mode, "none");
         assert!(restored.requires_user_credential);
