@@ -23,6 +23,10 @@ polling:
 workspace:
   root: /tmp/symphony_workspaces
 
+git:
+  user_name: chronoai-bot
+  email: support@chrono-ai.fun
+
 hooks:
   after_create: |
     git clone git@github.com:ChronoAIProject/NyxID.git .
