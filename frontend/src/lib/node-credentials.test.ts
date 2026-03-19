@@ -80,4 +80,14 @@ describe("buildNodeCredentialCommand", () => {
       "nyxid-node credentials add --service fallback --header Authorization",
     );
   });
+
+  it("returns null for SSH services (no credential injection needed)", () => {
+    const service = makeService({
+      service_type: "ssh",
+      auth_method: "none",
+      auth_type: "ssh",
+    });
+
+    expect(buildNodeCredentialCommand("bastion", service)).toBeNull();
+  });
 });

@@ -7,10 +7,20 @@ function getServiceAuthKind(
   return service.auth_type ?? service.auth_method;
 }
 
+export function isSshService(
+  service: DownstreamService | undefined,
+): boolean {
+  return service?.service_type === "ssh";
+}
+
 export function buildNodeCredentialCommand(
   serviceSlug: string,
   service: DownstreamService | undefined,
-): string {
+): string | null {
+  // SSH services don't need credential injection on the node agent.
+  // The node agent opens a raw TCP connection to the SSH target.
+  if (isSshService(service)) return null;
+
   const base = `nyxid-node credentials add --service ${serviceSlug}`;
   if (!service) return `${base} --header Authorization`;
 
