@@ -1547,6 +1547,32 @@ mod tests {
     }
 
     #[test]
+    fn build_proxy_args_preserves_urlencoded_body_as_raw_text() {
+        let endpoint = McpToolEndpoint {
+            name: "submit_form".to_string(),
+            description: Some("Submit a urlencoded form".to_string()),
+            method: "POST".to_string(),
+            path: "/forms".to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: Some("application/x-www-form-urlencoded".to_string()),
+        };
+
+        let (_, _, _, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "body": "message=hello%20world&count=2"
+            }),
+        )
+        .expect("raw body should pass through");
+
+        assert_eq!(
+            std::str::from_utf8(body.unwrap().as_ref()).unwrap(),
+            "message=hello%20world&count=2"
+        );
+    }
+
+    #[test]
     fn build_proxy_args_rejects_multipart_body() {
         let endpoint = McpToolEndpoint {
             name: "upload_form".to_string(),

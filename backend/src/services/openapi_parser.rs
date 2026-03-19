@@ -17,6 +17,12 @@ struct ParsedRequestBody {
     schema: Option<serde_json::Value>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Swagger2FormBodyKind {
+    FileUpload,
+    FormFields,
+}
+
 /// Fetch and parse an OpenAPI 3.x or Swagger 2.0 spec from a URL.
 ///
 /// For each path+operation, extracts the operationId (or generates one from
@@ -188,14 +194,18 @@ fn extract_parameters(
     // Path-level parameters
     if let Some(path_params) = path_obj.get("parameters").and_then(|v| v.as_array()) {
         for p in path_params {
-            all_params.push(p.clone());
+            if should_include_parameter(p) {
+                all_params.push(p.clone());
+            }
         }
     }
 
     // Operation-level parameters (override path-level by name+in)
     if let Some(op_params) = operation.get("parameters").and_then(|v| v.as_array()) {
         for p in op_params {
-            all_params.push(p.clone());
+            if should_include_parameter(p) {
+                all_params.push(p.clone());
+            }
         }
     }
 
@@ -204,6 +214,13 @@ fn extract_parameters(
     } else {
         Some(serde_json::Value::Array(all_params))
     }
+}
+
+fn should_include_parameter(param: &serde_json::Value) -> bool {
+    !matches!(
+        param.get("in").and_then(|v| v.as_str()),
+        Some("body" | "formData")
+    )
 }
 
 /// Extract requestBody schema for OpenAPI 3.x.
@@ -242,6 +259,24 @@ fn extract_request_body_swagger2(
         })
     };
 
+    let find_form_data_kind = |params: &serde_json::Value| -> Option<Swagger2FormBodyKind> {
+        let mut saw_form_fields = false;
+
+        for param in params.as_array()? {
+            if param.get("in").and_then(|v| v.as_str()) != Some("formData") {
+                continue;
+            }
+
+            if param.get("type").and_then(|v| v.as_str()) == Some("file") {
+                return Some(Swagger2FormBodyKind::FileUpload);
+            }
+
+            saw_form_fields = true;
+        }
+
+        saw_form_fields.then_some(Swagger2FormBodyKind::FormFields)
+    };
+
     // Check operation-level first, then path-level
     let schema = if let Some(params) = operation.get("parameters")
         && let Some(schema) = find_body_param(params)
@@ -255,7 +290,19 @@ fn extract_request_body_swagger2(
         None
     };
 
-    let content_type = extract_swagger2_consumes(operation, spec, schema.as_ref());
+    let form_data_kind = if let Some(params) = operation.get("parameters")
+        && let Some(kind) = find_form_data_kind(params)
+    {
+        Some(kind)
+    } else if let Some(params) = path_obj.get("parameters")
+        && let Some(kind) = find_form_data_kind(params)
+    {
+        Some(kind)
+    } else {
+        None
+    };
+
+    let content_type = extract_swagger2_consumes(operation, spec, schema.as_ref(), form_data_kind);
 
     ParsedRequestBody {
         content_type,
@@ -306,21 +353,34 @@ fn extract_swagger2_consumes(
     operation: &serde_json::Value,
     spec: &serde_json::Value,
     body_schema: Option<&serde_json::Value>,
+    form_data_kind: Option<Swagger2FormBodyKind>,
 ) -> Option<String> {
     let prefers_binary = schema_is_binary(body_schema);
 
     operation
         .get("consumes")
-        .and_then(|value| select_swagger2_content_type(value, prefers_binary))
+        .and_then(|value| select_swagger2_content_type(value, prefers_binary, form_data_kind))
         .or_else(|| {
-            spec.get("consumes")
-                .and_then(|value| select_swagger2_content_type(value, prefers_binary))
+            spec.get("consumes").and_then(|value| {
+                select_swagger2_content_type(value, prefers_binary, form_data_kind)
+            })
         })
+        .or_else(|| form_data_kind.map(default_swagger2_form_content_type))
         .or_else(|| prefers_binary.then(|| "application/octet-stream".to_string()))
 }
 
-fn select_swagger2_content_type(value: &serde_json::Value, prefers_binary: bool) -> Option<String> {
+fn select_swagger2_content_type(
+    value: &serde_json::Value,
+    prefers_binary: bool,
+    form_data_kind: Option<Swagger2FormBodyKind>,
+) -> Option<String> {
     let content_types = value.as_array()?;
+
+    if let Some(kind) = form_data_kind
+        && let Some(content_type) = select_swagger2_form_content_type(content_types, kind)
+    {
+        return Some(content_type);
+    }
 
     if prefers_binary
         && let Some(content_type) = content_types.iter().find_map(|entry| {
@@ -334,6 +394,38 @@ fn select_swagger2_content_type(value: &serde_json::Value, prefers_binary: bool)
     content_types
         .iter()
         .find_map(|entry| entry.as_str().map(ToString::to_string))
+}
+
+fn select_swagger2_form_content_type(
+    content_types: &[serde_json::Value],
+    kind: Swagger2FormBodyKind,
+) -> Option<String> {
+    let preferred = match kind {
+        Swagger2FormBodyKind::FileUpload => ["multipart/form-data"].as_slice(),
+        Swagger2FormBodyKind::FormFields => {
+            ["application/x-www-form-urlencoded", "multipart/form-data"].as_slice()
+        }
+    };
+
+    for preferred_type in preferred {
+        if let Some(content_type) = content_types.iter().find_map(|entry| {
+            let content_type = entry.as_str()?;
+            (normalize_content_type(content_type) == *preferred_type)
+                .then(|| content_type.to_string())
+        }) {
+            return Some(content_type);
+        }
+    }
+
+    None
+}
+
+fn default_swagger2_form_content_type(kind: Swagger2FormBodyKind) -> String {
+    match kind {
+        Swagger2FormBodyKind::FileUpload => "multipart/form-data",
+        Swagger2FormBodyKind::FormFields => "application/x-www-form-urlencoded",
+    }
+    .to_string()
 }
 
 fn is_json_content_type(content_type: &str) -> bool {
@@ -510,6 +602,29 @@ mod tests {
         let operation = &path_obj["get"];
         let params = extract_parameters(operation, &path_obj);
         assert!(params.is_none());
+    }
+
+    #[test]
+    fn extract_parameters_excludes_body_and_form_data_params() {
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({
+                "post": {
+                    "parameters": [
+                        {"in": "query", "name": "limit"},
+                        {"in": "body", "name": "payload", "schema": {"type": "object"}},
+                        {"in": "formData", "name": "file", "type": "file"},
+                        {"in": "path", "name": "id", "required": true}
+                    ]
+                }
+            }))
+            .unwrap();
+        let operation = &path_obj["post"];
+        let params = extract_parameters(operation, &path_obj).unwrap();
+        let arr = params.as_array().unwrap();
+
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["name"], "limit");
+        assert_eq!(arr[1]["name"], "id");
     }
 
     #[test]
@@ -693,5 +808,40 @@ mod tests {
             Some("application/octet-stream")
         );
         assert_eq!(body.schema.unwrap()["format"], "binary");
+    }
+
+    #[test]
+    fn extract_request_body_swagger2_detects_file_form_data_uploads() {
+        let op = serde_json::json!({
+            "consumes": ["application/json", "multipart/form-data"],
+            "parameters": [
+                {"in": "formData", "name": "file", "type": "file", "required": true}
+            ]
+        });
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        let spec = serde_json::json!({});
+        let body = extract_request_body_swagger2(&op, &path_obj, &spec);
+        assert_eq!(body.content_type.as_deref(), Some("multipart/form-data"));
+        assert!(body.schema.is_none());
+    }
+
+    #[test]
+    fn extract_request_body_swagger2_detects_urlencoded_form_data() {
+        let op = serde_json::json!({
+            "consumes": ["application/json", "application/x-www-form-urlencoded"],
+            "parameters": [
+                {"in": "formData", "name": "message", "type": "string", "required": true}
+            ]
+        });
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        let spec = serde_json::json!({});
+        let body = extract_request_body_swagger2(&op, &path_obj, &spec);
+        assert_eq!(
+            body.content_type.as_deref(),
+            Some("application/x-www-form-urlencoded")
+        );
+        assert!(body.schema.is_none());
     }
 }
