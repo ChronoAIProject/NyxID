@@ -285,47 +285,29 @@ async fn execute_proxy(
             // Resolve signing secret for this specific node. When HMAC signing is
             // enabled, unsigned requests are treated as a routing failure rather
             // than silently downgrading integrity guarantees.
-            let signing_secret: Option<Vec<u8>> = if state.config.node_hmac_signing_enabled {
-                let Some(node) = node_service::get_node_by_id(&state.db, node_id).await? else {
-                    last_error = Some(AppError::NodeNotFound(format!(
-                        "Node {node_id} not found during proxy routing"
-                    )));
-                    continue;
-                };
-
-                let Some(encrypted_secret) = node.signing_secret_encrypted.as_deref() else {
-                    tracing::warn!(
-                        node_id = %node_id,
-                        "Skipping node route because signing secret is missing"
-                    );
-                    last_error = Some(AppError::NodeOffline(format!(
-                        "Node {node_id} is missing its signing secret"
-                    )));
-                    continue;
-                };
-
-                let secret_hex = String::from_utf8(
-                    state
-                        .encryption_keys
-                        .decrypt(encrypted_secret)
-                        .await
-                        .map_err(|e| {
-                            AppError::Internal(format!(
-                                "Failed to decrypt node signing secret for {node_id}: {e}"
-                            ))
-                        })?,
+            let signing_secret = if state.config.node_hmac_signing_enabled {
+                match node_service::get_node_signing_secret(
+                    &state.db,
+                    state.encryption_keys.as_ref(),
+                    node_id,
                 )
-                .map_err(|e| {
-                    AppError::Internal(format!(
-                        "Node signing secret for {node_id} is not valid UTF-8: {e}"
-                    ))
-                })?;
-
-                Some(hex::decode(&secret_hex).map_err(|e| {
-                    AppError::Internal(format!(
-                        "Node signing secret for {node_id} is not valid hex: {e}"
-                    ))
-                })?)
+                .await
+                {
+                    Ok(secret) => Some(secret),
+                    Err(AppError::NodeNotFound(message)) => {
+                        last_error = Some(AppError::NodeNotFound(message));
+                        continue;
+                    }
+                    Err(AppError::NodeOffline(message)) => {
+                        tracing::warn!(
+                            node_id = %node_id,
+                            "Skipping node route because signing secret is missing"
+                        );
+                        last_error = Some(AppError::NodeOffline(message));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 None
             };
@@ -333,7 +315,11 @@ async fn execute_proxy(
             let start = std::time::Instant::now();
             let result = state
                 .node_ws_manager
-                .send_proxy_request(node_id, attempt_request, signing_secret.as_deref())
+                .send_proxy_request(
+                    node_id,
+                    attempt_request,
+                    signing_secret.as_ref().map(|secret| secret.as_slice()),
+                )
                 .await;
             let latency_ms = start.elapsed().as_millis() as u64;
 
