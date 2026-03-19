@@ -35,11 +35,7 @@ export function SshServiceInstructions({
   // Target machine setup commands
   const caPublicKey = sshConfig.ca_public_key ?? "<CA public key from above>";
   const trustedCaCommand = `echo '${caPublicKey}' | sudo tee /etc/ssh/nyxid_ca.pub`;
-  const sshdConfigCommand = [
-    "# Add to /etc/ssh/sshd_config:",
-    "TrustedUserCAKeys /etc/ssh/nyxid_ca.pub",
-    `AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u`,
-  ].join("\n");
+  const sshdConfigCommand = `echo 'TrustedUserCAKeys /etc/ssh/nyxid_ca.pub' | sudo tee -a /etc/ssh/sshd_config && echo 'AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u' | sudo tee -a /etc/ssh/sshd_config`;
   const principalsCommand = [
     "sudo mkdir -p /etc/ssh/auth_principals",
     ...(sshConfig.allowed_principals.length > 0
