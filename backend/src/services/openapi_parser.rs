@@ -255,8 +255,10 @@ fn extract_request_body_swagger2(
         None
     };
 
+    let content_type = extract_swagger2_consumes(operation, spec, schema.as_ref());
+
     ParsedRequestBody {
-        content_type: extract_swagger2_consumes(operation, spec),
+        content_type,
         schema,
     }
 }
@@ -264,6 +266,19 @@ fn extract_request_body_swagger2(
 fn select_openapi3_media(
     content: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<(&str, &serde_json::Value)> {
+    if let Some((content_type, media)) = content.iter().find(|(content_type, media)| {
+        is_concrete_content_type(content_type) && is_binary_media(content_type, media)
+    }) {
+        return Some((content_type.as_str(), media));
+    }
+
+    if let Some((content_type, media)) = content
+        .iter()
+        .find(|(content_type, media)| is_binary_media(content_type, media))
+    {
+        return Some((content_type.as_str(), media));
+    }
+
     if let Some((content_type, media)) = content.get_key_value("application/json") {
         return Some((content_type.as_str(), media));
     }
@@ -275,10 +290,10 @@ fn select_openapi3_media(
         return Some((content_type.as_str(), media));
     }
 
-    if let Some((content_type, media)) = content.iter().find(|(content_type, _)| {
-        let normalized = normalize_content_type(content_type);
-        normalized != "*/*" && !normalized.is_empty()
-    }) {
+    if let Some((content_type, media)) = content
+        .iter()
+        .find(|(content_type, _)| is_concrete_content_type(content_type))
+    {
         return Some((content_type.as_str(), media));
     }
 
@@ -290,16 +305,33 @@ fn select_openapi3_media(
 fn extract_swagger2_consumes(
     operation: &serde_json::Value,
     spec: &serde_json::Value,
+    body_schema: Option<&serde_json::Value>,
 ) -> Option<String> {
+    let prefers_binary = schema_is_binary(body_schema);
+
     operation
         .get("consumes")
-        .and_then(first_content_type_from_array)
-        .or_else(|| spec.get("consumes").and_then(first_content_type_from_array))
+        .and_then(|value| select_swagger2_content_type(value, prefers_binary))
+        .or_else(|| {
+            spec.get("consumes")
+                .and_then(|value| select_swagger2_content_type(value, prefers_binary))
+        })
+        .or_else(|| prefers_binary.then(|| "application/octet-stream".to_string()))
 }
 
-fn first_content_type_from_array(value: &serde_json::Value) -> Option<String> {
-    value
-        .as_array()?
+fn select_swagger2_content_type(value: &serde_json::Value, prefers_binary: bool) -> Option<String> {
+    let content_types = value.as_array()?;
+
+    if prefers_binary
+        && let Some(content_type) = content_types.iter().find_map(|entry| {
+            let content_type = entry.as_str()?;
+            is_binary_content_type(content_type).then(|| content_type.to_string())
+        })
+    {
+        return Some(content_type);
+    }
+
+    content_types
         .iter()
         .find_map(|entry| entry.as_str().map(ToString::to_string))
 }
@@ -307,6 +339,34 @@ fn first_content_type_from_array(value: &serde_json::Value) -> Option<String> {
 fn is_json_content_type(content_type: &str) -> bool {
     let normalized = normalize_content_type(content_type);
     normalized == "application/json" || normalized.ends_with("+json")
+}
+
+fn is_concrete_content_type(content_type: &str) -> bool {
+    let normalized = normalize_content_type(content_type);
+    normalized != "*/*" && !normalized.is_empty()
+}
+
+fn is_binary_content_type(content_type: &str) -> bool {
+    let normalized = normalize_content_type(content_type);
+    normalized == "application/octet-stream"
+        || normalized == "application/zip"
+        || normalized == "application/gzip"
+        || normalized == "application/pdf"
+        || normalized.starts_with("image/")
+        || normalized.starts_with("audio/")
+        || normalized.starts_with("video/")
+        || normalized.starts_with("font/")
+}
+
+fn is_binary_media(content_type: &str, media: &serde_json::Value) -> bool {
+    is_binary_content_type(content_type) || schema_is_binary(media.get("schema"))
+}
+
+fn schema_is_binary(schema: Option<&serde_json::Value>) -> bool {
+    schema
+        .and_then(|schema| schema.get("format"))
+        .and_then(|format| format.as_str())
+        == Some("binary")
 }
 
 fn normalize_content_type(content_type: &str) -> String {
@@ -482,6 +542,55 @@ mod tests {
     }
 
     #[test]
+    fn extract_request_body_openapi3_prefers_binary_media_over_json() {
+        let op = serde_json::json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object"
+                        }
+                    },
+                    "application/zip": {
+                        "schema": {
+                            "type": "string",
+                            "format": "binary"
+                        }
+                    }
+                }
+            }
+        });
+        let body = extract_request_body_openapi3(&op);
+        assert_eq!(body.content_type.as_deref(), Some("application/zip"));
+        assert_eq!(body.schema.unwrap()["format"], "binary");
+    }
+
+    #[test]
+    fn extract_request_body_openapi3_prefers_concrete_binary_media_over_wildcard() {
+        let op = serde_json::json!({
+            "requestBody": {
+                "content": {
+                    "*/*": {
+                        "schema": {
+                            "type": "string",
+                            "format": "binary"
+                        }
+                    },
+                    "application/zip": {
+                        "schema": {
+                            "type": "string",
+                            "format": "binary"
+                        }
+                    }
+                }
+            }
+        });
+        let body = extract_request_body_openapi3(&op);
+        assert_eq!(body.content_type.as_deref(), Some("application/zip"));
+        assert_eq!(body.schema.unwrap()["format"], "binary");
+    }
+
+    #[test]
     fn extract_request_body_openapi3_missing() {
         let op = serde_json::json!({});
         let body = extract_request_body_openapi3(&op);
@@ -523,6 +632,25 @@ mod tests {
         });
         let body = extract_request_body_swagger2(&op, &path_obj, &spec);
         assert_eq!(body.content_type.as_deref(), Some("application/zip"));
+        assert_eq!(body.schema.unwrap()["format"], "binary");
+    }
+
+    #[test]
+    fn extract_request_body_swagger2_prefers_binary_consumes_for_binary_schema() {
+        let op = serde_json::json!({
+            "consumes": ["application/json", "application/octet-stream"],
+            "parameters": [
+                {"in": "body", "schema": {"type": "string", "format": "binary"}}
+            ]
+        });
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        let spec = serde_json::json!({});
+        let body = extract_request_body_swagger2(&op, &path_obj, &spec);
+        assert_eq!(
+            body.content_type.as_deref(),
+            Some("application/octet-stream")
+        );
         assert_eq!(body.schema.unwrap()["format"], "binary");
     }
 }

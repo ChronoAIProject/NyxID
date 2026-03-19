@@ -504,43 +504,37 @@ fn build_body_property(
             body_prop
         }
         RequestBodyMode::Binary => {
-            let mut body_prop = serde_json::json!({
+            let body_prop = serde_json::json!({
                 "type": "string",
                 "description": format!(
                     "Base64-encoded binary content for {} request body",
                     request_content_type_or_default(endpoint)
                 ),
                 "contentEncoding": "base64",
+                "contentMediaType": request_content_type_or_default(endpoint),
             });
-            if let Some(content_type) = endpoint.request_content_type.as_deref() {
-                body_prop["contentMediaType"] = serde_json::Value::String(content_type.to_string());
-            }
             body_prop
         }
         RequestBodyMode::Raw => {
-            let mut body_prop = serde_json::json!({
+            let body_prop = serde_json::json!({
                 "type": "string",
                 "description": format!(
                     "Raw request body for {}",
                     request_content_type_or_default(endpoint)
                 ),
+                "contentMediaType": request_content_type_or_default(endpoint),
             });
-            if let Some(content_type) = endpoint.request_content_type.as_deref() {
-                body_prop["contentMediaType"] = serde_json::Value::String(content_type.to_string());
-            }
             body_prop
         }
         RequestBodyMode::Multipart => {
-            let mut body_prop = serde_json::json!({
+            let body_prop = serde_json::json!({
                 "type": "string",
                 "description": format!(
                     "multipart/form-data request body for {}. Multipart bodies are not yet supported by the NyxID MCP proxy.",
                     request_content_type_or_default(endpoint)
                 ),
+                "contentMediaType": request_content_type_or_default(endpoint),
             });
-            if let Some(content_type) = endpoint.request_content_type.as_deref() {
-                body_prop["contentMediaType"] = serde_json::Value::String(content_type.to_string());
-            }
             body_prop
         }
     }
@@ -605,6 +599,7 @@ fn request_content_type_or_default(endpoint: &McpToolEndpoint) -> &str {
     endpoint
         .request_content_type
         .as_deref()
+        .filter(|content_type| has_concrete_content_type(content_type))
         .unwrap_or_else(|| default_content_type_for_mode(request_body_mode(endpoint)))
 }
 
@@ -615,6 +610,11 @@ fn default_content_type_for_mode(mode: RequestBodyMode) -> &'static str {
         RequestBodyMode::Binary => "application/octet-stream",
         RequestBodyMode::Multipart => "multipart/form-data",
     }
+}
+
+fn has_concrete_content_type(content_type: &str) -> bool {
+    let normalized = normalize_content_type(content_type);
+    !normalized.is_empty() && normalized != "*/*"
 }
 
 fn request_content_type_header_value<'a>(
@@ -1377,6 +1377,52 @@ mod tests {
     }
 
     #[test]
+    fn build_input_schema_defaults_binary_media_type_when_missing() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "string",
+                "format": "binary"
+            })),
+            request_content_type: None,
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert_eq!(
+            schema["properties"]["body"]["contentMediaType"],
+            "application/octet-stream"
+        );
+        assert_eq!(schema["properties"]["body"]["contentEncoding"], "base64");
+    }
+
+    #[test]
+    fn build_input_schema_defaults_wildcard_binary_media_type_to_octet_stream() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "string",
+                "format": "binary"
+            })),
+            request_content_type: Some("*/*".to_string()),
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert_eq!(
+            schema["properties"]["body"]["contentMediaType"],
+            "application/octet-stream"
+        );
+        assert_eq!(schema["properties"]["body"]["contentEncoding"], "base64");
+    }
+
+    #[test]
     fn build_proxy_args_decodes_binary_body_from_base64() {
         use base64::Engine as _;
 
@@ -1473,6 +1519,27 @@ mod tests {
                 "format": "binary"
             })),
             request_content_type: None,
+        };
+
+        assert_eq!(
+            request_content_type_header_value(&endpoint, &reqwest::Method::POST, true),
+            Some("application/octet-stream")
+        );
+    }
+
+    #[test]
+    fn request_content_type_header_value_defaults_wildcard_binary_schema_to_octet_stream() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "string",
+                "format": "binary"
+            })),
+            request_content_type: Some("*/*".to_string()),
         };
 
         assert_eq!(
