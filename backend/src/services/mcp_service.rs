@@ -346,12 +346,12 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
     let mut properties = serde_json::Map::new();
     let mut required: Vec<serde_json::Value> = Vec::new();
 
-    // -- URL / query / header parameters --
+    // -- Path / query / header / cookie parameters --
     if let Some(params_value) = &endpoint.parameters
         && let Some(params) = params_value.as_array()
     {
         for param in params {
-            let name = match param.get("name").and_then(|v| v.as_str()) {
+            let name = match supported_parameter_name_for_mcp(param) {
                 Some(n) if !n.is_empty() => n,
                 _ => continue,
             };
@@ -558,6 +558,43 @@ fn push_required(required: &mut Vec<serde_json::Value>, name: &str) {
     }
 }
 
+const BLOCKED_MCP_HEADER_PARAMETER_NAMES: &[&str] = &[
+    "host",
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "transfer-encoding",
+    "content-length",
+    "connection",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-real-ip",
+    "content-type",
+    "accept",
+];
+
+fn normalize_header_name(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
+}
+
+fn is_blocked_mcp_header_parameter(name: &str) -> bool {
+    let normalized = normalize_header_name(name);
+    normalized.starts_with("x-nyxid-")
+        || BLOCKED_MCP_HEADER_PARAMETER_NAMES.contains(&normalized.as_str())
+}
+
+fn supported_parameter_name_for_mcp(param: &serde_json::Value) -> Option<&str> {
+    let name = param.get("name").and_then(|v| v.as_str())?;
+    if name.is_empty() {
+        return None;
+    }
+
+    match param.get("in").and_then(|v| v.as_str()) {
+        Some("header") if is_blocked_mcp_header_parameter(name) => None,
+        _ => Some(name),
+    }
+}
+
 fn normalize_content_type(content_type: &str) -> String {
     content_type
         .split(';')
@@ -673,24 +710,32 @@ pub fn resolve_tool_call<'a>(
 // Proxy argument building (ported from TypeScript buildProxyArgs)
 // ---------------------------------------------------------------------------
 
+type ProxyArgs = (
+    reqwest::Method,
+    String,
+    Option<String>,
+    Vec<(String, String)>,
+    Option<bytes::Bytes>,
+);
+
 /// Build the HTTP method, path, query string, and body for a proxy request
 /// from the endpoint definition and the MCP tool call arguments.
 pub fn build_proxy_args(
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
-) -> AppResult<(
-    reqwest::Method,
-    String,
-    Option<String>,
-    Option<bytes::Bytes>,
-)> {
+) -> AppResult<ProxyArgs> {
     let mut path = endpoint.path.trim_start_matches('/').to_string();
     let mut query_params: Vec<(String, String)> = Vec::new();
+    let mut header_params: Vec<(String, String)> = Vec::new();
+    let mut cookie_params: Vec<(String, String)> = Vec::new();
     let mut body_fields: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
 
     // Classify parameters
     let mut path_params = HashSet::new();
     let mut query_param_names = HashSet::new();
+    let mut header_param_names = HashSet::new();
+    let mut cookie_param_names = HashSet::new();
+    let mut blocked_header_param_names = HashSet::new();
 
     if let Some(params_value) = &endpoint.parameters
         && let Some(params) = params_value.as_array()
@@ -703,6 +748,22 @@ pub fn build_proxy_args(
                 }
                 "query" => {
                     query_param_names.insert(name.to_string());
+                }
+                "header" => {
+                    if is_blocked_mcp_header_parameter(name) {
+                        blocked_header_param_names.insert(name.to_string());
+                    } else {
+                        reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
+                            AppError::Internal(format!(
+                                "Invalid header parameter configured for endpoint {}: {} ({e})",
+                                endpoint.name, name
+                            ))
+                        })?;
+                        header_param_names.insert(name.to_string());
+                    }
+                }
+                "cookie" => {
+                    cookie_param_names.insert(name.to_string());
                 }
                 _ => {}
             }
@@ -720,6 +781,14 @@ pub fn build_proxy_args(
                 path = path.replace(&format!("{{{key}}}"), &urlencoding::encode(&str_value));
             } else if query_param_names.contains(key.as_str()) {
                 query_params.push((key.clone(), str_value));
+            } else if header_param_names.contains(key.as_str()) {
+                header_params.push((key.clone(), str_value));
+            } else if cookie_param_names.contains(key.as_str()) {
+                cookie_params.push((key.clone(), str_value));
+            } else if blocked_header_param_names.contains(key.as_str()) {
+                return Err(AppError::BadRequest(format!(
+                    "Header parameter `{key}` is reserved and cannot be set through the NyxID MCP proxy"
+                )));
             } else {
                 body_fields.insert(key.clone(), value.clone());
             }
@@ -747,9 +816,10 @@ pub fn build_proxy_args(
         _ => reqwest::Method::GET,
     };
 
+    let parameter_headers = build_parameter_headers(endpoint, header_params, cookie_params)?;
     let body = build_request_body(endpoint, body_fields)?;
 
-    Ok((method, path, query, body))
+    Ok((method, path, query, parameter_headers, body))
 }
 
 fn build_request_body(
@@ -828,6 +898,49 @@ fn extract_single_body_field(
     )))
 }
 
+fn build_parameter_headers(
+    endpoint: &McpToolEndpoint,
+    header_params: Vec<(String, String)>,
+    cookie_params: Vec<(String, String)>,
+) -> AppResult<Vec<(String, String)>> {
+    let mut headers =
+        Vec::with_capacity(header_params.len() + usize::from(!cookie_params.is_empty()));
+
+    for (name, value) in header_params {
+        reqwest::header::HeaderValue::from_str(&value).map_err(|e| {
+            AppError::BadRequest(format!(
+                "Invalid value for header parameter `{name}` on endpoint {}: {e}",
+                endpoint.name
+            ))
+        })?;
+        headers.push((name, value));
+    }
+
+    if !cookie_params.is_empty() {
+        let mut cookie_pairs = Vec::with_capacity(cookie_params.len());
+        for (name, value) in cookie_params {
+            if value.contains(';') {
+                return Err(AppError::BadRequest(format!(
+                    "Cookie parameter `{name}` on endpoint {} cannot contain `;`",
+                    endpoint.name
+                )));
+            }
+            cookie_pairs.push(format!("{name}={value}"));
+        }
+
+        let cookie_header = cookie_pairs.join("; ");
+        reqwest::header::HeaderValue::from_str(&cookie_header).map_err(|e| {
+            AppError::BadRequest(format!(
+                "Invalid cookie parameters for endpoint {}: {e}",
+                endpoint.name
+            ))
+        })?;
+        headers.push((reqwest::header::COOKIE.as_str().to_string(), cookie_header));
+    }
+
+    Ok(headers)
+}
+
 fn json_body_is_flattened(
     endpoint: &McpToolEndpoint,
     body_mode: RequestBodyMode,
@@ -849,7 +962,7 @@ fn json_body_is_flattened(
         .and_then(|params| params.as_array())
         .into_iter()
         .flatten()
-        .filter_map(|param| param.get("name").and_then(|v| v.as_str()))
+        .filter_map(supported_parameter_name_for_mcp)
         .any(|name| properties.contains_key(name));
 
     !has_param_collision
@@ -890,7 +1003,7 @@ pub async fn execute_tool(
     use crate::services::{delegation_service, identity_service};
     use mongodb::bson::doc;
 
-    let (method, path, query, body) = build_proxy_args(endpoint, arguments)?;
+    let (method, path, query, parameter_headers, body) = build_proxy_args(endpoint, arguments)?;
 
     let target =
         proxy_service::resolve_proxy_target(db, encryption_keys, user_id, &service.service_id)
@@ -966,6 +1079,8 @@ pub async fn execute_tool(
             }
         }
     }
+
+    identity_headers.extend(parameter_headers);
 
     // Resolve delegated credentials. Required provider connections must succeed.
     let delegated = delegation_service::resolve_delegated_credentials(
@@ -1451,6 +1566,47 @@ mod tests {
     }
 
     #[test]
+    fn build_input_schema_includes_supported_header_and_cookie_params() {
+        let endpoint = McpToolEndpoint {
+            name: "update_user".to_string(),
+            description: Some("Update a user".to_string()),
+            method: "POST".to_string(),
+            path: "/users/{id}".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "X-Api-Version",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                },
+                {
+                    "name": "session_id",
+                    "in": "cookie",
+                    "required": true,
+                    "schema": { "type": "string" }
+                },
+                {
+                    "name": "Authorization",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: None,
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert_eq!(schema["properties"]["X-Api-Version"]["type"], "string");
+        assert_eq!(schema["properties"]["session_id"]["type"], "string");
+        assert!(schema["properties"].get("Authorization").is_none());
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["X-Api-Version", "session_id"])
+        );
+    }
+
+    #[test]
     fn build_input_schema_wraps_json_body_when_properties_collide_with_params() {
         let endpoint = McpToolEndpoint {
             name: "update_user".to_string(),
@@ -1461,6 +1617,18 @@ mod tests {
                 {
                     "name": "id",
                     "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" }
+                },
+                {
+                    "name": "X-Api-Version",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                },
+                {
+                    "name": "session_id",
+                    "in": "cookie",
                     "required": true,
                     "schema": { "type": "string" }
                 }
@@ -1483,7 +1651,10 @@ mod tests {
             schema["properties"]["body"]["properties"]["id"]["type"],
             "string"
         );
-        assert_eq!(schema["required"], serde_json::json!(["id", "body"]));
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["id", "X-Api-Version", "session_id", "body"])
+        );
     }
 
     #[test]
@@ -1549,7 +1720,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
         };
 
-        let (_, _, _, body) = build_proxy_args(
+        let (_, _, _, _, body) = build_proxy_args(
             &endpoint,
             &serde_json::json!({
                 "body": base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04")
@@ -1577,7 +1748,7 @@ mod tests {
             request_content_type: None,
         };
 
-        let (_, _, _, body) = build_proxy_args(
+        let (_, _, _, _, body) = build_proxy_args(
             &endpoint,
             &serde_json::json!({
                 "body": base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04")
@@ -1602,7 +1773,7 @@ mod tests {
             request_content_type: Some("application/x-tar".to_string()),
         };
 
-        let (_, _, _, body) = build_proxy_args(
+        let (_, _, _, _, body) = build_proxy_args(
             &endpoint,
             &serde_json::json!({
                 "body": base64::engine::general_purpose::STANDARD.encode(b"ustar")
@@ -1631,7 +1802,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
         };
 
-        let (_, _, _, body) = build_proxy_args(
+        let (_, _, _, _, body) = build_proxy_args(
             &endpoint,
             &serde_json::json!({
                 "body": "hello"
@@ -1642,6 +1813,71 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(body.unwrap().as_ref()).unwrap(),
             serde_json::json!({ "body": "hello" })
+        );
+    }
+
+    #[test]
+    fn build_proxy_args_routes_header_and_cookie_params_out_of_body() {
+        let endpoint = McpToolEndpoint {
+            name: "update_user".to_string(),
+            description: Some("Update a user".to_string()),
+            method: "POST".to_string(),
+            path: "/users/{id}".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "id",
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" }
+                },
+                {
+                    "name": "X-Api-Version",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                },
+                {
+                    "name": "session_id",
+                    "in": "cookie",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "display_name": { "type": "string" }
+                },
+                "required": ["display_name"]
+            })),
+            request_content_type: Some("application/json".to_string()),
+        };
+
+        let (_, path, _, headers, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "id": "path-user",
+                "X-Api-Version": "2025-01-01",
+                "session_id": "abc123",
+                "display_name": "Nyx"
+            }),
+        )
+        .expect("header and cookie params should be routed out of the body");
+
+        assert_eq!(path, "users/path-user");
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| { name == "X-Api-Version" && value == "2025-01-01" })
+        );
+        assert!(headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("cookie") && value == "session_id=abc123"
+        }));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(body.unwrap().as_ref()).unwrap(),
+            serde_json::json!({
+                "display_name": "Nyx"
+            })
         );
     }
 
@@ -1658,6 +1894,18 @@ mod tests {
                     "in": "path",
                     "required": true,
                     "schema": { "type": "string" }
+                },
+                {
+                    "name": "X-Api-Version",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                },
+                {
+                    "name": "session_id",
+                    "in": "cookie",
+                    "required": true,
+                    "schema": { "type": "string" }
                 }
             ])),
             request_body_schema: Some(serde_json::json!({
@@ -1671,10 +1919,12 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
         };
 
-        let (_, path, _, body) = build_proxy_args(
+        let (_, path, _, headers, body) = build_proxy_args(
             &endpoint,
             &serde_json::json!({
                 "id": "path-user",
+                "X-Api-Version": "2025-01-01",
+                "session_id": "abc123",
                 "body": {
                     "id": "body-user",
                     "display_name": "Nyx"
@@ -1684,12 +1934,53 @@ mod tests {
         .expect("wrapped JSON body should serialize with path param intact");
 
         assert_eq!(path, "users/path-user");
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| { name == "X-Api-Version" && value == "2025-01-01" })
+        );
+        assert!(headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("cookie") && value == "session_id=abc123"
+        }));
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(body.unwrap().as_ref()).unwrap(),
             serde_json::json!({
                 "id": "body-user",
                 "display_name": "Nyx"
             })
+        );
+    }
+
+    #[test]
+    fn build_proxy_args_rejects_reserved_header_parameters() {
+        let endpoint = McpToolEndpoint {
+            name: "submit_message".to_string(),
+            description: Some("Submit a message".to_string()),
+            method: "POST".to_string(),
+            path: "/messages".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "Authorization",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: Some("text/plain".to_string()),
+        };
+
+        let error = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "Authorization": "Bearer secret",
+                "body": "hello"
+            }),
+        )
+        .expect_err("reserved header params should be rejected");
+
+        assert!(
+            matches!(error, AppError::BadRequest(message) if message.contains("is reserved and cannot be set"))
         );
     }
 
@@ -1733,7 +2024,7 @@ mod tests {
             request_content_type: Some("application/x-www-form-urlencoded".to_string()),
         };
 
-        let (_, _, _, body) = build_proxy_args(
+        let (_, _, _, _, body) = build_proxy_args(
             &endpoint,
             &serde_json::json!({
                 "body": "message=hello%20world&count=2"
