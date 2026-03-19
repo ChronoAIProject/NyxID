@@ -574,7 +574,6 @@ pub async fn create_service(
                 certificate_ttl_minutes: ssh_config.certificate_ttl_minutes,
                 allowed_principals: &ssh_config.allowed_principals,
             },
-            state.config.is_development(),
         )
         .await?;
         let service_category = derive_ssh_service_category(body.service_category.as_deref())?;
@@ -974,7 +973,6 @@ pub async fn update_service(
                         certificate_ttl_minutes: ssh_config.certificate_ttl_minutes,
                         allowed_principals: &ssh_config.allowed_principals,
                     },
-                    state.config.is_development(),
                 )
                 .await?;
                 set_doc.insert(

@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -119,9 +118,8 @@ pub async fn build_ssh_config(
     service_id: &str,
     existing: Option<&SshServiceConfig>,
     input: SshConfigInput<'_>,
-    allow_private: bool,
 ) -> AppResult<SshServiceConfig> {
-    validate_resolved_ssh_target(input.host, input.port, allow_private).await?;
+    validate_resolved_ssh_target(input.host, input.port).await?;
     validate_certificate_settings(
         input.certificate_auth_enabled,
         input.certificate_ttl_minutes,
@@ -151,55 +149,38 @@ pub fn target_base_url(host: &str, port: u16) -> String {
     format!("ssh://{}:{port}", host.trim())
 }
 
-pub fn validate_ssh_target(host: &str, port: u16) -> AppResult<()> {
+/// Validate an SSH target hostname and port.
+///
+/// Unlike HTTP base_url validation, SSH targets are always allowed to use
+/// private/internal IPs. SSH services are admin-configured infrastructure
+/// (not user-supplied URLs), so SSRF is not a concern. The NyxID server or
+/// node agent connects to these hosts on behalf of authenticated users.
+pub async fn validate_resolved_ssh_target(host: &str, port: u16) -> AppResult<()> {
+    validate_ssh_target_syntax(host, port)?;
+    Ok(())
+}
+
+/// Validate SSH target syntax only (non-empty host, valid port, blocked
+/// hostnames like metadata endpoints).
+fn validate_ssh_target_syntax(host: &str, port: u16) -> AppResult<()> {
     let trimmed = host.trim();
     if trimmed.is_empty() || trimmed.len() > 255 {
         return Err(AppError::ValidationError(
             "host must be between 1 and 255 characters".to_string(),
         ));
     }
-
     if port == 0 {
         return Err(AppError::ValidationError(
             "port must be greater than 0".to_string(),
         ));
     }
-
+    // Still block cloud metadata endpoints (SSRF to metadata is always dangerous)
     if is_blocked_ssh_hostname(trimmed) {
         return Err(AppError::ValidationError(
-            "host must not point to a private or internal address".to_string(),
+            "host must not point to a cloud metadata endpoint".to_string(),
         ));
     }
-
-    if let Ok(ip) = parse_ssh_target_ip(trimmed)
-        && is_private_or_internal_ip(ip)
-    {
-        return Err(AppError::ValidationError(
-            "host must not point to a private or internal IP address".to_string(),
-        ));
-    }
-
     Ok(())
-}
-
-pub async fn validate_resolved_ssh_target(
-    host: &str,
-    port: u16,
-    allow_private: bool,
-) -> AppResult<()> {
-    if allow_private {
-        // In development mode, skip SSRF checks for SSH targets.
-        // SSH targets are often private hosts reachable only from node agents.
-        return Ok(());
-    }
-    validate_resolved_ssh_target_with_lookup(host, port, |lookup_host, lookup_port| {
-        let lookup_host = lookup_host.to_string();
-        async move {
-            let resolved = tokio::net::lookup_host((lookup_host.as_str(), lookup_port)).await?;
-            Ok(resolved.map(|addr| addr.ip()).collect())
-        }
-    })
-    .await
 }
 
 pub fn validate_certificate_settings(
@@ -259,78 +240,14 @@ fn sanitize_allowed_principals(principals: &[String]) -> Vec<String> {
 }
 
 fn is_blocked_ssh_hostname(host: &str) -> bool {
-    matches!(
-        normalize_host(host).as_str(),
-        "localhost" | "metadata.google.internal"
-    )
-}
-
-fn parse_ssh_target_ip(host: &str) -> Result<std::net::IpAddr, std::net::AddrParseError> {
-    normalize_host(host).parse()
-}
-
-async fn validate_resolved_ssh_target_with_lookup<F, Fut>(
-    host: &str,
-    port: u16,
-    lookup: F,
-) -> AppResult<()>
-where
-    F: Fn(&str, u16) -> Fut,
-    Fut: Future<Output = std::io::Result<Vec<std::net::IpAddr>>>,
-{
-    validate_ssh_target(host, port)?;
-
-    let resolved_ips = match parse_ssh_target_ip(host) {
-        Ok(ip) => vec![ip],
-        Err(_) => match lookup(host, port).await {
-            // Best-effort DNS resolution catches resolvable private targets
-            // without blocking split-horizon names only reachable from nodes.
-            Ok(addresses) => addresses,
-            Err(_) => return Ok(()),
-        },
-    };
-
-    if resolved_ips.iter().copied().any(is_private_or_internal_ip) {
-        return Err(AppError::ValidationError(
-            "host must not resolve to a private or internal IP address".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-fn normalize_host(host: &str) -> String {
-    host.trim()
+    let normalized = host
+        .trim()
         .trim_start_matches('[')
         .trim_end_matches(']')
         .trim_end_matches('.')
-        .to_ascii_lowercase()
-}
-
-fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(ipv4) => {
-            ipv4.is_loopback()
-                || ipv4.is_private()
-                || ipv4.is_link_local()
-                || ipv4.is_unspecified()
-                || ipv4.is_broadcast()
-                || is_rfc6598_cgnat(ipv4)
-        }
-        std::net::IpAddr::V6(ipv6) => {
-            ipv6.is_loopback()
-                || ipv6.is_unspecified()
-                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
-                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
-                || ipv6
-                    .to_ipv4_mapped()
-                    .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
-        }
-    }
-}
-
-fn is_rfc6598_cgnat(ipv4: std::net::Ipv4Addr) -> bool {
-    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
+        .to_ascii_lowercase();
+    // Block cloud metadata endpoints only -- private IPs/hostnames are allowed
+    normalized == "metadata.google.internal"
 }
 
 async fn ca_material_for_upsert(
@@ -475,51 +392,25 @@ pub async fn issue_certificate(
 mod tests {
     use super::{
         SshConfigInput, SshSessionManager, build_ssh_config, issue_certificate, target_base_url,
-        validate_certificate_settings, validate_principal,
-        validate_resolved_ssh_target_with_lookup, validate_ssh_target,
+        validate_certificate_settings, validate_principal, validate_ssh_target_syntax,
     };
     use crate::crypto::aes::EncryptionKeys;
     use crate::crypto::local_key_provider::LocalKeyProvider;
     use crate::models::downstream_service::SshServiceConfig;
-    use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
 
     #[test]
-    fn validates_ssh_target() {
-        assert!(validate_ssh_target("ssh.internal.example", 22).is_ok());
-        assert!(validate_ssh_target("", 22).is_err());
-        assert!(validate_ssh_target("ssh.internal.example", 0).is_err());
-        assert!(validate_ssh_target("127.0.0.1", 22).is_err());
-        assert!(validate_ssh_target("100.64.0.10", 22).is_err());
-        assert!(validate_ssh_target("[::1]", 22).is_err());
-        assert!(validate_ssh_target("metadata.google.internal", 22).is_err());
-    }
-
-    #[tokio::test]
-    async fn rejects_hostnames_that_resolve_to_private_ips() {
-        let error = validate_resolved_ssh_target_with_lookup("ssh.example.com", 22, |_, _| async {
-            Ok(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))])
-        })
-        .await
-        .expect_err("private resolved target");
-
-        assert!(
-            error
-                .to_string()
-                .contains("must not resolve to a private or internal IP address")
-        );
-    }
-
-    #[tokio::test]
-    async fn allows_unresolved_hostnames_for_node_only_targets() {
-        validate_resolved_ssh_target_with_lookup("ssh.internal.example", 22, |_, _| async {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "unresolved",
-            ))
-        })
-        .await
-        .expect("unresolved host should not fail validation");
+    fn validates_ssh_target_syntax() {
+        assert!(validate_ssh_target_syntax("ssh.internal.example", 22).is_ok());
+        assert!(validate_ssh_target_syntax("", 22).is_err());
+        assert!(validate_ssh_target_syntax("ssh.internal.example", 0).is_err());
+        // Private/internal IPs are allowed for SSH targets
+        assert!(validate_ssh_target_syntax("127.0.0.1", 22).is_ok());
+        assert!(validate_ssh_target_syntax("100.64.0.10", 22).is_ok());
+        assert!(validate_ssh_target_syntax("192.168.1.50", 22).is_ok());
+        assert!(validate_ssh_target_syntax("[::1]", 22).is_ok());
+        // Cloud metadata endpoints are still blocked
+        assert!(validate_ssh_target_syntax("metadata.google.internal", 22).is_err());
     }
 
     #[test]
@@ -575,7 +466,6 @@ mod tests {
                 certificate_ttl_minutes: 45,
                 allowed_principals: &[String::from("ubuntu"), String::from(" deploy ")],
             },
-            true,
         )
         .await
         .expect("config");
@@ -605,7 +495,6 @@ mod tests {
                 certificate_ttl_minutes: 30,
                 allowed_principals: &[String::from("ubuntu")],
             },
-            true,
         )
         .await
         .expect("ssh config");

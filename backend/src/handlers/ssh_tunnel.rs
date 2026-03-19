@@ -143,7 +143,7 @@ pub async fn ssh_tunnel_ws(
 ) -> AppResult<Response> {
     authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    validate_runtime_ssh_target(&service_id, &ssh_service, state.config.is_development()).await?;
+    validate_runtime_ssh_target(&service_id, &ssh_service).await?;
     let session_guard = state
         .ssh_session_manager
         .try_acquire(&auth_user.user_id.to_string())?;
@@ -903,9 +903,8 @@ fn ssh_banner_validated(buffer: &[u8]) -> AppResult<bool> {
 async fn validate_runtime_ssh_target(
     service_id: &str,
     ssh_service: &crate::models::downstream_service::SshServiceConfig,
-    allow_private: bool,
 ) -> AppResult<()> {
-    ssh_service::validate_resolved_ssh_target(&ssh_service.host, ssh_service.port, allow_private)
+    ssh_service::validate_resolved_ssh_target(&ssh_service.host, ssh_service.port)
         .await
         .map_err(|error| {
             tracing::warn!(
@@ -967,11 +966,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_invalid_runtime_ssh_target() {
-        let error = validate_runtime_ssh_target(
+    async fn allows_private_ip_ssh_target() {
+        validate_runtime_ssh_target(
             "svc-1",
             &SshServiceConfig {
-                host: "127.0.0.1".to_string(),
+                host: "192.168.1.50".to_string(),
                 port: 22,
                 certificate_auth_enabled: false,
                 certificate_ttl_minutes: 30,
@@ -979,11 +978,28 @@ mod tests {
                 ca_private_key_encrypted: None,
                 ca_public_key: None,
             },
-            false,
         )
         .await
-        .expect_err("invalid target");
+        .expect("private IPs should be allowed for SSH targets");
+    }
 
-        assert!(error.to_string().contains("private or internal IP address"));
+    #[tokio::test]
+    async fn rejects_metadata_ssh_target() {
+        let error = validate_runtime_ssh_target(
+            "svc-1",
+            &SshServiceConfig {
+                host: "metadata.google.internal".to_string(),
+                port: 22,
+                certificate_auth_enabled: false,
+                certificate_ttl_minutes: 30,
+                allowed_principals: Vec::new(),
+                ca_private_key_encrypted: None,
+                ca_public_key: None,
+            },
+        )
+        .await
+        .expect_err("metadata endpoint should be blocked");
+
+        assert!(error.to_string().contains("cloud metadata endpoint"));
     }
 }
