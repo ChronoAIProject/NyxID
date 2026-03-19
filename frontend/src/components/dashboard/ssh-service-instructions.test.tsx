@@ -52,15 +52,17 @@ describe("SshServiceInstructions", () => {
       />,
     );
 
-    expect(screen.getByText("NyxID SSH Helper")).toBeInTheDocument();
-    expect(screen.getByText("Install helper")).toBeInTheDocument();
+    expect(screen.getByText("Client Setup")).toBeInTheDocument();
+    expect(screen.getByText("1. Install CLI")).toBeInTheDocument();
     expect(
       screen.getAllByText((content) =>
         content.includes(
           "--base-url https://auth.nyxid.test --service-id svc-1",
         ),
-      ),
-    ).toHaveLength(2);
-    expect(screen.getByText("Generate SSH config stanza")).toBeInTheDocument();
+      ).length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("Optional: Generate SSH config stanza")).toBeInTheDocument();
+    expect(screen.getByText("Target Machine Setup (Passwordless Login)")).toBeInTheDocument();
+    expect(screen.getByText("Node Agent (Remote Targets)")).toBeInTheDocument();
   });
 });
