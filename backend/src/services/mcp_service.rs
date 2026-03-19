@@ -897,6 +897,10 @@ fn build_request_body(
         return Ok(None);
     }
 
+    if !endpoint_has_request_body(endpoint) {
+        return Err(unexpected_request_body_error(endpoint, &body_fields));
+    }
+
     match request_body_mode(endpoint) {
         RequestBodyMode::Json => {
             let body_value = if json_body_uses_wrapper(endpoint) {
@@ -986,6 +990,20 @@ fn missing_required_request_body_error(endpoint: &McpToolEndpoint) -> AppError {
             request_body_field_name(endpoint)
         )),
     }
+}
+
+fn unexpected_request_body_error(
+    endpoint: &McpToolEndpoint,
+    body_fields: &serde_json::Map<String, serde_json::Value>,
+) -> AppError {
+    let mut field_names: Vec<&str> = body_fields.keys().map(String::as_str).collect();
+    field_names.sort_unstable();
+
+    AppError::BadRequest(format!(
+        "Endpoint {} does not define a request body, but received unexpected argument(s): {}",
+        endpoint.name,
+        field_names.join(", ")
+    ))
 }
 
 fn extract_body_field(
@@ -2400,6 +2418,72 @@ mod tests {
             std::str::from_utf8(body.unwrap().as_ref()).unwrap(),
             "message=hello%20world&count=2"
         );
+    }
+
+    #[test]
+    fn build_proxy_args_rejects_unknown_args_when_endpoint_has_no_request_body() {
+        let endpoint = McpToolEndpoint {
+            name: "list_users".to_string(),
+            description: Some("List users".to_string()),
+            method: "GET".to_string(),
+            path: "/users".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "limit",
+                    "in": "query",
+                    "required": false,
+                    "schema": { "type": "integer" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: false,
+        };
+
+        let error = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "limit": 10,
+                "unexpected": { "send": "body" }
+            }),
+        )
+        .expect_err("unknown args should not become an undeclared request body");
+
+        assert!(matches!(
+            error,
+            AppError::BadRequest(message)
+                if message.contains("does not define a request body")
+                    && message.contains("unexpected")
+        ));
+    }
+
+    #[test]
+    fn build_proxy_args_rejects_body_for_bodyless_post_endpoint() {
+        let endpoint = McpToolEndpoint {
+            name: "create_session".to_string(),
+            description: Some("Create a session without a request body".to_string()),
+            method: "POST".to_string(),
+            path: "/sessions".to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: false,
+        };
+
+        let error = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "payload": { "hello": "world" }
+            }),
+        )
+        .expect_err("bodyless endpoints should reject undeclared payloads");
+
+        assert!(matches!(
+            error,
+            AppError::BadRequest(message)
+                if message.contains("does not define a request body")
+                    && message.contains("payload")
+        ));
     }
 
     #[test]
