@@ -273,6 +273,56 @@ ssh prod-api
 
 The helper refreshes the certificate automatically before opening the tunnel.
 
+### Full command breakdown
+
+A complete one-off SSH command with certificate auth looks like this:
+
+```bash
+ssh \
+  -o ProxyCommand='nyxid ssh proxy \
+    --base-url https://auth.example.com \
+    --service-id <service_id> \
+    --issue-certificate \
+    --public-key-file ~/.ssh/id_ed25519.pub \
+    --principal ubuntu \
+    --certificate-file ~/.ssh/nyxid/prod-api-cert.pub \
+    --ca-public-key-file ~/.ssh/nyxid/prod-api-ca.pub' \
+  -o CertificateFile=~/.ssh/nyxid/prod-api-cert.pub \
+  -o IdentityFile=~/.ssh/id_ed25519 \
+  ubuntu@prod-api
+```
+
+**ProxyCommand arguments** (run by SSH before connecting):
+
+| Argument | Purpose |
+|----------|---------|
+| `--base-url` | NyxID backend URL |
+| `--service-id` | Which SSH service to tunnel to (determines target host:port) |
+| `--issue-certificate` | Request a fresh short-lived certificate before opening the tunnel |
+| `--public-key-file` | Your SSH public key -- sent to NyxID to sign into a certificate |
+| `--principal` | Unix username to embed in the certificate (must be in the service's `allowed_principals`) |
+| `--certificate-file` | Where to save the signed certificate locally |
+| `--ca-public-key-file` | Where to save the CA public key (for trust verification) |
+
+**SSH client arguments:**
+
+| Argument | Purpose |
+|----------|---------|
+| `-o CertificateFile=...` | Tells SSH to present this certificate during authentication |
+| `-o IdentityFile=...` | Private key matching the public key the cert was signed for -- proves you own the key |
+| `ubuntu@prod-api` | User and host alias (hostname is irrelevant since ProxyCommand handles routing) |
+
+**What happens when you run this:**
+
+1. SSH runs the ProxyCommand (`nyxid ssh proxy`)
+2. The CLI authenticates with NyxID using the saved token from `nyxid login` (or env var / flag)
+3. It sends your public key to NyxID, receives a signed certificate, saves it locally
+4. It opens a WebSocket tunnel: client → NyxID → TCP to SSH target
+5. SSH uses the certificate + private key to authenticate with the target's sshd
+6. If the target trusts NyxID's CA and the principal is authorized → passwordless login
+
+Replace `~/.ssh/id_ed25519` with your actual key path (`id_rsa`, `id_ecdsa`, etc.).
+
 ---
 
 ## 5. Transport-Only Mode
