@@ -143,7 +143,7 @@ pub async fn ssh_tunnel_ws(
 ) -> AppResult<Response> {
     authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    validate_runtime_ssh_target(&service_id, &ssh_service).await?;
+    validate_runtime_ssh_target(&service_id, &ssh_service, state.config.is_development()).await?;
     let session_guard = state
         .ssh_session_manager
         .try_acquire(&auth_user.user_id.to_string())?;
@@ -903,8 +903,9 @@ fn ssh_banner_validated(buffer: &[u8]) -> AppResult<bool> {
 async fn validate_runtime_ssh_target(
     service_id: &str,
     ssh_service: &crate::models::downstream_service::SshServiceConfig,
+    allow_private: bool,
 ) -> AppResult<()> {
-    ssh_service::validate_resolved_ssh_target(&ssh_service.host, ssh_service.port, false)
+    ssh_service::validate_resolved_ssh_target(&ssh_service.host, ssh_service.port, allow_private)
         .await
         .map_err(|error| {
             tracing::warn!(
@@ -978,6 +979,7 @@ mod tests {
                 ca_private_key_encrypted: None,
                 ca_public_key: None,
             },
+            false,
         )
         .await
         .expect_err("invalid target");
