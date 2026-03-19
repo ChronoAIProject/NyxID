@@ -17,6 +17,8 @@ pub struct ServiceEndpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_schema: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_description: Option<String>,
     pub is_active: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -45,6 +47,7 @@ mod tests {
             path: "/users".to_string(),
             parameters: Some(serde_json::json!([{"name": "limit", "in": "query"}])),
             request_body_schema: None,
+            request_content_type: Some("application/json".to_string()),
             response_description: Some("200 OK".to_string()),
             is_active: true,
             created_at: Utc::now(),
@@ -54,5 +57,6 @@ mod tests {
         let restored: ServiceEndpoint = bson::from_document(doc).expect("deserialize");
         assert_eq!(endpoint.id, restored.id);
         assert_eq!(endpoint.method, restored.method);
+        assert_eq!(endpoint.request_content_type, restored.request_content_type);
     }
 }

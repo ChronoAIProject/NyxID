@@ -8,6 +8,13 @@ pub struct ParsedEndpoint {
     pub path: String,
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
+    pub request_content_type: Option<String>,
+}
+
+#[derive(Default)]
+struct ParsedRequestBody {
+    content_type: Option<String>,
+    schema: Option<serde_json::Value>,
 }
 
 /// Fetch and parse an OpenAPI 3.x or Swagger 2.0 spec from a URL.
@@ -78,10 +85,10 @@ pub async fn parse_openapi_spec(
             let name = extract_name(operation, method, path);
             let description = extract_description(operation);
             let parameters = extract_parameters(operation, path_obj);
-            let request_body_schema = if is_openapi3 {
+            let request_body = if is_openapi3 {
                 extract_request_body_openapi3(operation)
             } else {
-                extract_request_body_swagger2(operation, path_obj)
+                extract_request_body_swagger2(operation, path_obj, &spec)
             };
 
             endpoints.push(ParsedEndpoint {
@@ -90,7 +97,8 @@ pub async fn parse_openapi_spec(
                 method: method.to_uppercase(),
                 path: path.clone(),
                 parameters,
-                request_body_schema,
+                request_body_schema: request_body.schema,
+                request_content_type: request_body.content_type,
             });
         }
     }
@@ -199,24 +207,31 @@ fn extract_parameters(
 }
 
 /// Extract requestBody schema for OpenAPI 3.x.
-fn extract_request_body_openapi3(operation: &serde_json::Value) -> Option<serde_json::Value> {
-    operation
+fn extract_request_body_openapi3(operation: &serde_json::Value) -> ParsedRequestBody {
+    let Some(content) = operation
         .get("requestBody")
         .and_then(|rb| rb.get("content"))
-        .and_then(|content| {
-            content
-                .get("application/json")
-                .or_else(|| content.get("*/*"))
-        })
-        .and_then(|media| media.get("schema"))
-        .cloned()
+        .and_then(|content| content.as_object())
+    else {
+        return ParsedRequestBody::default();
+    };
+
+    let Some((content_type, media)) = select_openapi3_media(content) else {
+        return ParsedRequestBody::default();
+    };
+
+    ParsedRequestBody {
+        content_type: Some(content_type.to_string()),
+        schema: media.get("schema").cloned(),
+    }
 }
 
 /// Extract body parameter schema for Swagger 2.0.
 fn extract_request_body_swagger2(
     operation: &serde_json::Value,
     path_obj: &serde_json::Map<String, serde_json::Value>,
-) -> Option<serde_json::Value> {
+    spec: &serde_json::Value,
+) -> ParsedRequestBody {
     let find_body_param = |params: &serde_json::Value| -> Option<serde_json::Value> {
         params.as_array()?.iter().find_map(|p| {
             if p.get("in").and_then(|v| v.as_str()) == Some("body") {
@@ -228,19 +243,79 @@ fn extract_request_body_swagger2(
     };
 
     // Check operation-level first, then path-level
-    if let Some(params) = operation.get("parameters")
+    let schema = if let Some(params) = operation.get("parameters")
         && let Some(schema) = find_body_param(params)
     {
-        return Some(schema);
-    }
-
-    if let Some(params) = path_obj.get("parameters")
+        Some(schema)
+    } else if let Some(params) = path_obj.get("parameters")
         && let Some(schema) = find_body_param(params)
     {
-        return Some(schema);
+        Some(schema)
+    } else {
+        None
+    };
+
+    ParsedRequestBody {
+        content_type: extract_swagger2_consumes(operation, spec),
+        schema,
+    }
+}
+
+fn select_openapi3_media(
+    content: &serde_json::Map<String, serde_json::Value>,
+) -> Option<(&str, &serde_json::Value)> {
+    if let Some((content_type, media)) = content.get_key_value("application/json") {
+        return Some((content_type.as_str(), media));
     }
 
-    None
+    if let Some((content_type, media)) = content
+        .iter()
+        .find(|(content_type, _)| is_json_content_type(content_type))
+    {
+        return Some((content_type.as_str(), media));
+    }
+
+    if let Some((content_type, media)) = content.iter().find(|(content_type, _)| {
+        let normalized = normalize_content_type(content_type);
+        normalized != "*/*" && !normalized.is_empty()
+    }) {
+        return Some((content_type.as_str(), media));
+    }
+
+    content
+        .get_key_value("*/*")
+        .map(|(content_type, media)| (content_type.as_str(), media))
+}
+
+fn extract_swagger2_consumes(
+    operation: &serde_json::Value,
+    spec: &serde_json::Value,
+) -> Option<String> {
+    operation
+        .get("consumes")
+        .and_then(first_content_type_from_array)
+        .or_else(|| spec.get("consumes").and_then(first_content_type_from_array))
+}
+
+fn first_content_type_from_array(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_array()?
+        .iter()
+        .find_map(|entry| entry.as_str().map(ToString::to_string))
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    let normalized = normalize_content_type(content_type);
+    normalized == "application/json" || normalized.ends_with("+json")
+}
+
+fn normalize_content_type(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -366,15 +441,38 @@ mod tests {
                 }
             }
         });
-        let schema = extract_request_body_openapi3(&op);
-        assert!(schema.is_some());
-        assert_eq!(schema.unwrap()["type"], "object");
+        let body = extract_request_body_openapi3(&op);
+        assert_eq!(body.content_type.as_deref(), Some("application/json"));
+        assert!(body.schema.is_some());
+        assert_eq!(body.schema.unwrap()["type"], "object");
+    }
+
+    #[test]
+    fn extract_request_body_openapi3_uses_non_json_content_when_json_absent() {
+        let op = serde_json::json!({
+            "requestBody": {
+                "content": {
+                    "application/zip": {
+                        "schema": {
+                            "type": "string",
+                            "format": "binary"
+                        }
+                    }
+                }
+            }
+        });
+        let body = extract_request_body_openapi3(&op);
+        assert_eq!(body.content_type.as_deref(), Some("application/zip"));
+        assert!(body.schema.is_some());
+        assert_eq!(body.schema.unwrap()["format"], "binary");
     }
 
     #[test]
     fn extract_request_body_openapi3_missing() {
         let op = serde_json::json!({});
-        assert!(extract_request_body_openapi3(&op).is_none());
+        let body = extract_request_body_openapi3(&op);
+        assert!(body.content_type.is_none());
+        assert!(body.schema.is_none());
     }
 
     #[test]
@@ -387,8 +485,30 @@ mod tests {
         });
         let path_obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_value(serde_json::json!({})).unwrap();
-        let schema = extract_request_body_swagger2(&op, &path_obj);
-        assert!(schema.is_some());
-        assert_eq!(schema.unwrap()["type"], "object");
+        let spec = serde_json::json!({
+            "consumes": ["application/json"]
+        });
+        let body = extract_request_body_swagger2(&op, &path_obj, &spec);
+        assert_eq!(body.content_type.as_deref(), Some("application/json"));
+        assert!(body.schema.is_some());
+        assert_eq!(body.schema.unwrap()["type"], "object");
+    }
+
+    #[test]
+    fn extract_request_body_swagger2_prefers_operation_consumes() {
+        let op = serde_json::json!({
+            "consumes": ["application/zip"],
+            "parameters": [
+                {"in": "body", "schema": {"type": "string", "format": "binary"}}
+            ]
+        });
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        let spec = serde_json::json!({
+            "consumes": ["application/json"]
+        });
+        let body = extract_request_body_swagger2(&op, &path_obj, &spec);
+        assert_eq!(body.content_type.as_deref(), Some("application/zip"));
+        assert_eq!(body.schema.unwrap()["format"], "binary");
     }
 }

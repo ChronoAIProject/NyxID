@@ -35,6 +35,7 @@ pub struct McpToolEndpoint {
     pub path: String,
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
+    pub request_content_type: Option<String>,
 }
 
 /// An MCP tool definition (name + description + JSON Schema input).
@@ -190,6 +191,7 @@ pub async fn load_user_tools(
                             path: ep.path.clone(),
                             parameters: ep.parameters.clone(),
                             request_body_schema: ep.request_body_schema.clone(),
+                            request_content_type: ep.request_content_type.clone(),
                         })
                         .collect()
                 })
@@ -396,13 +398,14 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
 
     // -- Request body schema --
     if let Some(body_schema) = &endpoint.request_body_schema {
+        let body_mode = request_body_mode(endpoint);
         let is_object = body_schema.get("type").and_then(|v| v.as_str()) == Some("object");
         let has_props = body_schema
             .get("properties")
             .and_then(|v| v.as_object())
             .is_some();
 
-        if is_object && has_props {
+        if matches!(body_mode, RequestBodyMode::Json) && is_object && has_props {
             // Merge object properties directly into the tool's inputSchema
             if let Some(props) = body_schema.get("properties").and_then(|v| v.as_object()) {
                 for (key, value) in props {
@@ -412,21 +415,15 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
             if let Some(req_arr) = body_schema.get("required").and_then(|v| v.as_array()) {
                 for r in req_arr {
                     if let Some(s) = r.as_str() {
-                        required.push(serde_json::Value::String(s.to_string()));
+                        push_required(&mut required, s);
                     }
                 }
             }
         } else {
             // Non-object body: wrap as a single `body` property
-            let mut body_prop = body_schema.clone();
-            if let Some(obj) = body_prop.as_object_mut() {
-                obj.insert(
-                    "description".into(),
-                    serde_json::Value::String("Request body".into()),
-                );
-            }
+            let body_prop = build_body_property(endpoint, body_schema, body_mode);
             properties.insert("body".to_string(), body_prop);
-            required.push(serde_json::Value::String("body".to_string()));
+            push_required(&mut required, "body");
         }
     }
 
@@ -443,6 +440,162 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
     }
 
     schema
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestBodyMode {
+    Json,
+    Raw,
+    Binary,
+    Multipart,
+}
+
+fn request_body_mode(endpoint: &McpToolEndpoint) -> RequestBodyMode {
+    request_body_mode_for(
+        endpoint.request_content_type.as_deref(),
+        endpoint.request_body_schema.as_ref(),
+    )
+}
+
+fn request_body_mode_for(
+    content_type: Option<&str>,
+    body_schema: Option<&serde_json::Value>,
+) -> RequestBodyMode {
+    let Some(content_type) = content_type else {
+        return RequestBodyMode::Json;
+    };
+
+    let normalized = normalize_content_type(content_type);
+    if normalized.is_empty() || normalized == "*/*" || is_json_content_type(&normalized) {
+        RequestBodyMode::Json
+    } else if normalized.starts_with("multipart/") {
+        RequestBodyMode::Multipart
+    } else if is_binary_content_type(&normalized) || schema_is_binary(body_schema) {
+        RequestBodyMode::Binary
+    } else {
+        RequestBodyMode::Raw
+    }
+}
+
+fn build_body_property(
+    endpoint: &McpToolEndpoint,
+    body_schema: &serde_json::Value,
+    body_mode: RequestBodyMode,
+) -> serde_json::Value {
+    match body_mode {
+        RequestBodyMode::Json => {
+            let mut body_prop = body_schema.clone();
+            if let Some(obj) = body_prop.as_object_mut() {
+                obj.insert(
+                    "description".into(),
+                    serde_json::Value::String("Request body".into()),
+                );
+            }
+            body_prop
+        }
+        RequestBodyMode::Binary => {
+            let mut body_prop = serde_json::json!({
+                "type": "string",
+                "description": format!(
+                    "Base64-encoded binary content for {} request body",
+                    request_content_type_or_default(endpoint)
+                ),
+                "contentEncoding": "base64",
+            });
+            if let Some(content_type) = endpoint.request_content_type.as_deref() {
+                body_prop["contentMediaType"] = serde_json::Value::String(content_type.to_string());
+            }
+            body_prop
+        }
+        RequestBodyMode::Raw => {
+            let mut body_prop = serde_json::json!({
+                "type": "string",
+                "description": format!(
+                    "Raw request body for {}",
+                    request_content_type_or_default(endpoint)
+                ),
+            });
+            if let Some(content_type) = endpoint.request_content_type.as_deref() {
+                body_prop["contentMediaType"] = serde_json::Value::String(content_type.to_string());
+            }
+            body_prop
+        }
+        RequestBodyMode::Multipart => {
+            let mut body_prop = serde_json::json!({
+                "type": "string",
+                "description": format!(
+                    "multipart/form-data request body for {}. Multipart bodies are not yet supported by the NyxID MCP proxy.",
+                    request_content_type_or_default(endpoint)
+                ),
+            });
+            if let Some(content_type) = endpoint.request_content_type.as_deref() {
+                body_prop["contentMediaType"] = serde_json::Value::String(content_type.to_string());
+            }
+            body_prop
+        }
+    }
+}
+
+fn push_required(required: &mut Vec<serde_json::Value>, name: &str) {
+    let required_value = serde_json::Value::String(name.to_string());
+    if !required.contains(&required_value) {
+        required.push(required_value);
+    }
+}
+
+fn normalize_content_type(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    content_type == "application/json" || content_type.ends_with("+json")
+}
+
+fn is_binary_content_type(content_type: &str) -> bool {
+    content_type == "application/octet-stream"
+        || content_type == "application/zip"
+        || content_type == "application/gzip"
+        || content_type == "application/pdf"
+        || content_type.starts_with("image/")
+        || content_type.starts_with("audio/")
+        || content_type.starts_with("video/")
+        || content_type.starts_with("font/")
+}
+
+fn schema_is_binary(body_schema: Option<&serde_json::Value>) -> bool {
+    body_schema
+        .and_then(|schema| schema.get("format"))
+        .and_then(|format| format.as_str())
+        == Some("binary")
+}
+
+fn request_content_type_or_default(endpoint: &McpToolEndpoint) -> &str {
+    endpoint
+        .request_content_type
+        .as_deref()
+        .unwrap_or("application/json")
+}
+
+fn request_content_type_header_value<'a>(
+    endpoint: &'a McpToolEndpoint,
+    method: &reqwest::Method,
+    has_body: bool,
+) -> Option<&'a str> {
+    if has_body
+        || matches!(
+            *method,
+            reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
+        )
+    {
+        Some(request_content_type_or_default(endpoint))
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -474,12 +627,12 @@ pub fn resolve_tool_call<'a>(
 pub fn build_proxy_args(
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
-) -> (
+) -> AppResult<(
     reqwest::Method,
     String,
     Option<String>,
     Option<bytes::Bytes>,
-) {
+)> {
     let mut path = endpoint.path.trim_start_matches('/').to_string();
     let mut query_params: Vec<(String, String)> = Vec::new();
     let mut body_fields: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
@@ -532,20 +685,6 @@ pub fn build_proxy_args(
         Some(qs.join("&"))
     };
 
-    let body = if body_fields.is_empty() {
-        None
-    } else {
-        // If only a `body` key exists, unwrap it (same logic as TS buildProxyArgs)
-        let body_value = if body_fields.len() == 1 && body_fields.contains_key("body") {
-            body_fields.remove("body").unwrap()
-        } else {
-            serde_json::Value::Object(body_fields)
-        };
-        Some(bytes::Bytes::from(
-            serde_json::to_vec(&body_value).unwrap_or_default(),
-        ))
-    };
-
     let method = match endpoint.method.to_uppercase().as_str() {
         "GET" => reqwest::Method::GET,
         "POST" => reqwest::Method::POST,
@@ -557,7 +696,85 @@ pub fn build_proxy_args(
         _ => reqwest::Method::GET,
     };
 
-    (method, path, query, body)
+    let body = build_request_body(endpoint, body_fields)?;
+
+    Ok((method, path, query, body))
+}
+
+fn build_request_body(
+    endpoint: &McpToolEndpoint,
+    mut body_fields: serde_json::Map<String, serde_json::Value>,
+) -> AppResult<Option<bytes::Bytes>> {
+    if body_fields.is_empty() {
+        return Ok(None);
+    }
+
+    match request_body_mode(endpoint) {
+        RequestBodyMode::Json => {
+            let body_value = if body_fields.len() == 1 && body_fields.contains_key("body") {
+                body_fields.remove("body").unwrap()
+            } else {
+                serde_json::Value::Object(body_fields)
+            };
+            let bytes = serde_json::to_vec(&body_value).map_err(|e| {
+                AppError::BadRequest(format!("Failed to serialize request body as JSON: {e}"))
+            })?;
+            Ok(Some(bytes::Bytes::from(bytes)))
+        }
+        RequestBodyMode::Binary => {
+            let body = extract_single_body_field(body_fields, endpoint, "a base64-encoded string")?;
+            let encoded = body.as_str().ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "Request body for {} must be a base64-encoded string in the `body` field",
+                    request_content_type_or_default(endpoint)
+                ))
+            })?;
+
+            use base64::Engine as _;
+
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .map_err(|e| {
+                    AppError::BadRequest(format!(
+                        "Failed to decode base64 body for {}: {e}",
+                        request_content_type_or_default(endpoint)
+                    ))
+                })?;
+
+            Ok(Some(bytes::Bytes::from(decoded)))
+        }
+        RequestBodyMode::Raw => {
+            let body = extract_single_body_field(body_fields, endpoint, "a raw string")?;
+            let text = body.as_str().ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "Request body for {} must be a raw string in the `body` field",
+                    request_content_type_or_default(endpoint)
+                ))
+            })?;
+
+            Ok(Some(bytes::Bytes::from(text.to_owned())))
+        }
+        RequestBodyMode::Multipart => Err(AppError::BadRequest(format!(
+            "multipart/form-data request bodies are not yet supported by the NyxID MCP proxy for {}",
+            request_content_type_or_default(endpoint)
+        ))),
+    }
+}
+
+fn extract_single_body_field(
+    mut body_fields: serde_json::Map<String, serde_json::Value>,
+    endpoint: &McpToolEndpoint,
+    expected_shape: &str,
+) -> AppResult<serde_json::Value> {
+    if body_fields.len() == 1 && body_fields.contains_key("body") {
+        return Ok(body_fields.remove("body").unwrap());
+    }
+
+    Err(AppError::BadRequest(format!(
+        "Request body for {} must be provided as {} in the `body` field",
+        request_content_type_or_default(endpoint),
+        expected_shape
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +802,7 @@ pub async fn execute_tool(
     use crate::services::{delegation_service, identity_service};
     use mongodb::bson::doc;
 
-    let (method, path, query, body) = build_proxy_args(endpoint, arguments);
+    let (method, path, query, body) = build_proxy_args(endpoint, arguments)?;
 
     let target =
         proxy_service::resolve_proxy_target(db, encryption_keys, user_id, &service.service_id)
@@ -676,15 +893,16 @@ pub async fn execute_tool(
     // Always set Content-Type for methods that typically carry a body, even
     // when the body is empty -- some APIs (e.g. ASP.NET) return 415 without it.
     let mut headers = reqwest::header::HeaderMap::new();
-    if body.is_some()
-        || matches!(
-            method,
-            reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
-        )
+    if let Some(content_type) = request_content_type_header_value(endpoint, &method, body.is_some())
     {
         headers.insert(
             reqwest::header::CONTENT_TYPE,
-            "application/json".parse().unwrap(),
+            content_type.parse().map_err(|e| {
+                AppError::Internal(format!(
+                    "Invalid request content type configured for endpoint {}: {e}",
+                    endpoint.name
+                ))
+            })?,
         );
     }
     headers.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
@@ -883,6 +1101,7 @@ mod tests {
             path: format!("/{name}"),
             parameters: None,
             request_body_schema: None,
+            request_content_type: None,
         }
     }
 
@@ -1038,5 +1257,141 @@ mod tests {
         assert_eq!(tools.len(), 6);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
+    }
+
+    #[test]
+    fn build_input_schema_uses_base64_string_for_binary_bodies() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "string",
+                "format": "binary"
+            })),
+            request_content_type: Some("application/zip".to_string()),
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert_eq!(schema["properties"]["body"]["type"], "string");
+        assert_eq!(schema["properties"]["body"]["contentEncoding"], "base64");
+        assert_eq!(
+            schema["properties"]["body"]["contentMediaType"],
+            "application/zip"
+        );
+        assert!(
+            schema["properties"]["body"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Base64-encoded binary")
+        );
+        assert_eq!(schema["required"], serde_json::json!(["body"]));
+    }
+
+    #[test]
+    fn build_input_schema_wraps_non_json_object_bodies() {
+        let endpoint = McpToolEndpoint {
+            name: "submit_xml".to_string(),
+            description: Some("Submit XML".to_string()),
+            method: "POST".to_string(),
+            path: "/xml".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "note": { "type": "string" }
+                },
+                "required": ["note"]
+            })),
+            request_content_type: Some("application/xml".to_string()),
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert!(schema["properties"].get("note").is_none());
+        assert_eq!(schema["properties"]["body"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["body"]["contentMediaType"],
+            "application/xml"
+        );
+        assert_eq!(schema["required"], serde_json::json!(["body"]));
+    }
+
+    #[test]
+    fn build_proxy_args_decodes_binary_body_from_base64() {
+        use base64::Engine as _;
+
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "string",
+                "format": "binary"
+            })),
+            request_content_type: Some("application/zip".to_string()),
+        };
+
+        let (_, _, _, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "body": base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04")
+            }),
+        )
+        .expect("binary body should decode");
+
+        assert_eq!(body.unwrap().as_ref(), b"PK\x03\x04");
+    }
+
+    #[test]
+    fn build_proxy_args_rejects_multipart_body() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_form".to_string(),
+            description: Some("Upload multipart form".to_string()),
+            method: "POST".to_string(),
+            path: "/form".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string" }
+                }
+            })),
+            request_content_type: Some("multipart/form-data".to_string()),
+        };
+
+        let error = build_proxy_args(&endpoint, &serde_json::json!({ "body": "ignored" }))
+            .expect_err("multipart should be rejected");
+
+        assert!(matches!(error, AppError::BadRequest(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("multipart/form-data request bodies are not yet supported")
+        );
+    }
+
+    #[test]
+    fn request_content_type_header_value_uses_endpoint_content_type() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "string",
+                "format": "binary"
+            })),
+            request_content_type: Some("application/zip".to_string()),
+        };
+
+        assert_eq!(
+            request_content_type_header_value(&endpoint, &reqwest::Method::POST, true),
+            Some("application/zip")
+        );
     }
 }

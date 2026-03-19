@@ -47,6 +47,7 @@ pub struct McpEndpointConfig {
     pub path: String,
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
+    pub request_content_type: Option<String>,
     pub response_description: Option<String>,
 }
 
@@ -173,6 +174,7 @@ pub async fn get_mcp_config(
                             path: ep.path.clone(),
                             parameters: ep.parameters.clone(),
                             request_body_schema: ep.request_body_schema.clone(),
+                            request_content_type: ep.request_content_type.clone(),
                             response_description: ep.response_description.clone(),
                         })
                         .collect()

@@ -22,6 +22,7 @@ pub struct CreateEndpointRequest {
     pub path: String,
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
+    pub request_content_type: Option<String>,
     pub response_description: Option<String>,
 }
 
@@ -33,6 +34,7 @@ pub struct UpdateEndpointRequest {
     pub path: Option<String>,
     pub parameters: Option<Option<serde_json::Value>>,
     pub request_body_schema: Option<Option<serde_json::Value>>,
+    pub request_content_type: Option<Option<String>>,
     pub response_description: Option<Option<String>>,
     pub is_active: Option<bool>,
 }
@@ -47,6 +49,7 @@ pub struct EndpointResponse {
     pub path: String,
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
+    pub request_content_type: Option<String>,
     pub response_description: Option<String>,
     pub is_active: bool,
     pub created_at: String,
@@ -132,6 +135,7 @@ fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> 
         path: e.path,
         parameters: e.parameters,
         request_body_schema: e.request_body_schema,
+        request_content_type: e.request_content_type,
         response_description: e.response_description,
         is_active: e.is_active,
         created_at: e.created_at.to_rfc3339(),
@@ -181,6 +185,7 @@ pub async fn create_endpoint(
         path: body.path,
         parameters: body.parameters,
         request_body_schema: body.request_body_schema,
+        request_content_type: body.request_content_type,
         response_description: body.response_description,
     };
 
@@ -225,6 +230,7 @@ pub async fn update_endpoint(
         path: body.path,
         parameters: body.parameters,
         request_body_schema: body.request_body_schema,
+        request_content_type: body.request_content_type,
         response_description: body.response_description,
         is_active: body.is_active,
     };
@@ -293,6 +299,7 @@ pub async fn discover_endpoints(
             path: p.path,
             parameters: p.parameters,
             request_body_schema: p.request_body_schema,
+            request_content_type: p.request_content_type,
             response_description: None,
         })
         .collect();
