@@ -220,15 +220,34 @@ async fn handle_web_terminal(
         .arg("-o")
         .arg("LogLevel=FATAL");
 
-    // If node-routed, add ProxyCommand to tunnel through the node agent
+    // If node-routed, add ProxyCommand to tunnel through the node agent.
+    // Generate a short-lived access token for the ProxyCommand to authenticate.
     if node_route.is_some() {
+        let proxy_token = match crate::crypto::jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &auth_user.user_id,
+            "openid",
+            None,
+        ) {
+            Ok(token) => token,
+            Err(error) => {
+                tracing::warn!(error = %error, "Web terminal: failed to generate proxy token");
+                send_error_and_close(&mut socket, "Failed to generate proxy credentials").await;
+                return;
+            }
+        };
+
         let proxy_cmd = format!(
-            "{} ssh proxy --base-url {} --service-id {} --access-token-env NYXID_INTERNAL_TOKEN",
+            "{} ssh proxy --base-url {} --service-id {}",
             nyxid_binary.display(),
             base_url,
             service_id,
         );
-        cmd = cmd.arg("-o").arg(format!("ProxyCommand={proxy_cmd}"));
+        cmd = cmd
+            .arg("-o")
+            .arg(format!("ProxyCommand={proxy_cmd}"))
+            .env("NYXID_ACCESS_TOKEN", &proxy_token);
         tracing::info!(service_id = %service_id, "Web terminal: using node-routed ProxyCommand");
     }
 
