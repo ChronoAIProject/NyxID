@@ -1,5 +1,5 @@
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
@@ -35,7 +35,7 @@ static SPEC_FETCH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 
 #[derive(Clone)]
 struct CachedSpecEntry {
-    spec: serde_json::Value,
+    spec: Arc<serde_json::Value>,
     expires_at: Instant,
 }
 
@@ -90,7 +90,7 @@ pub async fn discover_service_docs(
         fetch_json_spec(openapi_url)
             .await
             .ok()
-            .is_some_and(|spec| detect_streaming_from_openapi(&spec))
+            .is_some_and(|spec| detect_streaming_from_openapi(spec.as_ref()))
     } else {
         false
     } || asyncapi_spec_url.is_some();
@@ -119,7 +119,7 @@ pub async fn fetch_downstream_openapi_spec(
         .as_deref()
         .ok_or_else(|| AppError::NotFound("Service has no OpenAPI spec configured".to_string()))?;
 
-    let mut spec = fetch_json_spec(spec_url).await?;
+    let mut spec = fetch_json_spec(spec_url).await?.as_ref().clone();
     if spec.get("openapi").is_none() && spec.get("swagger").is_none() {
         return Err(AppError::BadRequest(
             "Downstream spec is not an OpenAPI or Swagger document".to_string(),
@@ -147,7 +147,7 @@ pub async fn fetch_downstream_asyncapi_spec(
         .as_deref()
         .ok_or_else(|| AppError::NotFound("Service has no AsyncAPI spec configured".to_string()))?;
 
-    let mut spec = fetch_json_spec(spec_url).await?;
+    let mut spec = fetch_json_spec(spec_url).await?.as_ref().clone();
     if spec.get("asyncapi").is_none() {
         return Err(AppError::BadRequest(
             "Downstream spec is not an AsyncAPI document".to_string(),
@@ -609,7 +609,7 @@ fn is_probe_url(base_url: &str, spec_url: &str, candidate_paths: &[&str]) -> boo
         .any(|path| format!("{base}{path}") == spec_url)
 }
 
-async fn fetch_json_spec(url: &str) -> AppResult<serde_json::Value> {
+async fn fetch_json_spec(url: &str) -> AppResult<Arc<serde_json::Value>> {
     let target = validate_spec_fetch_target(url).await?;
     let cache_key = target.url.to_string();
     if let Some(spec) = get_cached_spec(&cache_key) {
@@ -661,9 +661,11 @@ async fn fetch_json_spec(url: &str) -> AppResult<serde_json::Value> {
         body.extend_from_slice(&chunk);
     }
 
-    let spec = serde_json::from_slice(&body)
-        .map_err(|e| AppError::BadRequest(format!("Spec was not valid JSON: {e}")))?;
-    cache_spec(&cache_key, &spec);
+    let spec = Arc::new(
+        serde_json::from_slice::<serde_json::Value>(&body)
+            .map_err(|e| AppError::BadRequest(format!("Spec was not valid JSON: {e}")))?,
+    );
+    cache_spec(&cache_key, spec.clone());
     Ok(spec)
 }
 
@@ -805,7 +807,7 @@ fn normalize_fetch_host(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn get_cached_spec(url: &str) -> Option<serde_json::Value> {
+fn get_cached_spec(url: &str) -> Option<Arc<serde_json::Value>> {
     let now = Instant::now();
     let entry = SPEC_CACHE.get(url)?;
     if entry.is_fresh(now) {
@@ -817,16 +819,16 @@ fn get_cached_spec(url: &str) -> Option<serde_json::Value> {
     None
 }
 
-fn cache_spec(url: &str, spec: &serde_json::Value) {
+fn cache_spec(url: &str, spec: Arc<serde_json::Value>) {
     prune_stale_cache_entries(Instant::now());
-    if !SPEC_CACHE.contains_key(url) && SPEC_CACHE.len() >= MAX_SPEC_CACHE_ENTRIES {
-        evict_oldest_cache_entry();
+    if !SPEC_CACHE.contains_key(url) {
+        while SPEC_CACHE.len() >= MAX_SPEC_CACHE_ENTRIES && evict_oldest_cache_entry() {}
     }
 
     SPEC_CACHE.insert(
         url.to_string(),
         CachedSpecEntry {
-            spec: spec.clone(),
+            spec,
             expires_at: Instant::now() + SPEC_CACHE_TTL,
         },
     );
@@ -836,14 +838,18 @@ fn prune_stale_cache_entries(now: Instant) {
     SPEC_CACHE.retain(|_, entry| entry.is_fresh(now));
 }
 
-fn evict_oldest_cache_entry() {
+fn evict_oldest_cache_entry() -> bool {
     let oldest_key = SPEC_CACHE
         .iter()
-        .min_by_key(|entry| entry.expires_at)
-        .map(|entry| entry.key().clone());
+        .map(|entry| (entry.key().clone(), entry.expires_at))
+        .min_by_key(|(_, expires_at)| *expires_at)
+        .map(|(key, _)| key);
     if let Some(oldest_key) = oldest_key {
         SPEC_CACHE.remove(&oldest_key);
+        return true;
     }
+
+    false
 }
 
 fn build_pinned_spec_fetch_client(target: &ValidatedSpecFetchTarget) -> AppResult<reqwest::Client> {
@@ -865,7 +871,6 @@ fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
                 || ipv4.is_unspecified()
                 || ipv4.is_broadcast()
                 || is_rfc6598_cgnat(ipv4)
-                || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
         }
         std::net::IpAddr::V6(ipv6) => {
             ipv6.is_loopback()
@@ -890,6 +895,7 @@ mod tests {
         build_asyncapi_document, cache_spec, catalog_csp, detect_streaming_from_openapi,
         get_cached_spec, render_scalar_html, scalar_docs_csp, validate_spec_fetch_target,
     };
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -1018,9 +1024,9 @@ mod tests {
         super::SPEC_CACHE.clear();
         let url = "https://example.com/openapi.json";
         let spec = serde_json::json!({ "openapi": "3.1.0" });
-        cache_spec(url, &spec);
+        cache_spec(url, Arc::new(spec.clone()));
 
-        assert_eq!(get_cached_spec(url), Some(spec));
+        assert_eq!(get_cached_spec(url).as_deref(), Some(&spec));
     }
 
     #[test]
@@ -1030,7 +1036,7 @@ mod tests {
         super::SPEC_CACHE.insert(
             url.to_string(),
             CachedSpecEntry {
-                spec: serde_json::json!({ "openapi": "3.1.0" }),
+                spec: Arc::new(serde_json::json!({ "openapi": "3.1.0" })),
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
         );
@@ -1047,7 +1053,7 @@ mod tests {
             super::SPEC_CACHE.insert(
                 format!("https://example.com/spec-{idx}.json"),
                 CachedSpecEntry {
-                    spec: serde_json::json!({ "openapi": "3.1.0", "idx": idx }),
+                    spec: Arc::new(serde_json::json!({ "openapi": "3.1.0", "idx": idx })),
                     expires_at: Instant::now() + Duration::from_secs(120 + idx as u64),
                 },
             );
@@ -1055,7 +1061,7 @@ mod tests {
 
         cache_spec(
             "https://example.com/spec-new.json",
-            &serde_json::json!({ "openapi": "3.1.0", "idx": "new" }),
+            Arc::new(serde_json::json!({ "openapi": "3.1.0", "idx": "new" })),
         );
 
         assert_eq!(super::SPEC_CACHE.len(), MAX_SPEC_CACHE_ENTRIES);

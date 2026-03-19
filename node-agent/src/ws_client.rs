@@ -7,8 +7,9 @@ use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::Message;
+use zeroize::Zeroizing;
 
 use crate::config::{NodeConfig, SshConfig};
 use crate::credential_store::SharedCredentials;
@@ -24,31 +25,25 @@ enum SshTunnelControl {
 
 const SSH_CONTROL_CHANNEL_SIZE: usize = 256;
 const SSH_CONNECT_TIMEOUT_SECS: u64 = 10;
+const SSH_SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 5;
+const AGENT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const WS_WRITE_CHANNEL_SIZE: usize = 256;
 
+type SharedSigningSecret = Arc<Zeroizing<String>>;
 type ActiveSshTunnelMap = Arc<tokio::sync::Mutex<HashMap<String, ActiveSshTunnelEntry>>>;
 
-enum ActiveSshTunnelEntry {
-    Opening {
-        control_tx: mpsc::Sender<SshTunnelControl>,
-    },
-    Active {
-        control_tx: mpsc::Sender<SshTunnelControl>,
-        task_handle: tokio::task::JoinHandle<()>,
-    },
+struct ActiveSshTunnelEntry {
+    control_tx: mpsc::Sender<SshTunnelControl>,
+    task_handle: tokio::task::JoinHandle<()>,
 }
 
 impl ActiveSshTunnelEntry {
     fn control_tx(&self) -> mpsc::Sender<SshTunnelControl> {
-        match self {
-            Self::Opening { control_tx } | Self::Active { control_tx, .. } => control_tx.clone(),
-        }
+        self.control_tx.clone()
     }
 
     fn abort(self) {
-        if let Self::Active { task_handle, .. } = self {
-            task_handle.abort();
-        }
+        self.task_handle.abort();
     }
 }
 
@@ -160,20 +155,52 @@ pub async fn run_with_shutdown(
 ) {
     let in_flight = Arc::new(AtomicUsize::new(0));
     let in_flight_shutdown = in_flight.clone();
+    let signing_secret = signing_secret.map(|secret| Arc::new(Zeroizing::new(secret)));
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut connection_task = tokio::spawn({
+        let in_flight = in_flight.clone();
+        async move {
+            run_connection_loop(
+                &config,
+                &auth_token,
+                signing_secret,
+                &credentials,
+                in_flight,
+                shutdown_rx,
+            )
+            .await;
+        }
+    });
 
     tokio::select! {
-        () = run_connection_loop(&config, &auth_token, signing_secret.as_deref(), &credentials, in_flight) => {},
+        result = &mut connection_task => {
+            if let Err(error) = result {
+                tracing::error!(%error, "Connection loop terminated unexpectedly");
+            }
+        }
         _ = shutdown_signal() => {
-            tracing::info!("Shutdown signal received, draining in-flight requests...");
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-            while in_flight_shutdown.load(Ordering::Relaxed) > 0
-                && tokio::time::Instant::now() < deadline
-            {
+            tracing::info!("Shutdown signal received, draining in-flight requests and SSH tunnels...");
+            let _ = shutdown_tx.send(true);
+            let deadline = tokio::time::Instant::now()
+                + Duration::from_secs(AGENT_SHUTDOWN_TIMEOUT_SECS);
+            while tokio::time::Instant::now() < deadline {
+                if connection_task.is_finished() && in_flight_shutdown.load(Ordering::Relaxed) == 0 {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             let remaining = in_flight_shutdown.load(Ordering::Relaxed);
             if remaining > 0 {
                 tracing::warn!(remaining, "Forcing shutdown with in-flight requests");
+            }
+            if !connection_task.is_finished() {
+                tracing::warn!("Forcing shutdown while the connection loop is still running");
+                connection_task.abort();
+            }
+            if let Err(error) = connection_task.await
+                && !error.is_cancelled()
+            {
+                tracing::error!(%error, "Connection loop terminated unexpectedly during shutdown");
             }
             tracing::info!("Shutdown complete");
         }
@@ -184,35 +211,51 @@ pub async fn run_with_shutdown(
 async fn run_connection_loop(
     config: &NodeConfig,
     auth_token: &str,
-    signing_secret: Option<&str>,
+    signing_secret: Option<SharedSigningSecret>,
     credentials: &SharedCredentials,
     in_flight: Arc<AtomicUsize>,
+    shutdown: watch::Receiver<bool>,
 ) {
     let mut backoff =
         ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
 
     loop {
+        if shutdown_requested(&shutdown) {
+            break;
+        }
+
         match connect_and_serve(
             config,
             auth_token,
-            signing_secret,
+            signing_secret.clone(),
             credentials,
             in_flight.clone(),
+            shutdown.clone(),
         )
         .await
         {
             Ok(()) => {
+                if shutdown_requested(&shutdown) {
+                    break;
+                }
                 tracing::info!("Disconnected cleanly, reconnecting...");
                 backoff.reset();
             }
             Err(e) => {
+                if shutdown_requested(&shutdown) {
+                    break;
+                }
                 let delay = backoff.next_delay();
                 tracing::warn!(
                     error = %e,
                     delay_ms = delay.as_millis(),
                     "Connection failed, retrying"
                 );
-                tokio::time::sleep(delay).await;
+                let mut shutdown_wait = shutdown.clone();
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = wait_for_shutdown(&mut shutdown_wait) => break,
+                }
             }
         }
     }
@@ -222,14 +265,20 @@ async fn run_connection_loop(
 async fn connect_and_serve(
     config: &NodeConfig,
     auth_token: &str,
-    signing_secret: Option<&str>,
+    signing_secret: Option<SharedSigningSecret>,
     credentials: &SharedCredentials,
     in_flight: Arc<AtomicUsize>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     // 1. Connect
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&config.server.url)
-        .await
-        .map_err(|e| Error::WebSocket(format!("Failed to connect: {e}")))?;
+    let connect = tokio_tungstenite::connect_async(&config.server.url);
+    tokio::pin!(connect);
+    let (ws_stream, _) = tokio::select! {
+        result = &mut connect => {
+            result.map_err(|e| Error::WebSocket(format!("Failed to connect: {e}")))?
+        }
+        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+    };
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
@@ -239,17 +288,23 @@ async fn connect_and_serve(
         "node_id": config.node.id,
         "token": auth_token,
     });
-    ws_sink
-        .send(Message::Text(auth_msg.to_string().into()))
-        .await
-        .map_err(|e| Error::WebSocket(format!("Failed to send auth: {e}")))?;
+    tokio::select! {
+        result = ws_sink.send(Message::Text(auth_msg.to_string().into())) => {
+            result.map_err(|e| Error::WebSocket(format!("Failed to send auth: {e}")))?;
+        }
+        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+    }
 
     // 3. Wait for auth_ok
-    let response = tokio::time::timeout(Duration::from_secs(10), ws_stream.next())
-        .await
-        .map_err(|_| Error::AuthFailed("Timed out waiting for auth response".to_string()))?
-        .ok_or_else(|| Error::AuthFailed("Connection closed during auth".to_string()))?
-        .map_err(|e| Error::WebSocket(format!("Read error during auth: {e}")))?;
+    let response = tokio::select! {
+        response = tokio::time::timeout(Duration::from_secs(10), ws_stream.next()) => {
+            response
+                .map_err(|_| Error::AuthFailed("Timed out waiting for auth response".to_string()))?
+                .ok_or_else(|| Error::AuthFailed("Connection closed during auth".to_string()))?
+                .map_err(|e| Error::WebSocket(format!("Read error during auth: {e}")))?
+        }
+        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+    };
 
     let text = match response {
         Message::Text(t) => t.to_string(),
@@ -293,15 +348,21 @@ async fn connect_and_serve(
     let replay_guard = Arc::new(tokio::sync::Mutex::new(ReplayGuard::new()));
 
     // 5. Reader loop: process incoming messages from the server
-    while let Some(msg) = ws_stream.next().await {
+    let shutting_down = loop {
+        let Some(msg) = (tokio::select! {
+            msg = ws_stream.next() => msg,
+            _ = wait_for_shutdown(&mut shutdown) => break true,
+        }) else {
+            break false;
+        };
         let text = match msg {
             Ok(Message::Text(t)) => t.to_string(),
-            Ok(Message::Close(_)) => break,
+            Ok(Message::Close(_)) => break false,
             Ok(Message::Ping(_)) => continue,
             Ok(_) => continue,
             Err(e) => {
                 tracing::debug!(error = %e, "WebSocket read error");
-                break;
+                break false;
             }
         };
 
@@ -320,13 +381,13 @@ async fn connect_and_serve(
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                 });
                 if !send_ws_message(&tx, pong.to_string()).await {
-                    break;
+                    break false;
                 }
             }
             Some("proxy_request") => {
                 let tx_clone = tx.clone();
                 let creds = credentials.snapshot();
-                let secret = signing_secret.map(String::from);
+                let secret = signing_secret.clone();
                 let replay = replay_guard.clone();
                 let metrics_clone = metrics.clone();
                 let http_client = proxy_http_client.clone();
@@ -338,7 +399,7 @@ async fn connect_and_serve(
                     proxy_executor::execute_proxy_request(
                         &parsed,
                         &creds,
-                        secret.as_deref(),
+                        secret.as_deref().map(|secret| secret.as_str()),
                         &replay,
                         &metrics_clone,
                         &tx_clone,
@@ -352,7 +413,7 @@ async fn connect_and_serve(
                 let tx_clone = tx.clone();
                 let ssh_config = config.ssh.clone();
                 let active_tunnels = active_ssh_tunnels.clone();
-                let secret = signing_secret.map(String::from);
+                let secret = signing_secret.clone();
                 let replay = replay_guard.clone();
                 tokio::spawn(async move {
                     handle_ssh_tunnel_open(
@@ -380,9 +441,17 @@ async fn connect_and_serve(
                 tracing::debug!(msg_type = ?other, "Unknown message type");
             }
         }
-    }
+    };
 
-    drain_active_ssh_tunnels(&active_ssh_tunnels).await;
+    if shutting_down {
+        close_active_ssh_tunnels(
+            &active_ssh_tunnels,
+            Duration::from_secs(SSH_SHUTDOWN_DRAIN_TIMEOUT_SECS),
+        )
+        .await;
+    } else {
+        drain_active_ssh_tunnels(&active_ssh_tunnels).await;
+    }
     writer_task.abort();
     Ok(())
 }
@@ -392,7 +461,7 @@ async fn handle_ssh_tunnel_open(
     ssh_config: &SshConfig,
     tx: mpsc::Sender<String>,
     active_tunnels: ActiveSshTunnelMap,
-    signing_secret: Option<String>,
+    signing_secret: Option<SharedSigningSecret>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
 ) {
     let session_id = match parsed["session_id"].as_str() {
@@ -405,7 +474,7 @@ async fn handle_ssh_tunnel_open(
 
     if let Some(secret) = signing_secret.as_deref()
         && let Err(error) =
-            verify_signed_ssh_tunnel_open(parsed, &session_id, secret, &replay_guard).await
+            verify_signed_ssh_tunnel_open(parsed, &session_id, secret.as_str(), &replay_guard).await
     {
         let _ = send_ssh_tunnel_closed(&tx, &session_id, Some(error)).await;
         return;
@@ -435,7 +504,9 @@ async fn handle_ssh_tunnel_open(
         return;
     }
 
-    let (control_tx, mut control_rx) = mpsc::channel(SSH_CONTROL_CHANNEL_SIZE);
+    let (control_tx, control_rx) = mpsc::channel(SSH_CONTROL_CHANNEL_SIZE);
+    let address = format!("{host}:{port}");
+    let io_timeout = Duration::from_secs(ssh_config.io_timeout_secs);
     let open_rejection = {
         let mut guard = active_tunnels.lock().await;
         if guard.contains_key(&session_id) {
@@ -457,10 +528,26 @@ async fn handle_ssh_tunnel_open(
                 .to_string(),
             )
         } else {
+            let task_session_id = session_id.clone();
+            let task_address = address.clone();
+            let task_tx = tx.clone();
+            let task_tunnels = active_tunnels.clone();
+            let task_handle = tokio::spawn(async move {
+                run_ssh_tunnel_session(
+                    task_session_id,
+                    task_address,
+                    control_rx,
+                    task_tx,
+                    task_tunnels,
+                    io_timeout,
+                )
+                .await;
+            });
             guard.insert(
                 session_id.clone(),
-                ActiveSshTunnelEntry::Opening {
+                ActiveSshTunnelEntry {
                     control_tx: control_tx.clone(),
+                    task_handle,
                 },
             );
             None
@@ -468,79 +555,7 @@ async fn handle_ssh_tunnel_open(
     };
     if let Some(message) = open_rejection {
         let _ = send_ws_message(&tx, message).await;
-        return;
     }
-
-    let address = format!("{host}:{port}");
-    let stream = match tokio::time::timeout(
-        Duration::from_secs(SSH_CONNECT_TIMEOUT_SECS),
-        TcpStream::connect(&address),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(error)) => {
-            tracing::warn!(session_id = %session_id, %address, %error, "failed to open ssh tunnel tcp stream");
-            let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
-            let error = format!("connect_failed:{error}");
-            let _ = send_ssh_tunnel_closed(&tx, &session_id, Some(error.as_str())).await;
-            return;
-        }
-        Err(_) => {
-            tracing::warn!(
-                session_id = %session_id,
-                %address,
-                timeout_secs = SSH_CONNECT_TIMEOUT_SECS,
-                "timed out opening ssh tunnel tcp stream"
-            );
-            let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
-            let _ = send_ssh_tunnel_closed(&tx, &session_id, Some("connect_timeout")).await;
-            return;
-        }
-    };
-
-    let io_timeout = Duration::from_secs(ssh_config.io_timeout_secs);
-    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-    let task_session_id = session_id.clone();
-    let task_tx = tx.clone();
-    let task_tunnels = active_tunnels.clone();
-    let task_handle = tokio::spawn(async move {
-        if start_rx.await.is_err() {
-            return;
-        }
-
-        run_ssh_tunnel_task(
-            task_session_id,
-            stream,
-            &mut control_rx,
-            task_tx,
-            task_tunnels,
-            io_timeout,
-        )
-        .await;
-    });
-    {
-        let mut guard = active_tunnels.lock().await;
-        let Some(entry) = guard.get_mut(&session_id) else {
-            task_handle.abort();
-            return;
-        };
-        *entry = ActiveSshTunnelEntry::Active {
-            control_tx: control_tx.clone(),
-            task_handle,
-        };
-    }
-    let _ = start_tx.send(());
-
-    let _ = send_ws_message(
-        &tx,
-        serde_json::json!({
-            "type": "ssh_tunnel_opened",
-            "session_id": session_id,
-        })
-        .to_string(),
-    )
-    .await;
 }
 
 async fn verify_signed_ssh_tunnel_open(
@@ -629,28 +644,89 @@ async fn handle_ssh_tunnel_close(parsed: &serde_json::Value, active_tunnels: &Ac
     };
 
     if let Some(entry) = remove_ssh_tunnel_entry(active_tunnels, session_id).await {
-        match entry {
-            ActiveSshTunnelEntry::Opening { .. } => {}
-            ActiveSshTunnelEntry::Active {
-                control_tx,
-                task_handle,
-            } => match control_tx.try_send(SshTunnelControl::Close) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_))
-                | Err(mpsc::error::TrySendError::Closed(_)) => task_handle.abort(),
-            },
+        let ActiveSshTunnelEntry {
+            control_tx,
+            task_handle,
+        } = entry;
+        match control_tx.try_send(SshTunnelControl::Close) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) | Err(mpsc::error::TrySendError::Closed(_)) => {
+                task_handle.abort()
+            }
         }
     }
 }
 
-async fn run_ssh_tunnel_task(
+async fn run_ssh_tunnel_session(
     session_id: String,
-    mut stream: TcpStream,
-    control_rx: &mut mpsc::Receiver<SshTunnelControl>,
+    address: String,
+    mut control_rx: mpsc::Receiver<SshTunnelControl>,
     tx: mpsc::Sender<String>,
     active_tunnels: ActiveSshTunnelMap,
     io_timeout: Duration,
 ) {
+    let connect = tokio::time::timeout(
+        Duration::from_secs(SSH_CONNECT_TIMEOUT_SECS),
+        TcpStream::connect(&address),
+    );
+    tokio::pin!(connect);
+    let mut stream = loop {
+        tokio::select! {
+            control = control_rx.recv() => {
+                match control {
+                    Some(SshTunnelControl::Close) | None => {
+                        let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
+                        let _ = send_ssh_tunnel_closed(&tx, &session_id, None).await;
+                        return;
+                    }
+                    Some(SshTunnelControl::Data(_)) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            "received ssh tunnel data before tunnel connect completed"
+                        );
+                    }
+                }
+            }
+            connect_result = &mut connect => {
+                match connect_result {
+                    Ok(Ok(stream)) => break stream,
+                    Ok(Err(error)) => {
+                        tracing::warn!(session_id = %session_id, %address, %error, "failed to open ssh tunnel tcp stream");
+                        let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
+                        let error = format!("connect_failed:{error}");
+                        let _ = send_ssh_tunnel_closed(&tx, &session_id, Some(error.as_str())).await;
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            %address,
+                            timeout_secs = SSH_CONNECT_TIMEOUT_SECS,
+                            "timed out opening ssh tunnel tcp stream"
+                        );
+                        let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
+                        let _ = send_ssh_tunnel_closed(&tx, &session_id, Some("connect_timeout")).await;
+                        return;
+                    }
+                }
+            }
+        }
+    };
+
+    if !send_ws_message(
+        &tx,
+        serde_json::json!({
+            "type": "ssh_tunnel_opened",
+            "session_id": session_id,
+        })
+        .to_string(),
+    )
+    .await
+    {
+        let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
+        return;
+    }
+
     let mut read_buf = [0u8; 16 * 1024];
 
     loop {
@@ -773,6 +849,34 @@ async fn drain_active_ssh_tunnels(active_tunnels: &ActiveSshTunnelMap) {
     }
 }
 
+async fn close_active_ssh_tunnels(active_tunnels: &ActiveSshTunnelMap, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let entries = {
+            let guard = active_tunnels.lock().await;
+            if guard.is_empty() {
+                return;
+            }
+            guard
+                .values()
+                .map(ActiveSshTunnelEntry::control_tx)
+                .collect::<Vec<_>>()
+        };
+
+        for control_tx in entries {
+            let _ = control_tx.try_send(SshTunnelControl::Close);
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    drain_active_ssh_tunnels(active_tunnels).await;
+}
+
 async fn send_ssh_tunnel_closed(
     tx: &mpsc::Sender<String>,
     session_id: &str,
@@ -862,7 +966,6 @@ fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
                 || ipv4.is_unspecified()
                 || ipv4.is_broadcast()
                 || is_rfc6598_cgnat(ipv4)
-                || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
         }
         std::net::IpAddr::V6(ipv6) => {
             ipv6.is_loopback()
@@ -883,6 +986,17 @@ fn is_rfc6598_cgnat(ipv4: std::net::Ipv4Addr) -> bool {
 
 async fn send_ws_message(tx: &mpsc::Sender<String>, message: String) -> bool {
     tx.send(message).await.is_ok()
+}
+
+fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow()
+}
+
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    if shutdown_requested(shutdown) {
+        return;
+    }
+    let _ = shutdown.changed().await;
 }
 
 /// Wait for SIGINT or SIGTERM.
@@ -926,6 +1040,10 @@ mod tests {
 
     fn replay_guard() -> Arc<tokio::sync::Mutex<ReplayGuard>> {
         Arc::new(tokio::sync::Mutex::new(ReplayGuard::new()))
+    }
+
+    fn shared_signing_secret(secret: &str) -> SharedSigningSecret {
+        Arc::new(Zeroizing::new(secret.to_string()))
     }
 
     fn signed_ssh_tunnel_open_request(
@@ -1010,7 +1128,7 @@ mod tests {
             &ssh_config_with_allowed_target("127.0.0.1", port),
             tx.clone(),
             active_tunnels.clone(),
-            Some("ab".repeat(32)),
+            Some(shared_signing_secret(&"ab".repeat(32))),
             replay_guard(),
         )
         .await;
@@ -1096,10 +1214,14 @@ mod tests {
             ActiveSshTunnelEntry,
         >::new()));
         let (placeholder_tx, _placeholder_rx) = mpsc::channel(SSH_CONTROL_CHANNEL_SIZE);
+        let placeholder_task = tokio::spawn(async {
+            futures::future::pending::<()>().await;
+        });
         active_tunnels.lock().await.insert(
             "existing".to_string(),
-            ActiveSshTunnelEntry::Opening {
+            ActiveSshTunnelEntry {
                 control_tx: placeholder_tx,
+                task_handle: placeholder_task,
             },
         );
 
@@ -1153,7 +1275,7 @@ mod tests {
             &ssh_config_with_allowed_target("ssh.example.com", 22),
             tx,
             active_tunnels.clone(),
-            Some("ab".repeat(32)),
+            Some(shared_signing_secret(&"ab".repeat(32))),
             replay_guard(),
         )
         .await;
@@ -1213,7 +1335,7 @@ mod tests {
 
         active_tunnels.lock().await.insert(
             "sess-4".to_string(),
-            ActiveSshTunnelEntry::Active {
+            ActiveSshTunnelEntry {
                 control_tx,
                 task_handle,
             },
@@ -1254,7 +1376,7 @@ mod tests {
 
         active_tunnels.lock().await.insert(
             "sess-5".to_string(),
-            ActiveSshTunnelEntry::Active {
+            ActiveSshTunnelEntry {
                 control_tx,
                 task_handle,
             },
@@ -1265,6 +1387,36 @@ mod tests {
 
         assert!(active_tunnels.lock().await.is_empty());
         assert!(abort_handle.is_finished());
+    }
+
+    #[tokio::test]
+    async fn close_active_ssh_tunnels_requests_graceful_close() {
+        let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
+            String,
+            ActiveSshTunnelEntry,
+        >::new()));
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+        let tunnels = active_tunnels.clone();
+        let task_handle = tokio::spawn(async move {
+            if matches!(control_rx.recv().await, Some(SshTunnelControl::Close)) {
+                let _ = remove_ssh_tunnel_entry(&tunnels, "sess-6").await;
+                let _ = closed_tx.send(());
+            }
+        });
+
+        active_tunnels.lock().await.insert(
+            "sess-6".to_string(),
+            ActiveSshTunnelEntry {
+                control_tx,
+                task_handle,
+            },
+        );
+
+        close_active_ssh_tunnels(&active_tunnels, Duration::from_millis(200)).await;
+
+        closed_rx.await.expect("close signal");
+        assert!(active_tunnels.lock().await.is_empty());
     }
 
     #[test]
