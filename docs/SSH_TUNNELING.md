@@ -2,7 +2,7 @@
 
 NyxID can proxy SSH connections the same way it proxies HTTP: the user authenticates with NyxID first, then NyxID opens a WebSocket-backed TCP tunnel to the registered SSH target.
 
-This guide covers SSH service setup, short-lived SSH certificates, and the built-in `nyxid ssh` helper used for OpenSSH `ProxyCommand` integration.
+This guide covers SSH service setup, authentication, short-lived SSH certificates, target machine configuration, node-agent routing for unreachable targets, and the built-in `nyxid ssh` helper used for OpenSSH `ProxyCommand` integration.
 
 SSH is a first-class service type in NyxID. Create the service with `service_type: "ssh"` and an embedded `ssh_config`; the service detail page then renders the SSH target, certificate settings, CA public key, and copyable `nyxid ssh` commands inline.
 
@@ -14,6 +14,7 @@ SSH is a first-class service type in NyxID. Create the service with `service_typ
 |----------|---------|
 | `POST /api/v1/ssh/{service_id}/certificate` | Issue a short-lived OpenSSH user certificate |
 | `GET /api/v1/ssh/{service_id}` | Open the SSH-over-WebSocket tunnel |
+| `POST /api/v1/auth/cli-token` | Issue an access token for the CLI (cookie session auth) |
 
 `GET /api/v1/ssh/{service_id}` upgrades to WebSocket and accepts binary frames only. In practice you should use the `nyxid ssh proxy` helper instead of speaking to the tunnel directly.
 
@@ -36,11 +37,53 @@ For local development without installing the binary globally:
 cargo run -p nyxid -- ssh --help
 ```
 
-Before using the helper, export a NyxID access token in the shell where you plan to run `ssh`:
+---
+
+## Authentication
+
+The `nyxid` CLI supports three authentication methods, checked in order:
+
+### Option A: Browser Login (recommended)
+
+Opens your browser to the NyxID portal where you can log in with any method (password, SSO, OAuth). The token is saved automatically -- no env vars needed.
 
 ```bash
-export NYXID_ACCESS_TOKEN=<access_token>
+nyxid login --base-url https://auth.example.com
 ```
+
+The CLI starts a temporary localhost server, opens the browser to `/cli-auth`, and waits for the redirect callback with the access token. The token is saved to `~/.nyxid/access_token` with `0600` permissions.
+
+For headless environments (CI, Docker), use `--password` to enter email and password directly:
+
+```bash
+nyxid login --base-url https://auth.example.com --password
+```
+
+### Option B: API Key
+
+Create an API key in the NyxID dashboard and export it:
+
+```bash
+export NYXID_ACCESS_TOKEN="nyx_..."
+```
+
+API keys are long-lived and work well for automation and CI/CD pipelines.
+
+### Option C: Explicit Token
+
+Pass a token directly (useful for scripting):
+
+```bash
+nyxid ssh proxy --access-token <token> ...
+```
+
+### Token Resolution Order
+
+When running `nyxid ssh` commands, the CLI resolves the access token in this order:
+
+1. `--access-token` flag (explicit)
+2. `NYXID_ACCESS_TOKEN` environment variable
+3. Saved token from `nyxid login` (`~/.nyxid/access_token`)
 
 ---
 
@@ -56,6 +99,7 @@ curl -X POST http://localhost:3001/api/v1/services \
     "name": "Production Bastion",
     "service_type": "ssh",
     "service_category": "internal",
+    "visibility": "private",
     "ssh_config": {
       "host": "ssh.internal.example",
       "port": 22,
@@ -71,18 +115,37 @@ Rules enforced by NyxID:
 - `port` must be greater than zero
 - `certificate_ttl_minutes` must be between `15` and `60`
 - `allowed_principals` is required when certificate auth is enabled
+- Private/internal IPs are allowed (SSH services are admin-configured infrastructure)
+- Only `metadata.google.internal` is blocked (cloud metadata SSRF protection)
+
+### Visibility
+
+SSH services default to `"private"` -- only visible to their creator and admins. Set `"visibility": "public"` if the service should be visible to all authenticated users.
 
 To update an SSH service later, use `PUT /api/v1/services/{service_id}` with a replacement `ssh_config` object. `GET /api/v1/services/{service_id}` returns the current SSH config and CA public key.
 
 ---
 
-## 2. Enable SSH Certificate Auth
+## 2. SSH Certificate Auth
 
 If you enable certificate auth, NyxID generates a per-service SSH CA and stores the private key encrypted at rest. The public key is returned in the service config and certificate issuance response.
 
-The downstream SSH server must trust that CA using your normal OpenSSH CA policy. At minimum, install the returned CA public key on the target host and wire it into your `sshd` configuration. The principal you request from NyxID must also be accepted by the target host's OpenSSH authorization rules.
+### How it works
 
-Issue a certificate with the built-in helper:
+1. User authenticates with NyxID (via JWT or API key)
+2. User sends their SSH public key and requested principal to NyxID
+3. NyxID verifies the user's identity and checks the principal is in the service's `allowed_principals` list
+4. NyxID signs a short-lived certificate (15-60 minutes) for the user's public key
+5. User presents the certificate + private key to the target SSH server
+6. Target server verifies the certificate was signed by the trusted CA AND the principal is authorized
+
+The identity file (private key) is required because SSH certificate auth is a two-part proof:
+- The **certificate** proves NyxID authorized this public key for this principal
+- The **private key** proves the user owns the public key the certificate was issued for
+
+NyxID handles the tunnel transport, but the SSH authentication handshake still happens end-to-end between the client and the target's `sshd`.
+
+### Issue a certificate with the CLI
 
 ```bash
 nyxid ssh issue-cert \
@@ -94,11 +157,69 @@ nyxid ssh issue-cert \
   --ca-public-key-file ~/.ssh/nyxid/prod-api-ca.pub
 ```
 
-By default the helper reads the NyxID access token from `NYXID_ACCESS_TOKEN`. Pass `--access-token` if you want to provide it directly.
+Replace `~/.ssh/id_ed25519.pub` with your actual SSH public key path (`id_rsa.pub`, `id_ecdsa.pub`, etc.).
 
 ---
 
-## 3. Use OpenSSH ProxyCommand
+## 3. Target Machine Setup (Passwordless Login)
+
+For certificate auth to work without a password, the SSH target machine must trust NyxID's CA and authorize the expected principals.
+
+### Step 1: Install the NyxID CA public key
+
+Copy the CA public key from the service detail page or API response and save it on the target:
+
+```bash
+echo '<CA public key>' | sudo tee /etc/ssh/nyxid_ca.pub
+```
+
+### Step 2: Configure sshd
+
+Add these lines to `/etc/ssh/sshd_config`:
+
+```
+TrustedUserCAKeys /etc/ssh/nyxid_ca.pub
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+```
+
+- `TrustedUserCAKeys` tells sshd to accept certificates signed by this CA
+- `AuthorizedPrincipalsFile` controls which principals can log in as which Unix users (`%u` expands to the target username)
+
+### Step 3: Create authorized principals files
+
+For each Unix user that should be accessible, create a principals file listing which certificate principals can log in as that user:
+
+```bash
+sudo mkdir -p /etc/ssh/auth_principals
+echo 'ubuntu' | sudo tee /etc/ssh/auth_principals/ubuntu
+echo 'deploy' | sudo tee /etc/ssh/auth_principals/deploy
+```
+
+This means:
+- A certificate with principal `ubuntu` can log in as Unix user `ubuntu`
+- A certificate with principal `deploy` can log in as Unix user `deploy`
+- A certificate with principal `ubuntu` CANNOT log in as Unix user `deploy` (and vice versa)
+
+### Step 4: Restart sshd
+
+```bash
+sudo systemctl restart sshd
+```
+
+### Security model
+
+The security is layered:
+
+1. **NyxID authentication**: User must have a valid JWT or API key
+2. **NyxID authorization**: NyxID only signs principals from the service's `allowed_principals` list
+3. **Target authorization**: Target sshd independently checks the certificate's principal against `AuthorizedPrincipalsFile`
+4. **Certificate expiry**: Certificates are short-lived (15-60 minutes), limiting exposure from compromised credentials
+
+Even if someone obtains a valid NyxID certificate, they can only access accounts whose principals file includes their certificate's principal.
+
+---
+
+## 4. Use OpenSSH ProxyCommand
 
 The easiest way to wire OpenSSH to NyxID is to let the helper print a ready-made `~/.ssh/config` stanza:
 
@@ -114,67 +235,101 @@ nyxid ssh config \
 ```
 
 That emits a config block using:
-- `ProxyCommand nyxid ssh proxy ...`
+- `ProxyCommand nyxid ssh proxy ...` with automatic certificate refresh
 - `CertificateFile` pointing at the short-lived cert written by the helper
-- `HostName ssh.invalid` so OpenSSH never talks to the target directly
+- `HostName` set to the host alias (the actual routing is handled by ProxyCommand)
 
 Once the stanza is in place:
 
 ```bash
-export NYXID_ACCESS_TOKEN=<access_token>
 ssh prod-api
 ```
 
-The helper can refresh the certificate automatically before opening the tunnel.
+The helper refreshes the certificate automatically before opening the tunnel.
 
 ---
 
-## 4. Transport-Only Mode
+## 5. Transport-Only Mode
 
-Certificate auth is optional. If your target host already uses another SSH auth method, `nyxid ssh proxy` still works as a transport tunnel:
+Certificate auth is optional. If your target host already uses another SSH auth method (password, authorized_keys), `nyxid ssh proxy` still works as a transport tunnel:
 
 ```bash
-nyxid ssh proxy \
-  --base-url https://auth.example.com \
-  --service-id <service_id>
+ssh -o ProxyCommand='nyxid ssh proxy --base-url https://auth.example.com --service-id <service_id>' user@my-service
 ```
 
-In that mode NyxID only carries the TCP stream. OpenSSH and the downstream host still negotiate authentication end to end.
+In that mode NyxID only carries the TCP stream. OpenSSH and the downstream host still negotiate authentication end to end. The user will be prompted for their password or use their existing key configuration.
 
 ---
 
-## 5. Node-Routed SSH
+## 6. Node-Routed SSH
 
-If the service is bound to a NyxID credential node, NyxID resolves that route before opening a direct TCP connection. The flow becomes:
+If the SSH target is behind a firewall or not directly reachable from the NyxID server, deploy a node agent on a machine that CAN reach the target. The node agent establishes an outbound WebSocket connection to NyxID and tunnels SSH traffic through it -- no inbound ports required.
 
-1. client connects to `GET /api/v1/ssh/{service_id}`
-2. NyxID resolves the user's active node binding
-3. NyxID sends `ssh_tunnel_open` to the node over the node WebSocket
-4. the node opens the local TCP connection to `host:port`
-5. raw SSH bytes flow through `ssh_tunnel_data` messages
+### How it works
 
-If no healthy node route is available, NyxID falls back to opening the TCP connection itself.
+1. Client connects to `GET /api/v1/ssh/{service_id}`
+2. NyxID resolves the user's active node binding for this service
+3. NyxID sends `ssh_tunnel_open` to the node over the existing node WebSocket
+4. The node agent opens a local TCP connection to `host:port` on its network
+5. Raw SSH bytes flow through `ssh_tunnel_data` messages between client and node
+6. If no healthy node route is available, NyxID falls back to opening the TCP connection itself
 
-Operational requirement: the selected node must be able to reach the target SSH host and port from its own network.
+### Setup
 
-For node-routed SSH, NyxID now validates the downstream banner as SSH before the tunnel is exposed to the client, and the node agent only allows private or loopback targets when you explicitly allowlist them in the node config. Public targets can still be opened without an allowlist entry. `io_timeout_secs` bounds stalled TCP reads and writes on the node side without changing NyxID's global tunnel lifetime cap. The default is `3600` seconds to align with `SSH_MAX_TUNNEL_DURATION_SECS`; lower it if you want idle interactive sessions reclaimed sooner.
+**1. Generate a registration token** (via the Nodes page or API):
 
-Example node-agent policy:
+```bash
+curl -X POST https://auth.example.com/api/v1/nodes/register-token \
+  -H "Authorization: Bearer <access_token>"
+```
+
+**2. Register the node agent** on a machine in the target's network:
+
+```bash
+nyxid-node register \
+  --token <registration_token> \
+  --url wss://auth.example.com/api/v1/nodes/ws
+```
+
+**3. Start the agent:**
+
+```bash
+nyxid-node start
+```
+
+**4. Bind the SSH service to the node** via the Nodes page or API. This tells NyxID to route SSH traffic for this service through the node agent.
+
+### Node-agent SSH policy
+
+The node agent validates SSH targets independently. Configure allowed targets in the node's TOML config:
 
 ```toml
 [ssh]
 max_tunnels = 10
-# Lower this if you want more aggressive idle-session cleanup on the node.
+# Timeout for idle SSH tunnel I/O on the node side.
+# Default is 3600s (1 hour) to match SSH_MAX_TUNNEL_DURATION_SECS.
 io_timeout_secs = 3600
 
 [[ssh.allowed_targets]]
 host = "bastion.internal.example"
 port = 22
+
+[[ssh.allowed_targets]]
+host = "192.168.1.50"
+port = 22
 ```
+
+Public targets can be opened without an allowlist entry. Private/loopback targets require explicit allowlisting in the node config.
+
+### Security
+
+- `ssh_tunnel_open` messages are HMAC-signed by the NyxID server using the node's signing secret
+- The node agent verifies the HMAC signature and checks a replay guard (5-minute window, 10k nonce cap)
+- Tunnel data is binary (not inspected by the node agent) -- SSH encryption is end-to-end
 
 ---
 
-## 6. Audit and Limits
+## 7. Audit and Limits
 
 NyxID emits audit events for:
 - `service_created` and `service_updated` when SSH services are created or edited
