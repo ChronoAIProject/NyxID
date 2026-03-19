@@ -94,7 +94,7 @@ pub async fn parse_openapi_spec(
 
             let name = extract_name(operation, method, path);
             let description = extract_description(operation);
-            let parameters = extract_parameters(operation, path_obj);
+            let parameters = extract_parameters_with_spec(operation, path_obj, &spec);
             let request_body = if is_openapi3 {
                 extract_request_body_openapi3_with_spec(operation, &spec)
             } else {
@@ -190,17 +190,28 @@ fn extract_description(operation: &serde_json::Value) -> Option<String> {
 }
 
 /// Extract parameters from both operation-level and path-level.
+#[cfg(test)]
 fn extract_parameters(
     operation: &serde_json::Value,
     path_obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    extract_parameters_with_spec(operation, path_obj, operation)
+}
+
+fn extract_parameters_with_spec(
+    operation: &serde_json::Value,
+    path_obj: &serde_json::Map<String, serde_json::Value>,
+    spec: &serde_json::Value,
 ) -> Option<serde_json::Value> {
     let mut all_params = Vec::new();
 
     // Path-level parameters
     if let Some(path_params) = path_obj.get("parameters").and_then(|v| v.as_array()) {
         for p in path_params {
-            if should_include_parameter(p) {
-                all_params.push(p.clone());
+            if let Some(param) = resolve_parameter_refs(spec, p)
+                && should_include_parameter(&param)
+            {
+                merge_parameter(&mut all_params, param);
             }
         }
     }
@@ -208,8 +219,10 @@ fn extract_parameters(
     // Operation-level parameters (override path-level by name+in)
     if let Some(op_params) = operation.get("parameters").and_then(|v| v.as_array()) {
         for p in op_params {
-            if should_include_parameter(p) {
-                all_params.push(p.clone());
+            if let Some(param) = resolve_parameter_refs(spec, p)
+                && should_include_parameter(&param)
+            {
+                merge_parameter(&mut all_params, param);
             }
         }
     }
@@ -222,10 +235,22 @@ fn extract_parameters(
 }
 
 fn should_include_parameter(param: &serde_json::Value) -> bool {
-    !matches!(
+    matches!(
         param.get("in").and_then(|v| v.as_str()),
-        Some("body" | "formData")
-    )
+        Some("path" | "query" | "header" | "cookie")
+    ) && param
+        .get("name")
+        .and_then(|v| v.as_str())
+        .is_some_and(|name| !name.is_empty())
+}
+
+fn merge_parameter(params: &mut Vec<serde_json::Value>, param: serde_json::Value) {
+    if let Some((name, location)) = parameter_identity(&param) {
+        params.retain(|existing| {
+            parameter_identity(existing) != Some((name.clone(), location.clone()))
+        });
+    }
+    params.push(param);
 }
 
 /// Extract requestBody schema for OpenAPI 3.x.
@@ -242,7 +267,9 @@ fn extract_request_body_openapi3_with_spec(
         return ParsedRequestBody::default();
     };
 
-    let request_body = resolve_local_ref(spec, request_body).unwrap_or(request_body);
+    let Some(request_body) = resolve_request_body_refs(spec, request_body) else {
+        return ParsedRequestBody::default();
+    };
 
     let Some(content) = request_body
         .get("content")
@@ -257,7 +284,9 @@ fn extract_request_body_openapi3_with_spec(
 
     ParsedRequestBody {
         content_type: Some(content_type.to_string()),
-        schema: media.get("schema").map(|schema| resolve_schema_refs(spec, schema)),
+        schema: media
+            .get("schema")
+            .map(|schema| resolve_schema_refs(spec, schema)),
         required: request_body
             .get("required")
             .and_then(|v| v.as_bool())
@@ -273,10 +302,15 @@ fn extract_request_body_swagger2(
 ) -> ParsedRequestBody {
     let find_body_param = |params: &serde_json::Value| -> Option<(serde_json::Value, bool)> {
         params.as_array()?.iter().find_map(|p| {
-            if p.get("in").and_then(|v| v.as_str()) == Some("body") {
+            let resolved = resolve_parameter_refs(spec, p)?;
+            if resolved.get("in").and_then(|v| v.as_str()) == Some("body") {
                 Some((
-                    p.get("schema").cloned().unwrap_or(serde_json::Value::Null),
-                    p.get("required")
+                    resolved
+                        .get("schema")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    resolved
+                        .get("required")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false),
                 ))
@@ -286,13 +320,16 @@ fn extract_request_body_swagger2(
         })
     };
 
-    let find_form_data_kind =
-        |params: &serde_json::Value| -> Option<(Swagger2FormBodyKind, bool)> {
+    let find_form_data_kind = |params: &serde_json::Value| -> Option<(Swagger2FormBodyKind, bool)> {
         let mut saw_form_fields = false;
         let mut saw_file_upload = false;
         let mut required = false;
 
         for param in params.as_array()? {
+            let Some(param) = resolve_parameter_refs(spec, param) else {
+                continue;
+            };
+
             if param.get("in").and_then(|v| v.as_str()) != Some("formData") {
                 continue;
             }
@@ -343,14 +380,12 @@ fn extract_request_body_swagger2(
         None
     };
 
-    let resolved_schema = schema.as_ref().map(|schema| resolve_schema_refs(spec, schema));
+    let resolved_schema = schema
+        .as_ref()
+        .map(|schema| resolve_schema_refs(spec, schema));
     let form_data_kind = form_data.as_ref().map(|(kind, _)| *kind);
-    let content_type = extract_swagger2_consumes(
-        operation,
-        spec,
-        resolved_schema.as_ref(),
-        form_data_kind,
-    );
+    let content_type =
+        extract_swagger2_consumes(operation, spec, resolved_schema.as_ref(), form_data_kind);
     let body_required = if schema.is_some() {
         required
     } else {
@@ -527,7 +562,11 @@ fn is_binary_content_type(content_type: &str) -> bool {
         || (normalized.starts_with("application/") && !is_text_content_type(&normalized))
 }
 
-fn is_binary_media(content_type: &str, media: &serde_json::Value, spec: &serde_json::Value) -> bool {
+fn is_binary_media(
+    content_type: &str,
+    media: &serde_json::Value,
+    spec: &serde_json::Value,
+) -> bool {
     is_binary_content_type(content_type)
         || media
             .get("schema")
@@ -541,7 +580,9 @@ fn is_upload_media(
     media: &serde_json::Value,
     spec: &serde_json::Value,
 ) -> bool {
-    let resolved_schema = media.get("schema").map(|schema| resolve_schema_refs(spec, schema));
+    let resolved_schema = media
+        .get("schema")
+        .map(|schema| resolve_schema_refs(spec, schema));
 
     is_binary_media(content_type, media, spec)
         || (normalize_content_type(content_type).starts_with("multipart/")
@@ -608,6 +649,13 @@ fn normalize_content_type(content_type: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn parameter_identity(param: &serde_json::Value) -> Option<(String, String)> {
+    Some((
+        param.get("name").and_then(|v| v.as_str())?.to_string(),
+        param.get("in").and_then(|v| v.as_str())?.to_string(),
+    ))
+}
+
 fn resolve_local_ref<'a>(
     root: &'a serde_json::Value,
     value: &'a serde_json::Value,
@@ -615,6 +663,102 @@ fn resolve_local_ref<'a>(
     let ref_str = value.get("$ref").and_then(|v| v.as_str())?;
     let pointer = ref_str.strip_prefix('#')?;
     root.pointer(pointer)
+}
+
+fn resolve_parameter_refs(
+    root: &serde_json::Value,
+    param: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let mut visited = HashSet::new();
+    resolve_parameter_refs_inner(root, param, &mut visited)
+}
+
+fn resolve_request_body_refs(
+    root: &serde_json::Value,
+    request_body: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let mut visited = HashSet::new();
+    resolve_request_body_refs_inner(root, request_body, &mut visited)
+}
+
+fn resolve_request_body_refs_inner(
+    root: &serde_json::Value,
+    request_body: &serde_json::Value,
+    visited: &mut HashSet<String>,
+) -> Option<serde_json::Value> {
+    let mut resolved = if let Some(ref_str) = request_body.get("$ref").and_then(|v| v.as_str()) {
+        if !visited.insert(ref_str.to_string()) {
+            return Some(request_body.clone());
+        }
+
+        let target = resolve_local_ref(root, request_body)?;
+        let mut expanded = resolve_request_body_refs_inner(root, target, visited)?;
+        visited.remove(ref_str);
+
+        if let (Some(request_body_obj), Some(expanded_obj)) =
+            (request_body.as_object(), expanded.as_object_mut())
+        {
+            for (key, value) in request_body_obj {
+                if key == "$ref" {
+                    continue;
+                }
+                expanded_obj.insert(key.clone(), value.clone());
+            }
+        }
+
+        expanded
+    } else {
+        request_body.clone()
+    };
+
+    if let Some(content) = resolved
+        .get_mut("content")
+        .and_then(|content| content.as_object_mut())
+    {
+        for media in content.values_mut() {
+            if let Some(schema) = media.get_mut("schema") {
+                *schema = resolve_schema_refs(root, schema);
+            }
+        }
+    }
+
+    Some(resolved)
+}
+
+fn resolve_parameter_refs_inner(
+    root: &serde_json::Value,
+    param: &serde_json::Value,
+    visited: &mut HashSet<String>,
+) -> Option<serde_json::Value> {
+    let mut resolved = if let Some(ref_str) = param.get("$ref").and_then(|v| v.as_str()) {
+        if !visited.insert(ref_str.to_string()) {
+            return Some(param.clone());
+        }
+
+        let target = resolve_local_ref(root, param)?;
+        let mut expanded = resolve_parameter_refs_inner(root, target, visited)?;
+        visited.remove(ref_str);
+
+        if let (Some(param_obj), Some(expanded_obj)) = (param.as_object(), expanded.as_object_mut())
+        {
+            for (key, value) in param_obj {
+                if key == "$ref" {
+                    continue;
+                }
+                expanded_obj.insert(key.clone(), value.clone());
+            }
+        }
+
+        expanded
+    } else {
+        param.clone()
+    };
+
+    if let Some(schema) = resolved.get_mut("schema") {
+        *schema = resolve_schema_refs(root, schema);
+    }
+
+    Some(resolved)
 }
 
 fn resolve_schema_refs(root: &serde_json::Value, schema: &serde_json::Value) -> serde_json::Value {
@@ -636,7 +780,9 @@ fn resolve_schema_refs_inner(
         let mut expanded = resolve_schema_refs_inner(root, resolved, visited);
         visited.remove(ref_str);
 
-        if let (Some(schema_obj), Some(expanded_obj)) = (schema.as_object(), expanded.as_object_mut()) {
+        if let (Some(schema_obj), Some(expanded_obj)) =
+            (schema.as_object(), expanded.as_object_mut())
+        {
             for (key, value) in schema_obj {
                 if key == "$ref" {
                     continue;
@@ -653,7 +799,10 @@ fn resolve_schema_refs_inner(
         return resolved;
     };
 
-    if let Some(properties) = obj.get_mut("properties").and_then(|value| value.as_object_mut()) {
+    if let Some(properties) = obj
+        .get_mut("properties")
+        .and_then(|value| value.as_object_mut())
+    {
         for property_schema in properties.values_mut() {
             *property_schema = resolve_schema_refs_inner(root, property_schema, visited);
         }
@@ -816,6 +965,97 @@ mod tests {
     }
 
     #[test]
+    fn extract_parameters_resolves_refs_and_operation_overrides_path_level() {
+        let spec = serde_json::json!({
+            "openapi": "3.0.0",
+            "components": {
+                "parameters": {
+                    "LimitPath": {
+                        "name": "limit",
+                        "in": "query",
+                        "required": false,
+                        "schema": { "type": "integer" }
+                    },
+                    "LimitOp": {
+                        "name": "limit",
+                        "in": "query",
+                        "required": true,
+                        "schema": { "$ref": "#/components/schemas/LimitType" }
+                    }
+                },
+                "schemas": {
+                    "LimitType": {
+                        "type": "integer",
+                        "format": "int32"
+                    }
+                }
+            }
+        });
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({
+                "parameters": [
+                    { "$ref": "#/components/parameters/LimitPath" }
+                ],
+                "get": {
+                    "parameters": [
+                        { "$ref": "#/components/parameters/LimitOp" }
+                    ]
+                }
+            }))
+            .unwrap();
+        let operation = &path_obj["get"];
+        let params = extract_parameters_with_spec(operation, &path_obj, &spec).unwrap();
+        let arr = params.as_array().unwrap();
+
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], "limit");
+        assert_eq!(arr[0]["required"], true);
+        assert_eq!(arr[0]["schema"]["type"], "integer");
+        assert_eq!(arr[0]["schema"]["format"], "int32");
+    }
+
+    #[test]
+    fn extract_parameters_excludes_referenced_body_and_form_data_params() {
+        let spec = serde_json::json!({
+            "swagger": "2.0",
+            "parameters": {
+                "Limit": {
+                    "name": "limit",
+                    "in": "query",
+                    "type": "integer"
+                },
+                "Payload": {
+                    "name": "payload",
+                    "in": "body",
+                    "schema": { "type": "object" }
+                },
+                "Upload": {
+                    "name": "file",
+                    "in": "formData",
+                    "type": "file"
+                }
+            }
+        });
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({
+                "post": {
+                    "parameters": [
+                        { "$ref": "#/parameters/Limit" },
+                        { "$ref": "#/parameters/Payload" },
+                        { "$ref": "#/parameters/Upload" }
+                    ]
+                }
+            }))
+            .unwrap();
+        let operation = &path_obj["post"];
+        let params = extract_parameters_with_spec(operation, &path_obj, &spec).unwrap();
+        let arr = params.as_array().unwrap();
+
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], "limit");
+    }
+
+    #[test]
     fn extract_request_body_openapi3_found() {
         let op = serde_json::json!({
             "requestBody": {
@@ -878,6 +1118,46 @@ mod tests {
         let op = serde_json::json!({
             "requestBody": {
                 "$ref": "#/components/requestBodies/SkillUpload"
+            }
+        });
+
+        let body = extract_request_body_openapi3_with_spec(&op, &spec);
+        assert_eq!(body.content_type.as_deref(), Some("application/zip"));
+        assert!(body.required);
+        assert_eq!(body.schema.unwrap()["format"], "binary");
+    }
+
+    #[test]
+    fn extract_request_body_openapi3_resolves_chained_request_body_refs() {
+        let spec = serde_json::json!({
+            "openapi": "3.0.0",
+            "components": {
+                "requestBodies": {
+                    "SkillUploadAlias": {
+                        "$ref": "#/components/requestBodies/SkillUpload"
+                    },
+                    "SkillUpload": {
+                        "required": true,
+                        "content": {
+                            "application/zip": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SkillArchive"
+                                }
+                            }
+                        }
+                    }
+                },
+                "schemas": {
+                    "SkillArchive": {
+                        "type": "string",
+                        "format": "binary"
+                    }
+                }
+            }
+        });
+        let op = serde_json::json!({
+            "requestBody": {
+                "$ref": "#/components/requestBodies/SkillUploadAlias"
             }
         });
 
@@ -1175,6 +1455,67 @@ mod tests {
             Some("application/octet-stream")
         );
         assert_eq!(body.schema.unwrap()["format"], "binary");
+    }
+
+    #[test]
+    fn extract_request_body_swagger2_resolves_referenced_body_parameters() {
+        let op = serde_json::json!({
+            "parameters": [
+                { "$ref": "#/parameters/UploadBody" }
+            ]
+        });
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        let spec = serde_json::json!({
+            "consumes": ["application/json", "application/octet-stream"],
+            "parameters": {
+                "UploadBody": {
+                    "name": "archive",
+                    "in": "body",
+                    "required": true,
+                    "schema": { "$ref": "#/definitions/SkillArchive" }
+                }
+            },
+            "definitions": {
+                "SkillArchive": {
+                    "type": "string",
+                    "format": "binary"
+                }
+            }
+        });
+        let body = extract_request_body_swagger2(&op, &path_obj, &spec);
+        assert_eq!(
+            body.content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        assert!(body.required);
+        assert_eq!(body.schema.unwrap()["format"], "binary");
+    }
+
+    #[test]
+    fn extract_request_body_swagger2_detects_referenced_file_form_data_uploads() {
+        let op = serde_json::json!({
+            "consumes": ["application/json", "multipart/form-data"],
+            "parameters": [
+                { "$ref": "#/parameters/UploadFile" }
+            ]
+        });
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        let spec = serde_json::json!({
+            "parameters": {
+                "UploadFile": {
+                    "name": "file",
+                    "in": "formData",
+                    "type": "file",
+                    "required": true
+                }
+            }
+        });
+        let body = extract_request_body_swagger2(&op, &path_obj, &spec);
+        assert_eq!(body.content_type.as_deref(), Some("multipart/form-data"));
+        assert!(body.schema.is_none());
+        assert!(body.required);
     }
 
     #[test]
