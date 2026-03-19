@@ -397,8 +397,8 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
     }
 
     // -- Request body schema --
+    let body_mode = request_body_mode(endpoint);
     if let Some(body_schema) = &endpoint.request_body_schema {
-        let body_mode = request_body_mode(endpoint);
         let is_object = body_schema.get("type").and_then(|v| v.as_str()) == Some("object");
         let has_props = body_schema
             .get("properties")
@@ -425,6 +425,12 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
             properties.insert("body".to_string(), body_prop);
             push_required(&mut required, "body");
         }
+    } else if endpoint.request_content_type.is_some() {
+        properties.insert(
+            "body".to_string(),
+            build_default_body_property(endpoint, body_mode),
+        );
+        push_required(&mut required, "body");
     }
 
     let mut schema = serde_json::json!({
@@ -462,16 +468,20 @@ fn request_body_mode_for(
     body_schema: Option<&serde_json::Value>,
 ) -> RequestBodyMode {
     let Some(content_type) = content_type else {
-        return RequestBodyMode::Json;
+        return if schema_is_binary(body_schema) {
+            RequestBodyMode::Binary
+        } else {
+            RequestBodyMode::Json
+        };
     };
 
     let normalized = normalize_content_type(content_type);
-    if normalized.is_empty() || normalized == "*/*" || is_json_content_type(&normalized) {
-        RequestBodyMode::Json
-    } else if normalized.starts_with("multipart/") {
+    if normalized.starts_with("multipart/") {
         RequestBodyMode::Multipart
     } else if is_binary_content_type(&normalized) || schema_is_binary(body_schema) {
         RequestBodyMode::Binary
+    } else if normalized.is_empty() || normalized == "*/*" || is_json_content_type(&normalized) {
+        RequestBodyMode::Json
     } else {
         RequestBodyMode::Raw
     }
@@ -536,6 +546,23 @@ fn build_body_property(
     }
 }
 
+fn build_default_body_property(
+    endpoint: &McpToolEndpoint,
+    body_mode: RequestBodyMode,
+) -> serde_json::Value {
+    match body_mode {
+        RequestBodyMode::Json => serde_json::json!({
+            "description": format!(
+                "Request body for {}",
+                request_content_type_or_default(endpoint)
+            ),
+        }),
+        RequestBodyMode::Binary | RequestBodyMode::Raw | RequestBodyMode::Multipart => {
+            build_body_property(endpoint, &serde_json::Value::Null, body_mode)
+        }
+    }
+}
+
 fn push_required(required: &mut Vec<serde_json::Value>, name: &str) {
     let required_value = serde_json::Value::String(name.to_string());
     if !required.contains(&required_value) {
@@ -578,7 +605,16 @@ fn request_content_type_or_default(endpoint: &McpToolEndpoint) -> &str {
     endpoint
         .request_content_type
         .as_deref()
-        .unwrap_or("application/json")
+        .unwrap_or_else(|| default_content_type_for_mode(request_body_mode(endpoint)))
+}
+
+fn default_content_type_for_mode(mode: RequestBodyMode) -> &'static str {
+    match mode {
+        RequestBodyMode::Json => "application/json",
+        RequestBodyMode::Raw => "text/plain",
+        RequestBodyMode::Binary => "application/octet-stream",
+        RequestBodyMode::Multipart => "multipart/form-data",
+    }
 }
 
 fn request_content_type_header_value<'a>(
@@ -1319,6 +1355,28 @@ mod tests {
     }
 
     #[test]
+    fn build_input_schema_exposes_body_when_content_type_has_no_schema() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: Some("application/zip".to_string()),
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert_eq!(schema["properties"]["body"]["type"], "string");
+        assert_eq!(schema["properties"]["body"]["contentEncoding"], "base64");
+        assert_eq!(
+            schema["properties"]["body"]["contentMediaType"],
+            "application/zip"
+        );
+        assert_eq!(schema["required"], serde_json::json!(["body"]));
+    }
+
+    #[test]
     fn build_proxy_args_decodes_binary_body_from_base64() {
         use base64::Engine as _;
 
@@ -1333,6 +1391,34 @@ mod tests {
                 "format": "binary"
             })),
             request_content_type: Some("application/zip".to_string()),
+        };
+
+        let (_, _, _, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "body": base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04")
+            }),
+        )
+        .expect("binary body should decode");
+
+        assert_eq!(body.unwrap().as_ref(), b"PK\x03\x04");
+    }
+
+    #[test]
+    fn build_proxy_args_decodes_binary_body_without_explicit_content_type() {
+        use base64::Engine as _;
+
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "string",
+                "format": "binary"
+            })),
+            request_content_type: None,
         };
 
         let (_, _, _, body) = build_proxy_args(
@@ -1371,6 +1457,27 @@ mod tests {
             error
                 .to_string()
                 .contains("multipart/form-data request bodies are not yet supported")
+        );
+    }
+
+    #[test]
+    fn request_content_type_header_value_defaults_binary_schema_to_octet_stream() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "string",
+                "format": "binary"
+            })),
+            request_content_type: None,
+        };
+
+        assert_eq!(
+            request_content_type_header_value(&endpoint, &reqwest::Method::POST, true),
+            Some("application/octet-stream")
         );
     }
 

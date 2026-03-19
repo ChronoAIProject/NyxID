@@ -468,6 +468,20 @@ mod tests {
     }
 
     #[test]
+    fn extract_request_body_openapi3_keeps_content_type_without_schema() {
+        let op = serde_json::json!({
+            "requestBody": {
+                "content": {
+                    "application/zip": {}
+                }
+            }
+        });
+        let body = extract_request_body_openapi3(&op);
+        assert_eq!(body.content_type.as_deref(), Some("application/zip"));
+        assert!(body.schema.is_none());
+    }
+
+    #[test]
     fn extract_request_body_openapi3_missing() {
         let op = serde_json::json!({});
         let body = extract_request_body_openapi3(&op);
