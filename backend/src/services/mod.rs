@@ -5,6 +5,7 @@ pub mod auth_service;
 pub mod chatgpt_translator;
 pub mod connection_service;
 pub mod consent_service;
+pub mod content_type;
 pub mod delegation_service;
 pub mod group_service;
 pub mod identity_service;
