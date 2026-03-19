@@ -894,30 +894,22 @@ async fn send_ssh_tunnel_closed(
     .await
 }
 
-async fn validate_node_ssh_target(ssh_config: &SshConfig, host: &str, port: u16) -> Result<()> {
-    if is_allowlisted_ssh_target(ssh_config, host, port) {
-        return Ok(());
-    }
-
+async fn validate_node_ssh_target(ssh_config: &SshConfig, host: &str, _port: u16) -> Result<()> {
+    // SSH services inherently target private/internal hosts -- that's the
+    // whole point of tunneling through a node agent. Only block cloud
+    // metadata endpoints (SSRF risk). If an allowlist is configured,
+    // require the target to be listed; otherwise allow all targets.
     let normalized_host = normalize_target_host(host);
-    if matches!(
-        normalized_host.as_str(),
-        "localhost" | "metadata.google.internal"
-    ) {
+    if normalized_host == "metadata.google.internal" {
         return Err(Error::Validation(
-            "SSH target must be explicitly allowlisted in the node config".to_string(),
+            "SSH target must not point to a cloud metadata endpoint".to_string(),
         ));
     }
 
-    let addresses = resolve_target_ips(host, port).await?;
-    if addresses.is_empty() {
+    if !ssh_config.allowed_targets.is_empty() && !is_allowlisted_ssh_target(ssh_config, host, _port)
+    {
         return Err(Error::Validation(
-            "SSH target did not resolve to any IP addresses".to_string(),
-        ));
-    }
-    if addresses.iter().copied().any(is_private_or_internal_ip) {
-        return Err(Error::Validation(
-            "SSH target resolves to a private or internal address and must be allowlisted in the node config".to_string(),
+            "SSH target is not in the node's allowed_targets list".to_string(),
         ));
     }
 
@@ -932,56 +924,12 @@ fn is_allowlisted_ssh_target(ssh_config: &SshConfig, host: &str, port: u16) -> b
     })
 }
 
-async fn resolve_target_ips(host: &str, port: u16) -> Result<Vec<std::net::IpAddr>> {
-    if let Ok(ip) = parse_target_ip(host) {
-        return Ok(vec![ip]);
-    }
-
-    let resolved = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|error| Error::Validation(format!("Failed to resolve SSH target: {error}")))?;
-    Ok(resolved.map(|addr| addr.ip()).collect())
-}
-
-fn parse_target_ip(host: &str) -> Result<std::net::IpAddr> {
-    normalize_target_host(host)
-        .parse()
-        .map_err(|error| Error::Validation(format!("Invalid SSH target host: {error}")))
-}
-
 fn normalize_target_host(host: &str) -> String {
     host.trim()
         .trim_start_matches('[')
         .trim_end_matches(']')
         .trim_end_matches('.')
         .to_ascii_lowercase()
-}
-
-fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(ipv4) => {
-            ipv4.is_loopback()
-                || ipv4.is_private()
-                || ipv4.is_link_local()
-                || ipv4.is_unspecified()
-                || ipv4.is_broadcast()
-                || is_rfc6598_cgnat(ipv4)
-        }
-        std::net::IpAddr::V6(ipv6) => {
-            ipv6.is_loopback()
-                || ipv6.is_unspecified()
-                || ipv6.is_multicast()
-                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
-                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
-                || ipv6
-                    .to_ipv4_mapped()
-                    .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
-        }
-    }
-}
-
-fn is_rfc6598_cgnat(ipv4: std::net::Ipv4Addr) -> bool {
-    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
 }
 
 async fn send_ws_message(tx: &mpsc::Sender<String>, message: String) -> bool {
@@ -1172,7 +1120,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ssh_tunnel_rejects_private_targets_without_allowlist() {
+    async fn ssh_tunnel_rejects_metadata_endpoint() {
         let (tx, mut rx) = mpsc::channel(8);
         let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
             String,
@@ -1181,8 +1129,8 @@ mod tests {
 
         handle_ssh_tunnel_open(
             &serde_json::json!({
-                "session_id": "sess-2",
-                "host": "127.0.0.1",
+                "session_id": "sess-meta",
+                "host": "metadata.google.internal",
                 "port": 22,
             }),
             &SshConfig::default(),
@@ -1196,12 +1144,53 @@ mod tests {
         let closed: serde_json::Value =
             serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
         assert_eq!(closed["type"], "ssh_tunnel_closed");
-        assert_eq!(closed["session_id"], "sess-2");
+        assert_eq!(closed["session_id"], "sess-meta");
         assert!(
             closed["error"]
                 .as_str()
                 .expect("error")
-                .starts_with("target_not_allowed:")
+                .contains("metadata"),
+        );
+        assert!(active_tunnels.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ssh_tunnel_rejects_target_not_in_allowlist() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
+            String,
+            ActiveSshTunnelEntry,
+        >::new()));
+
+        let mut config = SshConfig::default();
+        config.allowed_targets = vec![crate::config::SshTargetConfig {
+            host: "10.0.0.1".to_string(),
+            port: Some(22),
+        }];
+
+        handle_ssh_tunnel_open(
+            &serde_json::json!({
+                "session_id": "sess-deny",
+                "host": "10.0.0.99",
+                "port": 22,
+            }),
+            &config,
+            tx,
+            active_tunnels.clone(),
+            None,
+            replay_guard(),
+        )
+        .await;
+
+        let closed: serde_json::Value =
+            serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
+        assert_eq!(closed["type"], "ssh_tunnel_closed");
+        assert_eq!(closed["session_id"], "sess-deny");
+        assert!(
+            closed["error"]
+                .as_str()
+                .expect("error")
+                .contains("allowed_targets"),
         );
         assert!(active_tunnels.lock().await.is_empty());
     }
@@ -1419,16 +1408,33 @@ mod tests {
         assert!(active_tunnels.lock().await.is_empty());
     }
 
-    #[test]
-    fn rejects_ipv6_multicast_targets() {
-        assert!(is_private_or_internal_ip(
-            "ff02::1".parse().expect("valid multicast IPv6")
-        ));
-        assert!(is_private_or_internal_ip(
-            "100.64.0.10".parse().expect("valid RFC 6598 IPv4")
-        ));
-        assert!(!is_private_or_internal_ip(
-            "2001:4860:4860::8888".parse().expect("valid public IPv6")
-        ));
+    #[tokio::test]
+    async fn validate_node_ssh_target_blocks_metadata() {
+        let config = SshConfig::default();
+        assert!(
+            validate_node_ssh_target(&config, "metadata.google.internal", 22)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_node_ssh_target_allows_private_ips() {
+        let config = SshConfig::default();
+        assert!(
+            validate_node_ssh_target(&config, "192.168.1.50", 22)
+                .await
+                .is_ok()
+        );
+        assert!(
+            validate_node_ssh_target(&config, "100.64.0.10", 22)
+                .await
+                .is_ok()
+        );
+        assert!(
+            validate_node_ssh_target(&config, "127.0.0.1", 22)
+                .await
+                .is_ok()
+        );
     }
 }
