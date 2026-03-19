@@ -394,3 +394,124 @@ pub async fn forward_request(
 
     Ok(response)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Router,
+        body::Bytes,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+    };
+    use chrono::Utc;
+    use tokio::{net::TcpListener, sync::mpsc};
+
+    #[derive(Debug)]
+    struct CapturedRequest {
+        content_type: Option<String>,
+        body: Vec<u8>,
+    }
+
+    async fn capture_request(
+        State(sender): State<mpsc::UnboundedSender<CapturedRequest>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> StatusCode {
+        let _ = sender.send(CapturedRequest {
+            content_type: headers
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            body: body.to_vec(),
+        });
+
+        StatusCode::OK
+    }
+
+    fn make_proxy_target(base_url: String) -> ProxyTarget {
+        let now = Utc::now();
+        ProxyTarget {
+            base_url: base_url.clone(),
+            auth_method: "none".to_string(),
+            auth_key_name: "Authorization".to_string(),
+            credential: String::new(),
+            service: DownstreamService {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Upload Service".to_string(),
+                slug: "upload-service".to_string(),
+                description: Some("Receives binary uploads".to_string()),
+                base_url,
+                service_type: "http".to_string(),
+                visibility: "public".to_string(),
+                auth_method: "none".to_string(),
+                auth_key_name: "Authorization".to_string(),
+                credential_encrypted: vec![],
+                auth_type: None,
+                openapi_spec_url: None,
+                asyncapi_spec_url: None,
+                streaming_supported: false,
+                ssh_config: None,
+                oauth_client_id: None,
+                service_category: "internal".to_string(),
+                requires_user_credential: false,
+                is_active: true,
+                created_by: "test".to_string(),
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                inject_delegation_token: false,
+                delegation_token_scope: "llm:proxy".to_string(),
+                provider_config_id: None,
+                created_at: now,
+                updated_at: now,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_request_preserves_binary_body_and_content_type() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/upload", post(capture_request))
+            .with_state(sender);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/zip".parse().unwrap(),
+        );
+        let response = forward_request(
+            &Client::new(),
+            &make_proxy_target(format!("http://{addr}")),
+            reqwest::Method::POST,
+            "upload",
+            None,
+            headers,
+            Some(bytes::Bytes::from_static(b"PK\x03\x04")),
+            vec![],
+            vec![],
+        )
+        .await
+        .expect("proxy request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(captured.content_type.as_deref(), Some("application/zip"));
+        assert_eq!(captured.body, b"PK\x03\x04");
+
+        server.abort();
+    }
+}
