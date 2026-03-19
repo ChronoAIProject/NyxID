@@ -721,6 +721,26 @@ fn request_content_type_header_value(endpoint: &McpToolEndpoint, has_body: bool)
     }
 }
 
+fn build_downstream_request_headers(
+    endpoint: &McpToolEndpoint,
+    has_body: bool,
+) -> AppResult<reqwest::header::HeaderMap> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(content_type) = request_content_type_header_value(endpoint, has_body) {
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            content_type.parse().map_err(|e| {
+                AppError::Internal(format!(
+                    "Invalid request content type configured for endpoint {}: {e}",
+                    endpoint.name
+                ))
+            })?,
+        );
+    }
+
+    Ok(headers)
+}
+
 // ---------------------------------------------------------------------------
 // Tool resolution
 // ---------------------------------------------------------------------------
@@ -1172,21 +1192,10 @@ pub async fn execute_tool(
     .await
     .map_err(|e| AppError::BadRequest(format!("Provider credentials not available: {e}")))?;
 
-    // Minimal headers for the downstream request.
-    // Only set Content-Type when a payload is present.
-    let mut headers = reqwest::header::HeaderMap::new();
-    if let Some(content_type) = request_content_type_header_value(endpoint, body.is_some()) {
-        headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            content_type.parse().map_err(|e| {
-                AppError::Internal(format!(
-                    "Invalid request content type configured for endpoint {}: {e}",
-                    endpoint.name
-                ))
-            })?,
-        );
-    }
-    headers.insert(reqwest::header::ACCEPT, "application/json".parse().unwrap());
+    // Only set Content-Type when a payload is present. Do not force Accept:
+    // downstream content negotiation is endpoint-specific, and MCP tool
+    // results are already normalized back into text by the transport layer.
+    let headers = build_downstream_request_headers(endpoint, body.is_some())?;
 
     let response = proxy_service::forward_request(
         http_client,
@@ -2469,5 +2478,31 @@ mod tests {
         };
 
         assert_eq!(request_content_type_header_value(&endpoint, false), None);
+    }
+
+    #[test]
+    fn build_downstream_request_headers_sets_content_type_without_forcing_accept() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "string",
+                "format": "binary"
+            })),
+            request_content_type: Some("application/zip".to_string()),
+            request_body_required: true,
+        };
+
+        let headers =
+            build_downstream_request_headers(&endpoint, true).expect("headers should build");
+
+        assert_eq!(
+            headers.get(reqwest::header::CONTENT_TYPE).unwrap(),
+            "application/zip"
+        );
+        assert!(headers.get(reqwest::header::ACCEPT).is_none());
     }
 }
