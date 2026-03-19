@@ -605,6 +605,17 @@ fn request_argument_parameter_name(param: &serde_json::Value) -> Option<&str> {
     }
 }
 
+fn request_argument_name_conflicts(param: &serde_json::Value, candidate: &str) -> bool {
+    let Some(name) = request_argument_parameter_name(param) else {
+        return false;
+    };
+
+    match param.get("in").and_then(|v| v.as_str()) {
+        Some("header") => normalize_header_name(name) == normalize_header_name(candidate),
+        _ => name == candidate,
+    }
+}
+
 fn supported_parameter_name_for_mcp(param: &serde_json::Value) -> Option<&str> {
     let name = request_argument_parameter_name(param)?;
 
@@ -615,17 +626,16 @@ fn supported_parameter_name_for_mcp(param: &serde_json::Value) -> Option<&str> {
 }
 
 fn request_body_field_name(endpoint: &McpToolEndpoint) -> String {
-    let used_names: HashSet<&str> = endpoint
-        .parameters
-        .as_ref()
-        .and_then(|params| params.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(request_argument_parameter_name)
-        .collect();
-
     for candidate in REQUEST_BODY_FIELD_CANDIDATES {
-        if !used_names.contains(candidate) {
+        let has_collision = endpoint
+            .parameters
+            .as_ref()
+            .and_then(|params| params.as_array())
+            .into_iter()
+            .flatten()
+            .any(|param| request_argument_name_conflicts(param, candidate));
+
+        if !has_collision {
             return (*candidate).to_string();
         }
     }
@@ -633,7 +643,15 @@ fn request_body_field_name(endpoint: &McpToolEndpoint) -> String {
     let mut suffix = 2;
     loop {
         let candidate = format!("body_{suffix}");
-        if !used_names.contains(candidate.as_str()) {
+        let has_collision = endpoint
+            .parameters
+            .as_ref()
+            .and_then(|params| params.as_array())
+            .into_iter()
+            .flatten()
+            .any(|param| request_argument_name_conflicts(param, &candidate));
+
+        if !has_collision {
             return candidate;
         }
         suffix += 1;
@@ -798,6 +816,7 @@ pub fn build_proxy_args(
     let mut path_params = HashSet::new();
     let mut query_param_names = HashSet::new();
     let mut header_param_names = HashSet::new();
+    let mut header_param_lookup: HashMap<String, String> = HashMap::new();
     let mut cookie_param_names = HashSet::new();
     let mut blocked_header_param_names = HashSet::new();
     let mut required_path_params = HashSet::new();
@@ -833,7 +852,7 @@ pub fn build_proxy_args(
                 }
                 "header" => {
                     if is_blocked_mcp_header_parameter(name) {
-                        blocked_header_param_names.insert(name.to_string());
+                        blocked_header_param_names.insert(normalize_header_name(name));
                     } else {
                         reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
                             AppError::Internal(format!(
@@ -842,6 +861,7 @@ pub fn build_proxy_args(
                             ))
                         })?;
                         header_param_names.insert(name.to_string());
+                        header_param_lookup.insert(normalize_header_name(name), name.to_string());
                         if is_required {
                             required_header_params.insert(name.to_string());
                         }
@@ -864,6 +884,7 @@ pub fn build_proxy_args(
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
+            let normalized_header_key = normalize_header_name(key);
 
             if path_params.contains(key.as_str()) {
                 path = path.replace(&format!("{{{key}}}"), &urlencoding::encode(&str_value));
@@ -874,10 +895,13 @@ pub fn build_proxy_args(
             } else if header_param_names.contains(key.as_str()) {
                 header_params.push((key.clone(), str_value));
                 provided_header_params.insert(key.clone());
+            } else if let Some(header_name) = header_param_lookup.get(&normalized_header_key) {
+                header_params.push((header_name.clone(), str_value));
+                provided_header_params.insert(header_name.clone());
             } else if cookie_param_names.contains(key.as_str()) {
                 cookie_params.push((key.clone(), str_value));
                 provided_cookie_params.insert(key.clone());
-            } else if blocked_header_param_names.contains(key.as_str()) {
+            } else if blocked_header_param_names.contains(&normalized_header_key) {
                 return Err(AppError::BadRequest(format!(
                     "Header parameter `{key}` is reserved and cannot be set through the NyxID MCP proxy"
                 )));
@@ -1150,8 +1174,11 @@ fn json_body_is_flattened(
         .and_then(|params| params.as_array())
         .into_iter()
         .flatten()
-        .filter_map(request_argument_parameter_name)
-        .any(|name| properties.contains_key(name));
+        .any(|param| {
+            properties
+                .keys()
+                .any(|name| request_argument_name_conflicts(param, name))
+        });
 
     !has_param_collision
 }
@@ -1906,6 +1933,44 @@ mod tests {
     }
 
     #[test]
+    fn build_input_schema_wraps_json_body_when_properties_collide_with_header_params_case_insensitively(
+    ) {
+        let endpoint = McpToolEndpoint {
+            name: "update_user".to_string(),
+            description: Some("Update a user".to_string()),
+            method: "POST".to_string(),
+            path: "/users".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "X-Api-Version",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "x-api-version": { "type": "string" },
+                    "display_name": { "type": "string" }
+                },
+                "required": ["x-api-version", "display_name"]
+            })),
+            request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert!(schema["properties"].get("x-api-version").is_none());
+        assert_eq!(schema["properties"]["body"]["type"], "object");
+        assert_eq!(
+            schema["properties"]["body"]["properties"]["x-api-version"]["type"],
+            "string"
+        );
+        assert_eq!(schema["required"], serde_json::json!(["X-Api-Version", "body"]));
+    }
+
+    #[test]
     fn build_input_schema_wraps_optional_json_body_without_requiring_it() {
         let endpoint = McpToolEndpoint {
             name: "update_profile".to_string(),
@@ -1980,6 +2045,37 @@ mod tests {
             "application/octet-stream"
         );
         assert_eq!(schema["properties"]["body"]["contentEncoding"], "base64");
+    }
+
+    #[test]
+    fn build_input_schema_uses_alternate_body_field_when_body_header_param_exists_case_insensitively(
+    ) {
+        let endpoint = McpToolEndpoint {
+            name: "submit_message".to_string(),
+            description: Some("Submit a message".to_string()),
+            method: "POST".to_string(),
+            path: "/messages".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "Body",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: Some("text/plain".to_string()),
+            request_body_required: true,
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert_eq!(schema["properties"]["Body"]["type"], "string");
+        assert!(schema["properties"].get("body").is_none());
+        assert_eq!(schema["properties"]["request_body"]["type"], "string");
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["Body", "request_body"])
+        );
     }
 
     #[test]
@@ -2192,6 +2288,53 @@ mod tests {
     }
 
     #[test]
+    fn build_proxy_args_accepts_header_parameters_case_insensitively() {
+        let endpoint = McpToolEndpoint {
+            name: "update_user".to_string(),
+            description: Some("Update a user".to_string()),
+            method: "POST".to_string(),
+            path: "/users".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "X-Api-Version",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "display_name": { "type": "string" }
+                }
+            })),
+            request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
+        };
+
+        let (_, _, _, headers, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "x-api-version": "2025-01-01",
+                "display_name": "Nyx"
+            }),
+        )
+        .expect("header params should match case-insensitively");
+
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| { name == "X-Api-Version" && value == "2025-01-01" })
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(body.unwrap().as_ref()).unwrap(),
+            serde_json::json!({
+                "display_name": "Nyx"
+            })
+        );
+    }
+
+    #[test]
     fn build_proxy_args_allows_missing_optional_wrapped_json_body() {
         let endpoint = McpToolEndpoint {
             name: "update_profile".to_string(),
@@ -2371,6 +2514,60 @@ mod tests {
     }
 
     #[test]
+    fn build_proxy_args_wraps_json_body_when_properties_collide_with_header_params_case_insensitively(
+    ) {
+        let endpoint = McpToolEndpoint {
+            name: "update_user".to_string(),
+            description: Some("Update a user".to_string()),
+            method: "POST".to_string(),
+            path: "/users".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "X-Api-Version",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "x-api-version": { "type": "string" },
+                    "display_name": { "type": "string" }
+                },
+                "required": ["x-api-version", "display_name"]
+            })),
+            request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
+        };
+
+        let (_, _, _, headers, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "X-Api-Version": "2025-01-01",
+                "body": {
+                    "x-api-version": "body-version",
+                    "display_name": "Nyx"
+                }
+            }),
+        )
+        .expect("wrapped JSON body should not collide with header params case-insensitively");
+
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| { name == "X-Api-Version" && value == "2025-01-01" })
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(body.unwrap().as_ref()).unwrap(),
+            serde_json::json!({
+                "x-api-version": "body-version",
+                "display_name": "Nyx"
+            })
+        );
+    }
+
+    #[test]
     fn build_proxy_args_rejects_missing_required_binary_body() {
         let endpoint = McpToolEndpoint {
             name: "upload_skill".to_string(),
@@ -2423,6 +2620,78 @@ mod tests {
         assert!(
             matches!(error, AppError::BadRequest(message) if message.contains("is reserved and cannot be set"))
         );
+    }
+
+    #[test]
+    fn build_proxy_args_rejects_reserved_header_parameters_case_insensitively() {
+        let endpoint = McpToolEndpoint {
+            name: "submit_message".to_string(),
+            description: Some("Submit a message".to_string()),
+            method: "POST".to_string(),
+            path: "/messages".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "Authorization",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: Some("text/plain".to_string()),
+            request_body_required: true,
+        };
+
+        let error = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "authorization": "Bearer secret",
+                "body": "hello"
+            }),
+        )
+        .expect_err("reserved header params should be rejected case-insensitively");
+
+        assert!(
+            matches!(error, AppError::BadRequest(message) if message.contains("is reserved and cannot be set"))
+        );
+    }
+
+    #[test]
+    fn build_proxy_args_uses_alternate_body_field_when_body_header_param_exists_case_insensitively(
+    ) {
+        let endpoint = McpToolEndpoint {
+            name: "submit_message".to_string(),
+            description: Some("Submit a message".to_string()),
+            method: "POST".to_string(),
+            path: "/messages".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "Body",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: Some("text/plain".to_string()),
+            request_body_required: true,
+        };
+
+        let (_, _, _, headers, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "Body": "metadata",
+                "request_body": "hello"
+            }),
+        )
+        .expect("alternate body field should avoid case-insensitive header collisions");
+
+        assert!(
+            headers
+                .iter()
+                .any(|(name, value)| { name == "Body" && value == "metadata" })
+        );
+        assert_eq!(std::str::from_utf8(body.unwrap().as_ref()).unwrap(), "hello");
     }
 
     #[test]
