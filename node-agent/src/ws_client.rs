@@ -787,6 +787,7 @@ fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
         std::net::IpAddr::V6(ipv6) => {
             ipv6.is_loopback()
                 || ipv6.is_unspecified()
+                || ipv6.is_multicast()
                 || (ipv6.segments()[0] & 0xfe00) == 0xfc00
                 || (ipv6.segments()[0] & 0xffc0) == 0xfe80
                 || ipv6
@@ -1081,5 +1082,15 @@ mod tests {
         assert_eq!(closed["error"], "control_buffer_full");
         assert!(active_tunnels.lock().await.is_empty());
         assert!(abort_handle.is_finished());
+    }
+
+    #[test]
+    fn rejects_ipv6_multicast_targets() {
+        assert!(is_private_or_internal_ip(
+            "ff02::1".parse().expect("valid multicast IPv6")
+        ));
+        assert!(!is_private_or_internal_ip(
+            "2001:4860:4860::8888".parse().expect("valid public IPv6")
+        ));
     }
 }

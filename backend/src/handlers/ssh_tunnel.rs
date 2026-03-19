@@ -508,7 +508,35 @@ async fn handle_node_ssh_socket(
         );
         return;
     };
-    let node_id = selected_node_id.expect("selected node id");
+    let Some(node_id) = selected_node_id else {
+        tracing::error!(
+            service_id = %service_id,
+            session_id = %session_id,
+            "Node-routed SSH tunnel opened without a selected node id"
+        );
+        let _ = socket
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1011,
+                reason: "Failed to bind SSH tunnel to node".into(),
+            })))
+            .await;
+        audit_service::log_async(
+            state.db.clone(),
+            Some(user_id),
+            "ssh_tunnel_connect_failed".to_string(),
+            Some(serde_json::json!({
+                "service_id": service_id,
+                "session_id": session_id,
+                "routed_via": "node",
+                "target_host": ssh_service.host,
+                "target_port": ssh_service.port,
+                "error": "missing_selected_node_id",
+            })),
+            client_meta.ip_address,
+            client_meta.user_agent,
+        );
+        return;
+    };
 
     let mut from_client_bytes: u64 = 0;
     let mut to_client_bytes: u64 = 0;
@@ -521,9 +549,13 @@ async fn handle_node_ssh_socket(
         Ok(bytes) => bytes,
         Err(error) => {
             tracing::warn!(service_id = %service_id, node_id = %node_id, error = %error, "Node-routed SSH tunnel failed banner validation");
-            let _ = state
-                .node_ws_manager
-                .close_ssh_tunnel(&node_id, &session_id);
+            close_node_ssh_tunnel(
+                &state,
+                &service_id,
+                &node_id,
+                &session_id,
+                "banner_validation_failed",
+            );
             let _ = socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                     code: 1011,
@@ -554,9 +586,13 @@ async fn handle_node_ssh_socket(
         .await
         .is_err()
     {
-        let _ = state
-            .node_ws_manager
-            .close_ssh_tunnel(&node_id, &session_id);
+        close_node_ssh_tunnel(
+            &state,
+            &service_id,
+            &node_id,
+            &session_id,
+            "banner_send_failed",
+        );
         audit_service::log_async(
             state.db.clone(),
             Some(user_id.clone()),
@@ -657,9 +693,13 @@ async fn handle_node_ssh_socket(
         }
     };
 
-    let _ = state
-        .node_ws_manager
-        .close_ssh_tunnel(&node_id, &session_id);
+    close_node_ssh_tunnel(
+        &state,
+        &service_id,
+        &node_id,
+        &session_id,
+        "session_cleanup",
+    );
     let _ = socket.close().await;
 
     audit_service::log_async(
@@ -845,6 +885,25 @@ fn validate_runtime_ssh_target(
         );
         error
     })
+}
+
+fn close_node_ssh_tunnel(
+    state: &AppState,
+    service_id: &str,
+    node_id: &str,
+    session_id: &str,
+    reason: &str,
+) {
+    if let Err(error) = state.node_ws_manager.close_ssh_tunnel(node_id, session_id) {
+        tracing::warn!(
+            service_id,
+            node_id,
+            session_id,
+            reason,
+            error = %error,
+            "Failed to close node-routed SSH tunnel"
+        );
+    }
 }
 
 #[cfg(test)]
