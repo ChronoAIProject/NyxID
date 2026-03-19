@@ -187,7 +187,24 @@ async fn handle_web_terminal(
     // configurations). Instead, run `script` on the remote side to create
     // a PTY there, giving us an interactive shell with prompt.
     let remote_cmd = "TERM=xterm-256color script -q /dev/null $SHELL -il 2>/dev/null || TERM=xterm-256color exec $SHELL -il";
-    let cmd = pty_process::Command::new("ssh")
+
+    // Check if this service is node-routed. If so, use ProxyCommand to
+    // tunnel through the node agent via the existing NyxID WebSocket tunnel.
+    let node_route = crate::services::node_routing_service::resolve_node_route(
+        &state.db,
+        &user_id,
+        &service_id,
+        &state.node_ws_manager,
+    )
+    .await
+    .ok()
+    .flatten();
+
+    let nyxid_binary =
+        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("nyxid"));
+    let base_url = state.config.base_url.trim_end_matches('/');
+
+    let mut cmd = pty_process::Command::new("ssh")
         .arg("-o")
         .arg("StrictHostKeyChecking=no")
         .arg("-o")
@@ -201,7 +218,21 @@ async fn handle_web_terminal(
         .arg("-o")
         .arg("RequestTTY=no")
         .arg("-o")
-        .arg("LogLevel=FATAL")
+        .arg("LogLevel=FATAL");
+
+    // If node-routed, add ProxyCommand to tunnel through the node agent
+    if node_route.is_some() {
+        let proxy_cmd = format!(
+            "{} ssh proxy --base-url {} --service-id {} --access-token-env NYXID_INTERNAL_TOKEN",
+            nyxid_binary.display(),
+            base_url,
+            service_id,
+        );
+        cmd = cmd.arg("-o").arg(format!("ProxyCommand={proxy_cmd}"));
+        tracing::info!(service_id = %service_id, "Web terminal: using node-routed ProxyCommand");
+    }
+
+    let cmd = cmd
         .arg("-p")
         .arg(ssh_svc.port.to_string())
         .arg(format!("{principal}@{}", ssh_svc.host))
@@ -226,6 +257,21 @@ async fn handle_web_terminal(
             return;
         }
     };
+
+    // Set PTY master to raw mode so control characters (Ctrl+C, Ctrl+Z, etc.)
+    // and special keys (for top, vim, etc.) are passed through to the remote
+    // shell instead of being intercepted locally.
+    {
+        use std::os::fd::AsFd;
+        if let Ok(mut termios) = nix::sys::termios::tcgetattr(pty.as_fd()) {
+            nix::sys::termios::cfmakeraw(&mut termios);
+            let _ = nix::sys::termios::tcsetattr(
+                pty.as_fd(),
+                nix::sys::termios::SetArg::TCSANOW,
+                &termios,
+            );
+        }
+    }
 
     tracing::info!(service_id = %service_id, "Web terminal: ssh spawned with pty-process");
 
