@@ -577,6 +577,26 @@ fn is_json_content_type(content_type: &str) -> bool {
     content_type == "application/json" || content_type.ends_with("+json")
 }
 
+fn is_text_content_type(content_type: &str) -> bool {
+    content_type.starts_with("text/")
+        || is_json_content_type(content_type)
+        || content_type == "application/xml"
+        || content_type.ends_with("+xml")
+        || content_type == "application/x-www-form-urlencoded"
+        || content_type == "application/yaml"
+        || content_type == "application/x-yaml"
+        || content_type.ends_with("+yaml")
+        || content_type == "application/graphql"
+        || content_type == "application/javascript"
+        || content_type == "application/ecmascript"
+        || content_type == "application/sql"
+        || content_type == "application/toml"
+        || content_type == "application/ndjson"
+        || content_type == "application/x-ndjson"
+        || content_type == "application/csv"
+        || content_type == "application/tsv"
+}
+
 fn is_binary_content_type(content_type: &str) -> bool {
     content_type == "application/octet-stream"
         || content_type == "application/zip"
@@ -586,6 +606,7 @@ fn is_binary_content_type(content_type: &str) -> bool {
         || content_type.starts_with("audio/")
         || content_type.starts_with("video/")
         || content_type.starts_with("font/")
+        || (content_type.starts_with("application/") && !is_text_content_type(content_type))
 }
 
 fn schema_is_binary(body_schema: Option<&serde_json::Value>) -> bool {
@@ -1377,6 +1398,28 @@ mod tests {
     }
 
     #[test]
+    fn build_input_schema_treats_unknown_application_uploads_as_binary() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_tarball".to_string(),
+            description: Some("Upload a tarball".to_string()),
+            method: "POST".to_string(),
+            path: "/archives".to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: Some("application/x-tar".to_string()),
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert_eq!(schema["properties"]["body"]["type"], "string");
+        assert_eq!(schema["properties"]["body"]["contentEncoding"], "base64");
+        assert_eq!(
+            schema["properties"]["body"]["contentMediaType"],
+            "application/x-tar"
+        );
+        assert_eq!(schema["required"], serde_json::json!(["body"]));
+    }
+
+    #[test]
     fn build_input_schema_defaults_binary_media_type_when_missing() {
         let endpoint = McpToolEndpoint {
             name: "upload_skill".to_string(),
@@ -1476,6 +1519,31 @@ mod tests {
         .expect("binary body should decode");
 
         assert_eq!(body.unwrap().as_ref(), b"PK\x03\x04");
+    }
+
+    #[test]
+    fn build_proxy_args_decodes_unknown_application_binary_body() {
+        use base64::Engine as _;
+
+        let endpoint = McpToolEndpoint {
+            name: "upload_tarball".to_string(),
+            description: Some("Upload a tarball".to_string()),
+            method: "POST".to_string(),
+            path: "/archives".to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: Some("application/x-tar".to_string()),
+        };
+
+        let (_, _, _, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "body": base64::engine::general_purpose::STANDARD.encode(b"ustar")
+            }),
+        )
+        .expect("binary body should decode");
+
+        assert_eq!(body.unwrap().as_ref(), b"ustar");
     }
 
     #[test]

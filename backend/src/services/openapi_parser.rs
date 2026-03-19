@@ -346,6 +346,27 @@ fn is_concrete_content_type(content_type: &str) -> bool {
     normalized != "*/*" && !normalized.is_empty()
 }
 
+fn is_text_content_type(content_type: &str) -> bool {
+    let normalized = normalize_content_type(content_type);
+    normalized.starts_with("text/")
+        || is_json_content_type(&normalized)
+        || normalized == "application/xml"
+        || normalized.ends_with("+xml")
+        || normalized == "application/x-www-form-urlencoded"
+        || normalized == "application/yaml"
+        || normalized == "application/x-yaml"
+        || normalized.ends_with("+yaml")
+        || normalized == "application/graphql"
+        || normalized == "application/javascript"
+        || normalized == "application/ecmascript"
+        || normalized == "application/sql"
+        || normalized == "application/toml"
+        || normalized == "application/ndjson"
+        || normalized == "application/x-ndjson"
+        || normalized == "application/csv"
+        || normalized == "application/tsv"
+}
+
 fn is_binary_content_type(content_type: &str) -> bool {
     let normalized = normalize_content_type(content_type);
     normalized == "application/octet-stream"
@@ -356,6 +377,7 @@ fn is_binary_content_type(content_type: &str) -> bool {
         || normalized.starts_with("audio/")
         || normalized.starts_with("video/")
         || normalized.starts_with("font/")
+        || (normalized.starts_with("application/") && !is_text_content_type(&normalized))
 }
 
 fn is_binary_media(content_type: &str, media: &serde_json::Value) -> bool {
@@ -563,6 +585,25 @@ mod tests {
         let body = extract_request_body_openapi3(&op);
         assert_eq!(body.content_type.as_deref(), Some("application/zip"));
         assert_eq!(body.schema.unwrap()["format"], "binary");
+    }
+
+    #[test]
+    fn extract_request_body_openapi3_prefers_unknown_application_binary_media_over_json() {
+        let op = serde_json::json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object"
+                        }
+                    },
+                    "application/x-tar": {}
+                }
+            }
+        });
+        let body = extract_request_body_openapi3(&op);
+        assert_eq!(body.content_type.as_deref(), Some("application/x-tar"));
+        assert!(body.schema.is_none());
     }
 
     #[test]
