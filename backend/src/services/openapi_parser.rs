@@ -649,10 +649,21 @@ fn normalize_content_type(content_type: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn normalize_parameter_name(location: &str, name: &str) -> String {
+    if location == "header" {
+        name.trim().to_ascii_lowercase()
+    } else {
+        name.to_string()
+    }
+}
+
 fn parameter_identity(param: &serde_json::Value) -> Option<(String, String)> {
+    let name = param.get("name").and_then(|v| v.as_str())?;
+    let location = param.get("in").and_then(|v| v.as_str())?;
+
     Some((
-        param.get("name").and_then(|v| v.as_str())?.to_string(),
-        param.get("in").and_then(|v| v.as_str())?.to_string(),
+        normalize_parameter_name(location, name),
+        location.to_string(),
     ))
 }
 
@@ -1012,6 +1023,50 @@ mod tests {
         assert_eq!(arr[0]["required"], true);
         assert_eq!(arr[0]["schema"]["type"], "integer");
         assert_eq!(arr[0]["schema"]["format"], "int32");
+    }
+
+    #[test]
+    fn extract_parameters_treats_header_overrides_case_insensitively() {
+        let spec = serde_json::json!({
+            "openapi": "3.0.0",
+            "components": {
+                "parameters": {
+                    "HeaderPath": {
+                        "name": "X-Api-Version",
+                        "in": "header",
+                        "required": false,
+                        "schema": { "type": "string" }
+                    },
+                    "HeaderOp": {
+                        "name": "x-api-version",
+                        "in": "header",
+                        "required": true,
+                        "schema": { "type": "string", "enum": ["2025-01-01"] }
+                    }
+                }
+            }
+        });
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({
+                "parameters": [
+                    { "$ref": "#/components/parameters/HeaderPath" }
+                ],
+                "get": {
+                    "parameters": [
+                        { "$ref": "#/components/parameters/HeaderOp" }
+                    ]
+                }
+            }))
+            .unwrap();
+        let operation = &path_obj["get"];
+        let params = extract_parameters_with_spec(operation, &path_obj, &spec).unwrap();
+        let arr = params.as_array().unwrap();
+
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["name"], "x-api-version");
+        assert_eq!(arr[0]["in"], "header");
+        assert_eq!(arr[0]["required"], true);
+        assert_eq!(arr[0]["schema"]["enum"], serde_json::json!(["2025-01-01"]));
     }
 
     #[test]
