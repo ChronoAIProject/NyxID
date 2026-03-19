@@ -102,8 +102,15 @@ URL: {{ issue.url }}
 **Continuation attempt {{ attempt }}.** Resume from the current workspace state:
 - Check what was already done (`git log`, `git status`, existing changes).
 - Do not redo completed work.
-- Do not end the turn while the issue remains active unless you are blocked.
 {% endif %}
+
+## CRITICAL: Scope and Completion Rules
+
+1. **Stay focused on the issue description.** Only implement what is explicitly requested. Do not fix unrelated bugs, refactor surrounding code, or add features not in the issue.
+2. **Do not expand scope.** If you discover unrelated problems, create a NEW GitHub issue: `gh issue create --title "..." --body "Found while working on {{ issue.identifier }}"`.
+3. **Finish and hand off.** Once the requested changes are implemented and tests pass, immediately push, create the PR, and move to `code-review`. Do not keep iterating.
+4. **Good enough is done.** The code review agent will catch quality issues. Your job is to implement the feature/fix, not to achieve perfection.
+5. **If blocked, stop.** Update the workpad with what's blocking you and move to `human-review`.
 
 ## Status Map
 
@@ -161,7 +168,7 @@ gh api repos/ChronoAIProject/NyxID/issues/comments/{comment_id} -X PATCH -f body
 4. Run validation before pushing (see Quality Checklist).
 5. Push branch and create PR targeting `main`.
 6. Run the PR feedback sweep (see below).
-7. Add label `code-review` to issue {{ issue.identifier }} (triggers automated review).
+7. **STOP implementing.** Add label `code-review` to issue {{ issue.identifier }}. Do not make more changes after creating the PR.
 
 ## Rework Flow
 
@@ -172,7 +179,7 @@ When issue state is `rework`, a reviewer has requested changes:
 3. Address each comment: fix the code or reply with justification.
 4. Run the full test suite again.
 5. Push the fixes to the same branch.
-6. Add label `code-review` to the issue (triggers another automated review).
+6. **STOP.** Add label `code-review`. Do not continue making more changes.
 
 ## Project Context
 
