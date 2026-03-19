@@ -43,6 +43,7 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/login", post(handlers::auth::login))
         .route("/logout", post(handlers::auth::logout))
         .route("/refresh", post(handlers::auth::refresh))
+        .route("/cli-token", post(handlers::auth::cli_token))
         .route("/verify-email", post(handlers::auth::verify_email))
         .route("/forgot-password", post(handlers::auth::forgot_password))
         .route("/reset-password", post(handlers::auth::reset_password))

@@ -90,8 +90,8 @@ export function CliAuthPage() {
 
 async function sendTokenToCliCallback(port: string, state?: string) {
   try {
-    // Request a fresh short-lived token for the CLI
-    const response = await api.post<TokenResponse>("/auth/refresh");
+    // Request a fresh access token for the CLI (uses cookie session)
+    const response = await api.post<TokenResponse>("/auth/cli-token");
     const callbackUrl = new URL(`http://127.0.0.1:${port}/callback`);
     callbackUrl.searchParams.set("access_token", response.access_token);
     if (state) {
