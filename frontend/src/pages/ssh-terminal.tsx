@@ -1,5 +1,6 @@
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useService } from "@/hooks/use-services";
+import { usePublicConfig } from "@/hooks/use-public-config";
 import { SshWebTerminal } from "@/components/dashboard/ssh-web-terminal";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +14,7 @@ export function SshTerminalPage() {
   const navigate = useNavigate();
 
   const { data: service, isLoading, error } = useService(serviceId);
+  const { data: publicConfig } = usePublicConfig();
 
   const isSshService = service?.service_type === "ssh";
   const hasCertAuth = service?.ssh_config?.certificate_auth_enabled === true;
@@ -132,6 +134,7 @@ export function SshTerminalPage() {
         <SshWebTerminal
           serviceId={serviceId}
           principal={principal}
+          nodeWsUrl={publicConfig?.node_ws_url}
           onDisconnect={handleDisconnect}
         />
       </div>

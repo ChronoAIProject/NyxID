@@ -14,23 +14,45 @@ interface ControlMessage {
 interface SshWebTerminalProps {
   readonly serviceId: string;
   readonly principal: string;
+  readonly nodeWsUrl?: string;
   readonly onDisconnect?: () => void;
 }
 
-function buildWebSocketUrl(serviceId: string, principal: string, cols: number, rows: number): string {
-  const origin = window.location.origin;
-  const wsOrigin = origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+function buildWebSocketUrl(
+  serviceId: string,
+  principal: string,
+  cols: number,
+  rows: number,
+  nodeWsUrl?: string,
+): string {
+  // Derive the backend WS base from the node WebSocket URL (which points to the backend).
+  // Falls back to same-origin (works when frontend is served by the backend).
+  let wsBase: string;
+  if (nodeWsUrl) {
+    try {
+      const parsed = new URL(nodeWsUrl);
+      parsed.pathname = "";
+      parsed.search = "";
+      parsed.hash = "";
+      wsBase = parsed.toString().replace(/\/$/, "");
+    } catch {
+      wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+    }
+  } else {
+    wsBase = window.location.origin.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
+  }
   const params = new URLSearchParams({
     principal,
     cols: String(cols),
     rows: String(rows),
   });
-  return `${wsOrigin}/api/v1/ssh/${encodeURIComponent(serviceId)}/terminal?${params.toString()}`;
+  return `${wsBase}/api/v1/ssh/${encodeURIComponent(serviceId)}/terminal?${params.toString()}`;
 }
 
 export function SshWebTerminal({
   serviceId,
   principal,
+  nodeWsUrl,
   onDisconnect,
 }: SshWebTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -135,7 +157,7 @@ export function SshWebTerminal({
 
     terminal.writeln("\x1b[90mConnecting...\x1b[0m");
 
-    const wsUrl = buildWebSocketUrl(serviceId, principal, cols, rows);
+    const wsUrl = buildWebSocketUrl(serviceId, principal, cols, rows, nodeWsUrl);
     const ws = new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
@@ -219,7 +241,7 @@ export function SshWebTerminal({
         resizeTimerRef.current = null;
       }, 100);
     });
-  }, [serviceId, principal, onDisconnect, cleanup, status]);
+  }, [serviceId, principal, nodeWsUrl, onDisconnect, cleanup, status]);
 
   // Initial connection on mount.
   useEffect(() => {
