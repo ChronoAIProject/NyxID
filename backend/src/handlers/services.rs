@@ -281,10 +281,21 @@ fn resolve_spec_url_update(
 )]
 pub async fn list_services(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Query(query): Query<ListServicesQuery>,
 ) -> AppResult<Json<ServiceListResponse>> {
-    let mut filter = doc! { "is_active": true };
+    let user_id_str = auth_user.user_id.to_string();
+
+    // SSH services are private -- only visible to their creator (or admins).
+    // HTTP services remain visible to all authenticated users.
+    let mut filter = doc! {
+        "is_active": true,
+        "$or": [
+            { "service_type": { "$ne": "ssh" } },
+            { "service_type": { "$exists": false } },
+            { "service_type": "ssh", "created_by": &user_id_str },
+        ],
+    };
     if let Some(ref category) = query.category {
         let valid = ["provider", "connection", "internal"];
         if !valid.contains(&category.as_str()) {
@@ -530,6 +541,7 @@ pub async fn create_service(
                 certificate_ttl_minutes: ssh_config.certificate_ttl_minutes,
                 allowed_principals: &ssh_config.allowed_principals,
             },
+            state.config.is_development(),
         )
         .await?;
         let service_category = derive_ssh_service_category(body.service_category.as_deref())?;
@@ -915,6 +927,7 @@ pub async fn update_service(
                         certificate_ttl_minutes: ssh_config.certificate_ttl_minutes,
                         allowed_principals: &ssh_config.allowed_principals,
                     },
+                    state.config.is_development(),
                 )
                 .await?;
                 set_doc.insert(

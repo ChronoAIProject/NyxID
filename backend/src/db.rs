@@ -39,6 +39,8 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
     ensure_indexes(&db).await?;
     tracing::info!("MongoDB indexes verified");
 
+    backfill_downstream_service_types(&db).await?;
+
     Ok(db)
 }
 

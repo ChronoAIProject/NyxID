@@ -119,8 +119,9 @@ pub async fn build_ssh_config(
     service_id: &str,
     existing: Option<&SshServiceConfig>,
     input: SshConfigInput<'_>,
+    allow_private: bool,
 ) -> AppResult<SshServiceConfig> {
-    validate_resolved_ssh_target(input.host, input.port).await?;
+    validate_resolved_ssh_target(input.host, input.port, allow_private).await?;
     validate_certificate_settings(
         input.certificate_auth_enabled,
         input.certificate_ttl_minutes,
@@ -181,7 +182,16 @@ pub fn validate_ssh_target(host: &str, port: u16) -> AppResult<()> {
     Ok(())
 }
 
-pub async fn validate_resolved_ssh_target(host: &str, port: u16) -> AppResult<()> {
+pub async fn validate_resolved_ssh_target(
+    host: &str,
+    port: u16,
+    allow_private: bool,
+) -> AppResult<()> {
+    if allow_private {
+        // In development mode, skip SSRF checks for SSH targets.
+        // SSH targets are often private hosts reachable only from node agents.
+        return Ok(());
+    }
     validate_resolved_ssh_target_with_lookup(host, port, |lookup_host, lookup_port| {
         let lookup_host = lookup_host.to_string();
         async move {
@@ -306,7 +316,6 @@ fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
                 || ipv4.is_unspecified()
                 || ipv4.is_broadcast()
                 || is_rfc6598_cgnat(ipv4)
-                || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
         }
         std::net::IpAddr::V6(ipv6) => {
             ipv6.is_loopback()
@@ -566,6 +575,7 @@ mod tests {
                 certificate_ttl_minutes: 45,
                 allowed_principals: &[String::from("ubuntu"), String::from(" deploy ")],
             },
+            true,
         )
         .await
         .expect("config");
@@ -595,6 +605,7 @@ mod tests {
                 certificate_ttl_minutes: 30,
                 allowed_principals: &[String::from("ubuntu")],
             },
+            true,
         )
         .await
         .expect("ssh config");

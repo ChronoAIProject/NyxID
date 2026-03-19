@@ -156,7 +156,6 @@ pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
                     || ipv4.is_private()
                     || ipv4.is_link_local()
                     || is_rfc6598_cgnat(ipv4)
-                    || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
             }
             std::net::IpAddr::V6(ipv6) => {
                 ipv6.is_loopback()

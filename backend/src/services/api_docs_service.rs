@@ -119,13 +119,15 @@ pub async fn fetch_downstream_openapi_spec(
         .as_deref()
         .ok_or_else(|| AppError::NotFound("Service has no OpenAPI spec configured".to_string()))?;
 
-    let mut spec = fetch_json_spec(spec_url).await?.as_ref().clone();
-    if spec.get("openapi").is_none() && spec.get("swagger").is_none() {
+    let cached = fetch_json_spec(spec_url).await?;
+    if cached.get("openapi").is_none() && cached.get("swagger").is_none() {
         return Err(AppError::BadRequest(
             "Downstream spec is not an OpenAPI or Swagger document".to_string(),
         ));
     }
 
+    // Clone only when we need to mutate (add proxy metadata)
+    let mut spec = Arc::unwrap_or_clone(cached);
     let base = proxy_base_url.trim_end_matches('/');
     let proxy_url = format!("{base}/api/v1/proxy/{}/", service.id);
     spec["servers"] = serde_json::json!([{
@@ -147,13 +149,14 @@ pub async fn fetch_downstream_asyncapi_spec(
         .as_deref()
         .ok_or_else(|| AppError::NotFound("Service has no AsyncAPI spec configured".to_string()))?;
 
-    let mut spec = fetch_json_spec(spec_url).await?.as_ref().clone();
-    if spec.get("asyncapi").is_none() {
+    let cached = fetch_json_spec(spec_url).await?;
+    if cached.get("asyncapi").is_none() {
         return Err(AppError::BadRequest(
             "Downstream spec is not an AsyncAPI document".to_string(),
         ));
     }
 
+    let mut spec = Arc::unwrap_or_clone(cached);
     spec["x-nyxid-service-id"] = serde_json::Value::String(service.id.clone());
     spec["x-nyxid-service-slug"] = serde_json::Value::String(service.slug.clone());
     spec["x-nyxid-proxy-base-url"] = serde_json::Value::String(format!(

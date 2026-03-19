@@ -904,7 +904,7 @@ async fn validate_runtime_ssh_target(
     service_id: &str,
     ssh_service: &crate::models::downstream_service::SshServiceConfig,
 ) -> AppResult<()> {
-    ssh_service::validate_resolved_ssh_target(&ssh_service.host, ssh_service.port)
+    ssh_service::validate_resolved_ssh_target(&ssh_service.host, ssh_service.port, false)
         .await
         .map_err(|error| {
             tracing::warn!(
