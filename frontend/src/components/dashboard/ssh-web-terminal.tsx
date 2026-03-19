@@ -208,10 +208,13 @@ export function SshWebTerminal({
 
     ws.onclose = () => {
       if (!mountedRef.current) return;
-      if (status !== "error") {
-        setStatus("disconnected");
-        terminal.writeln("\r\n\x1b[90mConnection closed.\x1b[0m");
-      }
+      setStatus((prev) => {
+        if (prev !== "error") {
+          terminal.writeln("\r\n\x1b[90mConnection closed.\x1b[0m");
+          return "disconnected";
+        }
+        return prev;
+      });
     };
 
     ws.onerror = () => {
@@ -241,7 +244,8 @@ export function SshWebTerminal({
         resizeTimerRef.current = null;
       }, 100);
     });
-  }, [serviceId, principal, nodeWsUrl, onDisconnect, cleanup, status]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceId, principal, nodeWsUrl, cleanup]);
 
   // Initial connection on mount.
   useEffect(() => {
