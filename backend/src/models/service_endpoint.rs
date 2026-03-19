@@ -33,18 +33,22 @@ pub struct ServiceEndpoint {
     pub updated_at: DateTime<Utc>,
 }
 
+impl ServiceEndpoint {
+    pub fn has_request_body(&self) -> bool {
+        self.request_body_schema.is_some() || self.request_content_type.is_some()
+    }
+
+    pub fn effective_request_body_required(&self) -> bool {
+        self.request_body_required && self.has_request_body()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn collection_name() {
-        assert_eq!(COLLECTION_NAME, "service_endpoints");
-    }
-
-    #[test]
-    fn bson_roundtrip() {
-        let endpoint = ServiceEndpoint {
+    fn make_endpoint() -> ServiceEndpoint {
+        ServiceEndpoint {
             id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
             name: "get_users".to_string(),
@@ -59,12 +63,40 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
-        };
+        }
+    }
+
+    #[test]
+    fn collection_name() {
+        assert_eq!(COLLECTION_NAME, "service_endpoints");
+    }
+
+    #[test]
+    fn bson_roundtrip() {
+        let endpoint = make_endpoint();
         let doc = bson::to_document(&endpoint).expect("serialize");
         let restored: ServiceEndpoint = bson::from_document(doc).expect("deserialize");
         assert_eq!(endpoint.id, restored.id);
         assert_eq!(endpoint.method, restored.method);
         assert_eq!(endpoint.request_content_type, restored.request_content_type);
         assert_eq!(endpoint.request_body_required, restored.request_body_required);
+    }
+
+    #[test]
+    fn effective_request_body_required_false_without_body_metadata() {
+        let mut endpoint = make_endpoint();
+        endpoint.request_body_schema = None;
+        endpoint.request_content_type = None;
+
+        assert!(!endpoint.has_request_body());
+        assert!(!endpoint.effective_request_body_required());
+    }
+
+    #[test]
+    fn effective_request_body_required_true_with_body_metadata() {
+        let endpoint = make_endpoint();
+
+        assert!(endpoint.has_request_body());
+        assert!(endpoint.effective_request_body_required());
     }
 }

@@ -52,6 +52,21 @@ pub struct McpEndpointConfig {
     pub response_description: Option<String>,
 }
 
+fn endpoint_to_mcp_config(ep: &ServiceEndpoint) -> McpEndpointConfig {
+    McpEndpointConfig {
+        endpoint_id: ep.id.clone(),
+        name: ep.name.clone(),
+        description: ep.description.clone(),
+        method: ep.method.clone(),
+        path: ep.path.clone(),
+        parameters: ep.parameters.clone(),
+        request_body_schema: ep.request_body_schema.clone(),
+        request_content_type: ep.request_content_type.clone(),
+        request_body_required: ep.effective_request_body_required(),
+        response_description: ep.response_description.clone(),
+    }
+}
+
 // --- Handler ---
 
 /// GET /api/v1/mcp/config
@@ -166,20 +181,7 @@ pub async fn get_mcp_config(
             let endpoints = endpoints_by_service
                 .get(svc.id.as_str())
                 .map(|eps| {
-                    eps.iter()
-                        .map(|ep| McpEndpointConfig {
-                            endpoint_id: ep.id.clone(),
-                            name: ep.name.clone(),
-                            description: ep.description.clone(),
-                            method: ep.method.clone(),
-                            path: ep.path.clone(),
-                            parameters: ep.parameters.clone(),
-                            request_body_schema: ep.request_body_schema.clone(),
-                            request_content_type: ep.request_content_type.clone(),
-                            request_body_required: ep.request_body_required,
-                            response_description: ep.response_description.clone(),
-                        })
-                        .collect()
+                    eps.iter().map(|ep| endpoint_to_mcp_config(ep)).collect()
                 })
                 .unwrap_or_default();
 
@@ -213,4 +215,35 @@ pub async fn get_mcp_config(
 /// Build the proxy base URL from the backend's base_url config.
 fn build_proxy_base_url(base_url: &str) -> String {
     format!("{}/api/v1/proxy", base_url.trim_end_matches('/'))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::endpoint_to_mcp_config;
+    use crate::models::service_endpoint::ServiceEndpoint;
+
+    #[test]
+    fn endpoint_to_mcp_config_uses_effective_request_body_required() {
+        let endpoint = ServiceEndpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            service_id: uuid::Uuid::new_v4().to_string(),
+            name: "list_users".to_string(),
+            description: Some("List users".to_string()),
+            method: "GET".to_string(),
+            path: "/users".to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: true,
+            response_description: None,
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let config = endpoint_to_mcp_config(&endpoint);
+        assert!(!config.request_body_required);
+    }
 }

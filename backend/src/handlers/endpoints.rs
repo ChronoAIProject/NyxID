@@ -129,6 +129,8 @@ fn validate_path(path: &str) -> AppResult<()> {
 }
 
 fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> EndpointResponse {
+    let request_body_required = e.effective_request_body_required();
+
     EndpointResponse {
         id: e.id,
         service_id: e.service_id,
@@ -139,7 +141,7 @@ fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> 
         parameters: e.parameters,
         request_body_schema: e.request_body_schema,
         request_content_type: e.request_content_type,
-        request_body_required: e.request_body_required,
+        request_body_required,
         response_description: e.response_description,
         is_active: e.is_active,
         created_at: e.created_at.to_rfc3339(),
@@ -330,4 +332,35 @@ pub async fn discover_endpoints(
         message: format!("{count} endpoints discovered and synced"),
         endpoints: items,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::endpoint_to_response;
+    use crate::models::service_endpoint::ServiceEndpoint;
+
+    #[test]
+    fn endpoint_to_response_uses_effective_request_body_required() {
+        let endpoint = ServiceEndpoint {
+            id: uuid::Uuid::new_v4().to_string(),
+            service_id: uuid::Uuid::new_v4().to_string(),
+            name: "list_users".to_string(),
+            description: Some("List users".to_string()),
+            method: "GET".to_string(),
+            path: "/users".to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: true,
+            response_description: None,
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let response = endpoint_to_response(endpoint);
+        assert!(!response.request_body_required);
+    }
 }
