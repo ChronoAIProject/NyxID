@@ -6,6 +6,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use mongodb::bson::doc;
 use ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey, certificate};
+use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
@@ -398,7 +399,8 @@ pub async fn issue_certificate(
             .ok_or_else(|| {
                 AppError::Internal("SSH certificate CA private key is not configured".to_string())
             })?;
-    let decrypted_ca_private_key = encryption_keys.decrypt(ca_private_key_encrypted).await?;
+    let decrypted_ca_private_key =
+        Zeroizing::new(encryption_keys.decrypt(ca_private_key_encrypted).await?);
     let ca_private_key = PrivateKey::from_openssh(&decrypted_ca_private_key)
         .map_err(|e| AppError::Internal(format!("Stored SSH CA private key is invalid: {e}")))?;
 

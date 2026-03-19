@@ -239,11 +239,6 @@ async fn execute_proxy(
             }
         })
         .collect();
-    let request_accepts_sse = all_headers
-        .get("accept")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|accept| accept.contains("text/event-stream"));
-
     // Read the request body (10MB limit)
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
@@ -722,7 +717,7 @@ async fn execute_proxy(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/event-stream"));
-    let is_sse = upstream_is_sse || request_accepts_sse;
+    let is_sse = upstream_is_sse;
 
     let mut response_builder = Response::builder().status(status);
 

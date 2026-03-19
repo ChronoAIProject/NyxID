@@ -176,9 +176,11 @@ async fn handle_ssh_socket(
     service_id: String,
     ssh_service: crate::models::downstream_service::SshServiceConfig,
     mut socket: WebSocket,
-    _session_guard: ssh_service::SshSessionGuard,
+    session_guard: ssh_service::SshSessionGuard,
     client_meta: TunnelClientMeta,
 ) {
+    // Held for Drop-based session count cleanup for the tunnel lifetime.
+    let _ = &session_guard;
     let user_id = auth_user.user_id.to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
     let started_at = Instant::now();
