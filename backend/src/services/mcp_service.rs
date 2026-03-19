@@ -800,18 +800,36 @@ pub fn build_proxy_args(
     let mut header_param_names = HashSet::new();
     let mut cookie_param_names = HashSet::new();
     let mut blocked_header_param_names = HashSet::new();
+    let mut required_path_params = HashSet::new();
+    let mut required_query_params = HashSet::new();
+    let mut required_header_params = HashSet::new();
+    let mut required_cookie_params = HashSet::new();
+    let mut provided_path_params = HashSet::new();
+    let mut provided_query_params = HashSet::new();
+    let mut provided_header_params = HashSet::new();
+    let mut provided_cookie_params = HashSet::new();
 
     if let Some(params_value) = &endpoint.parameters
         && let Some(params) = params_value.as_array()
     {
         for param in params {
             let name = param.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let is_required = param
+                .get("required")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             match param.get("in").and_then(|v| v.as_str()).unwrap_or("") {
                 "path" => {
                     path_params.insert(name.to_string());
+                    if is_required {
+                        required_path_params.insert(name.to_string());
+                    }
                 }
                 "query" => {
                     query_param_names.insert(name.to_string());
+                    if is_required {
+                        required_query_params.insert(name.to_string());
+                    }
                 }
                 "header" => {
                     if is_blocked_mcp_header_parameter(name) {
@@ -824,10 +842,16 @@ pub fn build_proxy_args(
                             ))
                         })?;
                         header_param_names.insert(name.to_string());
+                        if is_required {
+                            required_header_params.insert(name.to_string());
+                        }
                     }
                 }
                 "cookie" => {
                     cookie_param_names.insert(name.to_string());
+                    if is_required {
+                        required_cookie_params.insert(name.to_string());
+                    }
                 }
                 _ => {}
             }
@@ -843,12 +867,16 @@ pub fn build_proxy_args(
 
             if path_params.contains(key.as_str()) {
                 path = path.replace(&format!("{{{key}}}"), &urlencoding::encode(&str_value));
+                provided_path_params.insert(key.clone());
             } else if query_param_names.contains(key.as_str()) {
                 query_params.push((key.clone(), str_value));
+                provided_query_params.insert(key.clone());
             } else if header_param_names.contains(key.as_str()) {
                 header_params.push((key.clone(), str_value));
+                provided_header_params.insert(key.clone());
             } else if cookie_param_names.contains(key.as_str()) {
                 cookie_params.push((key.clone(), str_value));
+                provided_cookie_params.insert(key.clone());
             } else if blocked_header_param_names.contains(key.as_str()) {
                 return Err(AppError::BadRequest(format!(
                     "Header parameter `{key}` is reserved and cannot be set through the NyxID MCP proxy"
@@ -868,6 +896,14 @@ pub fn build_proxy_args(
             .collect();
         Some(qs.join("&"))
     };
+
+    if let Some(error) = missing_required_parameter_error(endpoint, &required_path_params, &provided_path_params, "path")
+        .or_else(|| missing_required_parameter_error(endpoint, &required_query_params, &provided_query_params, "query"))
+        .or_else(|| missing_required_parameter_error(endpoint, &required_header_params, &provided_header_params, "header"))
+        .or_else(|| missing_required_parameter_error(endpoint, &required_cookie_params, &provided_cookie_params, "cookie"))
+    {
+        return Err(error);
+    }
 
     let method = match endpoint.method.to_uppercase().as_str() {
         "GET" => reqwest::Method::GET,
@@ -1004,6 +1040,31 @@ fn unexpected_request_body_error(
         endpoint.name,
         field_names.join(", ")
     ))
+}
+
+fn missing_required_parameter_error(
+    endpoint: &McpToolEndpoint,
+    required_params: &HashSet<String>,
+    provided_params: &HashSet<String>,
+    location: &str,
+) -> Option<AppError> {
+    let mut missing_params: Vec<&str> = required_params
+        .iter()
+        .filter(|name| !provided_params.contains(name.as_str()))
+        .map(String::as_str)
+        .collect();
+
+    if missing_params.is_empty() {
+        return None;
+    }
+
+    missing_params.sort_unstable();
+    Some(AppError::BadRequest(format!(
+        "Endpoint {} is missing required {} parameter(s): {}",
+        endpoint.name,
+        location,
+        missing_params.join(", ")
+    )))
 }
 
 fn extract_body_field(
@@ -2483,6 +2544,102 @@ mod tests {
             AppError::BadRequest(message)
                 if message.contains("does not define a request body")
                     && message.contains("payload")
+        ));
+    }
+
+    #[test]
+    fn build_proxy_args_rejects_missing_required_path_parameter() {
+        let endpoint = McpToolEndpoint {
+            name: "get_user".to_string(),
+            description: Some("Get a user".to_string()),
+            method: "GET".to_string(),
+            path: "/users/{id}".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "id",
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: false,
+        };
+
+        let error = build_proxy_args(&endpoint, &serde_json::json!({}))
+            .expect_err("missing required path params should be rejected");
+
+        assert!(matches!(
+            error,
+            AppError::BadRequest(message)
+                if message.contains("missing required path parameter(s)")
+                    && message.contains("id")
+        ));
+    }
+
+    #[test]
+    fn build_proxy_args_rejects_missing_required_non_body_parameters() {
+        let endpoint = McpToolEndpoint {
+            name: "update_user".to_string(),
+            description: Some("Update a user".to_string()),
+            method: "POST".to_string(),
+            path: "/users".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "limit",
+                    "in": "query",
+                    "required": true,
+                    "schema": { "type": "integer" }
+                },
+                {
+                    "name": "X-Api-Version",
+                    "in": "header",
+                    "required": true,
+                    "schema": { "type": "string" }
+                },
+                {
+                    "name": "session_id",
+                    "in": "cookie",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: false,
+        };
+
+        let query_error = build_proxy_args(&endpoint, &serde_json::json!({}))
+            .expect_err("missing required query params should be rejected");
+        assert!(matches!(
+            query_error,
+            AppError::BadRequest(message)
+                if message.contains("missing required query parameter(s)")
+                    && message.contains("limit")
+        ));
+
+        let header_error = build_proxy_args(&endpoint, &serde_json::json!({
+            "limit": 10
+        }))
+        .expect_err("missing required header params should be rejected");
+        assert!(matches!(
+            header_error,
+            AppError::BadRequest(message)
+                if message.contains("missing required header parameter(s)")
+                    && message.contains("X-Api-Version")
+        ));
+
+        let cookie_error = build_proxy_args(&endpoint, &serde_json::json!({
+            "limit": 10,
+            "X-Api-Version": "2025-01-01"
+        }))
+        .expect_err("missing required cookie params should be rejected");
+        assert!(matches!(
+            cookie_error,
+            AppError::BadRequest(message)
+                if message.contains("missing required cookie parameter(s)")
+                    && message.contains("session_id")
         ));
     }
 
