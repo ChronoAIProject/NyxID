@@ -247,14 +247,19 @@ export function SshWebTerminal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serviceId, principal, nodeWsUrl, cleanup]);
 
-  // Initial connection on mount.
+  // Initial connection on mount. Guard against React Strict Mode double-mount.
+  const connectedOnceRef = useRef(false);
   useEffect(() => {
     mountedRef.current = true;
-    connect();
+    if (!connectedOnceRef.current) {
+      connectedOnceRef.current = true;
+      connect();
+    }
 
     return () => {
       mountedRef.current = false;
       cleanup();
+      connectedOnceRef.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serviceId, principal]);
