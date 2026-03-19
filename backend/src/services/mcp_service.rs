@@ -713,17 +713,8 @@ fn has_concrete_content_type(content_type: &str) -> bool {
     !normalized.is_empty() && normalized != "*/*"
 }
 
-fn request_content_type_header_value<'a>(
-    endpoint: &'a McpToolEndpoint,
-    method: &reqwest::Method,
-    has_body: bool,
-) -> Option<&'a str> {
-    if has_body
-        || matches!(
-            *method,
-            reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
-        )
-    {
+fn request_content_type_header_value(endpoint: &McpToolEndpoint, has_body: bool) -> Option<&str> {
+    if has_body {
         Some(request_content_type_or_default(endpoint))
     } else {
         None
@@ -1182,11 +1173,9 @@ pub async fn execute_tool(
     .map_err(|e| AppError::BadRequest(format!("Provider credentials not available: {e}")))?;
 
     // Minimal headers for the downstream request.
-    // Always set Content-Type for methods that typically carry a body, even
-    // when the body is empty -- some APIs (e.g. ASP.NET) return 415 without it.
+    // Only set Content-Type when a payload is present.
     let mut headers = reqwest::header::HeaderMap::new();
-    if let Some(content_type) = request_content_type_header_value(endpoint, &method, body.is_some())
-    {
+    if let Some(content_type) = request_content_type_header_value(endpoint, body.is_some()) {
         headers.insert(
             reqwest::header::CONTENT_TYPE,
             content_type.parse().map_err(|e| {
@@ -2394,7 +2383,7 @@ mod tests {
         };
 
         assert_eq!(
-            request_content_type_header_value(&endpoint, &reqwest::Method::POST, true),
+            request_content_type_header_value(&endpoint, true),
             Some("application/octet-stream")
         );
     }
@@ -2416,7 +2405,7 @@ mod tests {
         };
 
         assert_eq!(
-            request_content_type_header_value(&endpoint, &reqwest::Method::POST, true),
+            request_content_type_header_value(&endpoint, true),
             Some("application/octet-stream")
         );
     }
@@ -2438,8 +2427,47 @@ mod tests {
         };
 
         assert_eq!(
-            request_content_type_header_value(&endpoint, &reqwest::Method::POST, true),
+            request_content_type_header_value(&endpoint, true),
             Some("application/zip")
         );
+    }
+
+    #[test]
+    fn request_content_type_header_value_omits_optional_body_without_payload() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: Some("application/zip".to_string()),
+            request_body_required: false,
+        };
+
+        assert_eq!(request_content_type_header_value(&endpoint, false), None);
+    }
+
+    #[test]
+    fn request_content_type_header_value_omits_default_json_without_payload() {
+        let endpoint = McpToolEndpoint {
+            name: "create_session".to_string(),
+            description: Some("Create a session".to_string()),
+            method: "POST".to_string(),
+            path: "/sessions".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "ttl",
+                    "in": "query",
+                    "required": false,
+                    "schema": { "type": "integer" }
+                }
+            ])),
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: false,
+        };
+
+        assert_eq!(request_content_type_header_value(&endpoint, false), None);
     }
 }
