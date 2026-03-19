@@ -79,7 +79,10 @@ mod tests {
         assert_eq!(endpoint.id, restored.id);
         assert_eq!(endpoint.method, restored.method);
         assert_eq!(endpoint.request_content_type, restored.request_content_type);
-        assert_eq!(endpoint.request_body_required, restored.request_body_required);
+        assert_eq!(
+            endpoint.request_body_required,
+            restored.request_body_required
+        );
     }
 
     #[test]

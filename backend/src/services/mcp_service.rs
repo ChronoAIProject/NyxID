@@ -12,6 +12,9 @@ use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, Serv
 use crate::models::user_service_connection::{
     COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
+use crate::services::content_type::{
+    is_binary_content_type, is_json_content_type, normalize_content_type, schema_is_binary,
+};
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{connection_service, node_routing_service, proxy_service};
 
@@ -480,9 +483,9 @@ fn request_body_mode_for(
     let normalized = normalize_content_type(content_type);
     if normalized.starts_with("multipart/") {
         RequestBodyMode::Multipart
-    } else if is_binary_content_type(&normalized) || schema_is_binary(body_schema) {
+    } else if is_binary_content_type(content_type) || schema_is_binary(body_schema) {
         RequestBodyMode::Binary
-    } else if normalized.is_empty() || normalized == "*/*" || is_json_content_type(&normalized) {
+    } else if normalized.is_empty() || normalized == "*/*" || is_json_content_type(content_type) {
         RequestBodyMode::Json
     } else {
         RequestBodyMode::Raw
@@ -658,64 +661,12 @@ fn request_body_field_name(endpoint: &McpToolEndpoint) -> String {
     }
 }
 
-fn normalize_content_type(content_type: &str) -> String {
-    content_type
-        .split(';')
-        .next()
-        .unwrap_or(content_type)
-        .trim()
-        .to_ascii_lowercase()
-}
-
 fn endpoint_has_request_body(endpoint: &McpToolEndpoint) -> bool {
     endpoint.request_body_schema.is_some() || endpoint.request_content_type.is_some()
 }
 
 fn request_body_is_required(endpoint: &McpToolEndpoint) -> bool {
     endpoint.request_body_required && endpoint_has_request_body(endpoint)
-}
-
-fn is_json_content_type(content_type: &str) -> bool {
-    content_type == "application/json" || content_type.ends_with("+json")
-}
-
-fn is_text_content_type(content_type: &str) -> bool {
-    content_type.starts_with("text/")
-        || is_json_content_type(content_type)
-        || content_type == "application/xml"
-        || content_type.ends_with("+xml")
-        || content_type == "application/x-www-form-urlencoded"
-        || content_type == "application/yaml"
-        || content_type == "application/x-yaml"
-        || content_type.ends_with("+yaml")
-        || content_type == "application/graphql"
-        || content_type == "application/javascript"
-        || content_type == "application/ecmascript"
-        || content_type == "application/sql"
-        || content_type == "application/toml"
-        || content_type == "application/ndjson"
-        || content_type == "application/x-ndjson"
-        || content_type == "application/csv"
-        || content_type == "application/tsv"
-}
-
-fn is_binary_content_type(content_type: &str) -> bool {
-    content_type == "application/octet-stream"
-        || content_type == "application/zip"
-        || content_type == "application/gzip"
-        || content_type == "application/pdf"
-        || content_type.starts_with("image/")
-        || content_type.starts_with("audio/")
-        || content_type.starts_with("video/")
-        || content_type.starts_with("font/")
-        || (content_type.starts_with("application/") && !is_text_content_type(content_type))
-}
-
-fn schema_is_binary(body_schema: Option<&serde_json::Value>) -> bool {
-    body_schema
-        .and_then(|schema| schema.get("format"))
-        .and_then(|format| format.as_str())
-        == Some("binary")
 }
 
 fn request_content_type_or_default(endpoint: &McpToolEndpoint) -> &str {
@@ -921,11 +872,36 @@ pub fn build_proxy_args(
         Some(qs.join("&"))
     };
 
-    if let Some(error) = missing_required_parameter_error(endpoint, &required_path_params, &provided_path_params, "path")
-        .or_else(|| missing_required_parameter_error(endpoint, &required_query_params, &provided_query_params, "query"))
-        .or_else(|| missing_required_parameter_error(endpoint, &required_header_params, &provided_header_params, "header"))
-        .or_else(|| missing_required_parameter_error(endpoint, &required_cookie_params, &provided_cookie_params, "cookie"))
-    {
+    if let Some(error) = missing_required_parameter_error(
+        endpoint,
+        &required_path_params,
+        &provided_path_params,
+        "path",
+    )
+    .or_else(|| {
+        missing_required_parameter_error(
+            endpoint,
+            &required_query_params,
+            &provided_query_params,
+            "query",
+        )
+    })
+    .or_else(|| {
+        missing_required_parameter_error(
+            endpoint,
+            &required_header_params,
+            &provided_header_params,
+            "header",
+        )
+    })
+    .or_else(|| {
+        missing_required_parameter_error(
+            endpoint,
+            &required_cookie_params,
+            &provided_cookie_params,
+            "cookie",
+        )
+    }) {
         return Err(error);
     }
 
@@ -1027,12 +1003,12 @@ fn build_request_body(
 
 fn missing_required_request_body_error(endpoint: &McpToolEndpoint) -> AppError {
     match request_body_mode(endpoint) {
-        RequestBodyMode::Json if !json_body_uses_wrapper(endpoint) => AppError::BadRequest(
-            format!(
+        RequestBodyMode::Json if !json_body_uses_wrapper(endpoint) => {
+            AppError::BadRequest(format!(
                 "Request body for {} must include at least one body field",
                 request_content_type_or_default(endpoint)
-            ),
-        ),
+            ))
+        }
         RequestBodyMode::Json => AppError::BadRequest(format!(
             "Request body for {} must be provided as a JSON value in the `{}` field",
             request_content_type_or_default(endpoint),
@@ -1969,8 +1945,8 @@ mod tests {
     }
 
     #[test]
-    fn build_input_schema_wraps_json_body_when_properties_collide_with_header_params_case_insensitively(
-    ) {
+    fn build_input_schema_wraps_json_body_when_properties_collide_with_header_params_case_insensitively()
+     {
         let endpoint = McpToolEndpoint {
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -2003,7 +1979,10 @@ mod tests {
             schema["properties"]["body"]["properties"]["x-api-version"]["type"],
             "string"
         );
-        assert_eq!(schema["required"], serde_json::json!(["X-Api-Version", "body"]));
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["X-Api-Version", "body"])
+        );
     }
 
     #[test]
@@ -2084,8 +2063,8 @@ mod tests {
     }
 
     #[test]
-    fn build_input_schema_uses_alternate_body_field_when_body_header_param_exists_case_insensitively(
-    ) {
+    fn build_input_schema_uses_alternate_body_field_when_body_header_param_exists_case_insensitively()
+     {
         let endpoint = McpToolEndpoint {
             name: "submit_message".to_string(),
             description: Some("Submit a message".to_string()),
@@ -2550,8 +2529,8 @@ mod tests {
     }
 
     #[test]
-    fn build_proxy_args_wraps_json_body_when_properties_collide_with_header_params_case_insensitively(
-    ) {
+    fn build_proxy_args_wraps_json_body_when_properties_collide_with_header_params_case_insensitively()
+     {
         let endpoint = McpToolEndpoint {
             name: "update_user".to_string(),
             description: Some("Update a user".to_string()),
@@ -2693,8 +2672,8 @@ mod tests {
     }
 
     #[test]
-    fn build_proxy_args_uses_alternate_body_field_when_body_header_param_exists_case_insensitively(
-    ) {
+    fn build_proxy_args_uses_alternate_body_field_when_body_header_param_exists_case_insensitively()
+    {
         let endpoint = McpToolEndpoint {
             name: "submit_message".to_string(),
             description: Some("Submit a message".to_string()),
@@ -2727,7 +2706,10 @@ mod tests {
                 .iter()
                 .any(|(name, value)| { name == "Body" && value == "metadata" })
         );
-        assert_eq!(std::str::from_utf8(body.unwrap().as_ref()).unwrap(), "hello");
+        assert_eq!(
+            std::str::from_utf8(body.unwrap().as_ref()).unwrap(),
+            "hello"
+        );
     }
 
     #[test]
@@ -2955,9 +2937,12 @@ mod tests {
                     && message.contains("limit")
         ));
 
-        let header_error = build_proxy_args(&endpoint, &serde_json::json!({
-            "limit": 10
-        }))
+        let header_error = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "limit": 10
+            }),
+        )
         .expect_err("missing required header params should be rejected");
         assert!(matches!(
             header_error,
@@ -2966,10 +2951,13 @@ mod tests {
                     && message.contains("X-Api-Version")
         ));
 
-        let cookie_error = build_proxy_args(&endpoint, &serde_json::json!({
-            "limit": 10,
-            "X-Api-Version": "2025-01-01"
-        }))
+        let cookie_error = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "limit": 10,
+                "X-Api-Version": "2025-01-01"
+            }),
+        )
         .expect_err("missing required cookie params should be rejected");
         assert!(matches!(
             cookie_error,

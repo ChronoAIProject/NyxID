@@ -202,9 +202,9 @@ pub async fn create_endpoint(
     }
 
     let input = EndpointInput {
-        request_body_required: body.request_body_required.unwrap_or(
-            body.request_body_schema.is_some() || body.request_content_type.is_some(),
-        ),
+        request_body_required: body
+            .request_body_required
+            .unwrap_or(body.request_body_schema.is_some() || body.request_content_type.is_some()),
         name: body.name,
         description: body.description,
         method: body.method,
@@ -380,11 +380,15 @@ mod tests {
     fn validate_request_content_type_rejects_invalid_values() {
         let empty = validate_request_content_type("   ")
             .expect_err("empty content types should be rejected");
-        assert!(matches!(empty, AppError::ValidationError(message) if message.contains("must not be empty")));
+        assert!(
+            matches!(empty, AppError::ValidationError(message) if message.contains("must not be empty"))
+        );
 
         let invalid = validate_request_content_type("application/json\nx-bad: nope")
             .expect_err("invalid header values should be rejected");
-        assert!(matches!(invalid, AppError::ValidationError(message) if message.contains("valid HTTP content type")));
+        assert!(
+            matches!(invalid, AppError::ValidationError(message) if message.contains("valid HTTP content type"))
+        );
     }
 
     #[test]

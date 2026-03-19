@@ -180,9 +180,7 @@ pub async fn get_mcp_config(
         .map(|svc| {
             let endpoints = endpoints_by_service
                 .get(svc.id.as_str())
-                .map(|eps| {
-                    eps.iter().map(|ep| endpoint_to_mcp_config(ep)).collect()
-                })
+                .map(|eps| eps.iter().map(|ep| endpoint_to_mcp_config(ep)).collect())
                 .unwrap_or_default();
 
             McpServiceConfig {

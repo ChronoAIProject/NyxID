@@ -1,6 +1,10 @@
 use std::collections::HashSet;
 
 use crate::errors::{AppError, AppResult};
+use crate::services::content_type::{
+    is_binary_content_type, is_json_content_type, normalize_content_type,
+    schema_contains_binary_field, schema_is_binary,
+};
 
 /// A single endpoint parsed from an OpenAPI/Swagger specification.
 pub struct ParsedEndpoint {
@@ -518,48 +522,9 @@ fn default_swagger2_form_content_type(kind: Swagger2FormBodyKind) -> String {
     .to_string()
 }
 
-fn is_json_content_type(content_type: &str) -> bool {
-    let normalized = normalize_content_type(content_type);
-    normalized == "application/json" || normalized.ends_with("+json")
-}
-
 fn is_concrete_content_type(content_type: &str) -> bool {
     let normalized = normalize_content_type(content_type);
     normalized != "*/*" && !normalized.is_empty()
-}
-
-fn is_text_content_type(content_type: &str) -> bool {
-    let normalized = normalize_content_type(content_type);
-    normalized.starts_with("text/")
-        || is_json_content_type(&normalized)
-        || normalized == "application/xml"
-        || normalized.ends_with("+xml")
-        || normalized == "application/x-www-form-urlencoded"
-        || normalized == "application/yaml"
-        || normalized == "application/x-yaml"
-        || normalized.ends_with("+yaml")
-        || normalized == "application/graphql"
-        || normalized == "application/javascript"
-        || normalized == "application/ecmascript"
-        || normalized == "application/sql"
-        || normalized == "application/toml"
-        || normalized == "application/ndjson"
-        || normalized == "application/x-ndjson"
-        || normalized == "application/csv"
-        || normalized == "application/tsv"
-}
-
-fn is_binary_content_type(content_type: &str) -> bool {
-    let normalized = normalize_content_type(content_type);
-    normalized == "application/octet-stream"
-        || normalized == "application/zip"
-        || normalized == "application/gzip"
-        || normalized == "application/pdf"
-        || normalized.starts_with("image/")
-        || normalized.starts_with("audio/")
-        || normalized.starts_with("video/")
-        || normalized.starts_with("font/")
-        || (normalized.starts_with("application/") && !is_text_content_type(&normalized))
 }
 
 fn is_binary_media(
@@ -589,64 +554,6 @@ fn is_upload_media(
             && resolved_schema
                 .as_ref()
                 .is_some_and(|schema| schema_contains_binary_field(Some(schema))))
-}
-
-fn schema_is_binary(schema: Option<&serde_json::Value>) -> bool {
-    schema
-        .and_then(|schema| schema.get("format"))
-        .and_then(|format| format.as_str())
-        == Some("binary")
-}
-
-fn schema_contains_binary_field(schema: Option<&serde_json::Value>) -> bool {
-    let Some(schema) = schema else {
-        return false;
-    };
-
-    if schema_is_binary(Some(schema)) {
-        return true;
-    }
-
-    if let Some(properties) = schema.get("properties").and_then(|value| value.as_object())
-        && properties
-            .values()
-            .any(|property_schema| schema_contains_binary_field(Some(property_schema)))
-    {
-        return true;
-    }
-
-    if let Some(items) = schema.get("items")
-        && schema_contains_binary_field(Some(items))
-    {
-        return true;
-    }
-
-    if let Some(additional_properties) = schema.get("additionalProperties")
-        && schema_contains_binary_field(Some(additional_properties))
-    {
-        return true;
-    }
-
-    for key in ["allOf", "anyOf", "oneOf"] {
-        if let Some(variants) = schema.get(key).and_then(|value| value.as_array())
-            && variants
-                .iter()
-                .any(|variant_schema| schema_contains_binary_field(Some(variant_schema)))
-        {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn normalize_content_type(content_type: &str) -> String {
-    content_type
-        .split(';')
-        .next()
-        .unwrap_or(content_type)
-        .trim()
-        .to_ascii_lowercase()
 }
 
 fn normalize_parameter_name(location: &str, name: &str) -> String {
