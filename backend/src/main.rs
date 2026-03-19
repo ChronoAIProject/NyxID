@@ -12,6 +12,7 @@ mod crypto;
 mod db;
 mod errors;
 mod handlers;
+mod login_cli;
 mod models;
 mod mw;
 mod routes;
@@ -71,6 +72,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Authenticate with a NyxID server and print an access token.
+    Login(login_cli::LoginArgs),
     /// SSH client helper commands for certificate issuance and ProxyCommand integration.
     Ssh(ssh_cli::SshCli),
 }
@@ -91,12 +94,22 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
-    if let Some(Commands::Ssh(ssh_cli)) = cli.command {
-        if let Err(error) = ssh_cli::run(ssh_cli).await {
-            eprintln!("SSH helper failed: {error}");
-            std::process::exit(1);
+    match cli.command {
+        Some(Commands::Login(args)) => {
+            if let Err(error) = login_cli::run(args).await {
+                eprintln!("Login failed: {error}");
+                std::process::exit(1);
+            }
+            return;
         }
-        return;
+        Some(Commands::Ssh(ssh_cli)) => {
+            if let Err(error) = ssh_cli::run(ssh_cli).await {
+                eprintln!("SSH helper failed: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        None => {}
     }
 
     // Load configuration

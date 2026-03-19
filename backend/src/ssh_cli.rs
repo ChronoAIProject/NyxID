@@ -311,16 +311,27 @@ async fn issue_certificate(
 }
 
 fn resolve_access_token(auth: &AuthArgs) -> Result<String> {
+    // 1. Explicit --access-token flag
     if let Some(token) = &auth.access_token {
         return Ok(token.clone());
     }
 
-    std::env::var(&auth.access_token_env).with_context(|| {
-        format!(
-            "No access token provided. Set {} or pass --access-token",
-            auth.access_token_env
-        )
-    })
+    // 2. Environment variable (NYXID_ACCESS_TOKEN by default)
+    if let Ok(token) = std::env::var(&auth.access_token_env)
+        && !token.is_empty()
+    {
+        return Ok(token);
+    }
+
+    // 3. Saved token from `nyxid login`
+    if let Some(token) = crate::login_cli::read_saved_token() {
+        return Ok(token);
+    }
+
+    bail!(
+        "No access token found. Run `nyxid login --base-url <URL>`, set {}, or pass --access-token",
+        auth.access_token_env
+    )
 }
 
 fn build_issue_cert_url(base_url: &str, service_id: &str) -> Result<String> {

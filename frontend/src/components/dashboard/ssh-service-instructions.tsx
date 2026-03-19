@@ -22,7 +22,8 @@ export function SshServiceInstructions({
   const certificateFile = `~/.ssh/nyxid/${serviceSlug}-cert.pub`;
   const caPublicKeyFile = `~/.ssh/nyxid/${serviceSlug}-ca.pub`;
   const installCommand = "cargo install --path backend";
-  const tokenCommand = 'export NYXID_ACCESS_TOKEN="<paste-access-token>"';
+  const loginCommand = `nyxid login --base-url ${nyxidBaseUrl}`;
+  const apiKeyCommand = 'export NYXID_ACCESS_TOKEN="nyx_..."';
   const transportCommand = `ssh -o ProxyCommand='nyxid ssh proxy --base-url ${nyxidBaseUrl} --service-id ${serviceId}' <ssh-user>@ssh.invalid`;
   const certificateCommand = `ssh -o ProxyCommand='nyxid ssh proxy --base-url ${nyxidBaseUrl} --service-id ${serviceId} --issue-certificate --public-key-file ~/.ssh/id_ed25519.pub --principal ${primaryPrincipal} --certificate-file ${certificateFile} --ca-public-key-file ${caPublicKeyFile}' -o CertificateFile=${certificateFile} -o IdentityFile=~/.ssh/id_ed25519 ${primaryPrincipal}@ssh.invalid`;
   const configCommand = `nyxid ssh config --host-alias ${serviceSlug} --base-url ${nyxidBaseUrl} --service-id ${serviceId} --principal ${primaryPrincipal} --identity-file ~/.ssh/id_ed25519 --certificate-file ${certificateFile} --ca-public-key-file ${caPublicKeyFile}`;
@@ -32,18 +33,30 @@ export function SshServiceInstructions({
       <div className="space-y-1">
         <h4 className="text-sm font-semibold">NyxID SSH Helper</h4>
         <p className="text-xs text-muted-foreground">
-          Install the helper once, export a NyxID access token, then paste one
-          of these commands into your terminal.
+          Install the helper once, authenticate, then paste a connect command
+          into your terminal.
         </p>
       </div>
-      <CopyableField label="Install helper" value={installCommand} size="sm" />
+      <CopyableField label="1. Install helper" value={installCommand} size="sm" />
+
+      <div className="space-y-1">
+        <p className="text-xs font-medium text-muted-foreground">
+          2. Authenticate (choose one)
+        </p>
+      </div>
       <CopyableField
-        label="Export access token"
-        value={tokenCommand}
+        label="Option A: Login (recommended)"
+        value={loginCommand}
         size="sm"
       />
       <CopyableField
-        label="One-off SSH command"
+        label="Option B: Use an API key"
+        value={apiKeyCommand}
+        size="sm"
+      />
+
+      <CopyableField
+        label="3. Connect"
         value={
           sshConfig.certificate_auth_enabled
             ? certificateCommand
