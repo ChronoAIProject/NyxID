@@ -51,6 +51,9 @@ pub struct SigningConfig {
 pub struct SshConfig {
     #[serde(default = "default_max_ssh_tunnels")]
     pub max_tunnels: usize,
+    /// Idle timeout for each SSH TCP read/write. Defaults to 3600s to match
+    /// NyxID's tunnel lifetime cap; lower it if you want more aggressive
+    /// cleanup of stalled or idle interactive sessions.
     #[serde(default = "default_ssh_io_timeout_secs")]
     pub io_timeout_secs: u64,
     #[serde(default)]

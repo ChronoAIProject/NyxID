@@ -193,7 +193,7 @@ The same node routing layer can also carry SSH sessions for services that have S
 - The selected node must be online and able to reach the target SSH host from its own network
 - Private, loopback, and metadata SSH targets must be explicitly allowlisted in the node agent config before the node will open them
 - The node agent enforces a bounded `max_tunnels` limit so the server cannot open unbounded concurrent SSH sessions
-- The node agent enforces `io_timeout_secs` per SSH TCP read and write so stalled tunnel workers are eventually reclaimed
+- The node agent enforces `io_timeout_secs` per SSH TCP read and write so stalled tunnel workers are eventually reclaimed; the default `3600` seconds matches NyxID's tunnel cap, and operators can lower it for more aggressive idle-session cleanup
 - If no healthy bound node can open the SSH target, NyxID falls back to opening the TCP connection itself
 
 For operator-facing setup, see [SSH_TUNNELING.md](./SSH_TUNNELING.md). For the exact message shapes, see [NODE_PROXY_PROTOCOL.md](./NODE_PROXY_PROTOCOL.md).

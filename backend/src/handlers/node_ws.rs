@@ -100,6 +100,28 @@ fn decode_base64_payload(
     }
 }
 
+fn handle_proxy_response_chunk(
+    ws_manager: &NodeWsManager,
+    node_id: &str,
+    chunk: WsProxyResponseChunkMsg,
+) {
+    if let Some(data) = decode_base64_payload(
+        chunk.data.as_deref(),
+        "proxy_response_chunk",
+        &chunk.request_id,
+    ) {
+        ws_manager.deliver_stream_chunk(node_id, &chunk.request_id, data);
+    } else {
+        ws_manager.deliver_proxy_error(
+            node_id,
+            &chunk.request_id,
+            "invalid_base64_payload",
+            502,
+            false,
+        );
+    }
+}
+
 /// GET /api/v1/nodes/ws
 ///
 /// WebSocket upgrade handler for node agent connections.
@@ -451,13 +473,7 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                 }
             }
             NodeMessage::ProxyResponseChunk(chunk) => {
-                if let Some(data) = decode_base64_payload(
-                    chunk.data.as_deref(),
-                    "proxy_response_chunk",
-                    &chunk.request_id,
-                ) {
-                    ws_manager.deliver_stream_chunk(&node_id_reader, &chunk.request_id, data);
-                }
+                handle_proxy_response_chunk(&ws_manager, &node_id_reader, chunk);
             }
             NodeMessage::ProxyResponseEnd(end) => {
                 ws_manager.deliver_stream_end(&node_id_reader, &end.request_id);
@@ -600,8 +616,16 @@ pub async fn node_ws_manager_heartbeat_sweep(
 
 #[cfg(test)]
 mod tests {
-    use super::decode_base64_payload;
+    use super::{decode_base64_payload, handle_proxy_response_chunk};
     use base64::Engine;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    use crate::services::node_ws_manager::{
+        NodeOutboundMessage, NodeProxyRequest, NodeWsManager, ProxyResponseType, StreamChunk,
+        WsProxyResponseChunkMsg,
+    };
 
     #[test]
     fn decode_base64_payload_decodes_valid_body() {
@@ -618,5 +642,74 @@ mod tests {
             decode_base64_payload(Some("%%%not-base64%%%"), "proxy_response", "req-1"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_proxy_response_chunk_closes_stream_with_error() {
+        let manager = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        manager.register_connection("node-1", tx);
+
+        let manager_clone = manager.clone();
+        let responder = tokio::spawn(async move {
+            let Some(NodeOutboundMessage::Text(msg)) = rx.recv().await else {
+                panic!("expected outbound proxy request");
+            };
+            let parsed: Value = serde_json::from_str(&msg).expect("valid json");
+            let request_id = parsed["request_id"].as_str().expect("request id");
+
+            assert!(manager_clone.deliver_stream_start(
+                "node-1",
+                request_id,
+                200,
+                vec![("content-type".to_string(), "text/event-stream".to_string())],
+            ));
+            handle_proxy_response_chunk(
+                &manager_clone,
+                "node-1",
+                WsProxyResponseChunkMsg {
+                    request_id: request_id.to_string(),
+                    data: Some("%%%not-base64%%%".to_string()),
+                },
+            );
+        });
+
+        let response = manager
+            .send_proxy_request(
+                "node-1",
+                NodeProxyRequest {
+                    request_id: "req-stream-invalid".to_string(),
+                    service_id: "svc-1".to_string(),
+                    service_slug: "demo".to_string(),
+                    base_url: "https://api.example.com".to_string(),
+                    method: "GET".to_string(),
+                    path: "/stream".to_string(),
+                    query: None,
+                    headers: vec![],
+                    body: None,
+                },
+                None,
+            )
+            .await
+            .expect("streaming response");
+
+        match response {
+            ProxyResponseType::Streaming(mut stream) => {
+                assert!(matches!(
+                    stream.recv().await,
+                    Some(StreamChunk::Start { status: 200, .. })
+                ));
+                match stream.recv().await {
+                    Some(StreamChunk::Error(error)) => {
+                        assert_eq!(error, "invalid_base64_payload")
+                    }
+                    other => panic!("expected stream error, got {other:?}"),
+                }
+                assert!(stream.recv().await.is_none());
+            }
+            ProxyResponseType::Complete(_) => panic!("expected streaming response"),
+        }
+
+        responder.await.expect("responder task");
     }
 }

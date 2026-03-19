@@ -142,7 +142,7 @@ pub async fn ssh_tunnel_ws(
 ) -> AppResult<Response> {
     authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    validate_runtime_ssh_target(&service_id, &ssh_service)?;
+    validate_runtime_ssh_target(&service_id, &ssh_service).await?;
     let session_guard = state
         .ssh_session_manager
         .try_acquire(&auth_user.user_id.to_string())?;
@@ -871,20 +871,22 @@ fn ssh_banner_validated(buffer: &[u8]) -> AppResult<bool> {
     Ok(false)
 }
 
-fn validate_runtime_ssh_target(
+async fn validate_runtime_ssh_target(
     service_id: &str,
     ssh_service: &crate::models::downstream_service::SshServiceConfig,
 ) -> AppResult<()> {
-    ssh_service::validate_ssh_target(&ssh_service.host, ssh_service.port).map_err(|error| {
-        tracing::warn!(
-            service_id,
-            host = %ssh_service.host,
-            port = ssh_service.port,
-            error = %error,
-            "Rejected invalid SSH target during tunnel setup"
-        );
-        error
-    })
+    ssh_service::validate_resolved_ssh_target(&ssh_service.host, ssh_service.port)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                service_id,
+                host = %ssh_service.host,
+                port = ssh_service.port,
+                error = %error,
+                "Rejected invalid SSH target during tunnel setup"
+            );
+            error
+        })
 }
 
 fn close_node_ssh_tunnel(
@@ -934,8 +936,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rejects_invalid_runtime_ssh_target() {
+    #[tokio::test]
+    async fn rejects_invalid_runtime_ssh_target() {
         let error = validate_runtime_ssh_target(
             "svc-1",
             &SshServiceConfig {
@@ -948,6 +950,7 @@ mod tests {
                 ca_public_key: None,
             },
         )
+        .await
         .expect_err("invalid target");
 
         assert!(error.to_string().contains("private or internal IP address"));
