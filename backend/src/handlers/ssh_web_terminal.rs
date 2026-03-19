@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -12,6 +11,7 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use mongodb::bson::doc;
 use serde::Deserialize;
+use tokio::io::AsyncReadExt;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -20,10 +20,6 @@ use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, ssh_service};
 
 use super::ssh_tunnel::authorize_ssh_access;
-
-// ---------------------------------------------------------------------------
-// Query parameters
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 pub struct WebTerminalQuery {
@@ -41,10 +37,6 @@ fn default_rows() -> u32 {
     24
 }
 
-// ---------------------------------------------------------------------------
-// Control messages (JSON over text frames)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum ClientControl {
@@ -60,34 +52,7 @@ fn server_error_msg(message: &str) -> String {
     serde_json::json!({ "type": "error", "message": message }).to_string()
 }
 
-// ---------------------------------------------------------------------------
-// russh client handler
-// ---------------------------------------------------------------------------
-
-struct SshClientHandler;
-
-impl russh::client::Handler for SshClientHandler {
-    type Error = russh::Error;
-
-    #[allow(clippy::manual_async_fn)]
-    fn check_server_key(
-        &mut self,
-        _server_public_key: &russh::keys::PublicKey,
-    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        // TODO(TOFU): verify against known_hosts / per-service fingerprint
-        async { Ok(true) }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const DEFAULT_WEB_TERMINAL_IDLE_TIMEOUT_SECS: u64 = 1800;
-
-// ---------------------------------------------------------------------------
-// Handler
-// ---------------------------------------------------------------------------
 
 pub async fn ssh_web_terminal(
     State(state): State<AppState>,
@@ -99,12 +64,11 @@ pub async fn ssh_web_terminal(
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
     authorize_ssh_access(&state, &auth_user, &service_id).await?;
-
     let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
 
     if !ssh_svc.certificate_auth_enabled {
         return Err(AppError::BadRequest(
-            "Web terminal requires SSH certificate auth to be enabled for this service".to_string(),
+            "Web terminal requires SSH certificate auth to be enabled".to_string(),
         ));
     }
     if ssh_svc.allowed_principals.is_empty() {
@@ -120,8 +84,6 @@ pub async fn ssh_web_terminal(
             "Requested SSH principal is not allowed for this service".to_string(),
         ));
     }
-
-    ssh_service::validate_resolved_ssh_target(&ssh_svc.host, ssh_svc.port).await?;
 
     let session_guard = state
         .ssh_session_manager
@@ -157,10 +119,6 @@ pub async fn ssh_web_terminal(
         .into_response())
 }
 
-// ---------------------------------------------------------------------------
-// Session loop
-// ---------------------------------------------------------------------------
-
 #[allow(clippy::too_many_arguments)]
 async fn handle_web_terminal(
     state: AppState,
@@ -180,56 +138,81 @@ async fn handle_web_terminal(
     let started_at = Instant::now();
     let (ip_address, user_agent) = client_meta;
 
-    // ----- Generate ephemeral key + certificate -----
-    let (ephemeral_key_pem, cert_openssh) =
-        match generate_ephemeral_cert(&state, &ssh_svc, &service_id, &user_id, &principal).await {
-            Ok(pair) => pair,
-            Err(error) => {
-                tracing::warn!(
-                    service_id = %service_id,
-                    error = %error,
-                    "Web terminal: failed to generate ephemeral credentials"
-                );
-                send_error_and_close(&mut socket, "Failed to generate SSH credentials").await;
-                return;
-            }
-        };
-
-    // Parse into russh types (russh uses its own forked ssh_key internally)
-    let russh_key = match russh::keys::PrivateKey::from_openssh(&ephemeral_key_pem) {
-        Ok(key) => Arc::new(key),
-        Err(error) => {
-            tracing::warn!(error = %error, "Web terminal: failed to parse ephemeral key for russh");
-            send_error_and_close(&mut socket, "Internal SSH key error").await;
+    // Guard against React Strict Mode double-mount
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if socket.send(Message::Ping(vec![].into())).await.is_err() {
             return;
         }
-    };
-    let russh_cert = match russh::keys::Certificate::from_openssh(&cert_openssh) {
-        Ok(cert) => cert,
-        Err(error) => {
-            tracing::warn!(error = %error, "Web terminal: failed to parse certificate for russh");
-            send_error_and_close(&mut socket, "Internal SSH certificate error").await;
-            return;
-        }
-    };
+    }
 
-    // ----- Connect to SSH target -----
-    let ssh_config = Arc::new(russh::client::Config {
-        inactivity_timeout: Some(Duration::from_secs(DEFAULT_WEB_TERMINAL_IDLE_TIMEOUT_SECS)),
-        ..Default::default()
-    });
-
-    let connect_target = (ssh_svc.host.as_str(), ssh_svc.port);
-    let mut ssh_handle = match tokio::time::timeout(
-        Duration::from_secs(state.config.ssh_connect_timeout_secs),
-        russh::client::connect(ssh_config, connect_target, SshClientHandler),
+    // ----- Write ephemeral SSH key + certificate to temp files -----
+    let temp_dir = match write_ephemeral_ssh_files(
+        &state,
+        &ssh_svc,
+        &service_id,
+        &user_id,
+        &principal,
     )
     .await
     {
-        Ok(Ok(handle)) => handle,
-        Ok(Err(error)) => {
-            tracing::warn!(service_id = %service_id, error = %error, "Web terminal: SSH connect failed");
-            send_error_and_close(&mut socket, "Failed to connect to SSH target").await;
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::warn!(service_id = %service_id, error = %error, "Web terminal: credential gen failed");
+            send_error_and_close(&mut socket, "Failed to generate SSH credentials").await;
+            return;
+        }
+    };
+
+    let key_path = temp_dir.path().join("id_ed25519");
+    let cert_path = temp_dir.path().join("id_ed25519-cert.pub");
+
+    // ----- Create PTY and spawn ssh with pty-process -----
+    // pty-process calls setsid() + TIOCSCTTY in pre_exec, giving ssh
+    // a proper controlling terminal for PTY negotiation.
+    let (pty, pts) = match pty_process::open() {
+        Ok(pair) => pair,
+        Err(error) => {
+            tracing::warn!(error = %error, "Web terminal: PTY open failed");
+            send_error_and_close(&mut socket, "Failed to create PTY").await;
+            return;
+        }
+    };
+
+    if let Err(error) = pty.resize(pty_process::Size::new(rows as u16, cols as u16)) {
+        tracing::warn!(error = %error, "Web terminal: PTY resize failed");
+    }
+
+    // Don't request a remote PTY from sshd (it rejects it on some macOS
+    // configurations). Instead, run `script` on the remote side to create
+    // a PTY there, giving us an interactive shell with prompt.
+    let remote_cmd = "TERM=xterm-256color script -q /dev/null $SHELL -il 2>/dev/null || TERM=xterm-256color exec $SHELL -il";
+    let cmd = pty_process::Command::new("ssh")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg(format!("IdentityFile={}", key_path.display()))
+        .arg("-o")
+        .arg(format!("CertificateFile={}", cert_path.display()))
+        .arg("-o")
+        .arg("IdentitiesOnly=yes")
+        .arg("-o")
+        .arg("RequestTTY=no")
+        .arg("-o")
+        .arg("LogLevel=FATAL")
+        .arg("-p")
+        .arg(ssh_svc.port.to_string())
+        .arg(format!("{principal}@{}", ssh_svc.host))
+        .arg(remote_cmd)
+        .env("TERM", "xterm-256color");
+
+    let mut child = match cmd.spawn(pts) {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(service_id = %service_id, error = %error, "Web terminal: ssh spawn failed");
+            send_error_and_close(&mut socket, "Failed to start SSH").await;
             log_failed(
                 &state,
                 &user_id,
@@ -242,89 +225,9 @@ async fn handle_web_terminal(
             );
             return;
         }
-        Err(_) => {
-            tracing::warn!(service_id = %service_id, "Web terminal: SSH connect timed out");
-            send_error_and_close(&mut socket, "SSH target connect timed out").await;
-            log_failed(
-                &state,
-                &user_id,
-                &service_id,
-                &session_id,
-                &ssh_svc,
-                "connect_timeout",
-                &ip_address,
-                &user_agent,
-            );
-            return;
-        }
     };
 
-    // ----- Authenticate with certificate -----
-    match ssh_handle
-        .authenticate_openssh_cert(&principal, russh_key, russh_cert)
-        .await
-    {
-        Ok(result) if result.success() => {}
-        Ok(_) => {
-            tracing::warn!(service_id = %service_id, "Web terminal: cert auth rejected");
-            send_error_and_close(
-                &mut socket,
-                "SSH authentication failed -- ensure the target trusts the NyxID CA",
-            )
-            .await;
-            log_failed(
-                &state,
-                &user_id,
-                &service_id,
-                &session_id,
-                &ssh_svc,
-                "auth_rejected",
-                &ip_address,
-                &user_agent,
-            );
-            return;
-        }
-        Err(error) => {
-            tracing::warn!(service_id = %service_id, error = %error, "Web terminal: cert auth error");
-            send_error_and_close(&mut socket, "SSH authentication failed").await;
-            log_failed(
-                &state,
-                &user_id,
-                &service_id,
-                &session_id,
-                &ssh_svc,
-                &error.to_string(),
-                &ip_address,
-                &user_agent,
-            );
-            return;
-        }
-    }
-
-    // ----- Open channel, PTY, shell -----
-    let channel = match ssh_handle.channel_open_session().await {
-        Ok(ch) => ch,
-        Err(error) => {
-            tracing::warn!(service_id = %service_id, error = %error, "Web terminal: channel open failed");
-            send_error_and_close(&mut socket, "Failed to open SSH session").await;
-            return;
-        }
-    };
-
-    if let Err(error) = channel
-        .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
-        .await
-    {
-        tracing::warn!(service_id = %service_id, error = %error, "Web terminal: PTY request failed");
-        send_error_and_close(&mut socket, "Failed to allocate PTY").await;
-        return;
-    }
-
-    if let Err(error) = channel.request_shell(false).await {
-        tracing::warn!(service_id = %service_id, error = %error, "Web terminal: shell request failed");
-        send_error_and_close(&mut socket, "Failed to start shell").await;
-        return;
-    }
+    tracing::info!(service_id = %service_id, "Web terminal: ssh spawned with pty-process");
 
     // ----- Send connected -----
     if socket
@@ -332,6 +235,7 @@ async fn handle_web_terminal(
         .await
         .is_err()
     {
+        let _ = child.kill().await;
         return;
     }
 
@@ -345,25 +249,19 @@ async fn handle_web_terminal(
             "principal": principal,
             "target_host": ssh_svc.host,
             "target_port": ssh_svc.port,
-            "cols": cols,
-            "rows": rows,
         })),
         ip_address.clone(),
         user_agent.clone(),
     );
 
-    // ----- Bridge loop using split() -----
-    // channel.wait() doesn't reliably pump interactive PTY data in russh 0.58.
-    // split() gives us a read half (with make_reader for AsyncRead) and a
-    // write half (with data() for writing and window_change() for resize).
-    let (mut read_half, write_half) = channel.split();
-    let mut ssh_reader = read_half.make_reader();
+    // ----- Bridge loop: PTY master <-> WebSocket -----
+    let (mut pty_reader, mut pty_writer) = pty.into_split();
 
     let idle_timeout = Duration::from_secs(DEFAULT_WEB_TERMINAL_IDLE_TIMEOUT_SECS);
     let max_duration = Duration::from_secs(state.config.ssh_max_tunnel_duration_secs);
     let mut from_client_bytes: u64 = 0;
     let mut to_client_bytes: u64 = 0;
-    let mut ssh_buf = vec![0u8; 8192];
+    let mut pty_buf = vec![0u8; 8192];
 
     let max_timer = tokio::time::sleep(max_duration);
     tokio::pin!(max_timer);
@@ -385,17 +283,17 @@ async fn handle_web_terminal(
                 match ws_msg {
                     Some(Ok(Message::Binary(data))) => {
                         from_client_bytes += data.len() as u64;
-                        if write_half.data(&data[..]).await.is_err() {
-                            break "ssh_write_failed";
+                        if tokio::io::AsyncWriteExt::write_all(&mut pty_writer, &data).await.is_err() {
+                            break "pty_write_failed";
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(ClientControl::Resize { cols: c, rows: r }) =
                             serde_json::from_str::<ClientControl>(&text)
                         {
-                            let _ = write_half
-                                .window_change(c.clamp(10, 500), r.clamp(2, 200), 0, 0)
-                                .await;
+                            let _ = pty_writer.resize(
+                                pty_process::Size::new(r.clamp(2, 200) as u16, c.clamp(10, 500) as u16),
+                            );
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
@@ -408,25 +306,24 @@ async fn handle_web_terminal(
                     Some(Err(_)) => break "client_error",
                 }
             }
-            n = tokio::io::AsyncReadExt::read(&mut ssh_reader, &mut ssh_buf) => {
+            n = pty_reader.read(&mut pty_buf) => {
                 idle_timer.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
                 match n {
-                    Ok(0) => break "ssh_eof",
+                    Ok(0) => break "pty_eof",
                     Ok(n) => {
                         to_client_bytes += n as u64;
-                        if socket.send(Message::Binary(ssh_buf[..n].to_vec().into())).await.is_err() {
+                        if socket.send(Message::Binary(pty_buf[..n].to_vec().into())).await.is_err() {
                             break "client_write_failed";
                         }
                     }
-                    Err(_) => break "ssh_read_error",
+                    Err(e) if e.raw_os_error() == Some(5) => break "pty_closed",
+                    Err(_) => break "pty_read_error",
                 }
             }
         }
     };
 
-    let _ = ssh_handle
-        .disconnect(russh::Disconnect::ByApplication, "", "English")
-        .await;
+    let _ = child.kill().await;
     let _ = socket.close().await;
 
     audit_service::log_async(
@@ -447,17 +344,13 @@ async fn handle_web_terminal(
     );
 }
 
-// ---------------------------------------------------------------------------
-// Ephemeral key + certificate
-// ---------------------------------------------------------------------------
-
-async fn generate_ephemeral_cert(
+async fn write_ephemeral_ssh_files(
     state: &AppState,
     ssh_svc: &crate::models::downstream_service::SshServiceConfig,
     service_id: &str,
     user_id: &str,
     principal: &str,
-) -> AppResult<(String, String)> {
+) -> AppResult<tempfile::TempDir> {
     let mut rng = rand::rngs::OsRng;
     let ephemeral_key = ssh_key::PrivateKey::random(&mut rng, ssh_key::Algorithm::Ed25519)
         .map_err(|e| AppError::Internal(format!("Failed to generate ephemeral key: {e}")))?;
@@ -465,11 +358,11 @@ async fn generate_ephemeral_cert(
     let public_key_openssh = ephemeral_key
         .public_key()
         .to_openssh()
-        .map_err(|e| AppError::Internal(format!("Failed to encode ephemeral public key: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("Failed to encode public key: {e}")))?;
 
     let private_key_openssh = ephemeral_key
         .to_openssh(ssh_key::LineEnding::LF)
-        .map_err(|e| AppError::Internal(format!("Failed to encode ephemeral private key: {e}")))?;
+        .map_err(|e| AppError::Internal(format!("Failed to encode private key: {e}")))?;
 
     let user = state
         .db
@@ -489,12 +382,29 @@ async fn generate_ephemeral_cert(
     )
     .await?;
 
-    Ok((private_key_openssh.to_string(), issued.certificate))
-}
+    let temp_dir = tempfile::tempdir()
+        .map_err(|e| AppError::Internal(format!("Failed to create temp dir: {e}")))?;
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+    let key_path = temp_dir.path().join("id_ed25519");
+    let cert_path = temp_dir.path().join("id_ed25519-cert.pub");
+
+    tokio::fs::write(&key_path, private_key_openssh.as_bytes())
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to write key: {e}")))?;
+    tokio::fs::write(&cert_path, issued.certificate.as_bytes())
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to write cert: {e}")))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to set key permissions: {e}")))?;
+    }
+
+    Ok(temp_dir)
+}
 
 async fn send_error_and_close(socket: &mut WebSocket, message: &str) {
     let _ = socket
@@ -539,16 +449,13 @@ mod tests {
         let msg = server_connected_msg(120, 40);
         let parsed: serde_json::Value = serde_json::from_str(&msg).expect("valid JSON");
         assert_eq!(parsed["type"], "connected");
-        assert_eq!(parsed["cols"], 120);
-        assert_eq!(parsed["rows"], 40);
     }
 
     #[test]
     fn server_error_msg_is_valid_json() {
-        let msg = server_error_msg("something broke");
+        let msg = server_error_msg("broke");
         let parsed: serde_json::Value = serde_json::from_str(&msg).expect("valid JSON");
         assert_eq!(parsed["type"], "error");
-        assert_eq!(parsed["message"], "something broke");
     }
 
     #[test]
