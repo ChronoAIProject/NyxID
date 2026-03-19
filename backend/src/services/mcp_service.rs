@@ -593,11 +593,20 @@ fn is_blocked_mcp_header_parameter(name: &str) -> bool {
         || BLOCKED_MCP_HEADER_PARAMETER_NAMES.contains(&normalized.as_str())
 }
 
-fn supported_parameter_name_for_mcp(param: &serde_json::Value) -> Option<&str> {
+fn request_argument_parameter_name(param: &serde_json::Value) -> Option<&str> {
     let name = param.get("name").and_then(|v| v.as_str())?;
     if name.is_empty() {
         return None;
     }
+
+    match param.get("in").and_then(|v| v.as_str()) {
+        Some("path" | "query" | "header" | "cookie") => Some(name),
+        _ => None,
+    }
+}
+
+fn supported_parameter_name_for_mcp(param: &serde_json::Value) -> Option<&str> {
+    let name = request_argument_parameter_name(param)?;
 
     match param.get("in").and_then(|v| v.as_str()) {
         Some("header") if is_blocked_mcp_header_parameter(name) => None,
@@ -612,7 +621,7 @@ fn request_body_field_name(endpoint: &McpToolEndpoint) -> String {
         .and_then(|params| params.as_array())
         .into_iter()
         .flatten()
-        .filter_map(supported_parameter_name_for_mcp)
+        .filter_map(request_argument_parameter_name)
         .collect();
 
     for candidate in REQUEST_BODY_FIELD_CANDIDATES {
@@ -1062,7 +1071,7 @@ fn json_body_is_flattened(
         .and_then(|params| params.as_array())
         .into_iter()
         .flatten()
-        .filter_map(supported_parameter_name_for_mcp)
+        .filter_map(request_argument_parameter_name)
         .any(|name| properties.contains_key(name));
 
     !has_param_collision
@@ -1785,6 +1794,39 @@ mod tests {
     }
 
     #[test]
+    fn build_input_schema_wraps_json_body_when_properties_collide_with_blocked_header_params() {
+        let endpoint = McpToolEndpoint {
+            name: "update_user".to_string(),
+            description: Some("Update a user".to_string()),
+            method: "POST".to_string(),
+            path: "/users".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "accept",
+                    "in": "header",
+                    "required": false,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "accept": { "type": "string" },
+                    "display_name": { "type": "string" }
+                },
+                "required": ["accept", "display_name"]
+            })),
+            request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert!(schema["properties"].get("accept").is_none());
+        assert_eq!(schema["properties"]["body"]["type"], "object");
+        assert_eq!(schema["required"], serde_json::json!(["body"]));
+    }
+
+    #[test]
     fn build_input_schema_wraps_optional_json_body_without_requiring_it() {
         let endpoint = McpToolEndpoint {
             name: "update_profile".to_string(),
@@ -2196,6 +2238,54 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(body.unwrap().as_ref()).unwrap(),
             serde_json::json!({
                 "id": "body-user",
+                "display_name": "Nyx"
+            })
+        );
+    }
+
+    #[test]
+    fn build_proxy_args_wraps_json_body_when_properties_collide_with_blocked_header_params() {
+        let endpoint = McpToolEndpoint {
+            name: "update_user".to_string(),
+            description: Some("Update a user".to_string()),
+            method: "POST".to_string(),
+            path: "/users".to_string(),
+            parameters: Some(serde_json::json!([
+                {
+                    "name": "accept",
+                    "in": "header",
+                    "required": false,
+                    "schema": { "type": "string" }
+                }
+            ])),
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "accept": { "type": "string" },
+                    "display_name": { "type": "string" }
+                },
+                "required": ["accept", "display_name"]
+            })),
+            request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
+        };
+
+        let (_, _, _, headers, body) = build_proxy_args(
+            &endpoint,
+            &serde_json::json!({
+                "body": {
+                    "accept": "application/json",
+                    "display_name": "Nyx"
+                }
+            }),
+        )
+        .expect("wrapped JSON body should not collide with blocked header params");
+
+        assert!(headers.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(body.unwrap().as_ref()).unwrap(),
+            serde_json::json!({
+                "accept": "application/json",
                 "display_name": "Nyx"
             })
         );
