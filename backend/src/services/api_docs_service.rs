@@ -1,7 +1,8 @@
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use bytes::BytesMut;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +20,18 @@ const ASYNCAPI_PROBE_PATHS: &[&str] = &["/asyncapi.json", "/.well-known/asyncapi
 const SCALAR_SCRIPT_SRC: &str = "https://cdn.jsdelivr.net";
 const SPEC_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const SPEC_CACHE_TTL: Duration = Duration::from_secs(60);
+const MAX_SPEC_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_SPEC_CACHE_ENTRIES: usize = 128;
 
 static SPEC_CACHE: LazyLock<DashMap<String, CachedSpecEntry>> = LazyLock::new(DashMap::new);
+static SPEC_FETCH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("Failed to create hardened spec fetch client")
+});
 
 #[derive(Clone)]
 struct CachedSpecEntry {
@@ -49,35 +60,34 @@ pub struct ServiceDocumentationMetadata {
 }
 
 pub async fn discover_service_docs(
-    client: &reqwest::Client,
     base_url: &str,
     explicit_openapi_spec_url: Option<String>,
     explicit_asyncapi_spec_url: Option<String>,
 ) -> ServiceDocumentationMetadata {
     let openapi_spec_url = match explicit_openapi_spec_url {
         Some(url) if !url.trim().is_empty() => {
-            if fetch_json_spec(client, &url).await.is_ok() {
+            if fetch_json_spec(&url).await.is_ok() {
                 Some(url)
             } else {
                 None
             }
         }
-        _ => discover_spec_url(client, base_url, OPENAPI_PROBE_PATHS).await,
+        _ => discover_spec_url(base_url, OPENAPI_PROBE_PATHS).await,
     };
 
     let asyncapi_spec_url = match explicit_asyncapi_spec_url {
         Some(url) if !url.trim().is_empty() => {
-            if fetch_json_spec(client, &url).await.is_ok() {
+            if fetch_json_spec(&url).await.is_ok() {
                 Some(url)
             } else {
                 None
             }
         }
-        _ => discover_spec_url(client, base_url, ASYNCAPI_PROBE_PATHS).await,
+        _ => discover_spec_url(base_url, ASYNCAPI_PROBE_PATHS).await,
     };
 
     let streaming_supported = if let Some(ref openapi_url) = openapi_spec_url {
-        fetch_json_spec(client, openapi_url)
+        fetch_json_spec(openapi_url)
             .await
             .ok()
             .is_some_and(|spec| detect_streaming_from_openapi(&spec))
@@ -101,7 +111,6 @@ pub fn is_auto_discovered_asyncapi_spec_url(base_url: &str, spec_url: &str) -> b
 }
 
 pub async fn fetch_downstream_openapi_spec(
-    client: &reqwest::Client,
     service: &DownstreamService,
     proxy_base_url: &str,
 ) -> AppResult<serde_json::Value> {
@@ -110,7 +119,7 @@ pub async fn fetch_downstream_openapi_spec(
         .as_deref()
         .ok_or_else(|| AppError::NotFound("Service has no OpenAPI spec configured".to_string()))?;
 
-    let mut spec = fetch_json_spec(client, spec_url).await?;
+    let mut spec = fetch_json_spec(spec_url).await?;
     if spec.get("openapi").is_none() && spec.get("swagger").is_none() {
         return Err(AppError::BadRequest(
             "Downstream spec is not an OpenAPI or Swagger document".to_string(),
@@ -130,7 +139,6 @@ pub async fn fetch_downstream_openapi_spec(
 }
 
 pub async fn fetch_downstream_asyncapi_spec(
-    client: &reqwest::Client,
     service: &DownstreamService,
     proxy_base_url: &str,
 ) -> AppResult<serde_json::Value> {
@@ -139,7 +147,7 @@ pub async fn fetch_downstream_asyncapi_spec(
         .as_deref()
         .ok_or_else(|| AppError::NotFound("Service has no AsyncAPI spec configured".to_string()))?;
 
-    let mut spec = fetch_json_spec(client, spec_url).await?;
+    let mut spec = fetch_json_spec(spec_url).await?;
     if spec.get("asyncapi").is_none() {
         return Err(AppError::BadRequest(
             "Downstream spec is not an AsyncAPI document".to_string(),
@@ -583,15 +591,11 @@ pub fn build_asyncapi_document(base_url: &str) -> serde_json::Value {
     })
 }
 
-async fn discover_spec_url(
-    client: &reqwest::Client,
-    base_url: &str,
-    candidate_paths: &[&str],
-) -> Option<String> {
+async fn discover_spec_url(base_url: &str, candidate_paths: &[&str]) -> Option<String> {
     let base = base_url.trim_end_matches('/');
     for path in candidate_paths {
         let candidate = format!("{base}{path}");
-        if fetch_json_spec(client, &candidate).await.is_ok() {
+        if fetch_json_spec(&candidate).await.is_ok() {
             return Some(candidate);
         }
     }
@@ -605,25 +609,30 @@ fn is_probe_url(base_url: &str, spec_url: &str, candidate_paths: &[&str]) -> boo
         .any(|path| format!("{base}{path}") == spec_url)
 }
 
-async fn fetch_json_spec(client: &reqwest::Client, url: &str) -> AppResult<serde_json::Value> {
+async fn fetch_json_spec(url: &str) -> AppResult<serde_json::Value> {
     let target = validate_spec_fetch_target(url).await?;
     let cache_key = target.url.to_string();
     if let Some(spec) = get_cached_spec(&cache_key) {
         return Ok(spec);
     }
 
-    let request = if target.requires_dns_pinning {
+    let response = if target.requires_dns_pinning {
         build_pinned_spec_fetch_client(&target)?
             .get(target.url.clone())
             .timeout(SPEC_FETCH_TIMEOUT)
+            .send()
+            .await
     } else {
-        client.get(target.url.clone()).timeout(SPEC_FETCH_TIMEOUT)
-    };
-
-    let response = request
-        .send()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to fetch spec: {e}")))?;
+        SPEC_FETCH_CLIENT
+            .get(target.url.clone())
+            .timeout(SPEC_FETCH_TIMEOUT)
+            .send()
+            .await
+    }
+    .map_err(|error| {
+        tracing::warn!(url = %target.url, %error, "Failed to fetch downstream API spec");
+        AppError::BadRequest("Failed to fetch spec".to_string())
+    })?;
 
     if !response.status().is_success() {
         return Err(AppError::BadRequest(format!(
@@ -632,12 +641,27 @@ async fn fetch_json_spec(client: &reqwest::Client, url: &str) -> AppResult<serde
         )));
     }
 
-    let body = response
-        .text()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to read spec body: {e}")))?;
+    let mut response = response;
+    let mut body = BytesMut::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        tracing::warn!(url = %target.url, %error, "Failed to read downstream API spec body");
+        AppError::BadRequest("Failed to read spec body".to_string())
+    })? {
+        if body.len() + chunk.len() > MAX_SPEC_RESPONSE_BYTES {
+            tracing::warn!(
+                url = %target.url,
+                limit_bytes = MAX_SPEC_RESPONSE_BYTES,
+                "Downstream API spec exceeded size limit"
+            );
+            return Err(AppError::BadRequest(format!(
+                "Spec response exceeded the {} byte limit",
+                MAX_SPEC_RESPONSE_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
 
-    let spec = serde_json::from_str(&body)
+    let spec = serde_json::from_slice(&body)
         .map_err(|e| AppError::BadRequest(format!("Spec was not valid JSON: {e}")))?;
     cache_spec(&cache_key, &spec);
     Ok(spec)
@@ -794,6 +818,11 @@ fn get_cached_spec(url: &str) -> Option<serde_json::Value> {
 }
 
 fn cache_spec(url: &str, spec: &serde_json::Value) {
+    prune_stale_cache_entries(Instant::now());
+    if !SPEC_CACHE.contains_key(url) && SPEC_CACHE.len() >= MAX_SPEC_CACHE_ENTRIES {
+        evict_oldest_cache_entry();
+    }
+
     SPEC_CACHE.insert(
         url.to_string(),
         CachedSpecEntry {
@@ -803,10 +832,25 @@ fn cache_spec(url: &str, spec: &serde_json::Value) {
     );
 }
 
+fn prune_stale_cache_entries(now: Instant) {
+    SPEC_CACHE.retain(|_, entry| entry.is_fresh(now));
+}
+
+fn evict_oldest_cache_entry() {
+    let oldest_key = SPEC_CACHE
+        .iter()
+        .min_by_key(|entry| entry.expires_at)
+        .map(|entry| entry.key().clone());
+    if let Some(oldest_key) = oldest_key {
+        SPEC_CACHE.remove(&oldest_key);
+    }
+}
+
 fn build_pinned_spec_fetch_client(target: &ValidatedSpecFetchTarget) -> AppResult<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .pool_idle_timeout(Duration::from_secs(90))
+        .redirect(reqwest::redirect::Policy::none())
         .resolve_to_addrs(&target.host, &target.resolved_addrs)
         .build()
         .map_err(|e| AppError::Internal(format!("Failed to build pinned spec fetch client: {e}")))
@@ -820,6 +864,7 @@ fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
                 || ipv4.is_link_local()
                 || ipv4.is_unspecified()
                 || ipv4.is_broadcast()
+                || is_rfc6598_cgnat(ipv4)
                 || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
         }
         std::net::IpAddr::V6(ipv6) => {
@@ -834,12 +879,16 @@ fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
+fn is_rfc6598_cgnat(ipv4: Ipv4Addr) -> bool {
+    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CachedSpecEntry, ServiceDocumentationMetadata, build_asyncapi_document, cache_spec,
-        catalog_csp, detect_streaming_from_openapi, get_cached_spec, render_scalar_html,
-        scalar_docs_csp, validate_spec_fetch_target,
+        CachedSpecEntry, MAX_SPEC_CACHE_ENTRIES, ServiceDocumentationMetadata,
+        build_asyncapi_document, cache_spec, catalog_csp, detect_streaming_from_openapi,
+        get_cached_spec, render_scalar_html, scalar_docs_csp, validate_spec_fetch_target,
     };
     use std::time::{Duration, Instant};
 
@@ -943,6 +992,11 @@ mod tests {
     #[tokio::test]
     async fn spec_fetch_validation_rejects_private_targets() {
         assert!(
+            validate_spec_fetch_target("http://100.64.0.1/openapi.json")
+                .await
+                .is_err()
+        );
+        assert!(
             validate_spec_fetch_target("http://127.0.0.1/openapi.json")
                 .await
                 .is_err()
@@ -961,6 +1015,7 @@ mod tests {
 
     #[test]
     fn cached_specs_are_returned_while_fresh() {
+        super::SPEC_CACHE.clear();
         let url = "https://example.com/openapi.json";
         let spec = serde_json::json!({ "openapi": "3.1.0" });
         cache_spec(url, &spec);
@@ -970,6 +1025,7 @@ mod tests {
 
     #[test]
     fn stale_cache_entries_are_evicted() {
+        super::SPEC_CACHE.clear();
         let url = "https://example.com/stale-openapi.json";
         super::SPEC_CACHE.insert(
             url.to_string(),
@@ -981,5 +1037,29 @@ mod tests {
 
         assert!(get_cached_spec(url).is_none());
         assert!(!super::SPEC_CACHE.contains_key(url));
+    }
+
+    #[test]
+    fn cache_spec_evicts_oldest_entry_when_capacity_is_reached() {
+        super::SPEC_CACHE.clear();
+
+        for idx in 0..MAX_SPEC_CACHE_ENTRIES {
+            super::SPEC_CACHE.insert(
+                format!("https://example.com/spec-{idx}.json"),
+                CachedSpecEntry {
+                    spec: serde_json::json!({ "openapi": "3.1.0", "idx": idx }),
+                    expires_at: Instant::now() + Duration::from_secs(120 + idx as u64),
+                },
+            );
+        }
+
+        cache_spec(
+            "https://example.com/spec-new.json",
+            &serde_json::json!({ "openapi": "3.1.0", "idx": "new" }),
+        );
+
+        assert_eq!(super::SPEC_CACHE.len(), MAX_SPEC_CACHE_ENTRIES);
+        assert!(!super::SPEC_CACHE.contains_key("https://example.com/spec-0.json"));
+        assert!(super::SPEC_CACHE.contains_key("https://example.com/spec-new.json"));
     }
 }

@@ -141,12 +141,8 @@ pub async fn service_openapi_json(
     Path(service_id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let service = fetch_service(&state, &service_id).await?;
-    let spec = api_docs_service::fetch_downstream_openapi_spec(
-        &state.http_client,
-        &service,
-        &state.config.base_url,
-    )
-    .await?;
+    let spec =
+        api_docs_service::fetch_downstream_openapi_spec(&service, &state.config.base_url).await?;
 
     Ok(Json(spec))
 }
@@ -169,12 +165,8 @@ pub async fn service_asyncapi_json(
     Path(service_id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let service = fetch_service(&state, &service_id).await?;
-    let spec = api_docs_service::fetch_downstream_asyncapi_spec(
-        &state.http_client,
-        &service,
-        &state.config.base_url,
-    )
-    .await?;
+    let spec =
+        api_docs_service::fetch_downstream_asyncapi_spec(&service, &state.config.base_url).await?;
 
     Ok(Json(spec))
 }

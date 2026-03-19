@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::Utc;
 use dashmap::DashMap;
 use mongodb::bson::doc;
+use rand::RngCore;
 use ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey, certificate};
 use zeroize::Zeroizing;
 
@@ -304,6 +305,7 @@ fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
                 || ipv4.is_link_local()
                 || ipv4.is_unspecified()
                 || ipv4.is_broadcast()
+                || is_rfc6598_cgnat(ipv4)
                 || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
         }
         std::net::IpAddr::V6(ipv6) => {
@@ -316,6 +318,10 @@ fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
                     .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
         }
     }
+}
+
+fn is_rfc6598_cgnat(ipv4: std::net::Ipv4Addr) -> bool {
+    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
 }
 
 async fn ca_material_for_upsert(
@@ -425,7 +431,7 @@ pub async fn issue_certificate(
     )
     .map_err(|e| AppError::Internal(format!("Failed to initialize SSH certificate: {e}")))?;
     cert_builder
-        .serial(rand::random::<u64>())
+        .serial(rng.next_u64())
         .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate serial: {e}")))?;
     cert_builder
         .key_id(format!("nyxid:{service_id}:{user_id}:{principal}"))
@@ -475,6 +481,7 @@ mod tests {
         assert!(validate_ssh_target("", 22).is_err());
         assert!(validate_ssh_target("ssh.internal.example", 0).is_err());
         assert!(validate_ssh_target("127.0.0.1", 22).is_err());
+        assert!(validate_ssh_target("100.64.0.10", 22).is_err());
         assert!(validate_ssh_target("[::1]", 22).is_err());
         assert!(validate_ssh_target("metadata.google.internal", 22).is_err());
     }

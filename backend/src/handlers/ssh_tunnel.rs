@@ -730,6 +730,9 @@ async fn authorize_ssh_access(
 ) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let service = fetch_service(state, service_id).await?;
+    if !service.is_active {
+        return Err(AppError::NotFound("SSH service not found".to_string()));
+    }
     ssh_service::ensure_ssh_service(&service)?;
 
     let requires_approval = approval_service::requires_approval_for_service(

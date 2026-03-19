@@ -2937,6 +2937,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "urlencoding",
  "uuid",
  "zeroize",
 ]

@@ -23,6 +23,7 @@ enum SshTunnelControl {
 }
 
 const SSH_CONTROL_CHANNEL_SIZE: usize = 256;
+const SSH_CONNECT_TIMEOUT_SECS: u64 = 10;
 const WS_WRITE_CHANNEL_SIZE: usize = 256;
 
 type ActiveSshTunnelMap = Arc<tokio::sync::Mutex<HashMap<String, ActiveSshTunnelEntry>>>;
@@ -269,6 +270,8 @@ async fn connect_and_serve(
         }
     }
 
+    let proxy_http_client = proxy_executor::build_http_client()?;
+
     // 4. Set up writer channel
     let (tx, mut rx) = mpsc::channel::<String>(WS_WRITE_CHANNEL_SIZE);
     let active_ssh_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
@@ -326,6 +329,7 @@ async fn connect_and_serve(
                 let secret = signing_secret.map(String::from);
                 let replay = replay_guard.clone();
                 let metrics_clone = metrics.clone();
+                let http_client = proxy_http_client.clone();
                 let in_flight_clone = in_flight.clone();
 
                 in_flight_clone.fetch_add(1, Ordering::Relaxed);
@@ -338,6 +342,7 @@ async fn connect_and_serve(
                         &replay,
                         &metrics_clone,
                         &tx_clone,
+                        &http_client,
                     )
                     .await;
                     in_flight_clone.fetch_sub(1, Ordering::Relaxed);
@@ -367,6 +372,7 @@ async fn connect_and_serve(
         }
     }
 
+    drain_active_ssh_tunnels(&active_ssh_tunnels).await;
     writer_task.abort();
     Ok(())
 }
@@ -471,9 +477,14 @@ async fn handle_ssh_tunnel_open(
     }
 
     let address = format!("{host}:{port}");
-    let stream = match TcpStream::connect(&address).await {
-        Ok(stream) => stream,
-        Err(error) => {
+    let stream = match tokio::time::timeout(
+        Duration::from_secs(SSH_CONNECT_TIMEOUT_SECS),
+        TcpStream::connect(&address),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
             tracing::warn!(session_id = %session_id, %address, %error, "failed to open ssh tunnel tcp stream");
             let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
             let _ = send_ws_message(
@@ -482,6 +493,26 @@ async fn handle_ssh_tunnel_open(
                     "type": "ssh_tunnel_closed",
                     "session_id": session_id,
                     "error": format!("connect_failed:{error}"),
+                })
+                .to_string(),
+            )
+            .await;
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                session_id = %session_id,
+                %address,
+                timeout_secs = SSH_CONNECT_TIMEOUT_SECS,
+                "timed out opening ssh tunnel tcp stream"
+            );
+            let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
+            let _ = send_ws_message(
+                &tx,
+                serde_json::json!({
+                    "type": "ssh_tunnel_closed",
+                    "session_id": session_id,
+                    "error": "connect_timeout",
                 })
                 .to_string(),
             )
@@ -733,6 +764,17 @@ async fn remove_ssh_tunnel_entry(
     active_tunnels.lock().await.remove(session_id)
 }
 
+async fn drain_active_ssh_tunnels(active_tunnels: &ActiveSshTunnelMap) {
+    let entries = {
+        let mut guard = active_tunnels.lock().await;
+        guard.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
+    };
+
+    for entry in entries {
+        entry.abort();
+    }
+}
+
 async fn validate_node_ssh_target(ssh_config: &SshConfig, host: &str, port: u16) -> Result<()> {
     if is_allowlisted_ssh_target(ssh_config, host, port) {
         return Ok(());
@@ -804,6 +846,7 @@ fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
                 || ipv4.is_link_local()
                 || ipv4.is_unspecified()
                 || ipv4.is_broadcast()
+                || is_rfc6598_cgnat(ipv4)
                 || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
         }
         std::net::IpAddr::V6(ipv6) => {
@@ -817,6 +860,10 @@ fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
                     .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
         }
     }
+}
+
+fn is_rfc6598_cgnat(ipv4: std::net::Ipv4Addr) -> bool {
+    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
 }
 
 async fn send_ws_message(tx: &mpsc::Sender<String>, message: String) -> bool {
@@ -1110,10 +1157,40 @@ mod tests {
         assert!(abort_handle.is_finished());
     }
 
+    #[tokio::test]
+    async fn drain_active_ssh_tunnels_aborts_active_entries() {
+        let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
+            String,
+            ActiveSshTunnelEntry,
+        >::new()));
+        let (control_tx, _control_rx) = mpsc::channel(1);
+        let task_handle = tokio::spawn(async {
+            futures::future::pending::<()>().await;
+        });
+        let abort_handle = task_handle.abort_handle();
+
+        active_tunnels.lock().await.insert(
+            "sess-5".to_string(),
+            ActiveSshTunnelEntry::Active {
+                control_tx,
+                task_handle,
+            },
+        );
+
+        drain_active_ssh_tunnels(&active_tunnels).await;
+        tokio::task::yield_now().await;
+
+        assert!(active_tunnels.lock().await.is_empty());
+        assert!(abort_handle.is_finished());
+    }
+
     #[test]
     fn rejects_ipv6_multicast_targets() {
         assert!(is_private_or_internal_ip(
             "ff02::1".parse().expect("valid multicast IPv6")
+        ));
+        assert!(is_private_or_internal_ip(
+            "100.64.0.10".parse().expect("valid RFC 6598 IPv4")
         ));
         assert!(!is_private_or_internal_ip(
             "2001:4860:4860::8888".parse().expect("valid public IPv6")

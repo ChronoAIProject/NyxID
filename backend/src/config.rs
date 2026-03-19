@@ -659,6 +659,18 @@ impl AppConfig {
             );
         }
     }
+
+    pub fn validate_ssh_runtime_config(&self) {
+        if self.ssh_max_sessions_per_user == 0 {
+            panic!("SSH_MAX_SESSIONS_PER_USER must be greater than 0");
+        }
+        if self.ssh_connect_timeout_secs == 0 {
+            panic!("SSH_CONNECT_TIMEOUT_SECS must be greater than 0");
+        }
+        if self.ssh_max_tunnel_duration_secs == 0 {
+            panic!("SSH_MAX_TUNNEL_DURATION_SECS must be greater than 0");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -874,5 +886,27 @@ mod tests {
         let mut cfg = make_config("http://localhost:3001", "dev", &key);
         cfg.encryption_key_previous = Some("00".repeat(32));
         cfg.validate_encryption_key();
+    }
+
+    #[test]
+    #[should_panic(expected = "SSH_MAX_SESSIONS_PER_USER must be greater than 0")]
+    fn validate_ssh_runtime_config_rejects_zero_max_sessions() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        cfg.ssh_max_sessions_per_user = 0;
+        cfg.validate_ssh_runtime_config();
+    }
+
+    #[test]
+    #[should_panic(expected = "SSH_CONNECT_TIMEOUT_SECS must be greater than 0")]
+    fn validate_ssh_runtime_config_rejects_zero_connect_timeout() {
+        let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        cfg.ssh_connect_timeout_secs = 0;
+        cfg.validate_ssh_runtime_config();
+    }
+
+    #[test]
+    fn validate_ssh_runtime_config_accepts_valid_values() {
+        let cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
+        cfg.validate_ssh_runtime_config();
     }
 }

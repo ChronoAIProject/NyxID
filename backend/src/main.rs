@@ -101,6 +101,7 @@ async fn main() {
 
     // Load configuration
     let mut config = AppConfig::from_env();
+    config.validate_ssh_runtime_config();
 
     // Connect to database
     let db = db::create_connection(&config)

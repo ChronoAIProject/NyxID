@@ -1,8 +1,10 @@
 use base64::Engine;
 use futures::StreamExt;
+use reqwest::Client;
 use tokio::sync::mpsc;
 
 use crate::credential_store::CredentialStore;
+use crate::error::Result;
 use crate::metrics::NodeMetrics;
 use crate::signing::{self, ReplayGuard};
 
@@ -21,6 +23,7 @@ pub async fn execute_proxy_request(
     replay_guard: &tokio::sync::Mutex<ReplayGuard>,
     metrics: &NodeMetrics,
     tx: &mpsc::Sender<String>,
+    http_client: &Client,
 ) {
     let request_id = request["request_id"].as_str().unwrap_or("");
     let service_slug = request["service_slug"].as_str().unwrap_or("");
@@ -132,14 +135,11 @@ pub async fn execute_proxy_request(
 
     // Handle query_param injection by appending to URL
     if let Some((param_name, param_value)) = cred.query_param() {
-        let separator = if url.contains('?') { "&" } else { "?" };
-        url = format!("{url}{separator}{param_name}={param_value}");
+        url = append_query_param(&url, param_name, param_value);
     }
 
     let method = reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
-
-    let client = reqwest::Client::new();
-    let mut req_builder = client.request(method, &url);
+    let mut req_builder = http_client.request(method, &url);
 
     // 4. Forward headers from the proxy_request
     if let Some(headers) = request["headers"].as_object() {
@@ -223,6 +223,13 @@ pub async fn execute_proxy_request(
             .await;
         }
     }
+}
+
+pub fn build_http_client() -> Result<Client> {
+    Ok(Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .build()?)
 }
 
 /// Stream a proxy response back through the WebSocket channel.
@@ -325,4 +332,32 @@ fn proxy_error_response(request_id: &str, error: &str, status: u16, retryable: b
         "retryable": retryable,
     })
     .to_string()
+}
+
+fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String {
+    let separator = if url.contains('?') { "&" } else { "?" };
+    let encoded_name = urlencoding::encode(param_name);
+    let encoded_value = urlencoding::encode(param_value);
+    format!("{url}{separator}{encoded_name}={encoded_value}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_query_param;
+
+    #[test]
+    fn append_query_param_url_encodes_name_and_value() {
+        let url = append_query_param("https://example.com/api", "api key", "a=b&c d#fragment");
+
+        assert_eq!(
+            url,
+            "https://example.com/api?api%20key=a%3Db%26c%20d%23fragment"
+        );
+    }
+
+    #[test]
+    fn append_query_param_preserves_existing_query_string() {
+        let url = append_query_param("https://example.com/api?x=1", "token", "abc");
+        assert_eq!(url, "https://example.com/api?x=1&token=abc");
+    }
 }

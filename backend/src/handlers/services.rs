@@ -486,8 +486,7 @@ pub async fn create_service(
             (enc, None)
         };
 
-        let docs_metadata =
-            api_docs_service::discover_service_docs(&state.http_client, base_url, None, None).await;
+        let docs_metadata = api_docs_service::discover_service_docs(base_url, None, None).await;
         let service_category =
             derive_http_service_category(&auth_method, body.service_category.as_deref())?;
         let requires_user_credential = service_category == "connection";
@@ -880,7 +879,6 @@ pub async fn update_service(
             };
             http_docs_refresh = Some(
                 api_docs_service::discover_service_docs(
-                    &state.http_client,
                     docs_base_url,
                     explicit_openapi,
                     explicit_asyncapi,

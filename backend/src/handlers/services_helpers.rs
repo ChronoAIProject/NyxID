@@ -1,5 +1,6 @@
 use mongodb::bson::doc;
 use serde::Serialize;
+use std::net::Ipv4Addr;
 use utoipa::ToSchema;
 
 use crate::AppState;
@@ -154,6 +155,7 @@ pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
                 ipv4.is_loopback()
                     || ipv4.is_private()
                     || ipv4.is_link_local()
+                    || is_rfc6598_cgnat(ipv4)
                     || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
             }
             std::net::IpAddr::V6(ipv6) => {
@@ -172,6 +174,10 @@ pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
     }
 
     Ok(())
+}
+
+fn is_rfc6598_cgnat(ipv4: Ipv4Addr) -> bool {
+    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
 }
 
 /// Validate an optional documentation spec URL using the same SSRF rules as base_url.
@@ -213,6 +219,7 @@ mod tests {
     #[test]
     fn validate_optional_spec_url_rejects_private_host() {
         assert!(validate_optional_spec_url("http://127.0.0.1/openapi.json", false).is_err());
+        assert!(validate_optional_spec_url("http://100.64.0.10/openapi.json", false).is_err());
     }
 
     #[test]
