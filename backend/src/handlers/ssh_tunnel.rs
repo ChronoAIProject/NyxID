@@ -20,7 +20,8 @@ use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
-    approval_service, audit_service, node_routing_service, notification_service, ssh_service,
+    approval_service, audit_service, node_routing_service, node_service, notification_service,
+    ssh_service,
 };
 
 use super::services_helpers::fetch_service;
@@ -462,6 +463,18 @@ async fn handle_node_ssh_socket(
     let mut selected_node_id = None;
 
     for node_id in all_node_ids {
+        let signing_secret = match resolve_node_signing_secret(&state, node_id).await {
+            Ok(secret) => secret,
+            Err(error) => {
+                tracing::warn!(
+                    service_id = %service_id,
+                    node_id = %node_id,
+                    error = %error,
+                    "SSH node tunnel signing secret resolution failed"
+                );
+                continue;
+            }
+        };
         match state
             .node_ws_manager
             .open_ssh_tunnel(
@@ -472,6 +485,7 @@ async fn handle_node_ssh_socket(
                     host: ssh_service.host.clone(),
                     port: ssh_service.port,
                 },
+                signing_secret.as_deref(),
             )
             .await
         {
@@ -721,6 +735,54 @@ async fn handle_node_ssh_socket(
         client_meta.ip_address,
         client_meta.user_agent,
     );
+}
+
+async fn resolve_node_signing_secret(
+    state: &AppState,
+    node_id: &str,
+) -> AppResult<Option<Vec<u8>>> {
+    if !state.config.node_hmac_signing_enabled {
+        return Ok(None);
+    }
+
+    let Some(node) = node_service::get_node_by_id(&state.db, node_id).await? else {
+        return Err(AppError::NodeNotFound(format!(
+            "Node {node_id} not found during SSH tunnel routing"
+        )));
+    };
+
+    let Some(encrypted_secret) = node.signing_secret_encrypted.as_deref() else {
+        tracing::warn!(
+            node_id = %node_id,
+            "Skipping SSH node route because signing secret is missing"
+        );
+        return Err(AppError::NodeOffline(format!(
+            "Node {node_id} is missing its signing secret"
+        )));
+    };
+
+    let secret_hex = String::from_utf8(
+        state
+            .encryption_keys
+            .decrypt(encrypted_secret)
+            .await
+            .map_err(|e| {
+                AppError::Internal(format!(
+                    "Failed to decrypt node signing secret for {node_id}: {e}"
+                ))
+            })?,
+    )
+    .map_err(|e| {
+        AppError::Internal(format!(
+            "Node signing secret for {node_id} is not valid UTF-8: {e}"
+        ))
+    })?;
+
+    Ok(Some(hex::decode(&secret_hex).map_err(|e| {
+        AppError::Internal(format!(
+            "Node signing secret for {node_id} is not valid hex: {e}"
+        ))
+    })?))
 }
 
 async fn authorize_ssh_access(

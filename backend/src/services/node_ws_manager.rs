@@ -164,6 +164,12 @@ struct WsSshTunnelOpen {
     service_id: String,
     host: String,
     port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -276,6 +282,29 @@ pub fn compute_hmac_signature(
         path,
         query.unwrap_or(""),
         body_b64,
+    );
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
+    mac.update(message.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Compute HMAC-SHA256 signature for an SSH tunnel open request.
+pub fn compute_ssh_tunnel_hmac_signature(
+    secret: &[u8],
+    timestamp: &str,
+    nonce: &str,
+    session_id: &str,
+    service_id: &str,
+    host: &str,
+    port: u16,
+) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let message = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        timestamp, nonce, session_id, service_id, host, port
     );
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
@@ -518,6 +547,7 @@ impl NodeWsManager {
         &self,
         node_id: &str,
         request: NodeSshTunnelRequest,
+        signing_secret: Option<&[u8]>,
     ) -> AppResult<mpsc::Receiver<SshTunnelChunk>> {
         let conn = self
             .connections
@@ -528,12 +558,32 @@ impl NodeWsManager {
         conn.ssh_tunnels
             .insert(session_id.clone(), PendingSshTunnel::Awaiting(ready_tx));
 
+        let (timestamp, nonce, signature) = if let Some(secret) = signing_secret {
+            let ts = chrono::Utc::now().to_rfc3339();
+            let n = uuid::Uuid::new_v4().to_string();
+            let sig = compute_ssh_tunnel_hmac_signature(
+                secret,
+                &ts,
+                &n,
+                &request.session_id,
+                &request.service_id,
+                &request.host,
+                request.port,
+            );
+            (Some(ts), Some(n), Some(sig))
+        } else {
+            (None, None, None)
+        };
+
         let msg = serde_json::to_string(&WsSshTunnelOpen {
             msg_type: "ssh_tunnel_open",
             session_id: request.session_id,
             service_id: request.service_id,
             host: request.host,
             port: request.port,
+            timestamp,
+            nonce,
+            signature,
         })
         .map_err(|e| {
             conn.ssh_tunnels.remove(&session_id);
@@ -1244,6 +1294,7 @@ mod tests {
                         host: "ssh.internal".to_string(),
                         port: 22,
                     },
+                    None,
                 )
                 .await
             }
@@ -1271,6 +1322,65 @@ mod tests {
         mgr.deliver_ssh_tunnel_closed("node-1", "sess-1", Some("done".to_string()));
         match tunnel_rx.recv().await.expect("close") {
             SshTunnelChunk::Closed(Some(error)) => assert_eq!(error, "done"),
+            other => panic!("unexpected close chunk: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_ssh_tunnel_includes_hmac_fields_when_secret_present() {
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+        let signing_secret = vec![0xabu8; 32];
+
+        let open = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            let signing_secret = signing_secret.clone();
+            async move {
+                mgr.open_ssh_tunnel(
+                    "node-1",
+                    NodeSshTunnelRequest {
+                        session_id: "sess-signed".to_string(),
+                        service_id: "svc-1".to_string(),
+                        host: "ssh.internal".to_string(),
+                        port: 22,
+                    },
+                    Some(&signing_secret),
+                )
+                .await
+            }
+        });
+
+        let outbound = rx.recv().await.expect("open message");
+        match outbound {
+            NodeOutboundMessage::Text(text) => {
+                let json: Value = serde_json::from_str(&text).expect("json");
+                assert_eq!(json["type"], "ssh_tunnel_open");
+                assert_eq!(json["session_id"], "sess-signed");
+                let timestamp = json["timestamp"].as_str().expect("timestamp");
+                let nonce = json["nonce"].as_str().expect("nonce");
+                let signature = json["signature"].as_str().expect("signature");
+                assert_eq!(
+                    signature,
+                    compute_ssh_tunnel_hmac_signature(
+                        &signing_secret,
+                        timestamp,
+                        nonce,
+                        "sess-signed",
+                        "svc-1",
+                        "ssh.internal",
+                        22,
+                    )
+                );
+            }
+            other => panic!("unexpected outbound message: {other:?}"),
+        }
+
+        assert!(mgr.deliver_ssh_tunnel_opened("node-1", "sess-signed"));
+        let mut tunnel_rx = open.await.expect("join").expect("open tunnel");
+        mgr.deliver_ssh_tunnel_closed("node-1", "sess-signed", None);
+        match tunnel_rx.recv().await.expect("close") {
+            SshTunnelChunk::Closed(None) => {}
             other => panic!("unexpected close chunk: {other:?}"),
         }
     }

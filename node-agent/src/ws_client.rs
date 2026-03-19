@@ -15,7 +15,7 @@ use crate::credential_store::SharedCredentials;
 use crate::error::{Error, Result};
 use crate::metrics::NodeMetrics;
 use crate::proxy_executor;
-use crate::signing::ReplayGuard;
+use crate::signing::{self, ReplayGuard};
 
 enum SshTunnelControl {
     Data(Vec<u8>),
@@ -352,8 +352,18 @@ async fn connect_and_serve(
                 let tx_clone = tx.clone();
                 let ssh_config = config.ssh.clone();
                 let active_tunnels = active_ssh_tunnels.clone();
+                let secret = signing_secret.map(String::from);
+                let replay = replay_guard.clone();
                 tokio::spawn(async move {
-                    handle_ssh_tunnel_open(&parsed, &ssh_config, tx_clone, active_tunnels).await;
+                    handle_ssh_tunnel_open(
+                        &parsed,
+                        &ssh_config,
+                        tx_clone,
+                        active_tunnels,
+                        secret,
+                        replay,
+                    )
+                    .await;
                 });
             }
             Some("ssh_tunnel_data") => {
@@ -382,6 +392,8 @@ async fn handle_ssh_tunnel_open(
     ssh_config: &SshConfig,
     tx: mpsc::Sender<String>,
     active_tunnels: ActiveSshTunnelMap,
+    signing_secret: Option<String>,
+    replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
 ) {
     let session_id = match parsed["session_id"].as_str() {
         Some(id) if !id.is_empty() => id.to_string(),
@@ -390,20 +402,20 @@ async fn handle_ssh_tunnel_open(
             return;
         }
     };
+
+    if let Some(secret) = signing_secret.as_deref()
+        && let Err(error) =
+            verify_signed_ssh_tunnel_open(parsed, &session_id, secret, &replay_guard).await
+    {
+        let _ = send_ssh_tunnel_closed(&tx, &session_id, Some(error)).await;
+        return;
+    }
+
     let host = match parsed["host"].as_str() {
         Some(host) if !host.is_empty() => host.to_string(),
         _ => {
             tracing::warn!(session_id = %session_id, "ssh_tunnel_open missing host");
-            let _ = send_ws_message(
-                &tx,
-                serde_json::json!({
-                    "type": "ssh_tunnel_closed",
-                    "session_id": session_id,
-                    "error": "missing_host",
-                })
-                .to_string(),
-            )
-            .await;
+            let _ = send_ssh_tunnel_closed(&tx, &session_id, Some("missing_host")).await;
             return;
         }
     };
@@ -411,32 +423,15 @@ async fn handle_ssh_tunnel_open(
         Some(port) if u16::try_from(port).is_ok() => port as u16,
         _ => {
             tracing::warn!(session_id = %session_id, "ssh_tunnel_open missing or invalid port");
-            let _ = send_ws_message(
-                &tx,
-                serde_json::json!({
-                    "type": "ssh_tunnel_closed",
-                    "session_id": session_id,
-                    "error": "invalid_port",
-                })
-                .to_string(),
-            )
-            .await;
+            let _ = send_ssh_tunnel_closed(&tx, &session_id, Some("invalid_port")).await;
             return;
         }
     };
 
     if let Err(error) = validate_node_ssh_target(ssh_config, &host, port).await {
         tracing::warn!(session_id = %session_id, host = %host, port, %error, "ssh tunnel target rejected by node policy");
-        let _ = send_ws_message(
-            &tx,
-            serde_json::json!({
-                "type": "ssh_tunnel_closed",
-                "session_id": session_id,
-                "error": format!("target_not_allowed:{error}"),
-            })
-            .to_string(),
-        )
-        .await;
+        let error = format!("target_not_allowed:{error}");
+        let _ = send_ssh_tunnel_closed(&tx, &session_id, Some(error.as_str())).await;
         return;
     }
 
@@ -487,16 +482,8 @@ async fn handle_ssh_tunnel_open(
         Ok(Err(error)) => {
             tracing::warn!(session_id = %session_id, %address, %error, "failed to open ssh tunnel tcp stream");
             let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
-            let _ = send_ws_message(
-                &tx,
-                serde_json::json!({
-                    "type": "ssh_tunnel_closed",
-                    "session_id": session_id,
-                    "error": format!("connect_failed:{error}"),
-                })
-                .to_string(),
-            )
-            .await;
+            let error = format!("connect_failed:{error}");
+            let _ = send_ssh_tunnel_closed(&tx, &session_id, Some(error.as_str())).await;
             return;
         }
         Err(_) => {
@@ -507,16 +494,7 @@ async fn handle_ssh_tunnel_open(
                 "timed out opening ssh tunnel tcp stream"
             );
             let _ = remove_ssh_tunnel_entry(&active_tunnels, &session_id).await;
-            let _ = send_ws_message(
-                &tx,
-                serde_json::json!({
-                    "type": "ssh_tunnel_closed",
-                    "session_id": session_id,
-                    "error": "connect_timeout",
-                })
-                .to_string(),
-            )
-            .await;
+            let _ = send_ssh_tunnel_closed(&tx, &session_id, Some("connect_timeout")).await;
             return;
         }
     };
@@ -563,6 +541,35 @@ async fn handle_ssh_tunnel_open(
         .to_string(),
     )
     .await;
+}
+
+async fn verify_signed_ssh_tunnel_open(
+    parsed: &serde_json::Value,
+    session_id: &str,
+    signing_secret: &str,
+    replay_guard: &Arc<tokio::sync::Mutex<ReplayGuard>>,
+) -> std::result::Result<(), &'static str> {
+    let timestamp = parsed["timestamp"].as_str();
+    let nonce = parsed["nonce"].as_str();
+    let signature = parsed["signature"].as_str();
+
+    let (Some(timestamp), Some(nonce), Some(signature)) = (timestamp, nonce, signature) else {
+        tracing::warn!(session_id = %session_id, "ssh_tunnel_open missing HMAC fields");
+        return Err("missing_hmac_fields");
+    };
+
+    if !signing::verify_ssh_tunnel_signature(parsed, signing_secret, signature) {
+        tracing::warn!(session_id = %session_id, "ssh_tunnel_open HMAC verification failed");
+        return Err("invalid_hmac_signature");
+    }
+
+    let mut guard = replay_guard.lock().await;
+    if !guard.check(timestamp, nonce) {
+        tracing::warn!(session_id = %session_id, "ssh_tunnel_open rejected by replay guard");
+        return Err("replay_or_expired_timestamp");
+    }
+
+    Ok(())
 }
 
 async fn handle_ssh_tunnel_data(
@@ -745,16 +752,7 @@ async fn abort_ssh_tunnel(
     };
 
     entry.abort();
-    let _ = send_ws_message(
-        tx,
-        serde_json::json!({
-            "type": "ssh_tunnel_closed",
-            "session_id": session_id,
-            "error": error,
-        })
-        .to_string(),
-    )
-    .await;
+    let _ = send_ssh_tunnel_closed(tx, session_id, error).await;
 }
 
 async fn remove_ssh_tunnel_entry(
@@ -773,6 +771,23 @@ async fn drain_active_ssh_tunnels(active_tunnels: &ActiveSshTunnelMap) {
     for entry in entries {
         entry.abort();
     }
+}
+
+async fn send_ssh_tunnel_closed(
+    tx: &mpsc::Sender<String>,
+    session_id: &str,
+    error: Option<&str>,
+) -> bool {
+    send_ws_message(
+        tx,
+        serde_json::json!({
+            "type": "ssh_tunnel_closed",
+            "session_id": session_id,
+            "error": error,
+        })
+        .to_string(),
+    )
+    .await
 }
 
 async fn validate_node_ssh_target(ssh_config: &SshConfig, host: &str, port: u16) -> Result<()> {
@@ -894,6 +909,8 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use crate::config::{SshConfig, SshTargetConfig};
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
     use tokio::net::TcpListener;
 
     fn ssh_config_with_allowed_target(host: &str, port: u16) -> SshConfig {
@@ -905,6 +922,35 @@ mod tests {
                 port: Some(port),
             }],
         }
+    }
+
+    fn replay_guard() -> Arc<tokio::sync::Mutex<ReplayGuard>> {
+        Arc::new(tokio::sync::Mutex::new(ReplayGuard::new()))
+    }
+
+    fn signed_ssh_tunnel_open_request(
+        session_id: &str,
+        service_id: &str,
+        host: &str,
+        port: u16,
+        secret_hex: &str,
+    ) -> serde_json::Value {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let message = format!("{timestamp}\n{nonce}\n{session_id}\n{service_id}\n{host}\n{port}");
+        let secret = hex::decode(secret_hex).expect("secret hex");
+        let mut mac = Hmac::<Sha256>::new_from_slice(&secret).expect("hmac");
+        mac.update(message.as_bytes());
+
+        serde_json::json!({
+            "session_id": session_id,
+            "service_id": service_id,
+            "host": host,
+            "port": port,
+            "timestamp": timestamp,
+            "nonce": nonce,
+            "signature": hex::encode(mac.finalize().into_bytes()),
+        })
     }
 
     #[test]
@@ -960,14 +1006,12 @@ mod tests {
         >::new()));
 
         handle_ssh_tunnel_open(
-            &serde_json::json!({
-                "session_id": "sess-1",
-                "host": "127.0.0.1",
-                "port": port,
-            }),
+            &signed_ssh_tunnel_open_request("sess-1", "svc-1", "127.0.0.1", port, &"ab".repeat(32)),
             &ssh_config_with_allowed_target("127.0.0.1", port),
             tx.clone(),
             active_tunnels.clone(),
+            Some("ab".repeat(32)),
+            replay_guard(),
         )
         .await;
 
@@ -1026,6 +1070,8 @@ mod tests {
             &SshConfig::default(),
             tx,
             active_tunnels.clone(),
+            None,
+            replay_guard(),
         )
         .await;
 
@@ -1073,6 +1119,8 @@ mod tests {
             },
             tx,
             active_tunnels.clone(),
+            None,
+            replay_guard(),
         )
         .await;
 
@@ -1081,6 +1129,41 @@ mod tests {
         assert_eq!(closed["type"], "ssh_tunnel_closed");
         assert_eq!(closed["error"], "too_many_active_tunnels");
         assert_eq!(active_tunnels.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ssh_tunnel_rejects_invalid_hmac_signature() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let active_tunnels = Arc::new(tokio::sync::Mutex::new(HashMap::<
+            String,
+            ActiveSshTunnelEntry,
+        >::new()));
+
+        let mut request = signed_ssh_tunnel_open_request(
+            "sess-bad-sig",
+            "svc-1",
+            "ssh.example.com",
+            22,
+            &"ab".repeat(32),
+        );
+        request["host"] = serde_json::Value::String("tampered.example.com".to_string());
+
+        handle_ssh_tunnel_open(
+            &request,
+            &ssh_config_with_allowed_target("ssh.example.com", 22),
+            tx,
+            active_tunnels.clone(),
+            Some("ab".repeat(32)),
+            replay_guard(),
+        )
+        .await;
+
+        let closed: serde_json::Value =
+            serde_json::from_str(&rx.recv().await.expect("close message")).expect("close json");
+        assert_eq!(closed["type"], "ssh_tunnel_closed");
+        assert_eq!(closed["session_id"], "sess-bad-sig");
+        assert_eq!(closed["error"], "invalid_hmac_signature");
+        assert!(active_tunnels.lock().await.is_empty());
     }
 
     #[tokio::test]
