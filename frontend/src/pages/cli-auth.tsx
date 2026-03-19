@@ -24,16 +24,17 @@ export function CliAuthPage() {
   useEffect(() => {
     if (isLoading) return;
 
-    // Not authenticated -- redirect to login, then back here
+    // Not authenticated -- redirect to login, then back here.
+    // Use window.location.assign (not TanStack navigate) so that
+    // return_to lands in the real URL search params where the login
+    // page reads it via window.location.search.
     if (!isAuthenticated) {
       const returnPath = `/cli-auth?${new URLSearchParams({
         ...(port ? { port } : {}),
         ...(state ? { state } : {}),
       }).toString()}`;
-      void navigate({
-        to: "/login",
-        search: { return_to: `${window.location.origin}${returnPath}` },
-      });
+      const returnTo = `${window.location.origin}${returnPath}`;
+      window.location.assign(`/login?return_to=${encodeURIComponent(returnTo)}`);
       return;
     }
 
