@@ -23,6 +23,7 @@ pub struct CreateEndpointRequest {
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
     pub request_content_type: Option<String>,
+    pub request_body_required: Option<bool>,
     pub response_description: Option<String>,
 }
 
@@ -35,6 +36,7 @@ pub struct UpdateEndpointRequest {
     pub parameters: Option<Option<serde_json::Value>>,
     pub request_body_schema: Option<Option<serde_json::Value>>,
     pub request_content_type: Option<Option<String>>,
+    pub request_body_required: Option<bool>,
     pub response_description: Option<Option<String>>,
     pub is_active: Option<bool>,
 }
@@ -50,6 +52,7 @@ pub struct EndpointResponse {
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
     pub request_content_type: Option<String>,
+    pub request_body_required: bool,
     pub response_description: Option<String>,
     pub is_active: bool,
     pub created_at: String,
@@ -136,6 +139,7 @@ fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> 
         parameters: e.parameters,
         request_body_schema: e.request_body_schema,
         request_content_type: e.request_content_type,
+        request_body_required: e.request_body_required,
         response_description: e.response_description,
         is_active: e.is_active,
         created_at: e.created_at.to_rfc3339(),
@@ -179,6 +183,9 @@ pub async fn create_endpoint(
     validate_path(&body.path)?;
 
     let input = EndpointInput {
+        request_body_required: body.request_body_required.unwrap_or(
+            body.request_body_schema.is_some() || body.request_content_type.is_some(),
+        ),
         name: body.name,
         description: body.description,
         method: body.method,
@@ -231,6 +238,7 @@ pub async fn update_endpoint(
         parameters: body.parameters,
         request_body_schema: body.request_body_schema,
         request_content_type: body.request_content_type,
+        request_body_required: body.request_body_required,
         response_description: body.response_description,
         is_active: body.is_active,
     };
@@ -300,6 +308,7 @@ pub async fn discover_endpoints(
             parameters: p.parameters,
             request_body_schema: p.request_body_schema,
             request_content_type: p.request_content_type,
+            request_body_required: p.request_body_required,
             response_description: None,
         })
         .collect();

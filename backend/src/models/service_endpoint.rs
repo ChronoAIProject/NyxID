@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "service_endpoints";
 
+fn default_request_body_required() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceEndpoint {
     #[serde(rename = "_id")]
@@ -18,6 +22,8 @@ pub struct ServiceEndpoint {
     pub request_body_schema: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_content_type: Option<String>,
+    #[serde(default = "default_request_body_required")]
+    pub request_body_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_description: Option<String>,
     pub is_active: bool,
@@ -48,6 +54,7 @@ mod tests {
             parameters: Some(serde_json::json!([{"name": "limit", "in": "query"}])),
             request_body_schema: None,
             request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
             response_description: Some("200 OK".to_string()),
             is_active: true,
             created_at: Utc::now(),
@@ -58,5 +65,6 @@ mod tests {
         assert_eq!(endpoint.id, restored.id);
         assert_eq!(endpoint.method, restored.method);
         assert_eq!(endpoint.request_content_type, restored.request_content_type);
+        assert_eq!(endpoint.request_body_required, restored.request_body_required);
     }
 }

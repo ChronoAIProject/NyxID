@@ -36,6 +36,7 @@ pub struct McpToolEndpoint {
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
     pub request_content_type: Option<String>,
+    pub request_body_required: bool,
 }
 
 /// An MCP tool definition (name + description + JSON Schema input).
@@ -192,6 +193,7 @@ pub async fn load_user_tools(
                             parameters: ep.parameters.clone(),
                             request_body_schema: ep.request_body_schema.clone(),
                             request_content_type: ep.request_content_type.clone(),
+                            request_body_required: ep.request_body_required,
                         })
                         .collect()
                 })
@@ -418,7 +420,9 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
             let body_field_name = request_body_field_name(endpoint);
             let body_prop = build_body_property(endpoint, body_schema, body_mode);
             properties.insert(body_field_name.clone(), body_prop);
-            push_required(&mut required, &body_field_name);
+            if request_body_is_required(endpoint) {
+                push_required(&mut required, &body_field_name);
+            }
         }
     } else if endpoint.request_content_type.is_some() {
         let body_field_name = request_body_field_name(endpoint);
@@ -426,7 +430,9 @@ fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
             body_field_name.clone(),
             build_default_body_property(endpoint, body_mode),
         );
-        push_required(&mut required, &body_field_name);
+        if request_body_is_required(endpoint) {
+            push_required(&mut required, &body_field_name);
+        }
     }
 
     let mut schema = serde_json::json!({
@@ -632,6 +638,14 @@ fn normalize_content_type(content_type: &str) -> String {
         .unwrap_or(content_type)
         .trim()
         .to_ascii_lowercase()
+}
+
+fn endpoint_has_request_body(endpoint: &McpToolEndpoint) -> bool {
+    endpoint.request_body_schema.is_some() || endpoint.request_content_type.is_some()
+}
+
+fn request_body_is_required(endpoint: &McpToolEndpoint) -> bool {
+    endpoint.request_body_required && endpoint_has_request_body(endpoint)
 }
 
 fn is_json_content_type(content_type: &str) -> bool {
@@ -857,6 +871,9 @@ fn build_request_body(
     body_fields: serde_json::Map<String, serde_json::Value>,
 ) -> AppResult<Option<bytes::Bytes>> {
     if body_fields.is_empty() {
+        if request_body_is_required(endpoint) {
+            return Err(missing_required_request_body_error(endpoint));
+        }
         return Ok(None);
     }
 
@@ -917,6 +934,37 @@ fn build_request_body(
                 body_field_name
             )))
         }
+    }
+}
+
+fn missing_required_request_body_error(endpoint: &McpToolEndpoint) -> AppError {
+    match request_body_mode(endpoint) {
+        RequestBodyMode::Json if !json_body_uses_wrapper(endpoint) => AppError::BadRequest(
+            format!(
+                "Request body for {} must include at least one body field",
+                request_content_type_or_default(endpoint)
+            ),
+        ),
+        RequestBodyMode::Json => AppError::BadRequest(format!(
+            "Request body for {} must be provided as a JSON value in the `{}` field",
+            request_content_type_or_default(endpoint),
+            request_body_field_name(endpoint)
+        )),
+        RequestBodyMode::Binary => AppError::BadRequest(format!(
+            "Request body for {} must be provided as a base64-encoded string in the `{}` field",
+            request_content_type_or_default(endpoint),
+            request_body_field_name(endpoint)
+        )),
+        RequestBodyMode::Raw => AppError::BadRequest(format!(
+            "Request body for {} must be provided as a raw string in the `{}` field",
+            request_content_type_or_default(endpoint),
+            request_body_field_name(endpoint)
+        )),
+        RequestBodyMode::Multipart => AppError::BadRequest(format!(
+            "multipart/form-data request bodies are not yet supported by the NyxID MCP proxy for {}. Use the `{}` field for the body payload when support is added.",
+            request_content_type_or_default(endpoint),
+            request_body_field_name(endpoint)
+        )),
     }
 }
 
@@ -986,7 +1034,8 @@ fn json_body_is_flattened(
     body_mode: RequestBodyMode,
     body_schema: &serde_json::Value,
 ) -> bool {
-    if !matches!(body_mode, RequestBodyMode::Json)
+    if !request_body_is_required(endpoint)
+        || !matches!(body_mode, RequestBodyMode::Json)
         || body_schema.get("type").and_then(|v| v.as_str()) != Some("object")
     {
         return false;
@@ -1345,6 +1394,7 @@ mod tests {
             parameters: None,
             request_body_schema: None,
             request_content_type: None,
+            request_body_required: false,
         }
     }
 
@@ -1515,6 +1565,7 @@ mod tests {
                 "format": "binary"
             })),
             request_content_type: Some("application/zip".to_string()),
+            request_body_required: true,
         };
 
         let schema = build_input_schema(&endpoint);
@@ -1549,6 +1600,7 @@ mod tests {
                 "required": ["note"]
             })),
             request_content_type: Some("application/xml".to_string()),
+            request_body_required: true,
         };
 
         let schema = build_input_schema(&endpoint);
@@ -1571,6 +1623,7 @@ mod tests {
             parameters: None,
             request_body_schema: None,
             request_content_type: Some("application/zip".to_string()),
+            request_body_required: true,
         };
 
         let schema = build_input_schema(&endpoint);
@@ -1593,6 +1646,7 @@ mod tests {
             parameters: None,
             request_body_schema: None,
             request_content_type: Some("application/x-tar".to_string()),
+            request_body_required: true,
         };
 
         let schema = build_input_schema(&endpoint);
@@ -1634,6 +1688,7 @@ mod tests {
             ])),
             request_body_schema: None,
             request_content_type: None,
+            request_body_required: false,
         };
 
         let schema = build_input_schema(&endpoint);
@@ -1663,6 +1718,7 @@ mod tests {
             ])),
             request_body_schema: None,
             request_content_type: Some("application/zip".to_string()),
+            request_body_required: true,
         };
 
         let schema = build_input_schema(&endpoint);
@@ -1714,6 +1770,7 @@ mod tests {
                 "required": ["id", "display_name"]
             })),
             request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
         };
 
         let schema = build_input_schema(&endpoint);
@@ -1730,6 +1787,35 @@ mod tests {
     }
 
     #[test]
+    fn build_input_schema_wraps_optional_json_body_without_requiring_it() {
+        let endpoint = McpToolEndpoint {
+            name: "update_profile".to_string(),
+            description: Some("Update a profile".to_string()),
+            method: "PATCH".to_string(),
+            path: "/profile".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "display_name": { "type": "string" }
+                },
+                "required": ["display_name"]
+            })),
+            request_content_type: Some("application/json".to_string()),
+            request_body_required: false,
+        };
+
+        let schema = build_input_schema(&endpoint);
+        assert!(schema["properties"].get("display_name").is_none());
+        assert_eq!(schema["properties"]["body"]["type"], "object");
+        assert_eq!(
+            schema["properties"]["body"]["required"],
+            serde_json::json!(["display_name"])
+        );
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
     fn build_input_schema_defaults_binary_media_type_when_missing() {
         let endpoint = McpToolEndpoint {
             name: "upload_skill".to_string(),
@@ -1742,6 +1828,7 @@ mod tests {
                 "format": "binary"
             })),
             request_content_type: None,
+            request_body_required: true,
         };
 
         let schema = build_input_schema(&endpoint);
@@ -1765,6 +1852,7 @@ mod tests {
                 "format": "binary"
             })),
             request_content_type: Some("*/*".to_string()),
+            request_body_required: true,
         };
 
         let schema = build_input_schema(&endpoint);
@@ -1790,6 +1878,7 @@ mod tests {
                 "format": "binary"
             })),
             request_content_type: Some("application/zip".to_string()),
+            request_body_required: true,
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -1818,6 +1907,7 @@ mod tests {
                 "format": "binary"
             })),
             request_content_type: None,
+            request_body_required: true,
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -1843,6 +1933,7 @@ mod tests {
             parameters: None,
             request_body_schema: None,
             request_content_type: Some("application/x-tar".to_string()),
+            request_body_required: true,
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -1872,6 +1963,7 @@ mod tests {
                 "required": ["body"]
             })),
             request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -1885,6 +1977,32 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(body.unwrap().as_ref()).unwrap(),
             serde_json::json!({ "body": "hello" })
+        );
+    }
+
+    #[test]
+    fn build_proxy_args_rejects_missing_required_flattened_json_body() {
+        let endpoint = McpToolEndpoint {
+            name: "update_profile".to_string(),
+            description: Some("Update a profile".to_string()),
+            method: "PATCH".to_string(),
+            path: "/profile".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "display_name": { "type": "string" }
+                }
+            })),
+            request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
+        };
+
+        let error = build_proxy_args(&endpoint, &serde_json::json!({}))
+            .expect_err("required flattened JSON body should be rejected when omitted");
+
+        assert!(
+            matches!(error, AppError::BadRequest(message) if message.contains("must include at least one body field"))
         );
     }
 
@@ -1923,6 +2041,7 @@ mod tests {
                 "required": ["display_name"]
             })),
             request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
         };
 
         let (_, path, _, headers, body) = build_proxy_args(
@@ -1954,6 +2073,31 @@ mod tests {
     }
 
     #[test]
+    fn build_proxy_args_allows_missing_optional_wrapped_json_body() {
+        let endpoint = McpToolEndpoint {
+            name: "update_profile".to_string(),
+            description: Some("Update a profile".to_string()),
+            method: "PATCH".to_string(),
+            path: "/profile".to_string(),
+            parameters: None,
+            request_body_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "display_name": { "type": "string" }
+                },
+                "required": ["display_name"]
+            })),
+            request_content_type: Some("application/json".to_string()),
+            request_body_required: false,
+        };
+
+        let (_, _, _, _, body) = build_proxy_args(&endpoint, &serde_json::json!({}))
+            .expect("optional wrapped JSON body should be allowed");
+
+        assert!(body.is_none());
+    }
+
+    #[test]
     fn build_proxy_args_uses_alternate_body_field_when_body_param_exists() {
         use base64::Engine as _;
 
@@ -1972,6 +2116,7 @@ mod tests {
             ])),
             request_body_schema: None,
             request_content_type: Some("application/zip".to_string()),
+            request_body_required: true,
         };
 
         let (_, _, query, _, body) = build_proxy_args(
@@ -2023,6 +2168,7 @@ mod tests {
                 "required": ["id", "display_name"]
             })),
             request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
         };
 
         let (_, path, _, headers, body) = build_proxy_args(
@@ -2058,6 +2204,27 @@ mod tests {
     }
 
     #[test]
+    fn build_proxy_args_rejects_missing_required_binary_body() {
+        let endpoint = McpToolEndpoint {
+            name: "upload_skill".to_string(),
+            description: Some("Upload a skill archive".to_string()),
+            method: "POST".to_string(),
+            path: "/skills".to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: Some("application/zip".to_string()),
+            request_body_required: true,
+        };
+
+        let error = build_proxy_args(&endpoint, &serde_json::json!({}))
+            .expect_err("required binary body should be rejected when omitted");
+
+        assert!(
+            matches!(error, AppError::BadRequest(message) if message.contains("base64-encoded string"))
+        );
+    }
+
+    #[test]
     fn build_proxy_args_rejects_reserved_header_parameters() {
         let endpoint = McpToolEndpoint {
             name: "submit_message".to_string(),
@@ -2074,6 +2241,7 @@ mod tests {
             ])),
             request_body_schema: None,
             request_content_type: Some("text/plain".to_string()),
+            request_body_required: true,
         };
 
         let error = build_proxy_args(
@@ -2102,6 +2270,7 @@ mod tests {
                 "type": "string"
             })),
             request_content_type: Some("application/json".to_string()),
+            request_body_required: true,
         };
 
         let error = build_proxy_args(
@@ -2128,6 +2297,7 @@ mod tests {
             parameters: None,
             request_body_schema: None,
             request_content_type: Some("application/x-www-form-urlencoded".to_string()),
+            request_body_required: true,
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -2159,6 +2329,7 @@ mod tests {
                 }
             })),
             request_content_type: Some("multipart/form-data".to_string()),
+            request_body_required: true,
         };
 
         let error = build_proxy_args(&endpoint, &serde_json::json!({ "body": "ignored" }))
@@ -2189,6 +2360,7 @@ mod tests {
             ])),
             request_body_schema: None,
             request_content_type: Some("text/plain".to_string()),
+            request_body_required: true,
         };
 
         let error = build_proxy_args(
@@ -2218,6 +2390,7 @@ mod tests {
                 "format": "binary"
             })),
             request_content_type: None,
+            request_body_required: true,
         };
 
         assert_eq!(
@@ -2239,6 +2412,7 @@ mod tests {
                 "format": "binary"
             })),
             request_content_type: Some("*/*".to_string()),
+            request_body_required: true,
         };
 
         assert_eq!(
@@ -2260,6 +2434,7 @@ mod tests {
                 "format": "binary"
             })),
             request_content_type: Some("application/zip".to_string()),
+            request_body_required: true,
         };
 
         assert_eq!(

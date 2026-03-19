@@ -9,12 +9,14 @@ pub struct ParsedEndpoint {
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
     pub request_content_type: Option<String>,
+    pub request_body_required: bool,
 }
 
 #[derive(Default)]
 struct ParsedRequestBody {
     content_type: Option<String>,
     schema: Option<serde_json::Value>,
+    required: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,6 +107,7 @@ pub async fn parse_openapi_spec(
                 parameters,
                 request_body_schema: request_body.schema,
                 request_content_type: request_body.content_type,
+                request_body_required: request_body.required,
             });
         }
     }
@@ -225,9 +228,12 @@ fn should_include_parameter(param: &serde_json::Value) -> bool {
 
 /// Extract requestBody schema for OpenAPI 3.x.
 fn extract_request_body_openapi3(operation: &serde_json::Value) -> ParsedRequestBody {
-    let Some(content) = operation
-        .get("requestBody")
-        .and_then(|rb| rb.get("content"))
+    let Some(request_body) = operation.get("requestBody") else {
+        return ParsedRequestBody::default();
+    };
+
+    let Some(content) = request_body
+        .get("content")
         .and_then(|content| content.as_object())
     else {
         return ParsedRequestBody::default();
@@ -240,6 +246,10 @@ fn extract_request_body_openapi3(operation: &serde_json::Value) -> ParsedRequest
     ParsedRequestBody {
         content_type: Some(content_type.to_string()),
         schema: media.get("schema").cloned(),
+        required: request_body
+            .get("required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     }
 }
 
@@ -249,64 +259,90 @@ fn extract_request_body_swagger2(
     path_obj: &serde_json::Map<String, serde_json::Value>,
     spec: &serde_json::Value,
 ) -> ParsedRequestBody {
-    let find_body_param = |params: &serde_json::Value| -> Option<serde_json::Value> {
+    let find_body_param = |params: &serde_json::Value| -> Option<(serde_json::Value, bool)> {
         params.as_array()?.iter().find_map(|p| {
             if p.get("in").and_then(|v| v.as_str()) == Some("body") {
-                p.get("schema").cloned()
+                Some((
+                    p.get("schema").cloned().unwrap_or(serde_json::Value::Null),
+                    p.get("required")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                ))
             } else {
                 None
             }
         })
     };
 
-    let find_form_data_kind = |params: &serde_json::Value| -> Option<Swagger2FormBodyKind> {
+    let find_form_data_kind =
+        |params: &serde_json::Value| -> Option<(Swagger2FormBodyKind, bool)> {
         let mut saw_form_fields = false;
+        let mut saw_file_upload = false;
+        let mut required = false;
 
         for param in params.as_array()? {
             if param.get("in").and_then(|v| v.as_str()) != Some("formData") {
                 continue;
             }
 
-            if param.get("type").and_then(|v| v.as_str()) == Some("file") {
-                return Some(Swagger2FormBodyKind::FileUpload);
-            }
+            required |= param
+                .get("required")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
-            saw_form_fields = true;
+            if param.get("type").and_then(|v| v.as_str()) == Some("file") {
+                saw_file_upload = true;
+            } else {
+                saw_form_fields = true;
+            }
         }
 
-        saw_form_fields.then_some(Swagger2FormBodyKind::FormFields)
+        if saw_file_upload {
+            Some((Swagger2FormBodyKind::FileUpload, required))
+        } else if saw_form_fields {
+            Some((Swagger2FormBodyKind::FormFields, required))
+        } else {
+            None
+        }
     };
 
     // Check operation-level first, then path-level
-    let schema = if let Some(params) = operation.get("parameters")
-        && let Some(schema) = find_body_param(params)
+    let (schema, required) = if let Some(params) = operation.get("parameters")
+        && let Some((schema, required)) = find_body_param(params)
     {
-        Some(schema)
+        (Some(schema), required)
     } else if let Some(params) = path_obj.get("parameters")
-        && let Some(schema) = find_body_param(params)
+        && let Some((schema, required)) = find_body_param(params)
     {
-        Some(schema)
+        (Some(schema), required)
+    } else {
+        (None, false)
+    };
+
+    let form_data = if let Some(params) = operation.get("parameters")
+        && let Some(form_data) = find_form_data_kind(params)
+    {
+        Some(form_data)
+    } else if let Some(params) = path_obj.get("parameters")
+        && let Some(form_data) = find_form_data_kind(params)
+    {
+        Some(form_data)
     } else {
         None
     };
 
-    let form_data_kind = if let Some(params) = operation.get("parameters")
-        && let Some(kind) = find_form_data_kind(params)
-    {
-        Some(kind)
-    } else if let Some(params) = path_obj.get("parameters")
-        && let Some(kind) = find_form_data_kind(params)
-    {
-        Some(kind)
-    } else {
-        None
-    };
-
+    let form_data_kind = form_data.as_ref().map(|(kind, _)| *kind);
     let content_type = extract_swagger2_consumes(operation, spec, schema.as_ref(), form_data_kind);
+    let body_required = if schema.is_some() {
+        required
+    } else {
+        form_data.map(|(_, required)| required).unwrap_or(false)
+    };
 
     ParsedRequestBody {
         content_type,
         schema,
+        required: body_required,
     }
 }
 
@@ -689,7 +725,25 @@ mod tests {
         let body = extract_request_body_openapi3(&op);
         assert_eq!(body.content_type.as_deref(), Some("application/json"));
         assert!(body.schema.is_some());
-        assert_eq!(body.schema.unwrap()["type"], "object");
+        assert!(!body.required);
+        assert_eq!(body.schema.as_ref().unwrap()["type"], "object");
+    }
+
+    #[test]
+    fn extract_request_body_openapi3_preserves_required_flag() {
+        let op = serde_json::json!({
+            "requestBody": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {"type": "object"}
+                    }
+                }
+            }
+        });
+        let body = extract_request_body_openapi3(&op);
+        assert_eq!(body.content_type.as_deref(), Some("application/json"));
+        assert!(body.required);
     }
 
     #[test]
@@ -880,7 +934,8 @@ mod tests {
         let body = extract_request_body_swagger2(&op, &path_obj, &spec);
         assert_eq!(body.content_type.as_deref(), Some("application/json"));
         assert!(body.schema.is_some());
-        assert_eq!(body.schema.unwrap()["type"], "object");
+        assert!(!body.required);
+        assert_eq!(body.schema.as_ref().unwrap()["type"], "object");
     }
 
     #[test]
@@ -934,6 +989,7 @@ mod tests {
         let body = extract_request_body_swagger2(&op, &path_obj, &spec);
         assert_eq!(body.content_type.as_deref(), Some("multipart/form-data"));
         assert!(body.schema.is_none());
+        assert!(body.required);
     }
 
     #[test]
@@ -953,5 +1009,6 @@ mod tests {
             Some("application/x-www-form-urlencoded")
         );
         assert!(body.schema.is_none());
+        assert!(body.required);
     }
 }
