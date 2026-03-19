@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
 import type { ServiceEndpoint } from "@/types/api";
 import {
   createEndpointSchema,
@@ -43,6 +44,10 @@ interface EndpointFormDialogProps {
   readonly isPending: boolean;
 }
 
+const DESCRIPTION_MAX_LENGTH = 500;
+const DESCRIPTION_MAX_ERROR =
+  "Description must be at most 500 characters";
+
 function serializeJson(value: unknown): string {
   if (value === null || value === undefined) return "";
   try {
@@ -50,6 +55,32 @@ function serializeJson(value: unknown): string {
   } catch {
     return "";
   }
+}
+
+function buildEndpointFormSchema(existingDescription?: string | null) {
+  return createEndpointSchema.extend({
+    description: z
+      .string()
+      .optional()
+      .or(z.literal(""))
+      .superRefine((value, ctx) => {
+        const description = value ?? "";
+        const isUnchangedLegacyDescription =
+          typeof existingDescription === "string" &&
+          existingDescription.length > DESCRIPTION_MAX_LENGTH &&
+          description === existingDescription;
+
+        if (
+          description.length > DESCRIPTION_MAX_LENGTH &&
+          !isUnchangedLegacyDescription
+        ) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: DESCRIPTION_MAX_ERROR,
+          });
+        }
+      }),
+  });
 }
 
 export function EndpointFormDialog({
@@ -60,9 +91,12 @@ export function EndpointFormDialog({
   isPending,
 }: EndpointFormDialogProps) {
   const isEditing = endpoint !== null && endpoint !== undefined;
+  const formSchema = buildEndpointFormSchema(
+    isEditing ? endpoint?.description : undefined,
+  );
 
   const form = useForm<CreateEndpointFormData>({
-    resolver: zodResolver(createEndpointSchema),
+    resolver: zodResolver(formSchema),
     defaultValues: {
       name: "",
       description: "",
