@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::errors::{AppError, AppResult};
 
 /// A single endpoint parsed from an OpenAPI/Swagger specification.
@@ -94,7 +96,7 @@ pub async fn parse_openapi_spec(
             let description = extract_description(operation);
             let parameters = extract_parameters(operation, path_obj);
             let request_body = if is_openapi3 {
-                extract_request_body_openapi3(operation)
+                extract_request_body_openapi3_with_spec(operation, &spec)
             } else {
                 extract_request_body_swagger2(operation, path_obj, &spec)
             };
@@ -227,10 +229,20 @@ fn should_include_parameter(param: &serde_json::Value) -> bool {
 }
 
 /// Extract requestBody schema for OpenAPI 3.x.
+#[cfg(test)]
 fn extract_request_body_openapi3(operation: &serde_json::Value) -> ParsedRequestBody {
+    extract_request_body_openapi3_with_spec(operation, operation)
+}
+
+fn extract_request_body_openapi3_with_spec(
+    operation: &serde_json::Value,
+    spec: &serde_json::Value,
+) -> ParsedRequestBody {
     let Some(request_body) = operation.get("requestBody") else {
         return ParsedRequestBody::default();
     };
+
+    let request_body = resolve_local_ref(spec, request_body).unwrap_or(request_body);
 
     let Some(content) = request_body
         .get("content")
@@ -239,13 +251,13 @@ fn extract_request_body_openapi3(operation: &serde_json::Value) -> ParsedRequest
         return ParsedRequestBody::default();
     };
 
-    let Some((content_type, media)) = select_openapi3_media(content) else {
+    let Some((content_type, media)) = select_openapi3_media(content, spec) else {
         return ParsedRequestBody::default();
     };
 
     ParsedRequestBody {
         content_type: Some(content_type.to_string()),
-        schema: media.get("schema").cloned(),
+        schema: media.get("schema").map(|schema| resolve_schema_refs(spec, schema)),
         required: request_body
             .get("required")
             .and_then(|v| v.as_bool())
@@ -331,8 +343,14 @@ fn extract_request_body_swagger2(
         None
     };
 
+    let resolved_schema = schema.as_ref().map(|schema| resolve_schema_refs(spec, schema));
     let form_data_kind = form_data.as_ref().map(|(kind, _)| *kind);
-    let content_type = extract_swagger2_consumes(operation, spec, schema.as_ref(), form_data_kind);
+    let content_type = extract_swagger2_consumes(
+        operation,
+        spec,
+        resolved_schema.as_ref(),
+        form_data_kind,
+    );
     let body_required = if schema.is_some() {
         required
     } else {
@@ -341,23 +359,24 @@ fn extract_request_body_swagger2(
 
     ParsedRequestBody {
         content_type,
-        schema,
+        schema: resolved_schema,
         required: body_required,
     }
 }
 
-fn select_openapi3_media(
-    content: &serde_json::Map<String, serde_json::Value>,
-) -> Option<(&str, &serde_json::Value)> {
+fn select_openapi3_media<'a>(
+    content: &'a serde_json::Map<String, serde_json::Value>,
+    spec: &serde_json::Value,
+) -> Option<(&'a str, &'a serde_json::Value)> {
     if let Some((content_type, media)) = content.iter().find(|(content_type, media)| {
-        is_concrete_content_type(content_type) && is_upload_media(content_type, media)
+        is_concrete_content_type(content_type) && is_upload_media(content_type, media, spec)
     }) {
         return Some((content_type.as_str(), media));
     }
 
     if let Some((content_type, media)) = content
         .iter()
-        .find(|(content_type, media)| is_upload_media(content_type, media))
+        .find(|(content_type, media)| is_upload_media(content_type, media, spec))
     {
         return Some((content_type.as_str(), media));
     }
@@ -508,14 +527,27 @@ fn is_binary_content_type(content_type: &str) -> bool {
         || (normalized.starts_with("application/") && !is_text_content_type(&normalized))
 }
 
-fn is_binary_media(content_type: &str, media: &serde_json::Value) -> bool {
-    is_binary_content_type(content_type) || schema_is_binary(media.get("schema"))
+fn is_binary_media(content_type: &str, media: &serde_json::Value, spec: &serde_json::Value) -> bool {
+    is_binary_content_type(content_type)
+        || media
+            .get("schema")
+            .map(|schema| resolve_schema_refs(spec, schema))
+            .as_ref()
+            .is_some_and(|schema| schema_is_binary(Some(schema)))
 }
 
-fn is_upload_media(content_type: &str, media: &serde_json::Value) -> bool {
-    is_binary_media(content_type, media)
+fn is_upload_media(
+    content_type: &str,
+    media: &serde_json::Value,
+    spec: &serde_json::Value,
+) -> bool {
+    let resolved_schema = media.get("schema").map(|schema| resolve_schema_refs(spec, schema));
+
+    is_binary_media(content_type, media, spec)
         || (normalize_content_type(content_type).starts_with("multipart/")
-            && schema_contains_binary_field(media.get("schema")))
+            && resolved_schema
+                .as_ref()
+                .is_some_and(|schema| schema_contains_binary_field(Some(schema))))
 }
 
 fn schema_is_binary(schema: Option<&serde_json::Value>) -> bool {
@@ -574,6 +606,78 @@ fn normalize_content_type(content_type: &str) -> String {
         .unwrap_or(content_type)
         .trim()
         .to_ascii_lowercase()
+}
+
+fn resolve_local_ref<'a>(
+    root: &'a serde_json::Value,
+    value: &'a serde_json::Value,
+) -> Option<&'a serde_json::Value> {
+    let ref_str = value.get("$ref").and_then(|v| v.as_str())?;
+    let pointer = ref_str.strip_prefix('#')?;
+    root.pointer(pointer)
+}
+
+fn resolve_schema_refs(root: &serde_json::Value, schema: &serde_json::Value) -> serde_json::Value {
+    let mut visited = HashSet::new();
+    resolve_schema_refs_inner(root, schema, &mut visited)
+}
+
+fn resolve_schema_refs_inner(
+    root: &serde_json::Value,
+    schema: &serde_json::Value,
+    visited: &mut HashSet<String>,
+) -> serde_json::Value {
+    if let Some(ref_str) = schema.get("$ref").and_then(|v| v.as_str()) {
+        if !visited.insert(ref_str.to_string()) {
+            return schema.clone();
+        }
+
+        let resolved = resolve_local_ref(root, schema).unwrap_or(schema);
+        let mut expanded = resolve_schema_refs_inner(root, resolved, visited);
+        visited.remove(ref_str);
+
+        if let (Some(schema_obj), Some(expanded_obj)) = (schema.as_object(), expanded.as_object_mut()) {
+            for (key, value) in schema_obj {
+                if key == "$ref" {
+                    continue;
+                }
+                expanded_obj.insert(key.clone(), resolve_schema_refs_inner(root, value, visited));
+            }
+        }
+
+        return expanded;
+    }
+
+    let mut resolved = schema.clone();
+    let Some(obj) = resolved.as_object_mut() else {
+        return resolved;
+    };
+
+    if let Some(properties) = obj.get_mut("properties").and_then(|value| value.as_object_mut()) {
+        for property_schema in properties.values_mut() {
+            *property_schema = resolve_schema_refs_inner(root, property_schema, visited);
+        }
+    }
+
+    if let Some(items) = obj.get_mut("items") {
+        *items = resolve_schema_refs_inner(root, items, visited);
+    }
+
+    if let Some(additional_properties) = obj.get_mut("additionalProperties")
+        && additional_properties.is_object()
+    {
+        *additional_properties = resolve_schema_refs_inner(root, additional_properties, visited);
+    }
+
+    for key in ["allOf", "anyOf", "oneOf"] {
+        if let Some(variants) = obj.get_mut(key).and_then(|value| value.as_array_mut()) {
+            for variant in variants {
+                *variant = resolve_schema_refs_inner(root, variant, visited);
+            }
+        }
+    }
+
+    resolved
 }
 
 #[cfg(test)]
@@ -744,6 +848,78 @@ mod tests {
         let body = extract_request_body_openapi3(&op);
         assert_eq!(body.content_type.as_deref(), Some("application/json"));
         assert!(body.required);
+    }
+
+    #[test]
+    fn extract_request_body_openapi3_resolves_request_body_and_schema_refs() {
+        let spec = serde_json::json!({
+            "openapi": "3.0.0",
+            "components": {
+                "requestBodies": {
+                    "SkillUpload": {
+                        "required": true,
+                        "content": {
+                            "application/zip": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SkillArchive"
+                                }
+                            }
+                        }
+                    }
+                },
+                "schemas": {
+                    "SkillArchive": {
+                        "type": "string",
+                        "format": "binary"
+                    }
+                }
+            }
+        });
+        let op = serde_json::json!({
+            "requestBody": {
+                "$ref": "#/components/requestBodies/SkillUpload"
+            }
+        });
+
+        let body = extract_request_body_openapi3_with_spec(&op, &spec);
+        assert_eq!(body.content_type.as_deref(), Some("application/zip"));
+        assert!(body.required);
+        assert_eq!(body.schema.unwrap()["format"], "binary");
+    }
+
+    #[test]
+    fn extract_request_body_openapi3_prefers_binary_schema_refs_over_json() {
+        let spec = serde_json::json!({
+            "openapi": "3.0.0",
+            "components": {
+                "schemas": {
+                    "SkillArchive": {
+                        "type": "string",
+                        "format": "binary"
+                    }
+                }
+            }
+        });
+        let op = serde_json::json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object"
+                        }
+                    },
+                    "application/zip": {
+                        "schema": {
+                            "$ref": "#/components/schemas/SkillArchive"
+                        }
+                    }
+                }
+            }
+        });
+
+        let body = extract_request_body_openapi3_with_spec(&op, &spec);
+        assert_eq!(body.content_type.as_deref(), Some("application/zip"));
+        assert_eq!(body.schema.unwrap()["format"], "binary");
     }
 
     #[test]
@@ -967,6 +1143,32 @@ mod tests {
         let path_obj: serde_json::Map<String, serde_json::Value> =
             serde_json::from_value(serde_json::json!({})).unwrap();
         let spec = serde_json::json!({});
+        let body = extract_request_body_swagger2(&op, &path_obj, &spec);
+        assert_eq!(
+            body.content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        assert_eq!(body.schema.unwrap()["format"], "binary");
+    }
+
+    #[test]
+    fn extract_request_body_swagger2_resolves_binary_schema_refs_before_selecting_consumes() {
+        let op = serde_json::json!({
+            "parameters": [
+                {"in": "body", "schema": {"$ref": "#/definitions/SkillArchive"}}
+            ]
+        });
+        let path_obj: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        let spec = serde_json::json!({
+            "consumes": ["application/json", "application/octet-stream"],
+            "definitions": {
+                "SkillArchive": {
+                    "type": "string",
+                    "format": "binary"
+                }
+            }
+        });
         let body = extract_request_body_swagger2(&op, &path_obj, &spec);
         assert_eq!(
             body.content_type.as_deref(),
