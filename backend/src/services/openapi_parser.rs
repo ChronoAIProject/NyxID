@@ -314,14 +314,14 @@ fn select_openapi3_media(
     content: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<(&str, &serde_json::Value)> {
     if let Some((content_type, media)) = content.iter().find(|(content_type, media)| {
-        is_concrete_content_type(content_type) && is_binary_media(content_type, media)
+        is_concrete_content_type(content_type) && is_upload_media(content_type, media)
     }) {
         return Some((content_type.as_str(), media));
     }
 
     if let Some((content_type, media)) = content
         .iter()
-        .find(|(content_type, media)| is_binary_media(content_type, media))
+        .find(|(content_type, media)| is_upload_media(content_type, media))
     {
         return Some((content_type.as_str(), media));
     }
@@ -476,11 +476,53 @@ fn is_binary_media(content_type: &str, media: &serde_json::Value) -> bool {
     is_binary_content_type(content_type) || schema_is_binary(media.get("schema"))
 }
 
+fn is_upload_media(content_type: &str, media: &serde_json::Value) -> bool {
+    is_binary_media(content_type, media)
+        || (normalize_content_type(content_type).starts_with("multipart/")
+            && schema_contains_binary_field(media.get("schema")))
+}
+
 fn schema_is_binary(schema: Option<&serde_json::Value>) -> bool {
     schema
         .and_then(|schema| schema.get("format"))
         .and_then(|format| format.as_str())
         == Some("binary")
+}
+
+fn schema_contains_binary_field(schema: Option<&serde_json::Value>) -> bool {
+    let Some(schema) = schema else {
+        return false;
+    };
+
+    if schema_is_binary(Some(schema)) {
+        return true;
+    }
+
+    if let Some(properties) = schema.get("properties").and_then(|value| value.as_object())
+        && properties
+            .values()
+            .any(|property_schema| schema_contains_binary_field(Some(property_schema)))
+    {
+        return true;
+    }
+
+    if let Some(items) = schema.get("items")
+        && schema_contains_binary_field(Some(items))
+    {
+        return true;
+    }
+
+    for key in ["allOf", "anyOf", "oneOf"] {
+        if let Some(variants) = schema.get(key).and_then(|value| value.as_array())
+            && variants
+                .iter()
+                .any(|variant_schema| schema_contains_binary_field(Some(variant_schema)))
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn normalize_content_type(content_type: &str) -> String {
@@ -744,6 +786,38 @@ mod tests {
         let body = extract_request_body_openapi3(&op);
         assert_eq!(body.content_type.as_deref(), Some("application/zip"));
         assert_eq!(body.schema.unwrap()["format"], "binary");
+    }
+
+    #[test]
+    fn extract_request_body_openapi3_prefers_multipart_binary_file_uploads_over_json() {
+        let op = serde_json::json!({
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object"
+                        }
+                    },
+                    "multipart/form-data": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "file": {
+                                    "type": "string",
+                                    "format": "binary"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let body = extract_request_body_openapi3(&op);
+        assert_eq!(body.content_type.as_deref(), Some("multipart/form-data"));
+        assert_eq!(
+            body.schema.unwrap()["properties"]["file"]["format"],
+            "binary"
+        );
     }
 
     #[test]
