@@ -46,7 +46,9 @@ export function SshServiceInstructions({
   const restartSshdMac = "sudo launchctl kickstart -k system/com.openssh.sshd";
 
   // Node-agent setup (for targets not directly reachable from NyxID server)
-  const nodeRegisterCommand = `nyxid-node register --token <registration-token> --url ${nyxidBaseUrl.replace("http://", "ws://").replace("https://", "wss://")}/api/v1/nodes/ws`;
+  const nodeWsUrl = publicConfig?.node_ws_url ?? `${nyxidBaseUrl.replace("http://", "ws://").replace("https://", "wss://")}/api/v1/nodes/ws`;
+  const nodeInstallCommand = "cargo install --path node-agent";
+  const nodeRegisterCommand = `nyxid-node register --token <token-from-nodes-page> --url ${nodeWsUrl}`;
   const nodeStartCommand = "nyxid-node start";
 
   return (
@@ -157,20 +159,31 @@ export function SshServiceInstructions({
           </p>
         </div>
         <CopyableField
-          label="1. On the node machine: register"
+          label="1. Install node agent"
+          value={nodeInstallCommand}
+          size="sm"
+        />
+        <p className="text-xs text-muted-foreground">
+          2. Generate a registration token from the{" "}
+          <a href="/nodes" className="underline">Nodes page</a> using
+          &quot;Register Node&quot;.
+        </p>
+        <CopyableField
+          label="3. On the node machine: register"
           value={nodeRegisterCommand}
           size="sm"
         />
         <CopyableField
-          label="2. Start the agent"
+          label="4. Start the agent"
           value={nodeStartCommand}
           size="sm"
         />
         <p className="text-xs text-muted-foreground">
-          After registering, bind this SSH service to the node via the Nodes page.
+          5. Bind this SSH service to the node from the{" "}
+          <a href="/nodes" className="underline">Nodes page</a> &gt;
+          select your node &gt; add a service binding for &quot;{serviceSlug}&quot;.
           When a user connects, NyxID routes the SSH tunnel through the node agent
-          instead of connecting directly. The node agent handles the TCP connection
-          to the SSH target on its local network.
+          instead of connecting directly.
         </p>
       </div>
     </div>
