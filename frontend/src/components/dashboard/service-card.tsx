@@ -7,7 +7,7 @@ import {
 } from "@/lib/constants";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Trash2 } from "lucide-react";
+import { Lock, Trash2 } from "lucide-react";
 
 interface ServiceCardProps {
   readonly service: DownstreamService;
@@ -61,6 +61,12 @@ export function ServiceCard({
           <Badge variant="secondary">
             {SERVICE_TYPE_LABELS[service.service_type] ?? service.service_type}
           </Badge>
+          {service.service_type === "ssh" && (
+            <Badge variant="outline">
+              <Lock className="mr-1 h-2.5 w-2.5" />
+              Private
+            </Badge>
+          )}
           {isOidcService(service) && (
             <Badge variant="accent">OIDC</Badge>
           )}

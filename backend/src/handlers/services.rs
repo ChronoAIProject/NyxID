@@ -16,6 +16,7 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 use crate::services::{api_docs_service, audit_service, oauth_client_service, ssh_service};
 
@@ -285,16 +286,26 @@ pub async fn list_services(
     Query(query): Query<ListServicesQuery>,
 ) -> AppResult<Json<ServiceListResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    let is_admin = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &user_id_str })
+        .await?
+        .is_some_and(|u| u.is_admin);
 
     // SSH services are private -- only visible to their creator (or admins).
     // HTTP services remain visible to all authenticated users.
-    let mut filter = doc! {
-        "is_active": true,
-        "$or": [
-            { "service_type": { "$ne": "ssh" } },
-            { "service_type": { "$exists": false } },
-            { "service_type": "ssh", "created_by": &user_id_str },
-        ],
+    let mut filter = if is_admin {
+        doc! { "is_active": true }
+    } else {
+        doc! {
+            "is_active": true,
+            "$or": [
+                { "service_type": { "$ne": "ssh" } },
+                { "service_type": { "$exists": false } },
+                { "service_type": "ssh", "created_by": &user_id_str },
+            ],
+        }
     };
     if let Some(ref category) = query.category {
         let valid = ["provider", "connection", "internal"];
