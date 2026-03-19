@@ -402,6 +402,7 @@ impl NodeWsManager {
     pub async fn disconnect_connection(&self, node_id: &str, code: u16, reason: &str) -> bool {
         if let Some((_, conn)) = self.connections.remove(node_id) {
             conn.pending.clear();
+            conn.ssh_tunnels.clear();
             let close_msg = NodeOutboundMessage::Close {
                 code,
                 reason: reason.to_string(),
@@ -1272,6 +1273,57 @@ mod tests {
             Some(NodeOutboundMessage::Close { code, reason }) => {
                 assert_eq!(code, 4000);
                 assert_eq!(reason, "admin disconnected node");
+            }
+            other => panic!("expected close message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_connection_closes_active_ssh_tunnels() {
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+
+        let open = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move {
+                mgr.open_ssh_tunnel(
+                    "node-1",
+                    NodeSshTunnelRequest {
+                        session_id: "sess-disconnect".to_string(),
+                        service_id: "svc-1".to_string(),
+                        host: "ssh.internal".to_string(),
+                        port: 22,
+                    },
+                    None,
+                )
+                .await
+            }
+        });
+
+        let outbound = rx.recv().await.expect("open message");
+        match outbound {
+            NodeOutboundMessage::Text(text) => {
+                let json: Value = serde_json::from_str(&text).expect("json");
+                assert_eq!(json["type"], "ssh_tunnel_open");
+                assert_eq!(json["session_id"], "sess-disconnect");
+            }
+            other => panic!("unexpected outbound message: {other:?}"),
+        }
+
+        assert!(mgr.deliver_ssh_tunnel_opened("node-1", "sess-disconnect"));
+        let mut tunnel_rx = open.await.expect("join").expect("open tunnel");
+
+        assert!(
+            mgr.disconnect_connection("node-1", 4001, "forced disconnect")
+                .await
+        );
+
+        assert!(tunnel_rx.recv().await.is_none());
+        match rx.recv().await {
+            Some(NodeOutboundMessage::Close { code, reason }) => {
+                assert_eq!(code, 4001);
+                assert_eq!(reason, "forced disconnect");
             }
             other => panic!("expected close message, got {other:?}"),
         }
