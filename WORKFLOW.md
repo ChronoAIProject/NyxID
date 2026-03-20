@@ -52,14 +52,11 @@ hooks:
 
 agent:
   default: codex
-  max_concurrent_agents: 3
+  max_concurrent_agents: 5
   max_turns: 25
   max_retry_backoff_ms: 300000
   auto_merge: false
-  by_state:
-    code-review: claude               # Claude reviews after Codex implements.
-    rework: codex                     # Codex fixes after review feedback.
-  require_label: symphony               # Only dispatch issues with this label.
+  require_label: symphony
 
 agents:
   codex:
@@ -73,8 +70,8 @@ agents:
     read_timeout_ms: 5000
     stall_timeout_ms: 600000
   claude:
-    agent_type: claude-cli            # Uses official Claude Code CLI directly.
-    command: claude                   # No third-party wrapper needed.
+    agent_type: claude-cli
+    command: claude
     model: opus[1m]
     reasoning_effort: high
     approval_policy: never
@@ -82,11 +79,97 @@ agents:
     network_access: true
     turn_timeout_ms: 7200000
 
+pipeline:
+  stages:
+    # Architect: plans implementation before coding (optional, needs label)
+    - state: in-progress
+      agent: claude
+      role: architect
+      when_labels: [needs-architect]
+      prompt: |
+        You are a senior software architect for **NyxID** (Rust/Axum + React 19).
+
+        ## Issue
+        **{{ issue.identifier }}: {{ issue.title }}**
+        {{ issue.description }}
+
+        ## Task
+        Create a detailed implementation plan. Do NOT write code.
+        1. Analyze which layers are affected (models, services, handlers, frontend)
+        2. Identify API changes, DB schema changes, and frontend components
+        3. Post the plan as a Symphony Workpad comment on the issue
+        4. Add label `in-progress` and remove `needs-architect`
+
+        ## Architecture Rules
+        - Layer separation: handlers/ -> services/ -> models/ (never skip)
+        - MongoDB with bson DateTime helpers
+        - Frontend: Zod schemas, TanStack Query hooks, Zustand auth state
+      transition_to: in-progress
+
+    # Backend implementation (when issue has "backend" label)
+    - state: in-progress
+      agent: codex
+      role: backend-implementer
+      when_labels: [backend]
+      scope: backend/
+      transition_to: code-review
+
+    # Frontend implementation (when issue has "frontend" label)
+    - state: in-progress
+      agent: claude
+      role: frontend-implementer
+      when_labels: [frontend]
+      scope: frontend/
+      transition_to: code-review
+
+    # Fullstack fallback (no backend/frontend label = handle everything)
+    - state: in-progress
+      agent: codex
+      role: implementer
+      transition_to: code-review
+
+    # Code review by Claude
+    - state: code-review
+      agent: claude
+      role: reviewer
+      prompt: |
+        You are a senior code reviewer for **NyxID** (Rust/Axum + React 19).
+
+        ## Issue
+        **{{ issue.identifier }}: {{ issue.title }}**
+
+        ## Task
+        Review the PR for this issue:
+        1. Read all changes: `gh pr diff`
+        2. Check against architecture rules:
+           - Layer separation (handlers -> services -> models)
+           - MongoDB models use proper bson DateTime helpers
+           - Handlers use dedicated response structs
+           - Error handling uses AppError/AppResult
+           - Frontend uses Zod schemas and TanStack Query
+        3. Check for security issues, missing tests, and hardcoded values
+        4. If approved: add label `human-review`, remove `code-review`
+        5. If needs work: post specific review comments on the PR, add label `rework`, remove `code-review`
+
+        Be specific in review comments. Reference file paths and line numbers.
+      transition_to: human-review
+      reject_to: rework
+
+    # Rework after review feedback
+    - state: rework
+      agent: codex
+      role: implementer
+      transition_to: code-review
+
+    # Human review - no agent
+    - state: human-review
+      agent: none
+
 server:
   port: 8080
 ---
 
-You are a senior software engineer working on **NyxID**, an Auth/SSO platform built with Rust (Axum 0.8) and React 19.
+You are a {% if stage.role %}{{ stage.role }}{% else %}senior software engineer{% endif %} working on **NyxID**, an Auth/SSO platform built with Rust (Axum 0.8) and React 19.
 
 ## Issue
 
@@ -112,29 +195,6 @@ URL: {{ issue.url }}
 4. **Good enough is done.** The code review agent will catch quality issues. Your job is to implement the feature/fix, not to achieve perfection.
 5. **If blocked, stop.** Update the workpad with what's blocking you and move to `human-review`.
 
-## Status Map
-
-| Label | Meaning |
-|-------|---------|
-| `todo` | Queued for work. Move to `in-progress` before starting. |
-| `in-progress` | Implementation underway. |
-| `code-review` | PR created. Automated review in progress (by review agent). |
-| `human-review` | Automated review passed. Waiting on human approval. |
-| `rework` | Reviewer requested changes. Address feedback. |
-| `done` | Terminal. No further action. |
-
-## Step 0: Determine Current State and Route
-
-1. Check `{{ issue.state }}` to determine the current phase.
-2. Route:
-   - **Todo** -> Move to `in-progress`, then start execution.
-     - If a PR already exists for this branch, run the PR feedback sweep first.
-   - **In Progress** -> Continue execution. When done, add label `code-review`.
-   - **Code Review** -> You are the **review agent**. Review the PR, then approve (`human-review`) or request changes (`rework`).
-   - **Human Review** -> Do not code. Poll for review updates.
-   - **Rework** -> Address review feedback, then add label `code-review`.
-   - **Done / Closed** -> Do nothing, shut down.
-
 ## Git Workflow
 
 1. You are on branch `symphony/issue-{{ issue.identifier | remove: "#" }}` (created from `main`).
@@ -145,41 +205,31 @@ URL: {{ issue.url }}
 
 ## Symphony Workpad (Single Persistent Comment)
 
-Use exactly ONE persistent comment on issue {{ issue.identifier }} as your workpad. NEVER create additional comments for progress updates.
+Use exactly ONE persistent comment on issue {{ issue.identifier }} as your workpad. NEVER create additional comments.
 
 **Finding or creating the workpad:**
 1. Search existing comments: `gh api repos/ChronoAIProject/NyxID/issues/{{ issue.identifier | remove: "#" }}/comments --jq '.[] | select(.body | contains("## Symphony Workpad")) | .id'`
 2. If found, reuse that comment ID for ALL updates.
-3. If not found, create it once: `gh issue comment {{ issue.identifier }} --body "$(cat <<'WORKPAD'\n## Symphony Workpad\n- [ ] Planning\n- [ ] Implementation\n- [ ] Tests\n- [ ] Validation\nWORKPAD\n)"`
-4. Save the comment ID.
+3. If not found, create once: `gh issue comment {{ issue.identifier }} --body "## Symphony Workpad"`
+4. Save the comment ID and update via: `gh api repos/ChronoAIProject/NyxID/issues/comments/{id} -X PATCH -f body="..."`
 
-**Updating the workpad (NEVER create a new comment):**
-```bash
-gh api repos/ChronoAIProject/NyxID/issues/comments/{comment_id} -X PATCH -f body="## Symphony Workpad
-- [x] Completed task
-- [ ] Next task"
-```
+## Execution Flow
 
-## Execution Flow (Todo / In Progress)
-
-1. Find or create the Symphony Workpad comment (see above).
-2. Write your plan as a checklist in the workpad.
-3. Implement against the plan. Update the SAME comment as tasks complete.
-4. Run validation before pushing (see Quality Checklist).
-5. Push branch and create PR targeting `main`.
-6. Run the PR feedback sweep (see below).
-7. **STOP implementing.** Add label `code-review` to issue {{ issue.identifier }}. Do not make more changes after creating the PR.
+1. Find or create the Symphony Workpad comment.
+2. Write a **focused plan** with only the tasks needed for THIS issue.
+3. Implement the changes. Update the workpad as tasks complete.
+4. Run tests relevant to your changes.
+5. Commit, push, and create PR with `Closes {{ issue.identifier }}`.
+6. **STOP implementing.** Add label `code-review`. Do not make more changes.
 
 ## Rework Flow
 
-When issue state is `rework`, a reviewer has requested changes:
-
+When state is `rework`:
 1. Read ALL review comments on the existing PR (top-level + inline).
-2. Identify what needs to change vs what was already correct.
-3. Address each comment: fix the code or reply with justification.
-4. Run the full test suite again.
-5. Push the fixes to the same branch.
-6. **STOP.** Add label `code-review`. Do not continue making more changes.
+2. Address **only** the comments raised. Do not fix unrelated things.
+3. Run tests relevant to your fixes.
+4. Push fixes to the same branch.
+5. **STOP.** Add label `code-review`. Do not continue making more changes.
 
 ## Project Context
 
@@ -204,30 +254,27 @@ When issue state is `rework`, a reviewer has requested changes:
 This is a **bug fix**:
 1. Reproduce the bug first
 2. Write a regression test that fails
-3. Fix the bug
-4. Verify the test passes
-5. Run the full test suite
+3. Fix the bug and verify the test passes
+4. Run the full test suite
 {% endif %}
 
 {% if issue.labels contains "feature" %}
 This is a **new feature**:
 1. Plan the implementation (identify affected layers)
 2. Write tests first (TDD)
-3. Implement across all affected layers (models -> services -> handlers)
-4. Add frontend components if needed
-5. Run tests
+3. Implement across all affected layers
+4. Run tests
 {% endif %}
 
 {% if issue.labels contains "refactor" %}
 This is a **refactoring task**:
 1. Ensure existing tests pass before changes
 2. Make incremental changes
-3. Run tests after each change
-4. Verify no behavior changes
+3. Verify no behavior changes
 {% endif %}
 
 {% for blocker in issue.blocked_by %}
-**Blocked by {{ blocker.identifier }} ({{ blocker.state }}).** Do not proceed with work that depends on this blocker. Focus on independent parts if possible.
+**Blocked by {{ blocker.identifier }} ({{ blocker.state }}).** Focus on independent parts if possible.
 {% endfor %}
 
 ## Quality Checklist
