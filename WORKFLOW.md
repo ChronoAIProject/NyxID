@@ -118,7 +118,7 @@ pipeline:
 
     # Backend implementation (when triage adds "backend" label)
     - state: in-progress
-      agent: codex
+      agent: claude
       role: backend-implementer
       when_labels: [backend]
       scope: backend/
@@ -134,13 +134,13 @@ pipeline:
 
     # Fullstack fallback (triage didn't add backend/frontend labels)
     - state: in-progress
-      agent: codex
+      agent: claude
       role: implementer
       transition_to: code-review
 
     # Code review by Claude
     - state: code-review
-      agent: claude
+      agent: codex
       role: reviewer
       prompt: |
         You are a senior code reviewer for **NyxID** (Rust/Axum + React 19).
@@ -158,8 +158,8 @@ pipeline:
            - Error handling uses AppError/AppResult
            - Frontend uses Zod schemas and TanStack Query
         3. Check for security issues, missing tests, and hardcoded values
-        4. If approved: add label `human-review`, remove `code-review`
-        5. If needs work: post specific review comments on the PR, add label `rework`, remove `code-review`
+        4. If approved: `gh issue edit {{ issue.identifier }} --remove-label code-review --add-label human-review`
+        5. If needs work: post specific review comments on the PR, then: `gh issue edit {{ issue.identifier }} --remove-label code-review --add-label rework`
 
         Be specific in review comments. Reference file paths and line numbers.
       transition_to: human-review
@@ -167,7 +167,7 @@ pipeline:
 
     # Rework after review feedback
     - state: rework
-      agent: codex
+      agent: claude
       role: implementer
       transition_to: code-review
 
@@ -201,7 +201,7 @@ URL: {{ issue.url }}
 
 1. **Stay focused on the issue description.** Only implement what is explicitly requested. Do not fix unrelated bugs, refactor surrounding code, or add features not in the issue.
 2. **Do not expand scope.** If you discover unrelated problems, create a NEW GitHub issue: `gh issue create --title "..." --body "Found while working on {{ issue.identifier }}"`.
-3. **Finish and hand off.** Once the requested changes are implemented and tests pass, immediately push, create the PR, and move to `code-review`. Do not keep iterating.
+3. **Finish and hand off.** Once the requested changes are implemented and tests pass, immediately push, create the PR, and move the **issue** to `code-review`. Do not keep iterating.
 4. **Good enough is done.** The code review agent will catch quality issues. Your job is to implement the feature/fix, not to achieve perfection.
 5. **If blocked, stop.** Update the workpad with what's blocking you and move to `human-review`.
 
@@ -209,9 +209,12 @@ URL: {{ issue.url }}
 
 1. You are on branch `symphony/issue-{{ issue.identifier | remove: "#" }}` (created from `main`).
 2. Commit with conventional messages (`feat:`, `fix:`, `refactor:`).
-3. Push and create a pull request targeting `main`.
-4. Include `Closes {{ issue.identifier }}` in the PR description.
-5. Add the `symphony` label to the PR.
+3. Push your commits to the branch.
+4. Check if a PR already exists: `gh pr list --head symphony/issue-{{ issue.identifier | remove: "#" }} --json number --jq '.[0].number'`
+5. If no PR exists, create one: `gh pr create --title "{{ issue.identifier }}: {{ issue.title }}" --body "Closes {{ issue.identifier }}" --label symphony`
+6. If a PR already exists (another parallel agent created it), just push - the PR updates automatically.
+
+**IMPORTANT:** All agents working on the same issue share the same branch and PR. Do NOT create separate branches or PRs.
 
 ## Symphony Workpad (Single Persistent Comment)
 
@@ -229,8 +232,8 @@ Use exactly ONE persistent comment on issue {{ issue.identifier }} as your workp
 2. Write a **focused plan** with only the tasks needed for THIS issue.
 3. Implement the changes. Update the workpad as tasks complete.
 4. Run tests relevant to your changes.
-5. Commit, push, and create PR with `Closes {{ issue.identifier }}`.
-6. **STOP implementing.** Add label `code-review`. Do not make more changes.
+5. Commit and push. Create a PR if one doesn't exist (see Git Workflow).
+6. **STOP implementing.** Symphony will automatically move the issue to `code-review` when all parallel agents finish.
 
 ## Rework Flow
 
@@ -239,7 +242,7 @@ When state is `rework`:
 2. Address **only** the comments raised. Do not fix unrelated things.
 3. Run tests relevant to your fixes.
 4. Push fixes to the same branch.
-5. **STOP.** Add label `code-review`. Do not continue making more changes.
+5. **STOP.** Symphony will automatically move the issue to `code-review`.
 
 ## Project Context
 
