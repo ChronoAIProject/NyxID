@@ -42,6 +42,39 @@ pub struct DeleteCredentialsResponse {
     pub message: String,
 }
 
+fn validate_set_user_credentials_request<'a>(
+    provider: &crate::models::provider_config::ProviderConfig,
+    body: &'a SetUserCredentialsRequest,
+) -> AppResult<Option<&'a str>> {
+    if body.client_id.is_empty() || body.client_id.len() > 500 {
+        return Err(AppError::ValidationError(
+            "client_id must be between 1 and 500 characters".to_string(),
+        ));
+    }
+    if body
+        .client_secret
+        .as_ref()
+        .is_some_and(|value| value.len() > 2000)
+    {
+        return Err(AppError::ValidationError(
+            "client_secret must be at most 2000 characters".to_string(),
+        ));
+    }
+
+    let client_secret = body
+        .client_secret
+        .as_deref()
+        .filter(|value| !value.is_empty());
+
+    if provider.provider_type == "telegram_widget" && client_secret.is_none() {
+        return Err(AppError::ValidationError(
+            "Bot token is required for Telegram widget providers".to_string(),
+        ));
+    }
+
+    Ok(client_secret)
+}
+
 // --- Handlers ---
 
 /// GET /api/v1/providers/{provider_id}/credentials
@@ -99,25 +132,7 @@ pub async fn set_my_credentials(
         ));
     }
 
-    // Validate inputs
-    if body.client_id.is_empty() || body.client_id.len() > 500 {
-        return Err(AppError::ValidationError(
-            "client_id must be between 1 and 500 characters".to_string(),
-        ));
-    }
-    if body
-        .client_secret
-        .as_ref()
-        .is_some_and(|value| value.len() > 2000)
-    {
-        return Err(AppError::ValidationError(
-            "client_secret must be at most 2000 characters".to_string(),
-        ));
-    }
-    let client_secret = body
-        .client_secret
-        .as_deref()
-        .filter(|value| !value.is_empty());
+    let client_secret = validate_set_user_credentials_request(&provider, &body)?;
 
     let cred = user_credentials_service::upsert_user_credentials(
         &state.db,
@@ -175,4 +190,80 @@ pub async fn delete_my_credentials(
     Ok(Json(DeleteCredentialsResponse {
         message: "Credentials deleted successfully".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::models::provider_config::ProviderConfig;
+
+    fn make_provider(provider_type: &str) -> ProviderConfig {
+        ProviderConfig {
+            id: "provider-1".to_string(),
+            slug: "provider-1".to_string(),
+            name: "Provider 1".to_string(),
+            description: None,
+            provider_type: provider_type.to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "tester".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn telegram_widget_user_credentials_require_a_bot_token() {
+        let provider = make_provider("telegram_widget");
+        let request = SetUserCredentialsRequest {
+            client_id: "nyxid_bot".to_string(),
+            client_secret: None,
+            label: None,
+        };
+
+        let error = validate_set_user_credentials_request(&provider, &request)
+            .expect_err("telegram widget credentials without a bot token should fail");
+
+        assert!(matches!(error, AppError::ValidationError(_)));
+        assert_eq!(
+            error.to_string(),
+            "Validation error: Bot token is required for Telegram widget providers"
+        );
+    }
+
+    #[test]
+    fn oauth_user_credentials_can_omit_a_client_secret() {
+        let provider = make_provider("oauth2");
+        let request = SetUserCredentialsRequest {
+            client_id: "client-id".to_string(),
+            client_secret: None,
+            label: None,
+        };
+
+        let client_secret = validate_set_user_credentials_request(&provider, &request)
+            .expect("oauth credentials without a client secret should remain valid");
+
+        assert!(client_secret.is_none());
+    }
 }
