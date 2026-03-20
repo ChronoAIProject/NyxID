@@ -354,5 +354,63 @@ async fn decrypt_user_credentials(
 
 /// Check if a provider supports user-level credentials.
 pub fn supports_user_credentials(provider: &ProviderConfig) -> bool {
-    provider.credential_mode == "user" || provider.credential_mode == "both"
+    matches!(
+        provider.provider_type.as_str(),
+        "oauth2" | "device_code" | "telegram_widget"
+    ) && matches!(provider.credential_mode.as_str(), "user" | "both")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_provider(provider_type: &str, credential_mode: &str) -> ProviderConfig {
+        ProviderConfig {
+            id: "provider-1".to_string(),
+            slug: "provider-1".to_string(),
+            name: "Provider 1".to_string(),
+            description: None,
+            provider_type: provider_type.to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: credential_mode.to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "tester".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn supports_user_credentials_for_oauth_like_providers() {
+        assert!(supports_user_credentials(&make_provider("oauth2", "user")));
+        assert!(supports_user_credentials(&make_provider("device_code", "both")));
+        assert!(supports_user_credentials(&make_provider(
+            "telegram_widget",
+            "user",
+        )));
+    }
+
+    #[test]
+    fn rejects_user_credentials_for_api_key_providers() {
+        assert!(!supports_user_credentials(&make_provider("api_key", "user")));
+        assert!(!supports_user_credentials(&make_provider("api_key", "both")));
+    }
 }
