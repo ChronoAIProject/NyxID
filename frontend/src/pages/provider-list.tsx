@@ -239,7 +239,8 @@ export function ProviderListPage() {
                 />
 
                 {(watchedProviderType === "oauth2" ||
-                  watchedProviderType === "device_code") && (
+                  watchedProviderType === "device_code" ||
+                  watchedProviderType === "telegram_widget") && (
                   <FormField
                     control={form.control}
                     name="credential_mode"
@@ -262,8 +263,9 @@ export function ProviderListPage() {
                           </SelectContent>
                         </Select>
                         <p className="text-xs text-muted-foreground">
-                          Choose whether users rely on admin-managed OAuth apps,
-                          bring their own, or can use either.
+                          {watchedProviderType === "telegram_widget"
+                            ? "Choose whether users rely on an admin-managed Telegram bot, bring their own bot, or can use either."
+                            : "Choose whether users rely on admin-managed OAuth apps, bring their own, or can use either."}
                         </p>
                         <FormMessage />
                       </FormItem>
@@ -665,8 +667,9 @@ export function ProviderListPage() {
                             />
                           </FormControl>
                           <p className="text-xs text-muted-foreground">
-                            Telegram bot username from BotFather, without the
-                            leading @.
+                            {watchedCredentialMode === "admin"
+                              ? "Required in admin mode. Enter the Telegram bot username from BotFather without the leading @."
+                              : "Optional. Needed only when configuring admin-managed or fallback bot credentials."}
                           </p>
                           <FormMessage />
                         </FormItem>
@@ -688,8 +691,9 @@ export function ProviderListPage() {
                             />
                           </FormControl>
                           <p className="text-xs text-muted-foreground">
-                            BotFather token used to verify the signed Telegram
-                            login payload.
+                            {watchedCredentialMode === "admin"
+                              ? "Required in admin mode. BotFather token used to verify the signed Telegram login payload."
+                              : "Optional. Only set this when configuring admin-managed or fallback bot credentials."}
                           </p>
                           <FormMessage />
                         </FormItem>

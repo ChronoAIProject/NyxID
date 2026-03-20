@@ -116,6 +116,7 @@ export function ProviderEditPage() {
   }, [provider]);
 
   const watchedProviderType = form.watch("provider_type");
+  const watchedCredentialMode = form.watch("credential_mode");
 
   async function onSubmit(data: UpdateProviderFormData) {
     if (!provider) return;
@@ -274,7 +275,7 @@ export function ProviderEditPage() {
               )}
             />
 
-            {(isOAuth || isDeviceCode) && (
+            {(isOAuth || isDeviceCode || isTelegramWidget) && (
               <FormField
                 control={form.control}
                 name="credential_mode"
@@ -303,8 +304,9 @@ export function ProviderEditPage() {
                       </SelectContent>
                     </Select>
                     <p className="text-xs text-muted-foreground">
-                      Controls whether admin-configured or user-provided OAuth
-                      credentials are used for connections.
+                      {isTelegramWidget
+                        ? "Controls whether admin-configured or user-provided Telegram bot credentials are used for connections."
+                        : "Controls whether admin-configured or user-provided OAuth credentials are used for connections."}
                     </p>
                     <FormMessage />
                   </FormItem>
@@ -653,8 +655,9 @@ export function ProviderEditPage() {
                         />
                       </FormControl>
                       <p className="text-xs text-muted-foreground">
-                        Telegram bot username from BotFather, without the
-                        leading @.
+                        {watchedCredentialMode === "admin"
+                          ? "Leave blank to keep the current value, or enter a new Telegram bot username from BotFather without the leading @."
+                          : "Optional. Update this only when changing the admin-managed or fallback bot username."}
                       </p>
                       <FormMessage />
                     </FormItem>
@@ -676,7 +679,9 @@ export function ProviderEditPage() {
                         />
                       </FormControl>
                       <p className="text-xs text-muted-foreground">
-                        BotFather token used to verify Telegram widget logins.
+                        {watchedCredentialMode === "admin"
+                          ? "Leave blank to keep the current value, or enter a new BotFather token used to verify Telegram widget logins."
+                          : "Optional. Update this only when changing the admin-managed or fallback bot token."}
                       </p>
                       <FormMessage />
                     </FormItem>
