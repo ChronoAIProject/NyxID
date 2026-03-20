@@ -236,6 +236,26 @@ describe("createProviderSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts a user-mode Telegram widget provider without admin bot credentials", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      credential_mode: "user",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts a both-mode Telegram widget provider with fallback bot credentials", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      credential_mode: "both",
+      client_id: "nyxid_bot",
+      client_secret: "123456:ABC-DEF",
+    });
+    expect(result.success).toBe(true);
+  });
+
   it("rejects a Telegram widget provider without a bot username", () => {
     const result = createProviderSchema.safeParse({
       ...baseValid,
@@ -249,6 +269,16 @@ describe("createProviderSchema", () => {
     const result = createProviderSchema.safeParse({
       ...baseValid,
       provider_type: "telegram_widget",
+      client_id: "nyxid_bot",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a both-mode Telegram widget provider with only one fallback credential", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      credential_mode: "both",
       client_id: "nyxid_bot",
     });
     expect(result.success).toBe(false);
