@@ -1478,6 +1478,53 @@ fn normalize_telegram_widget_input(
     })
 }
 
+fn validate_telegram_widget_update(
+    existing: &ProviderConfig,
+    updates: &ProviderUpdateInput,
+) -> AppResult<()> {
+    if existing.provider_type != "telegram_widget" {
+        return Ok(());
+    }
+
+    let touches_telegram_credentials = updates.client_id.is_some()
+        || updates.client_secret.is_some()
+        || updates
+            .credential_mode
+            .as_deref()
+            .is_some_and(|mode| mode != existing.credential_mode);
+
+    if !touches_telegram_credentials {
+        return Ok(());
+    }
+
+    let effective_mode = updates
+        .credential_mode
+        .as_deref()
+        .unwrap_or(existing.credential_mode.as_str());
+    let has_bot_username = updates.client_id.is_some() || existing.client_id_encrypted.is_some();
+    let has_bot_token = updates.client_secret.is_some() || existing.client_secret_encrypted.is_some();
+
+    if effective_mode == "admin" {
+        if !has_bot_username {
+            return Err(AppError::ValidationError(
+                "Bot username is required for telegram_widget providers in admin mode".to_string(),
+            ));
+        }
+        if !has_bot_token {
+            return Err(AppError::ValidationError(
+                "Bot token is required for telegram_widget providers in admin mode".to_string(),
+            ));
+        }
+    } else if has_bot_username != has_bot_token {
+        return Err(AppError::ValidationError(
+            "telegram_widget fallback credentials must include both bot username and bot token"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Fields that can be updated on a provider config.
 pub struct ProviderUpdateInput {
     pub name: Option<String>,
@@ -1725,6 +1772,8 @@ pub async fn update_provider(
         }
     }
 
+    validate_telegram_widget_update(&existing, &updates)?;
+
     let now = Utc::now();
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(now),
@@ -1898,6 +1947,45 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+
+    fn make_telegram_provider(
+        credential_mode: &str,
+        has_bot_username: bool,
+        has_bot_token: bool,
+    ) -> ProviderConfig {
+        ProviderConfig {
+            id: "provider-1".to_string(),
+            slug: "telegram".to_string(),
+            name: "Telegram".to_string(),
+            description: None,
+            provider_type: "telegram_widget".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: has_bot_username.then(|| vec![1, 2, 3]),
+            client_secret_encrypted: has_bot_token.then(|| vec![4, 5, 6]),
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: credential_mode.to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "tester".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
 
     #[test]
     fn telegram_widget_input_trims_bot_values() {
@@ -1943,5 +2031,147 @@ mod tests {
             error.to_string(),
             "Validation error: Bot token must not be blank for Telegram widget providers"
         );
+    }
+
+    #[test]
+    fn telegram_widget_update_rejects_partial_admin_configuration() {
+        let existing = make_telegram_provider("admin", false, false);
+        let updates = ProviderUpdateInput {
+            name: None,
+            description: None,
+            is_active: None,
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id: Some("nyxid_bot".to_string()),
+            client_secret: None,
+            supports_pkce: None,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            credential_mode: None,
+            token_endpoint_auth_method: None,
+            extra_auth_params: None,
+            device_code_format: None,
+            client_id_param_name: None,
+        };
+
+        let error = validate_telegram_widget_update(&existing, &updates)
+            .expect_err("partial admin Telegram widget credentials should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Validation error: Bot token is required for telegram_widget providers in admin mode"
+        );
+    }
+
+    #[test]
+    fn telegram_widget_update_allows_switching_to_user_mode_without_admin_bot_credentials() {
+        let existing = make_telegram_provider("admin", false, false);
+        let updates = ProviderUpdateInput {
+            name: None,
+            description: None,
+            is_active: None,
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id: None,
+            client_secret: None,
+            supports_pkce: None,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            credential_mode: Some("user".to_string()),
+            token_endpoint_auth_method: None,
+            extra_auth_params: None,
+            device_code_format: None,
+            client_id_param_name: None,
+        };
+
+        validate_telegram_widget_update(&existing, &updates)
+            .expect("switching to user mode without admin bot credentials should stay valid");
+    }
+
+    #[test]
+    fn telegram_widget_update_requires_credentials_when_switching_to_admin_mode() {
+        let existing = make_telegram_provider("user", false, false);
+        let updates = ProviderUpdateInput {
+            name: None,
+            description: None,
+            is_active: None,
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id: None,
+            client_secret: None,
+            supports_pkce: None,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            credential_mode: Some("admin".to_string()),
+            token_endpoint_auth_method: None,
+            extra_auth_params: None,
+            device_code_format: None,
+            client_id_param_name: None,
+        };
+
+        let error = validate_telegram_widget_update(&existing, &updates)
+            .expect_err("switching to admin mode without bot credentials should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "Validation error: Bot username is required for telegram_widget providers in admin mode"
+        );
+    }
+
+    #[test]
+    fn telegram_widget_update_allows_single_field_rotation_when_other_half_exists() {
+        let existing = make_telegram_provider("both", true, true);
+        let updates = ProviderUpdateInput {
+            name: None,
+            description: None,
+            is_active: None,
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id: Some("new_bot_name".to_string()),
+            client_secret: None,
+            supports_pkce: None,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            credential_mode: None,
+            token_endpoint_auth_method: None,
+            extra_auth_params: None,
+            device_code_format: None,
+            client_id_param_name: None,
+        };
+
+        validate_telegram_widget_update(&existing, &updates)
+            .expect("updating one Telegram widget credential should be valid when the pair already exists");
     }
 }
