@@ -81,32 +81,42 @@ agents:
 
 pipeline:
   stages:
-    # Architect: plans implementation before coding (optional, needs label)
-    - state: in-progress
+    # Triage: Claude assesses the issue and decides the approach.
+    # For complex issues: creates architecture plan, adds routing labels.
+    # For simple issues: adds labels and moves straight to in-progress.
+    - state: todo
       agent: claude
-      role: architect
-      when_labels: [needs-architect]
+      role: triage
       prompt: |
-        You are a senior software architect for **NyxID** (Rust/Axum + React 19).
+        You are a senior technical lead triaging issue {{ issue.identifier }} for **NyxID** (Rust/Axum + React 19).
 
         ## Issue
         **{{ issue.identifier }}: {{ issue.title }}**
         {{ issue.description }}
 
-        ## Task
-        Create a detailed implementation plan. Do NOT write code.
-        1. Analyze which layers are affected (models, services, handlers, frontend)
-        2. Identify API changes, DB schema changes, and frontend components
-        3. Post the plan as a Symphony Workpad comment on the issue
-        4. Add label `in-progress` and remove `needs-architect`
+        ## Your job
+        1. Read the issue carefully and assess what needs to change.
+        2. Determine which parts of the codebase are affected:
+           - Backend only (Rust/Axum) → add label `backend`
+           - Frontend only (React/TypeScript) → add label `frontend`
+           - Both → add both labels (agents will work in parallel)
+           - Unclear → add neither (fullstack fallback agent will handle it)
+        3. Assess complexity:
+           - **Complex** (multiple layers, API changes, DB schema, new features spanning backend+frontend):
+             Create a Symphony Workpad comment with an implementation plan covering affected layers, API contracts, and DB changes. Do NOT write code.
+           - **Simple** (single file fix, small change, clear scope):
+             Skip the plan, just add the routing labels.
+        4. Move the issue to in-progress:
+           `gh issue edit {{ issue.identifier }} --remove-label todo --add-label in-progress`
 
-        ## Architecture Rules
-        - Layer separation: handlers/ -> services/ -> models/ (never skip)
-        - MongoDB with bson DateTime helpers
-        - Frontend: Zod schemas, TanStack Query hooks, Zustand auth state
+        ## Architecture context
+        - Backend: Rust, Axum 0.8, MongoDB 8.0 (handlers/ -> services/ -> models/)
+        - Frontend: React 19, TypeScript, Vite 7, TanStack Router + Query, Tailwind CSS 4
+        - Mobile: React Native 0.79, Expo 53
+        - SDK: TypeScript OAuth 2.0 client
       transition_to: in-progress
 
-    # Backend implementation (when issue has "backend" label)
+    # Backend implementation (when triage adds "backend" label)
     - state: in-progress
       agent: codex
       role: backend-implementer
@@ -114,7 +124,7 @@ pipeline:
       scope: backend/
       transition_to: code-review
 
-    # Frontend implementation (when issue has "frontend" label)
+    # Frontend implementation (when triage adds "frontend" label)
     - state: in-progress
       agent: claude
       role: frontend-implementer
@@ -122,7 +132,7 @@ pipeline:
       scope: frontend/
       transition_to: code-review
 
-    # Fullstack fallback (no backend/frontend label = handle everything)
+    # Fullstack fallback (triage didn't add backend/frontend labels)
     - state: in-progress
       agent: codex
       role: implementer
