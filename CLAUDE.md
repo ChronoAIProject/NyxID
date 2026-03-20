@@ -100,7 +100,7 @@ backend/src/
 |-- main.rs              # Server startup
 |-- models/              # MongoDB document structs (31 models, 29 collections, incl. node, node_service_binding, mcp_session)
 |-- services/            # Business logic (37 services, incl. node_service, node_routing_service, node_ws_manager, node_metrics_service)
-|-- handlers/            # HTTP handlers (37 handler modules, incl. node_admin, admin_nodes, node_ws, developer_apps)
+|-- handlers/            # HTTP handlers (38 handler modules, incl. node_admin, admin_nodes, node_ws, developer_apps, ssh_exec)
 |-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers, JWKS
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
@@ -151,6 +151,10 @@ All API routes under `/api/v1`:
 - `/nodes` -- node management (register-token, list, get, delete, rotate-token, bindings CRUD + priority update)
 - `/nodes/ws` -- WebSocket upgrade for node agent connections (auth via WS protocol, not middleware)
 - `/admin/nodes` -- admin node management (list all, get, disconnect, delete -- no ownership check)
+- `/ssh/{service_id}/certificate` -- issue short-lived SSH user certificate (POST)
+- `/ssh/{service_id}` -- SSH-over-WebSocket tunnel (GET, upgrade)
+- `/ssh/{service_id}/terminal` -- SSH web terminal (GET, upgrade)
+- `/ssh/{service_id}/exec` -- remote command execution (POST)
 
 - `/admin/service-accounts` -- service account CRUD, secret rotation, token revocation, provider management (connect via API key/OAuth redirect/device-code, list, disconnect providers on behalf of SAs)
 

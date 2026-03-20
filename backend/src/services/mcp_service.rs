@@ -313,6 +313,48 @@ pub fn generate_tool_definitions(
         }),
     });
 
+    tools.push(McpToolDefinition {
+        name: "nyx__ssh_exec".to_string(),
+        description: "Execute a command on a remote SSH service. Returns stdout, stderr, \
+            and exit code. The command runs on the remote machine authenticated via NyxID \
+            SSH certificate."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "string",
+                    "description": "Service slug or ID of the SSH service to execute on"
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute on the remote machine"
+                },
+                "principal": {
+                    "type": "string",
+                    "description": "SSH principal (Unix username) to run the command as"
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Maximum execution time in seconds (default: 30, max: 300)",
+                    "default": 30
+                }
+            },
+            "required": ["service", "command"]
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__ssh_list_services".to_string(),
+        description: "List available SSH services that can be used for remote command \
+            execution."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {}
+        }),
+    });
+
     // -- Per-service tools (filtered by activated set) --
     for service in services {
         let included = match activated_service_ids {
@@ -990,8 +1032,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 4 meta-tools
-        assert_eq!(tools.len(), 4);
+        // Should only have the 6 meta-tools (4 core + 2 SSH)
+        assert_eq!(tools.len(), 6);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -1016,8 +1058,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 4 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 5);
+        // 6 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 7);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -1041,8 +1083,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 4 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 6);
+        // 6 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 8);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }

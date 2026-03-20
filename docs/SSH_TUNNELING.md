@@ -423,3 +423,21 @@ Relevant environment variables:
 | `SSH_MAX_TUNNEL_DURATION_SECS` | `3600` | Maximum lifetime for a single SSH tunnel session before NyxID closes it |
 
 Every disconnect audit entry includes session duration plus byte counts in each direction.
+
+---
+
+## 8. Remote Command Execution
+
+NyxID also supports executing individual commands on SSH services programmatically, without opening an interactive tunnel. This is useful for AI agent automation, CI/CD pipelines, monitoring scripts, and infrastructure management.
+
+The exec endpoint is:
+
+```
+POST /api/v1/ssh/{service_id}/exec
+```
+
+It accepts a command string, optional principal, and optional timeout, and returns structured output (stdout, stderr, exit code, duration, timeout status). The same endpoint is also available as MCP tools (`nyx__ssh_exec` and `nyx__ssh_list_services`) for AI agent integration.
+
+Security controls include a command blocklist, 1 MB output cap, configurable timeouts (max 300s), full audit logging, and the same certificate-based authentication and RBAC as tunneling.
+
+For complete documentation, see [SSH_REMOTE_EXEC.md](SSH_REMOTE_EXEC.md).
