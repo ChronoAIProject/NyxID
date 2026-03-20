@@ -130,8 +130,7 @@ pub async fn get_mcp_config(
     let valid_services: Vec<&DownstreamService> = services
         .iter()
         .filter(|svc| {
-            // Skip provider services
-            if svc.service_category == "provider" {
+            if svc.service_type != "http" || svc.service_category == "provider" {
                 return false;
             }
             match conn_map.get(svc.id.as_str()) {

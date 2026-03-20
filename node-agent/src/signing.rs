@@ -72,11 +72,6 @@ pub fn verify_request_signature(
     secret_hex: &str,
     expected_signature: &str,
 ) -> bool {
-    let secret_bytes = match hex::decode(secret_hex) {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-
     let timestamp = request["timestamp"].as_str().unwrap_or("");
     let nonce = request["nonce"].as_str().unwrap_or("");
     let method = request["method"].as_str().unwrap_or("");
@@ -85,6 +80,78 @@ pub fn verify_request_signature(
     let body = request["body"].as_str().unwrap_or("");
 
     let message = format!("{timestamp}\n{nonce}\n{method}\n{path}\n{query}\n{body}");
+    verify_signature(secret_hex, expected_signature, &message)
+}
+
+/// Verify the HMAC-SHA256 signature on an SSH tunnel open request.
+pub fn verify_ssh_tunnel_signature(
+    request: &serde_json::Value,
+    secret_hex: &str,
+    expected_signature: &str,
+) -> bool {
+    let timestamp = request["timestamp"].as_str().unwrap_or("");
+    let nonce = request["nonce"].as_str().unwrap_or("");
+    let session_id = request["session_id"].as_str().unwrap_or("");
+    let service_id = request["service_id"].as_str().unwrap_or("");
+    let host = request["host"].as_str().unwrap_or("");
+    let port = request["port"]
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+
+    let message = format!("{timestamp}\n{nonce}\n{session_id}\n{service_id}\n{host}\n{port}");
+    verify_signature(secret_hex, expected_signature, &message)
+}
+
+/// Verify the HMAC-SHA256 signature on an SSH exec request.
+/// Message format: `{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}`
+pub fn verify_ssh_exec_signature(
+    request: &serde_json::Value,
+    secret_hex: &str,
+    expected_signature: &str,
+) -> bool {
+    let timestamp = request["timestamp"].as_str().unwrap_or("");
+    let nonce = request["nonce"].as_str().unwrap_or("");
+    let request_id = request["request_id"].as_str().unwrap_or("");
+    let host = request["host"].as_str().unwrap_or("");
+    let port = request["port"]
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let principal = request["principal"].as_str().unwrap_or("");
+
+    let message = format!("{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}");
+    verify_signature(secret_hex, expected_signature, &message)
+}
+
+/// Verify the HMAC-SHA256 signature on a web terminal open request.
+pub fn verify_web_terminal_signature(
+    request: &serde_json::Value,
+    secret_hex: &str,
+    expected_signature: &str,
+) -> bool {
+    let timestamp = request["timestamp"].as_str().unwrap_or("");
+    let nonce = request["nonce"].as_str().unwrap_or("");
+    let session_id = request["session_id"].as_str().unwrap_or("");
+    let host = request["host"].as_str().unwrap_or("");
+    let port = request["port"]
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let principal = request["principal"].as_str().unwrap_or("");
+
+    let message = format!("{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}");
+    verify_signature(secret_hex, expected_signature, &message)
+}
+
+fn verify_signature(secret_hex: &str, expected_signature: &str, message: &str) -> bool {
+    let secret_bytes = match hex::decode(secret_hex) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
 
     let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(&secret_bytes) else {
         return false;
@@ -105,7 +172,6 @@ mod tests {
     use super::*;
 
     fn compute_signature(secret_hex: &str, request: &serde_json::Value) -> String {
-        let secret_bytes = hex::decode(secret_hex).unwrap();
         let timestamp = request["timestamp"].as_str().unwrap_or("");
         let nonce = request["nonce"].as_str().unwrap_or("");
         let method = request["method"].as_str().unwrap_or("");
@@ -113,8 +179,34 @@ mod tests {
         let query = request["query"].as_str().unwrap_or("");
         let body = request["body"].as_str().unwrap_or("");
 
-        let message = format!("{timestamp}\n{nonce}\n{method}\n{path}\n{query}\n{body}");
+        compute_signature_for_message(
+            secret_hex,
+            &format!("{timestamp}\n{nonce}\n{method}\n{path}\n{query}\n{body}"),
+        )
+    }
 
+    fn compute_ssh_tunnel_signature(secret_hex: &str, request: &serde_json::Value) -> String {
+        let secret_bytes = hex::decode(secret_hex).unwrap();
+        let timestamp = request["timestamp"].as_str().unwrap_or("");
+        let nonce = request["nonce"].as_str().unwrap_or("");
+        let session_id = request["session_id"].as_str().unwrap_or("");
+        let service_id = request["service_id"].as_str().unwrap_or("");
+        let host = request["host"].as_str().unwrap_or("");
+        let port = request["port"]
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+
+        let message = format!("{timestamp}\n{nonce}\n{session_id}\n{service_id}\n{host}\n{port}");
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).unwrap();
+        mac.update(message.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn compute_signature_for_message(secret_hex: &str, message: &str) -> String {
+        let secret_bytes = hex::decode(secret_hex).unwrap();
         let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).unwrap();
         mac.update(message.as_bytes());
         hex::encode(mac.finalize().into_bytes())
@@ -175,6 +267,169 @@ mod tests {
         let sig = compute_signature(&secret, &request);
         let wrong_secret = "cd".repeat(32);
         assert!(!verify_request_signature(&request, &wrong_secret, &sig));
+    }
+
+    #[test]
+    fn valid_ssh_tunnel_signature_passes() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "session_id": "sess-1",
+            "service_id": "svc-1",
+            "host": "ssh.internal",
+            "port": 22,
+        });
+
+        let sig = compute_ssh_tunnel_signature(&secret, &request);
+        assert!(verify_ssh_tunnel_signature(&request, &secret, &sig));
+    }
+
+    #[test]
+    fn tampered_ssh_tunnel_signature_fails() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "session_id": "sess-1",
+            "service_id": "svc-1",
+            "host": "ssh.internal",
+            "port": 22,
+        });
+
+        let sig = compute_ssh_tunnel_signature(&secret, &request);
+        let tampered = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "session_id": "sess-1",
+            "service_id": "svc-1",
+            "host": "other.internal",
+            "port": 22,
+        });
+
+        assert!(!verify_ssh_tunnel_signature(&tampered, &secret, &sig));
+    }
+
+    fn compute_web_terminal_signature(secret_hex: &str, request: &serde_json::Value) -> String {
+        let secret_bytes = hex::decode(secret_hex).unwrap();
+        let timestamp = request["timestamp"].as_str().unwrap_or("");
+        let nonce = request["nonce"].as_str().unwrap_or("");
+        let session_id = request["session_id"].as_str().unwrap_or("");
+        let host = request["host"].as_str().unwrap_or("");
+        let port = request["port"]
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let principal = request["principal"].as_str().unwrap_or("");
+
+        let message = format!("{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}");
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).unwrap();
+        mac.update(message.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    #[test]
+    fn valid_web_terminal_signature_passes() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "session_id": "wt-sess-1",
+            "host": "10.0.0.5",
+            "port": 22,
+            "principal": "ubuntu",
+        });
+
+        let sig = compute_web_terminal_signature(&secret, &request);
+        assert!(verify_web_terminal_signature(&request, &secret, &sig));
+    }
+
+    #[test]
+    fn tampered_web_terminal_signature_fails() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "session_id": "wt-sess-1",
+            "host": "10.0.0.5",
+            "port": 22,
+            "principal": "ubuntu",
+        });
+
+        let sig = compute_web_terminal_signature(&secret, &request);
+        let tampered = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "session_id": "wt-sess-1",
+            "host": "10.0.0.5",
+            "port": 22,
+            "principal": "root",
+        });
+
+        assert!(!verify_web_terminal_signature(&tampered, &secret, &sig));
+    }
+
+    fn compute_ssh_exec_signature(secret_hex: &str, request: &serde_json::Value) -> String {
+        let secret_bytes = hex::decode(secret_hex).unwrap();
+        let timestamp = request["timestamp"].as_str().unwrap_or("");
+        let nonce = request["nonce"].as_str().unwrap_or("");
+        let request_id = request["request_id"].as_str().unwrap_or("");
+        let host = request["host"].as_str().unwrap_or("");
+        let port = request["port"]
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let principal = request["principal"].as_str().unwrap_or("");
+
+        let message = format!("{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}");
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(&secret_bytes).unwrap();
+        mac.update(message.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    #[test]
+    fn valid_ssh_exec_signature_passes() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "request_id": "req-exec-1",
+            "host": "10.0.0.5",
+            "port": 22,
+            "principal": "ubuntu",
+        });
+
+        let sig = compute_ssh_exec_signature(&secret, &request);
+        assert!(verify_ssh_exec_signature(&request, &secret, &sig));
+    }
+
+    #[test]
+    fn tampered_ssh_exec_signature_fails() {
+        let secret = "ab".repeat(32);
+        let request = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "request_id": "req-exec-1",
+            "host": "10.0.0.5",
+            "port": 22,
+            "principal": "ubuntu",
+        });
+
+        let sig = compute_ssh_exec_signature(&secret, &request);
+        let tampered = serde_json::json!({
+            "timestamp": "2026-03-12T10:30:00.000Z",
+            "nonce": "test-nonce",
+            "request_id": "req-exec-1",
+            "host": "10.0.0.5",
+            "port": 22,
+            "principal": "root",
+        });
+
+        assert!(!verify_ssh_exec_signature(&tampered, &secret, &sig));
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use mongodb::bson::doc;
 use serde::Serialize;
+use std::net::Ipv4Addr;
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -9,7 +11,7 @@ use crate::models::downstream_service::{
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 
-use super::services::ServiceResponse;
+use super::services::{ServiceResponse, SshServiceConfigResponse};
 
 /// Verify that the authenticated user has admin privileges.
 pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
@@ -71,12 +73,25 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
         slug: s.slug,
         description: s.description,
         base_url: s.base_url,
+        service_type: s.service_type,
+        visibility: s.visibility,
         auth_method: s.auth_method,
         auth_type: s.auth_type,
         auth_key_name: s.auth_key_name,
         is_active: s.is_active,
         oauth_client_id: s.oauth_client_id,
-        api_spec_url: s.api_spec_url,
+        openapi_spec_url: s.openapi_spec_url.clone(),
+        api_spec_url: s.openapi_spec_url,
+        asyncapi_spec_url: s.asyncapi_spec_url,
+        streaming_supported: s.streaming_supported,
+        ssh_config: s.ssh_config.map(|ssh| SshServiceConfigResponse {
+            host: ssh.host,
+            port: ssh.port,
+            certificate_auth_enabled: ssh.certificate_auth_enabled,
+            certificate_ttl_minutes: ssh.certificate_ttl_minutes,
+            allowed_principals: ssh.allowed_principals,
+            ca_public_key: ssh.ca_public_key,
+        }),
         service_category: s.service_category,
         requires_user_credential: s.requires_user_credential,
         identity_propagation_mode: s.identity_propagation_mode,
@@ -141,7 +156,7 @@ pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
                 ipv4.is_loopback()
                     || ipv4.is_private()
                     || ipv4.is_link_local()
-                    || ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254
+                    || is_rfc6598_cgnat(ipv4)
             }
             std::net::IpAddr::V6(ipv6) => {
                 ipv6.is_loopback()
@@ -161,8 +176,54 @@ pub fn validate_base_url(url: &str, allow_private: bool) -> AppResult<()> {
     Ok(())
 }
 
+fn is_rfc6598_cgnat(ipv4: Ipv4Addr) -> bool {
+    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
+}
+
+/// Validate an optional documentation spec URL using the same SSRF rules as base_url.
+pub fn validate_optional_spec_url(url: &str, allow_private: bool) -> AppResult<()> {
+    if url.len() > 2048 {
+        return Err(AppError::ValidationError(
+            "Spec URL must not exceed 2048 characters".to_string(),
+        ));
+    }
+
+    validate_base_url(url, allow_private)
+}
+
+pub fn require_http_service(service: &DownstreamService) -> AppResult<()> {
+    if service.service_type != "http" {
+        return Err(AppError::BadRequest(
+            "This operation is only supported for HTTP services".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Typed response for delete operations (CR-16).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteServiceResponse {
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_base_url, validate_optional_spec_url};
+
+    #[test]
+    fn validate_optional_spec_url_accepts_public_https_url() {
+        assert!(validate_optional_spec_url("https://example.com/openapi.json", false).is_ok());
+    }
+
+    #[test]
+    fn validate_optional_spec_url_rejects_private_host() {
+        assert!(validate_optional_spec_url("http://127.0.0.1/openapi.json", false).is_err());
+        assert!(validate_optional_spec_url("http://100.64.0.10/openapi.json", false).is_err());
+    }
+
+    #[test]
+    fn validate_base_url_accepts_private_hosts_in_development() {
+        assert!(validate_base_url("http://127.0.0.1:3000", true).is_ok());
+    }
 }

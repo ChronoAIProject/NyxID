@@ -1,13 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type {
+  CreateServicePayload,
   DownstreamService,
   OidcCredentials,
   RedirectUrisResponse,
   RegenerateSecretResponse,
+  UpdateServicePayload,
   UserServiceConnection,
 } from "@/types/api";
-import type { CreateServiceFormData, UpdateServiceFormData } from "@/schemas/services";
 
 export function useServices() {
   return useQuery({
@@ -36,7 +37,7 @@ export function useCreateService() {
 
   return useMutation({
     mutationFn: async (
-      data: CreateServiceFormData,
+      data: CreateServicePayload,
     ): Promise<DownstreamService> => {
       return api.post<DownstreamService>("/services", data);
     },
@@ -55,7 +56,7 @@ export function useUpdateService() {
       data,
     }: {
       readonly serviceId: string;
-      readonly data: UpdateServiceFormData;
+      readonly data: UpdateServicePayload;
     }): Promise<DownstreamService> => {
       return api.put<DownstreamService>(`/services/${serviceId}`, data);
     },

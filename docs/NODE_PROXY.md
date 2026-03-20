@@ -13,6 +13,7 @@ This is an opt-in feature. Users without nodes continue using the existing proxy
 - [Node Registration Flow](#node-registration-flow)
 - [Service Bindings](#service-bindings)
 - [Streaming Proxy](#streaming-proxy)
+- [SSH Tunnel Transport](#ssh-tunnel-transport)
 - [Multi-Node Failover](#multi-node-failover)
 - [HMAC Request Signing](#hmac-request-signing)
 - [Node Metrics](#node-metrics)
@@ -171,6 +172,31 @@ The streaming protocol uses three message types:
 3. `proxy_response_end` -- signals stream completion
 
 The `content-length` header is stripped from streaming responses since the total size is unknown. The maximum streaming duration is configurable via `NODE_MAX_STREAM_DURATION_SECS` (default: 300 seconds).
+
+---
+
+## SSH Tunnel Transport
+
+The same node routing layer can also carry SSH sessions for services that have SSH tunneling enabled in NyxID. Instead of forwarding HTTP, NyxID asks the node to open a raw TCP connection to the configured SSH target and then relays SSH bytes over the existing node WebSocket.
+
+### How It Works
+
+1. A user opens `GET /api/v1/ssh/{service_id}` through NyxID's SSH helper
+2. NyxID resolves the user's bound node for that service
+3. NyxID sends `ssh_tunnel_open` with the target `host` and `port`
+4. The node opens a local TCP connection to the SSH daemon
+5. Both sides exchange base64-encoded `ssh_tunnel_data` messages until either side closes the session
+
+### Routing Behavior
+
+- SSH uses the same per-user service bindings as HTTP proxy traffic
+- The selected node must be online and able to reach the target SSH host from its own network
+- Private, loopback, and metadata SSH targets must be explicitly allowlisted in the node agent config before the node will open them
+- The node agent enforces a bounded `max_tunnels` limit so the server cannot open unbounded concurrent SSH sessions
+- The node agent enforces `io_timeout_secs` per SSH TCP read and write so stalled tunnel workers are eventually reclaimed; the default `3600` seconds matches NyxID's tunnel cap, and operators can lower it for more aggressive idle-session cleanup
+- If no healthy bound node can open the SSH target, NyxID falls back to opening the TCP connection itself
+
+For operator-facing setup, see [SSH_TUNNELING.md](./SSH_TUNNELING.md). For the exact message shapes, see [NODE_PROXY_PROTOCOL.md](./NODE_PROXY_PROTOCOL.md).
 
 ---
 

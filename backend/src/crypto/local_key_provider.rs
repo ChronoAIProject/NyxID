@@ -324,6 +324,9 @@ mod tests {
             node_max_ws_connections: 100,
             node_max_stream_duration_secs: 300,
             node_hmac_signing_enabled: true,
+            ssh_max_sessions_per_user: 4,
+            ssh_connect_timeout_secs: 10,
+            ssh_max_tunnel_duration_secs: 3600,
         };
 
         let provider = LocalKeyProvider::from_config(&config);

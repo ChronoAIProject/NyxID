@@ -34,6 +34,7 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
 
 #[derive(Serialize)]
 pub struct PublicConfigResponse {
+    pub frontend_url: String,
     pub mcp_url: String,
     pub node_ws_url: String,
     pub version: String,
@@ -62,6 +63,7 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
         .replace("http://", "ws://");
 
     Json(PublicConfigResponse {
+        frontend_url: state.config.frontend_url.trim_end_matches('/').to_string(),
         mcp_url: format!("{base}/mcp"),
         node_ws_url: format!("{ws_base}/api/v1/nodes/ws"),
         version: env!("CARGO_PKG_VERSION").to_string(),

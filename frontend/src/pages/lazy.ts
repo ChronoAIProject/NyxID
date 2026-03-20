@@ -6,6 +6,9 @@ export const LoginPage = lazy(() =>
 export const RegisterPage = lazy(() =>
   import("@/pages/register").then((m) => ({ default: m.RegisterPage })),
 );
+export const CliAuthPage = lazy(() =>
+  import("@/pages/cli-auth").then((m) => ({ default: m.CliAuthPage })),
+);
 export const DashboardPage = lazy(() =>
   import("@/pages/dashboard").then((m) => ({ default: m.DashboardPage })),
 );
@@ -154,5 +157,10 @@ export const NodeDetailPage = lazy(() =>
 export const AdminNodesPage = lazy(() =>
   import("@/pages/admin-nodes").then((m) => ({
     default: m.AdminNodesPage,
+  })),
+);
+export const SshTerminalPage = lazy(() =>
+  import("@/pages/ssh-terminal").then((m) => ({
+    default: m.SshTerminalPage,
   })),
 );

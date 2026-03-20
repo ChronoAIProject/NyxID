@@ -51,6 +51,8 @@ import {
   NodesPage,
   NodeDetailPage,
   AdminNodesPage,
+  CliAuthPage,
+  SshTerminalPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
@@ -124,6 +126,24 @@ const privacyRoute = createRoute({
   path: "/privacy",
   getParentRoute: () => rootRoute,
   component: PrivacyPage,
+});
+
+const cliAuthRoute = createRoute({
+  path: "/cli-auth",
+  getParentRoute: () => rootRoute,
+  component: CliAuthPage,
+});
+
+const sshTerminalRoute = createRoute({
+  path: "/ssh/$serviceId/terminal",
+  getParentRoute: () => rootRoute,
+  beforeLoad: () => {
+    const { isAuthenticated, isLoading } = useAuthStore.getState();
+    if (!isAuthenticated && !isLoading) {
+      throw redirect({ to: "/login" });
+    }
+  },
+  component: SshTerminalPage,
 });
 
 const dashboardLayout = createRoute({
@@ -356,6 +376,8 @@ const routeTree = rootRoute.addChildren([
   oauthConsentRoute,
   oauthErrorRoute,
   privacyRoute,
+  cliAuthRoute,
+  sshTerminalRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
     apiKeysRoute,

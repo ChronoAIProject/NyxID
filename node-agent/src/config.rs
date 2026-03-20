@@ -14,6 +14,8 @@ pub struct NodeConfig {
     pub node: NodeSection,
     #[serde(default)]
     pub signing: SigningConfig,
+    #[serde(default)]
+    pub ssh: SshConfig,
     /// "file" (default, AES-GCM encrypted) or "keychain" (OS keychain)
     #[serde(default = "default_storage_backend")]
     pub storage_backend: String,
@@ -46,6 +48,44 @@ pub struct SigningConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshConfig {
+    #[serde(default = "default_max_ssh_tunnels")]
+    pub max_tunnels: usize,
+    /// Idle timeout for each SSH TCP read/write. Defaults to 3600s to match
+    /// NyxID's tunnel lifetime cap; lower it if you want more aggressive
+    /// cleanup of stalled or idle interactive sessions.
+    #[serde(default = "default_ssh_io_timeout_secs")]
+    pub io_timeout_secs: u64,
+    #[serde(default)]
+    pub allowed_targets: Vec<SshTargetConfig>,
+}
+
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self {
+            max_tunnels: default_max_ssh_tunnels(),
+            io_timeout_secs: default_ssh_io_timeout_secs(),
+            allowed_targets: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshTargetConfig {
+    pub host: String,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+fn default_max_ssh_tunnels() -> usize {
+    10
+}
+
+fn default_ssh_io_timeout_secs() -> u64 {
+    3600
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialConfig {
     /// "header" or "query_param"
     pub injection_method: String,
@@ -73,6 +113,7 @@ impl NodeConfig {
                 auth_token_encrypted: String::new(),
             },
             signing: SigningConfig::default(),
+            ssh: SshConfig::default(),
             storage_backend,
             credentials: BTreeMap::new(),
         }
@@ -318,5 +359,24 @@ mod tests {
         assert!(!config.credentials.contains_key("svc"));
 
         assert!(config.remove_credential("nonexistent").is_err());
+    }
+
+    #[test]
+    fn deserialize_defaults_ssh_settings_for_existing_configs() {
+        let config: NodeConfig = toml::from_str(
+            r#"
+                [server]
+                url = "wss://example.com/api/v1/nodes/ws"
+
+                [node]
+                id = "test-node-id"
+                auth_token_encrypted = "ciphertext"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.ssh.max_tunnels, 10);
+        assert_eq!(config.ssh.io_timeout_secs, 3600);
+        assert!(config.ssh.allowed_targets.is_empty());
     }
 }

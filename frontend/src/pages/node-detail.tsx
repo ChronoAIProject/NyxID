@@ -14,6 +14,7 @@ import { ApiError } from "@/lib/api-client";
 import {
   buildNodeCredentialCommand,
   getNodeCredentialPromptHint,
+  isSshService,
 } from "@/lib/node-credentials";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
@@ -677,38 +678,64 @@ export function NodeDetailPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Node Credential Setup</DialogTitle>
+            <DialogTitle>
+              {isSshService(setupService) ? "SSH Service Bound" : "Node Credential Setup"}
+            </DialogTitle>
             <DialogDescription>
-              Run this command on your node to configure the credential for{" "}
-              <strong>{setupCommandSlug ?? ""}</strong>. You will be prompted
-              to enter the secret value securely.
+              {isSshService(setupService)
+                ? `SSH service "${setupCommandSlug ?? ""}" is now bound to this node. The node agent will tunnel SSH connections to the target -- no credential setup needed.`
+                : `Run this command on your node to configure the credential for "${setupCommandSlug ?? ""}". You will be prompted to enter the secret value securely.`}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
-            <CopyableField
-              label="Setup Command"
-              value={buildNodeCredentialCommand(setupCommandSlug ?? "", setupService)}
-            />
-            {setupCommandHint && (
-              <p className="text-xs text-muted-foreground">{setupCommandHint}</p>
-            )}
-            {setupService && (
+            {isSshService(setupService) ? (
               <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
                 <p>
                   <span className="font-medium text-foreground">Service:</span>{" "}
-                  {setupService.name}
+                  {setupService?.name}
                 </p>
                 <p>
-                  <span className="font-medium text-foreground">Auth method:</span>{" "}
-                  {setupService.auth_method} ({setupService.auth_key_name})
+                  <span className="font-medium text-foreground">Target:</span>{" "}
+                  {setupService?.ssh_config
+                    ? `${setupService.ssh_config.host}:${String(setupService.ssh_config.port)}`
+                    : "Not configured"}
                 </p>
-                {setupService.auth_type && (
-                  <p>
-                    <span className="font-medium text-foreground">Auth type:</span>{" "}
-                    {setupService.auth_type}
-                  </p>
-                )}
+                <p className="pt-1">
+                  The node agent opens a raw TCP connection to the SSH target on its
+                  local network. SSH authentication (password or certificate) happens
+                  end-to-end between the client and target.
+                </p>
               </div>
+            ) : (
+              <>
+                {buildNodeCredentialCommand(setupCommandSlug ?? "", setupService) && (
+                  <CopyableField
+                    label="Setup Command"
+                    value={buildNodeCredentialCommand(setupCommandSlug ?? "", setupService) ?? ""}
+                  />
+                )}
+                {setupCommandHint && (
+                  <p className="text-xs text-muted-foreground">{setupCommandHint}</p>
+                )}
+                {setupService && (
+                  <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
+                    <p>
+                      <span className="font-medium text-foreground">Service:</span>{" "}
+                      {setupService.name}
+                    </p>
+                    <p>
+                      <span className="font-medium text-foreground">Auth method:</span>{" "}
+                      {setupService.auth_method} ({setupService.auth_key_name})
+                    </p>
+                    {setupService.auth_type && (
+                      <p>
+                        <span className="font-medium text-foreground">Auth type:</span>{" "}
+                        {setupService.auth_type}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </>
             )}
           </div>
           <DialogFooter>

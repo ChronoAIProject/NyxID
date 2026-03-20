@@ -11,6 +11,7 @@ This document describes the WebSocket protocol used for communication between Ny
 - [Heartbeat Protocol](#heartbeat-protocol)
 - [Request/Response Routing](#requestresponse-routing)
 - [Streaming Responses](#streaming-responses)
+- [SSH Tunnel Transport](#ssh-tunnel-transport)
 - [HMAC Request Signing](#hmac-request-signing)
 - [Message Reference: Node to NyxID](#message-reference-node-to-nyxid)
 - [Message Reference: NyxID to Node](#message-reference-nyxid-to-node)
@@ -44,6 +45,7 @@ Node Agent                              NyxID Server
     |  <<< Authenticated session >>>         |
     |  heartbeat_ping / heartbeat_pong       |
     |  proxy_request / proxy_response        |
+    |  ssh_tunnel_open / ssh_tunnel_data     |
     |                                        |
     |  WebSocket close                       |
     | ──────────────────────────────────────> |
@@ -323,23 +325,104 @@ If the node sends a standard `proxy_response` instead of the streaming sequence,
 
 ---
 
+## SSH Tunnel Transport
+
+SSH tunneling reuses the authenticated node WebSocket but carries raw SSH TCP bytes instead of HTTP metadata. NyxID uses this path when a service has SSH tunneling enabled and the user has a healthy node binding for that service.
+
+### ssh_tunnel_open
+
+Sent by NyxID when it wants the node to open a TCP connection to the downstream SSH target:
+
+```json
+{
+  "type": "ssh_tunnel_open",
+  "session_id": "<uuid>",
+  "service_id": "<service_uuid>",
+  "host": "ssh.internal.example",
+  "port": 22,
+  "timestamp": "2026-03-12T10:30:00.000Z",
+  "nonce": "<uuid>",
+  "signature": "<hex_encoded_hmac_sha256>"
+}
+```
+
+- `timestamp`, `nonce`, and `signature` are present when HMAC signing is enabled. Omitted when signing is disabled.
+
+### ssh_tunnel_opened
+
+Sent by the node after the TCP connection succeeds:
+
+```json
+{
+  "type": "ssh_tunnel_opened",
+  "session_id": "<uuid>"
+}
+```
+
+### ssh_tunnel_data
+
+Sent by either side to move SSH payload bytes:
+
+```json
+{
+  "type": "ssh_tunnel_data",
+  "session_id": "<uuid>",
+  "data": "<base64_encoded_chunk>"
+}
+```
+
+`data` contains arbitrary SSH bytes encoded as base64 because node control-plane messages remain JSON.
+
+### ssh_tunnel_close
+
+Sent by NyxID when the client disconnects or the server wants to terminate the session:
+
+```json
+{
+  "type": "ssh_tunnel_close",
+  "session_id": "<uuid>"
+}
+```
+
+### ssh_tunnel_closed
+
+Sent by the node when the TCP connection closes or fails to open:
+
+```json
+{
+  "type": "ssh_tunnel_closed",
+  "session_id": "<uuid>",
+  "error": "connect_failed:Connection refused"
+}
+```
+
+`error` is optional and is present when the node could not establish or keep the TCP stream open.
+
+---
+
 ## HMAC Request Signing
 
-When HMAC signing is enabled on the server (`NODE_HMAC_SIGNING_ENABLED=true`, default), proxy requests include a cryptographic signature that the node must verify before executing the request.
+When HMAC signing is enabled on the server (`NODE_HMAC_SIGNING_ENABLED=true`, default), `proxy_request` and `ssh_tunnel_open` messages include a cryptographic signature that the node must verify before executing the request.
 
 ### Signing Protocol
 
 1. The server generates a timestamp (RFC 3339) and nonce (UUID v4)
 2. The server computes an HMAC-SHA256 signature over the canonicalized request
-3. The `timestamp`, `nonce`, and `signature` fields are included in the `proxy_request` message
+3. The `timestamp`, `nonce`, and `signature` fields are included in the signed message
 4. The node verifies the signature using the shared secret from registration
 
-### Canonical Message Format
+### Canonical Message Formats
 
-The HMAC message is a newline-delimited string of the following fields:
+`proxy_request` uses a newline-delimited string of the following fields:
 
 ```
 {timestamp}\n{nonce}\n{method}\n{path}\n{query}\n{body_base64}
+```
+
+`ssh_tunnel_open` uses:
+
+```
+{timestamp}\n{nonce}\n{session_id}\n{service_id}\n{host}\n{port}
 ```
 
 | Field | Source | Empty Value |
@@ -350,6 +433,10 @@ The HMAC message is a newline-delimited string of the following fields:
 | `path` | Request path (e.g., `/v1/chat/completions`) | `""` |
 | `query` | Query string without `?` | `""` |
 | `body_base64` | Base64-encoded request body | `""` |
+| `session_id` | SSH tunnel session UUID | `""` |
+| `service_id` | SSH service UUID | `""` |
+| `host` | Downstream SSH host | `""` |
+| `port` | Downstream SSH port | `""` |
 
 ### Verification
 
@@ -384,6 +471,9 @@ Requests that fail replay checks are rejected with HTTP 403 and the error messag
 | `proxy_response_start` | Beginning of a streaming response | `request_id`, `status`, `headers` |
 | `proxy_response_chunk` | Chunk of streaming data | `request_id`, `data` (base64, max 64KB decoded) |
 | `proxy_response_end` | End of streaming response | `request_id` |
+| `ssh_tunnel_opened` | SSH target TCP connection established | `session_id` |
+| `ssh_tunnel_data` | SSH payload bytes flowing back to NyxID | `session_id`, `data` (base64) |
+| `ssh_tunnel_closed` | SSH tunnel closed or failed | `session_id`, `error` (optional) |
 | `proxy_error` | If a proxied request fails | `request_id`, `error`, `status` (optional, default 502) |
 | `status_update` | Voluntary health/capability update | `agent_version` (optional), `services_ready` (optional) |
 
@@ -398,6 +488,9 @@ Requests that fail replay checks are rejected with HTTP 403 and the error messag
 | `auth_error` | On authentication failure (connection closes) | `message` |
 | `heartbeat_ping` | Periodic keepalive | `timestamp` |
 | `proxy_request` | HTTP request to route through the node | `request_id`, `service_id`, `service_slug`, `method`, `path`, `query`, `headers`, `body` (base64), `timestamp`, `nonce`, `signature` (when HMAC enabled) |
+| `ssh_tunnel_open` | Open a downstream SSH TCP connection on the node | `session_id`, `service_id`, `host`, `port`, `timestamp`, `nonce`, `signature` (when HMAC enabled) |
+| `ssh_tunnel_data` | SSH payload bytes flowing from NyxID to the node | `session_id`, `data` (base64) |
+| `ssh_tunnel_close` | Close an active SSH tunnel on the node | `session_id` |
 | `error` | Server-side error | `message` |
 
 ---

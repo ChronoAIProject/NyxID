@@ -9,11 +9,12 @@ use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, legacy_http_service_type_filter,
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service_connection::{
@@ -238,7 +239,6 @@ async fn execute_proxy(
             }
         })
         .collect();
-
     // Read the request body (10MB limit)
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
@@ -285,47 +285,29 @@ async fn execute_proxy(
             // Resolve signing secret for this specific node. When HMAC signing is
             // enabled, unsigned requests are treated as a routing failure rather
             // than silently downgrading integrity guarantees.
-            let signing_secret: Option<Vec<u8>> = if state.config.node_hmac_signing_enabled {
-                let Some(node) = node_service::get_node_by_id(&state.db, node_id).await? else {
-                    last_error = Some(AppError::NodeNotFound(format!(
-                        "Node {node_id} not found during proxy routing"
-                    )));
-                    continue;
-                };
-
-                let Some(encrypted_secret) = node.signing_secret_encrypted.as_deref() else {
-                    tracing::warn!(
-                        node_id = %node_id,
-                        "Skipping node route because signing secret is missing"
-                    );
-                    last_error = Some(AppError::NodeOffline(format!(
-                        "Node {node_id} is missing its signing secret"
-                    )));
-                    continue;
-                };
-
-                let secret_hex = String::from_utf8(
-                    state
-                        .encryption_keys
-                        .decrypt(encrypted_secret)
-                        .await
-                        .map_err(|e| {
-                            AppError::Internal(format!(
-                                "Failed to decrypt node signing secret for {node_id}: {e}"
-                            ))
-                        })?,
+            let signing_secret = if state.config.node_hmac_signing_enabled {
+                match node_service::get_node_signing_secret(
+                    &state.db,
+                    state.encryption_keys.as_ref(),
+                    node_id,
                 )
-                .map_err(|e| {
-                    AppError::Internal(format!(
-                        "Node signing secret for {node_id} is not valid UTF-8: {e}"
-                    ))
-                })?;
-
-                Some(hex::decode(&secret_hex).map_err(|e| {
-                    AppError::Internal(format!(
-                        "Node signing secret for {node_id} is not valid hex: {e}"
-                    ))
-                })?)
+                .await
+                {
+                    Ok(secret) => Some(secret),
+                    Err(AppError::NodeNotFound(message)) => {
+                        last_error = Some(AppError::NodeNotFound(message));
+                        continue;
+                    }
+                    Err(AppError::NodeOffline(message)) => {
+                        tracing::warn!(
+                            node_id = %node_id,
+                            "Skipping node route because signing secret is missing"
+                        );
+                        last_error = Some(AppError::NodeOffline(message));
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 None
             };
@@ -333,7 +315,11 @@ async fn execute_proxy(
             let start = std::time::Instant::now();
             let result = state
                 .node_ws_manager
-                .send_proxy_request(node_id, attempt_request, signing_secret.as_deref())
+                .send_proxy_request(
+                    node_id,
+                    attempt_request,
+                    signing_secret.as_ref().map(|secret| secret.as_slice()),
+                )
                 .await;
             let latency_ms = start.elapsed().as_millis() as u64;
 
@@ -712,11 +698,14 @@ async fn execute_proxy(
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
 
-    let is_sse = downstream_response
+    let upstream_is_sse = downstream_response
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/event-stream"));
+    // `streaming_supported` is discovery metadata only; runtime passthrough
+    // follows the upstream response on each request.
+    let is_sse = upstream_is_sse;
 
     let mut response_builder = Response::builder().status(status);
 
@@ -874,7 +863,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProxyServiceItem {
     pub id: String,
     pub name: String,
@@ -891,6 +880,14 @@ pub struct ProxyServiceItem {
     pub proxy_url: String,
     /// Slug-based proxy URL (developer-friendly)
     pub proxy_url_slug: String,
+    /// Whether NyxID can serve a Scalar UI for this service
+    pub docs_url: Option<String>,
+    /// Proxied OpenAPI JSON URL
+    pub openapi_url: Option<String>,
+    /// Proxied AsyncAPI JSON URL
+    pub asyncapi_url: Option<String>,
+    /// Whether the service advertises streaming support
+    pub streaming_supported: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -899,7 +896,7 @@ pub struct ProxyServicesQuery {
     pub per_page: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProxyServicesResponse {
     pub services: Vec<ProxyServiceItem>,
     pub total: u64,
@@ -912,6 +909,19 @@ pub struct ProxyServicesResponse {
 /// List downstream services available for proxying with their proxy URLs.
 /// Excludes "provider" category services (not proxyable).
 /// Supports pagination via `page` and `per_page` query parameters.
+#[utoipa::path(
+    get,
+    path = "/api/v1/proxy/services",
+    params(
+        ("page" = Option<u64>, Query, description = "Page number"),
+        ("per_page" = Option<u64>, Query, description = "Items per page")
+    ),
+    responses(
+        (status = 200, description = "Proxyable downstream services", body = ProxyServicesResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Proxy"
+)]
 pub async fn list_proxy_services(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -924,10 +934,11 @@ pub async fn list_proxy_services(
     let per_page = query.per_page.unwrap_or(50).min(100);
     let offset = (page - 1) * per_page;
 
-    let filter = doc! {
+    let mut filter = doc! {
         "is_active": true,
         "service_category": { "$ne": "provider" },
     };
+    filter.extend(legacy_http_service_type_filter());
 
     // Get total count for pagination metadata
     let total = state
@@ -989,6 +1000,20 @@ pub async fn list_proxy_services(
             has_node_binding: node_bound_set.contains(s.id.as_str()),
             proxy_url: format!("{base}/api/v1/proxy/{}/{{path}}", s.id),
             proxy_url_slug: format!("{base}/api/v1/proxy/s/{}/{{path}}", s.slug),
+            docs_url: s
+                .openapi_spec_url
+                .as_ref()
+                .or(s.asyncapi_spec_url.as_ref())
+                .map(|_| format!("{base}/api/v1/proxy/services/{}/docs", s.id)),
+            openapi_url: s
+                .openapi_spec_url
+                .as_ref()
+                .map(|_| format!("{base}/api/v1/proxy/services/{}/openapi.json", s.id)),
+            asyncapi_url: s
+                .asyncapi_spec_url
+                .as_ref()
+                .map(|_| format!("{base}/api/v1/proxy/services/{}/asyncapi.json", s.id)),
+            streaming_supported: s.streaming_supported,
         })
         .collect();
 

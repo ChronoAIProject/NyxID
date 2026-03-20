@@ -6,7 +6,7 @@ use mongodb::bson::doc;
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, legacy_http_service_type_filter,
 };
 use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, ServiceEndpoint};
 use crate::models::user_service_connection::{
@@ -93,13 +93,16 @@ pub async fn load_user_tools(
         .collect();
 
     // 3. Auto-connect: services that don't require user credentials
+    let mut auto_services_filter = doc! {
+        "is_active": true,
+        "requires_user_credential": false,
+        "service_category": { "$ne": "provider" },
+    };
+    auto_services_filter.extend(legacy_http_service_type_filter());
+
     let auto_services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find(doc! {
-            "is_active": true,
-            "requires_user_credential": false,
-            "service_category": { "$ne": "provider" },
-        })
+        .find(auto_services_filter)
         .await?
         .try_collect()
         .await?;
@@ -121,7 +124,7 @@ pub async fn load_user_tools(
 
     // Add explicitly connected services (credential check)
     for svc in &connected_services {
-        if svc.service_category == "provider" {
+        if svc.service_type != "http" || svc.service_category == "provider" {
             continue;
         }
         if svc.requires_user_credential {
@@ -314,6 +317,48 @@ pub fn generate_tool_definitions(
                 }
             },
             "required": ["tool_name", "arguments_json"]
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__ssh_exec".to_string(),
+        description: "Execute a command on a remote SSH service. Returns stdout, stderr, \
+            and exit code. The command runs on the remote machine authenticated via NyxID \
+            SSH certificate."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "service": {
+                    "type": "string",
+                    "description": "Service slug or ID of the SSH service to execute on"
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute on the remote machine"
+                },
+                "principal": {
+                    "type": "string",
+                    "description": "SSH principal (Unix username) to run the command as"
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Maximum execution time in seconds (default: 30, max: 300)",
+                    "default": 30
+                }
+            },
+            "required": ["service", "command"]
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__ssh_list_services".to_string(),
+        description: "List available SSH services that can be used for remote command \
+            execution."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {}
         }),
     });
 
@@ -1420,7 +1465,11 @@ pub async fn discover_services(
 
     let connected_ids: HashSet<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
 
-    let mut filter = doc! { "is_active": true, "service_category": { "$ne": "provider" } };
+    let mut filter = doc! {
+        "is_active": true,
+        "service_category": { "$ne": "provider" },
+    };
+    filter.extend(legacy_http_service_type_filter());
     if let Some(cat) = category {
         if cat == "provider" {
             return Ok(serde_json::json!({ "services": [], "count": 0 }));
@@ -1620,8 +1669,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 4 meta-tools
-        assert_eq!(tools.len(), 4);
+        // Should only have the 6 meta-tools (4 core + 2 SSH)
+        assert_eq!(tools.len(), 6);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -1646,8 +1695,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 4 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 5);
+        // 6 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 7);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -1671,8 +1720,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 4 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 6);
+        // 6 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 8);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }

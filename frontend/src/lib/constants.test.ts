@@ -3,6 +3,7 @@ import type { DownstreamService, ProviderConfig } from "@/types/api";
 import {
   AUTH_TYPE_LABELS,
   SERVICE_CATEGORY_LABELS,
+  SERVICE_TYPE_LABELS,
   canConnectProvider,
   getProviderConnectHint,
   getProviderConnectLabel,
@@ -23,12 +24,18 @@ function makeService(
     slug: "test-service",
     description: null,
     base_url: "https://api.example.com",
+    service_type: "http",
+    visibility: "public",
     auth_method: "api_key",
     auth_type: null,
     auth_key_name: "Authorization",
     is_active: true,
     oauth_client_id: null,
+    openapi_spec_url: null,
     api_spec_url: null,
+    asyncapi_spec_url: null,
+    streaming_supported: false,
+    ssh_config: null,
     service_category: "connection",
     requires_user_credential: true,
     created_by: "user-1",
@@ -91,6 +98,12 @@ describe("SERVICE_CATEGORY_LABELS", () => {
 
   it("maps connection to 'External Service'", () => {
     expect(SERVICE_CATEGORY_LABELS["connection"]).toBe("External Service");
+  });
+});
+
+describe("SERVICE_TYPE_LABELS", () => {
+  it("maps ssh to 'SSH'", () => {
+    expect(SERVICE_TYPE_LABELS["ssh"]).toBe("SSH");
   });
 });
 
@@ -159,6 +172,10 @@ describe("isConnectable", () => {
     expect(isConnectable(makeService({ service_category: "provider" }))).toBe(
       false,
     );
+  });
+
+  it("returns false for ssh services", () => {
+    expect(isConnectable(makeService({ service_type: "ssh" }))).toBe(false);
   });
 });
 

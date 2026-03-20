@@ -1,7 +1,28 @@
 use chrono::{DateTime, Utc};
+use mongodb::bson::{Document, doc};
 use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "downstream_services";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SshServiceConfig {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub certificate_auth_enabled: bool,
+    #[serde(default = "default_certificate_ttl_minutes")]
+    pub certificate_ttl_minutes: u32,
+    #[serde(default)]
+    pub allowed_principals: Vec<String>,
+    #[serde(
+        default,
+        with = "crate::models::bson_bytes::optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ca_private_key_encrypted: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_public_key: Option<String>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DownstreamService {
@@ -10,8 +31,15 @@ pub struct DownstreamService {
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
-    /// Base URL of the downstream service (e.g. https://api.example.com)
+    /// Base URL of the downstream service.
+    /// For SSH services this is derived as `ssh://host:port`.
     pub base_url: String,
+    /// "http" | "ssh"
+    #[serde(default = "default_service_type")]
+    pub service_type: String,
+    /// "public" | "private" -- controls who can see this service in listings
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
     /// How credentials are injected: "header", "query", "body"
     pub auth_method: String,
     /// Header name or query param name for the credential
@@ -24,8 +52,21 @@ pub struct DownstreamService {
     #[serde(default)]
     pub auth_type: Option<String>,
     /// URL to an OpenAPI / Swagger spec describing this service's API
+    #[serde(
+        default,
+        alias = "api_spec_url",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub openapi_spec_url: Option<String>,
+    /// URL to an AsyncAPI spec describing this service's streaming interfaces
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_spec_url: Option<String>,
+    pub asyncapi_spec_url: Option<String>,
+    /// Whether this service supports SSE or other streaming responses.
+    #[serde(default)]
+    pub streaming_supported: bool,
+    /// SSH tunnel configuration for first-class SSH services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_config: Option<SshServiceConfig>,
     /// Associated OAuth client ID (set when auth_method is "oidc")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_client_id: Option<String>,
@@ -79,8 +120,31 @@ pub struct DownstreamService {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Match HTTP services while remaining compatible with legacy documents created
+/// before `service_type` was introduced.
+pub fn legacy_http_service_type_filter() -> Document {
+    doc! {
+        "$or": [
+            { "service_type": "http" },
+            { "service_type": { "$exists": false } },
+        ],
+    }
+}
+
+fn default_service_type() -> String {
+    "http".to_string()
+}
+
+fn default_visibility() -> String {
+    "public".to_string()
+}
+
 fn default_service_category() -> String {
     "connection".to_string()
+}
+
+fn default_certificate_ttl_minutes() -> u32 {
+    30
 }
 
 fn default_identity_propagation_mode() -> String {
@@ -106,9 +170,36 @@ mod tests {
 
     #[test]
     fn default_values() {
+        assert_eq!(default_service_type(), "http");
         assert_eq!(default_service_category(), "connection");
+        assert_eq!(default_certificate_ttl_minutes(), 30);
         assert_eq!(default_identity_propagation_mode(), "none");
         assert!(default_true());
+    }
+
+    #[test]
+    fn legacy_http_service_type_filter_matches_missing_field() {
+        let filter = legacy_http_service_type_filter();
+        let clauses = filter.get_array("$or").expect("or clause");
+
+        assert_eq!(clauses.len(), 2);
+        assert_eq!(
+            clauses[0]
+                .as_document()
+                .expect("http clause")
+                .get_str("service_type")
+                .expect("service_type"),
+            "http"
+        );
+        assert!(
+            !clauses[1]
+                .as_document()
+                .expect("legacy clause")
+                .get_document("service_type")
+                .expect("exists clause")
+                .get_bool("$exists")
+                .expect("exists value")
+        );
     }
 
     #[test]
@@ -119,11 +210,16 @@ mod tests {
             slug: "test-service".to_string(),
             description: Some("A test service".to_string()),
             base_url: "https://api.example.com".to_string(),
+            service_type: "http".to_string(),
+            visibility: "public".to_string(),
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1, 2, 3],
             auth_type: Some("bearer".to_string()),
-            api_spec_url: None,
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
+            ssh_config: None,
             oauth_client_id: None,
             service_category: "connection".to_string(),
             requires_user_credential: true,
@@ -144,6 +240,7 @@ mod tests {
         let restored: DownstreamService = bson::from_document(doc).expect("deserialize");
         assert_eq!(svc.id, restored.id);
         assert_eq!(svc.slug, restored.slug);
+        assert_eq!(svc.service_type, restored.service_type);
         assert_eq!(svc.service_category, restored.service_category);
     }
 
@@ -157,11 +254,16 @@ mod tests {
             slug: "svc".to_string(),
             description: None,
             base_url: "https://example.com".to_string(),
+            service_type: "http".to_string(),
+            visibility: "public".to_string(),
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1],
             auth_type: None,
-            api_spec_url: None,
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
+            ssh_config: None,
             oauth_client_id: None,
             service_category: "connection".to_string(),
             requires_user_credential: true,
@@ -180,16 +282,40 @@ mod tests {
         };
         let mut doc = bson::to_document(&svc).expect("serialize");
         // Remove the fields that have #[serde(default = ...)]
+        doc.remove("service_type");
+        doc.remove("visibility");
         doc.remove("service_category");
         doc.remove("requires_user_credential");
         doc.remove("identity_propagation_mode");
         doc.remove("inject_delegation_token");
         doc.remove("delegation_token_scope");
         let restored: DownstreamService = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.service_type, "http");
+        assert_eq!(restored.visibility, "public");
         assert_eq!(restored.service_category, "connection");
         assert_eq!(restored.identity_propagation_mode, "none");
         assert!(restored.requires_user_credential);
         assert!(!restored.inject_delegation_token);
         assert_eq!(restored.delegation_token_scope, "llm:proxy");
+    }
+
+    #[test]
+    fn ssh_config_roundtrip() {
+        let config = SshServiceConfig {
+            host: "ssh.internal.example".to_string(),
+            port: 22,
+            certificate_auth_enabled: true,
+            certificate_ttl_minutes: 30,
+            allowed_principals: vec!["ubuntu".to_string()],
+            ca_private_key_encrypted: Some(vec![1, 2, 3]),
+            ca_public_key: Some("ssh-ed25519 AAAATEST ssh-ca".to_string()),
+        };
+
+        let doc = bson::to_document(&config).expect("serialize");
+        let restored: SshServiceConfig = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.host, "ssh.internal.example");
+        assert_eq!(restored.port, 22);
+        assert!(restored.certificate_auth_enabled);
+        assert_eq!(restored.allowed_principals, vec!["ubuntu".to_string()]);
     }
 }

@@ -48,12 +48,18 @@ export interface DownstreamService {
   readonly slug: string;
   readonly description: string | null;
   readonly base_url: string;
+  readonly service_type: string;
+  readonly visibility: string;
   readonly auth_method: string;
   readonly auth_type: string | null;
   readonly auth_key_name: string;
   readonly is_active: boolean;
   readonly oauth_client_id: string | null;
+  readonly openapi_spec_url?: string | null;
   readonly api_spec_url: string | null;
+  readonly asyncapi_spec_url?: string | null;
+  readonly streaming_supported?: boolean;
+  readonly ssh_config?: SshServiceConfig | null;
   readonly service_category: string;
   readonly requires_user_credential: boolean;
   readonly created_by: string;
@@ -67,6 +73,67 @@ export interface DownstreamService {
   readonly inject_delegation_token?: boolean;
   readonly delegation_token_scope?: string;
 }
+
+export interface SshServiceConfig {
+  readonly host: string;
+  readonly port: number;
+  readonly certificate_auth_enabled: boolean;
+  readonly certificate_ttl_minutes: number;
+  readonly allowed_principals: readonly string[];
+  readonly ca_public_key: string | null;
+}
+
+export interface SshServiceConfigInput {
+  readonly host: string;
+  readonly port: number;
+  readonly certificate_auth_enabled: boolean;
+  readonly certificate_ttl_minutes: number;
+  readonly allowed_principals: readonly string[];
+}
+
+export type CreateServicePayload =
+  | {
+      readonly name: string;
+      readonly description?: string;
+      readonly service_type: "http";
+      readonly visibility?: string;
+      readonly base_url: string;
+      readonly auth_type: string;
+      readonly service_category?: string;
+    }
+  | {
+      readonly name: string;
+      readonly description?: string;
+      readonly service_type: "ssh";
+      readonly visibility?: string;
+      readonly service_category?: string;
+      readonly ssh_config: SshServiceConfigInput;
+    };
+
+export type UpdateServicePayload =
+  | {
+      readonly name?: string;
+      readonly description?: string;
+      readonly visibility?: string;
+      readonly base_url?: string;
+      readonly is_active?: boolean;
+      readonly openapi_spec_url?: string;
+      readonly asyncapi_spec_url?: string;
+      readonly identity_propagation_mode?: string;
+      readonly identity_include_user_id?: boolean;
+      readonly identity_include_email?: boolean;
+      readonly identity_include_name?: boolean;
+      readonly identity_jwt_audience?: string;
+      readonly inject_delegation_token?: boolean;
+      readonly delegation_token_scope?: string;
+    }
+  | {
+      readonly name?: string;
+      readonly description?: string;
+      readonly visibility?: string;
+      readonly is_active?: boolean;
+      readonly ssh_config?: SshServiceConfigInput;
+    };
 
 export interface ServiceEndpoint {
   readonly id: string;

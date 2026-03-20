@@ -6,6 +6,7 @@ use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -15,22 +16,24 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, oauth_client_service};
+use crate::services::{api_docs_service, audit_service, oauth_client_service, ssh_service};
 
 use super::services_helpers::{
     DeleteServiceResponse, fetch_service, require_admin, require_admin_or_creator,
-    service_to_response, validate_base_url,
+    service_to_response, validate_base_url, validate_optional_spec_url,
 };
 
 // --- Request / Response types ---
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateServiceRequest {
     pub name: String,
     pub slug: Option<String>,
     pub description: Option<String>,
-    pub base_url: String,
+    pub service_type: Option<String>,
+    pub base_url: Option<String>,
     /// Accepts "auth_method" or "auth_type" from frontend
     #[serde(alias = "auth_type")]
     pub auth_method: Option<String>,
@@ -38,6 +41,9 @@ pub struct CreateServiceRequest {
     pub credential: Option<String>,
     /// "provider", "connection", or "internal". Defaults to "connection".
     pub service_category: Option<String>,
+    /// "public" or "private". Defaults to "public" for HTTP, "private" for SSH.
+    pub visibility: Option<String>,
+    pub ssh_config: Option<SshServiceConfigRequest>,
 }
 
 impl std::fmt::Debug for CreateServiceRequest {
@@ -47,6 +53,7 @@ impl std::fmt::Debug for CreateServiceRequest {
             .field("slug", &self.slug)
             .field("description", &self.description)
             .field("base_url", &self.base_url)
+            .field("service_type", &self.service_type)
             .field("auth_method", &self.auth_method)
             .field("auth_key_name", &self.auth_key_name)
             .field(
@@ -54,23 +61,53 @@ impl std::fmt::Debug for CreateServiceRequest {
                 &self.credential.as_ref().map(|_| "[REDACTED]"),
             )
             .field("service_category", &self.service_category)
+            .field("visibility", &self.visibility)
+            .field("ssh_config", &self.ssh_config)
             .finish()
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct SshServiceConfigRequest {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub certificate_auth_enabled: bool,
+    #[serde(default = "default_certificate_ttl_minutes")]
+    pub certificate_ttl_minutes: u32,
+    #[serde(default)]
+    pub allowed_principals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SshServiceConfigResponse {
+    pub host: String,
+    pub port: u16,
+    pub certificate_auth_enabled: bool,
+    pub certificate_ttl_minutes: u32,
+    pub allowed_principals: Vec<String>,
+    pub ca_public_key: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
     pub id: String,
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
     pub base_url: String,
+    pub service_type: String,
+    pub visibility: String,
     pub auth_method: String,
     pub auth_type: Option<String>,
     pub auth_key_name: String,
     pub is_active: bool,
     pub oauth_client_id: Option<String>,
+    pub openapi_spec_url: Option<String>,
     pub api_spec_url: Option<String>,
+    pub asyncapi_spec_url: Option<String>,
+    pub streaming_supported: bool,
+    pub ssh_config: Option<SshServiceConfigResponse>,
     pub service_category: String,
     pub requires_user_credential: bool,
     pub identity_propagation_mode: String,
@@ -85,18 +122,22 @@ pub struct ServiceResponse {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceListResponse {
     pub services: Vec<ServiceResponse>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateServiceRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub base_url: Option<String>,
     pub is_active: Option<bool>,
-    pub api_spec_url: Option<String>,
+    /// "public" or "private"
+    pub visibility: Option<String>,
+    #[serde(alias = "api_spec_url")]
+    pub openapi_spec_url: Option<String>,
+    pub asyncapi_spec_url: Option<String>,
     pub identity_propagation_mode: Option<String>,
     pub identity_include_user_id: Option<bool>,
     pub identity_include_email: Option<bool>,
@@ -104,9 +145,10 @@ pub struct UpdateServiceRequest {
     pub identity_jwt_audience: Option<String>,
     pub inject_delegation_token: Option<bool>,
     pub delegation_token_scope: Option<String>,
+    pub ssh_config: Option<SshServiceConfigRequest>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OidcCredentialsResponse {
     pub client_id: String,
     pub client_secret: String,
@@ -120,17 +162,17 @@ pub struct OidcCredentialsResponse {
     pub jwks_uri: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateRedirectUrisRequest {
     pub redirect_uris: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RedirectUrisResponse {
     pub redirect_uris: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RegenerateSecretResponse {
     pub client_secret: String,
     pub message: String,
@@ -139,6 +181,104 @@ pub struct RegenerateSecretResponse {
 #[derive(Debug, Deserialize)]
 pub struct ListServicesQuery {
     pub category: Option<String>,
+}
+
+fn default_certificate_ttl_minutes() -> u32 {
+    30
+}
+
+fn normalize_service_type(service_type: Option<&str>) -> AppResult<String> {
+    match service_type.unwrap_or("http") {
+        "http" => Ok("http".to_string()),
+        "ssh" => Ok("ssh".to_string()),
+        other => Err(AppError::ValidationError(format!(
+            "Invalid service_type: {other}. Must be http or ssh"
+        ))),
+    }
+}
+
+fn derive_http_service_category(
+    auth_method: &str,
+    service_category: Option<&str>,
+) -> AppResult<String> {
+    if auth_method == "oidc" {
+        return Ok("provider".to_string());
+    }
+
+    if auth_method == "none" {
+        return Ok("internal".to_string());
+    }
+
+    match service_category {
+        Some("provider") => Err(AppError::ValidationError(
+            "Only OIDC services can be categorized as provider".to_string(),
+        )),
+        Some("internal") => Ok("internal".to_string()),
+        Some("connection") | None => Ok("connection".to_string()),
+        Some(other) => Err(AppError::ValidationError(format!(
+            "Invalid service_category: {other}. Must be provider, connection, or internal"
+        ))),
+    }
+}
+
+fn derive_ssh_service_category(service_category: Option<&str>) -> AppResult<String> {
+    match service_category {
+        Some("provider") => Err(AppError::ValidationError(
+            "SSH services cannot be categorized as provider".to_string(),
+        )),
+        Some("connection") => Ok("connection".to_string()),
+        Some("internal") | None => Ok("internal".to_string()),
+        Some(other) => Err(AppError::ValidationError(format!(
+            "Invalid service_category: {other}. Must be connection or internal"
+        ))),
+    }
+}
+
+fn derive_visibility(service_type: &str, explicit: Option<&str>) -> String {
+    match explicit {
+        Some("private") => "private".to_string(),
+        Some("public") => "public".to_string(),
+        Some(_) => "public".to_string(),
+        // Default: SSH services are private, HTTP services are public
+        None => {
+            if service_type == "ssh" {
+                "private".to_string()
+            } else {
+                "public".to_string()
+            }
+        }
+    }
+}
+
+fn should_refresh_openapi_url(service: &DownstreamService, body: &UpdateServiceRequest) -> bool {
+    body.openapi_spec_url.is_some()
+        || service.openapi_spec_url.is_none()
+        || service.openapi_spec_url.as_deref().is_some_and(|url| {
+            api_docs_service::is_auto_discovered_openapi_spec_url(&service.base_url, url)
+        })
+}
+
+fn should_refresh_asyncapi_url(service: &DownstreamService, body: &UpdateServiceRequest) -> bool {
+    body.asyncapi_spec_url.is_some()
+        || service.asyncapi_spec_url.is_none()
+        || service.asyncapi_spec_url.as_deref().is_some_and(|url| {
+            api_docs_service::is_auto_discovered_asyncapi_spec_url(&service.base_url, url)
+        })
+}
+
+fn resolve_spec_url_update(
+    explicit_update: Option<Option<String>>,
+    current_url: Option<&String>,
+    discovered_url: Option<&String>,
+    should_refresh: bool,
+) -> Option<String> {
+    if let Some(explicit_url) = explicit_update {
+        explicit_url
+    } else if should_refresh {
+        discovered_url.cloned()
+    } else {
+        current_url.cloned()
+    }
 }
 
 // --- Handlers ---
@@ -150,12 +290,45 @@ pub struct ListServicesQuery {
 /// GET /api/v1/services
 ///
 /// List all downstream services. Supports optional `?category=` filter.
+#[utoipa::path(
+    get,
+    path = "/api/v1/services",
+    params(
+        ("category" = Option<String>, Query, description = "Optional service category filter")
+    ),
+    responses(
+        (status = 200, description = "List of downstream services", body = ServiceListResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn list_services(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Query(query): Query<ListServicesQuery>,
 ) -> AppResult<Json<ServiceListResponse>> {
-    let mut filter = doc! { "is_active": true };
+    let user_id_str = auth_user.user_id.to_string();
+    let is_admin = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": &user_id_str })
+        .await?
+        .is_some_and(|u| u.is_admin);
+
+    // Private services are only visible to their creator (or admins).
+    // Public services (and legacy services without a visibility field) remain visible to all.
+    let mut filter = if is_admin {
+        doc! { "is_active": true }
+    } else {
+        doc! {
+            "is_active": true,
+            "$or": [
+                { "visibility": { "$ne": "private" } },
+                { "visibility": { "$exists": false } },
+                { "visibility": "private", "created_by": &user_id_str },
+            ],
+        }
+    };
     if let Some(ref category) = query.category {
         let valid = ["provider", "connection", "internal"];
         if !valid.contains(&category.as_str()) {
@@ -184,6 +357,18 @@ pub async fn list_services(
 /// POST /api/v1/services
 ///
 /// Register a new downstream service. Requires admin privileges.
+#[utoipa::path(
+    post,
+    path = "/api/v1/services",
+    request_body = CreateServiceRequest,
+    responses(
+        (status = 200, description = "Created downstream service", body = ServiceResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 409, description = "Conflict", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn create_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -191,14 +376,14 @@ pub async fn create_service(
 ) -> AppResult<Json<ServiceResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    if body.name.is_empty() || body.base_url.is_empty() {
-        return Err(AppError::ValidationError(
-            "name and base_url are required".to_string(),
-        ));
+    if body.name.is_empty() {
+        return Err(AppError::ValidationError("name is required".to_string()));
     }
 
+    let service_type = normalize_service_type(body.service_type.as_deref())?;
+
     // CR-18: Validate input lengths before doing work based on input
-    if body.name.len() > 200 || body.base_url.len() > 2048 {
+    if body.name.len() > 200 {
         return Err(AppError::ValidationError(
             "Input exceeds maximum length".to_string(),
         ));
@@ -230,43 +415,6 @@ pub async fn create_service(
         ));
     }
 
-    // Preserve the original auth_type value before mapping
-    let auth_type_original = body.auth_method.clone();
-
-    // Map frontend auth_type values to backend auth_method values
-    let auth_method = match body.auth_method.as_deref() {
-        Some("api_key") => "header".to_string(),
-        Some("oauth2") | Some("bearer") => "bearer".to_string(),
-        Some("basic") => "basic".to_string(),
-        Some("none") => "none".to_string(),
-        Some(other) => other.to_string(),
-        None => "header".to_string(),
-    };
-
-    let auth_key_name = body
-        .auth_key_name
-        .clone()
-        .unwrap_or_else(|| match auth_method.as_str() {
-            "bearer" => "Authorization".to_string(),
-            "basic" => "Authorization".to_string(),
-            "query" => "api_key".to_string(),
-            "none" => String::new(),
-            _ => "X-API-Key".to_string(),
-        });
-
-    let credential = body.credential.clone().unwrap_or_default();
-
-    let valid_methods = ["header", "bearer", "query", "basic", "oidc", "none"];
-    if !valid_methods.contains(&auth_method.as_str()) {
-        return Err(AppError::ValidationError(format!(
-            "auth_method must be one of: {}",
-            valid_methods.join(", ")
-        )));
-    }
-
-    // Validate base_url against SSRF
-    validate_base_url(&body.base_url, state.config.is_development())?;
-
     // Check slug uniqueness
     let existing = state
         .db
@@ -280,75 +428,188 @@ pub async fn create_service(
         ));
     }
 
-    let user_id_str = auth_user.user_id.to_string();
-
-    // For OIDC services, auto-provision an OAuth client
-    let (encrypted_cred, oauth_client_id) = if auth_method == "oidc" {
-        let callback_url = format!("{}/callback", body.base_url.trim_end_matches('/'));
-        let client_name = format!("{} OIDC Client", body.name);
-        let (client, raw_secret) = oauth_client_service::create_client(
-            &state.db,
-            &client_name,
-            &[callback_url],
-            "confidential",
-            &user_id_str,
-            "",
-            oauth_client_service::DEFAULT_ALLOWED_SCOPES,
-        )
-        .await?;
-
-        let secret_to_encrypt = raw_secret.unwrap_or_default();
-        let enc = state
-            .encryption_keys
-            .encrypt(secret_to_encrypt.as_bytes())
-            .await?;
-
-        (enc, Some(client.id))
-    } else {
-        let enc = state.encryption_keys.encrypt(credential.as_bytes()).await?;
-        (enc, None)
-    };
-
     let id = Uuid::new_v4().to_string();
     let now = Utc::now();
+    let user_id_str = auth_user.user_id.to_string();
 
-    // Derive service_category and requires_user_credential
-    let service_category = if auth_method == "oidc" {
-        // OIDC services are always providers
-        "provider".to_string()
-    } else if auth_method == "none" {
-        // No-auth services are always internal (auto-connected)
-        "internal".to_string()
-    } else {
-        match body.service_category.as_deref() {
-            Some("provider") => {
-                return Err(AppError::ValidationError(
-                    "Only OIDC services can be categorized as provider".to_string(),
-                ));
-            }
-            Some("internal") => "internal".to_string(),
-            Some("connection") | None => "connection".to_string(),
-            Some(other) => {
-                return Err(AppError::ValidationError(format!(
-                    "Invalid service_category: {other}. Must be provider, connection, or internal"
-                )));
-            }
+    let (
+        base_url,
+        auth_method,
+        auth_type,
+        auth_key_name,
+        encrypted_cred,
+        oauth_client_id,
+        openapi_spec_url,
+        asyncapi_spec_url,
+        streaming_supported,
+        ssh_config,
+        service_category,
+        requires_user_credential,
+    ) = if service_type == "http" {
+        if body.ssh_config.is_some() {
+            return Err(AppError::ValidationError(
+                "ssh_config is only valid when service_type is ssh".to_string(),
+            ));
         }
-    };
 
-    let requires_user_credential = service_category == "connection";
+        let base_url = body
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AppError::ValidationError(
+                    "base_url is required when service_type is http".to_string(),
+                )
+            })?;
+        if base_url.len() > 2048 {
+            return Err(AppError::ValidationError(
+                "Input exceeds maximum length".to_string(),
+            ));
+        }
+
+        // Preserve the original auth_type value before mapping
+        let auth_type_original = body.auth_method.clone();
+
+        // Map frontend auth_type values to backend auth_method values
+        let auth_method = match body.auth_method.as_deref() {
+            Some("api_key") => "header".to_string(),
+            Some("oauth2") | Some("bearer") => "bearer".to_string(),
+            Some("basic") => "basic".to_string(),
+            Some("none") => "none".to_string(),
+            Some(other) => other.to_string(),
+            None => "header".to_string(),
+        };
+
+        let auth_key_name =
+            body.auth_key_name
+                .clone()
+                .unwrap_or_else(|| match auth_method.as_str() {
+                    "bearer" => "Authorization".to_string(),
+                    "basic" => "Authorization".to_string(),
+                    "query" => "api_key".to_string(),
+                    "none" => String::new(),
+                    _ => "X-API-Key".to_string(),
+                });
+
+        let credential = body.credential.clone().unwrap_or_default();
+
+        let valid_methods = ["header", "bearer", "query", "basic", "oidc", "none"];
+        if !valid_methods.contains(&auth_method.as_str()) {
+            return Err(AppError::ValidationError(format!(
+                "auth_method must be one of: {}",
+                valid_methods.join(", ")
+            )));
+        }
+
+        validate_base_url(base_url, state.config.is_development())?;
+
+        let (encrypted_cred, oauth_client_id) = if auth_method == "oidc" {
+            let callback_url = format!("{}/callback", base_url.trim_end_matches('/'));
+            let client_name = format!("{} OIDC Client", body.name);
+            let (client, raw_secret) = oauth_client_service::create_client(
+                &state.db,
+                &client_name,
+                &[callback_url],
+                "confidential",
+                &user_id_str,
+                "",
+                oauth_client_service::DEFAULT_ALLOWED_SCOPES,
+            )
+            .await?;
+
+            let secret_to_encrypt = raw_secret.unwrap_or_default();
+            let enc = state
+                .encryption_keys
+                .encrypt(secret_to_encrypt.as_bytes())
+                .await?;
+
+            (enc, Some(client.id))
+        } else {
+            let enc = state.encryption_keys.encrypt(credential.as_bytes()).await?;
+            (enc, None)
+        };
+
+        let docs_metadata = api_docs_service::discover_service_docs(base_url, None, None).await;
+        let service_category =
+            derive_http_service_category(&auth_method, body.service_category.as_deref())?;
+        let requires_user_credential = service_category == "connection";
+
+        (
+            base_url.to_string(),
+            auth_method,
+            auth_type_original,
+            auth_key_name,
+            encrypted_cred,
+            oauth_client_id,
+            docs_metadata.openapi_spec_url,
+            docs_metadata.asyncapi_spec_url,
+            docs_metadata.streaming_supported,
+            None,
+            service_category,
+            requires_user_credential,
+        )
+    } else {
+        if body.base_url.is_some()
+            || body.auth_method.is_some()
+            || body.auth_key_name.is_some()
+            || body.credential.is_some()
+        {
+            return Err(AppError::ValidationError(
+                "HTTP-specific fields cannot be used when service_type is ssh".to_string(),
+            ));
+        }
+
+        let ssh_config = body.ssh_config.as_ref().ok_or_else(|| {
+            AppError::ValidationError("ssh_config is required when service_type is ssh".to_string())
+        })?;
+        let built_ssh_config = ssh_service::build_ssh_config(
+            &state.encryption_keys,
+            &id,
+            None,
+            ssh_service::SshConfigInput {
+                host: ssh_config.host.as_str(),
+                port: ssh_config.port,
+                certificate_auth_enabled: ssh_config.certificate_auth_enabled,
+                certificate_ttl_minutes: ssh_config.certificate_ttl_minutes,
+                allowed_principals: &ssh_config.allowed_principals,
+            },
+        )
+        .await?;
+        let service_category = derive_ssh_service_category(body.service_category.as_deref())?;
+
+        (
+            ssh_service::target_base_url(&built_ssh_config.host, built_ssh_config.port),
+            "none".to_string(),
+            Some("ssh".to_string()),
+            String::new(),
+            state.encryption_keys.encrypt(b"").await?,
+            None,
+            None,
+            None,
+            false,
+            Some(built_ssh_config),
+            service_category,
+            false,
+        )
+    };
 
     let new_service = DownstreamService {
         id: id.clone(),
         name: body.name.clone(),
         slug: slug.clone(),
         description: body.description.clone(),
-        base_url: body.base_url.clone(),
+        base_url,
+        service_type: service_type.clone(),
+        visibility: derive_visibility(&service_type, body.visibility.as_deref()),
         auth_method: auth_method.clone(),
-        auth_type: auth_type_original,
-        auth_key_name: auth_key_name.clone(),
+        auth_type,
+        auth_key_name,
         credential_encrypted: encrypted_cred,
-        api_spec_url: None,
+        openapi_spec_url,
+        asyncapi_spec_url,
+        streaming_supported,
+        ssh_config,
         oauth_client_id: oauth_client_id.clone(),
         service_category,
         requires_user_credential,
@@ -390,6 +651,19 @@ pub async fn create_service(
 /// DELETE /api/v1/services/:service_id
 ///
 /// Deactivate a downstream service. Requires admin or service creator.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/services/{service_id}",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    responses(
+        (status = 200, description = "Service deactivated", body = DeleteServiceResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn delete_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -452,6 +726,18 @@ pub async fn delete_service(
 /// GET /api/v1/services/{service_id}
 ///
 /// Get a single service by ID. Requires authentication.
+#[utoipa::path(
+    get,
+    path = "/api/v1/services/{service_id}",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    responses(
+        (status = 200, description = "Downstream service", body = ServiceResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn get_service(
     State(state): State<AppState>,
     _auth_user: AuthUser,
@@ -464,6 +750,21 @@ pub async fn get_service(
 /// PUT /api/v1/services/{service_id}
 ///
 /// Update a downstream service. Requires admin or original creator.
+#[utoipa::path(
+    put,
+    path = "/api/v1/services/{service_id}",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    request_body = UpdateServiceRequest,
+    responses(
+        (status = 200, description = "Updated downstream service", body = ServiceResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn update_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -475,6 +776,9 @@ pub async fn update_service(
 
     // Build the $set document with only provided fields
     let mut set_doc = doc! {};
+    let mut http_docs_refresh: Option<api_docs_service::ServiceDocumentationMetadata> = None;
+    let mut explicit_openapi_spec_url: Option<Option<String>> = None;
+    let mut explicit_asyncapi_spec_url: Option<Option<String>> = None;
 
     if let Some(ref name) = body.name {
         if name.is_empty() || name.len() > 200 {
@@ -494,80 +798,200 @@ pub async fn update_service(
         set_doc.insert("description", description.as_str());
     }
 
-    if let Some(ref base_url) = body.base_url {
-        validate_base_url(base_url, state.config.is_development())?;
-        if base_url.len() > 2048 {
-            return Err(AppError::ValidationError(
-                "base_url must not exceed 2048 characters".to_string(),
-            ));
-        }
-        set_doc.insert("base_url", base_url.as_str());
-    }
-
     if let Some(is_active) = body.is_active {
         set_doc.insert("is_active", is_active);
     }
 
-    if let Some(ref api_spec_url) = body.api_spec_url {
-        if api_spec_url.len() > 2048 {
-            return Err(AppError::ValidationError(
-                "api_spec_url must not exceed 2048 characters".to_string(),
-            ));
-        }
-        set_doc.insert("api_spec_url", api_spec_url.as_str());
-    }
-
-    if let Some(ref mode) = body.identity_propagation_mode {
-        let valid_modes = ["none", "headers", "jwt", "both"];
-        if !valid_modes.contains(&mode.as_str()) {
-            return Err(AppError::ValidationError(format!(
-                "identity_propagation_mode must be one of: {}",
-                valid_modes.join(", ")
-            )));
-        }
-        set_doc.insert("identity_propagation_mode", mode.as_str());
-    }
-    if let Some(include_uid) = body.identity_include_user_id {
-        set_doc.insert("identity_include_user_id", include_uid);
-    }
-    if let Some(include_email) = body.identity_include_email {
-        set_doc.insert("identity_include_email", include_email);
-    }
-    if let Some(include_name) = body.identity_include_name {
-        set_doc.insert("identity_include_name", include_name);
-    }
-    if let Some(ref audience) = body.identity_jwt_audience {
-        if audience.len() > 2048 {
-            return Err(AppError::ValidationError(
-                "identity_jwt_audience must not exceed 2048 characters".to_string(),
-            ));
-        }
-        set_doc.insert("identity_jwt_audience", audience.as_str());
-    }
-    if let Some(inject) = body.inject_delegation_token {
-        set_doc.insert("inject_delegation_token", inject);
-    }
-    if let Some(ref scope) = body.delegation_token_scope {
-        // H3: Default empty scope to "llm:proxy" so tokens always have permissions
-        let scope = if scope.is_empty() {
-            "llm:proxy"
-        } else {
-            scope.as_str()
-        };
-
-        // H2: Validate against known delegation scopes
-        let valid_scopes = ["llm:proxy", "proxy:*", "llm:status"];
-        for s in scope.split_whitespace() {
-            if !valid_scopes.contains(&s) {
+    if let Some(ref visibility) = body.visibility {
+        match visibility.as_str() {
+            "public" | "private" => {
+                set_doc.insert("visibility", visibility.as_str());
+            }
+            other => {
                 return Err(AppError::ValidationError(format!(
-                    "Invalid delegation_token_scope '{}'. Must be one of: {}",
-                    s,
-                    valid_scopes.join(", ")
+                    "Invalid visibility: {other}. Must be public or private"
                 )));
             }
         }
+    }
 
-        set_doc.insert("delegation_token_scope", scope);
+    match service.service_type.as_str() {
+        "http" => {
+            if body.ssh_config.is_some() {
+                return Err(AppError::ValidationError(
+                    "ssh_config is only valid for SSH services".to_string(),
+                ));
+            }
+
+            let refresh_openapi_url = should_refresh_openapi_url(&service, &body);
+            let refresh_asyncapi_url = should_refresh_asyncapi_url(&service, &body);
+
+            let openapi_spec_url = body
+                .openapi_spec_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let asyncapi_spec_url = body
+                .asyncapi_spec_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+
+            if let Some(ref base_url) = body.base_url {
+                validate_base_url(base_url, state.config.is_development())?;
+                if base_url.len() > 2048 {
+                    return Err(AppError::ValidationError(
+                        "base_url must not exceed 2048 characters".to_string(),
+                    ));
+                }
+                set_doc.insert("base_url", base_url.as_str());
+            }
+
+            if body.openapi_spec_url.is_some() {
+                explicit_openapi_spec_url = Some(openapi_spec_url.clone());
+                if let Some(ref openapi_spec_url) = openapi_spec_url {
+                    validate_optional_spec_url(openapi_spec_url, state.config.is_development())?;
+                    set_doc.insert("openapi_spec_url", openapi_spec_url.as_str());
+                } else {
+                    set_doc.insert("openapi_spec_url", bson::Bson::Null);
+                }
+            }
+
+            if body.asyncapi_spec_url.is_some() {
+                explicit_asyncapi_spec_url = Some(asyncapi_spec_url.clone());
+                if let Some(ref asyncapi_spec_url) = asyncapi_spec_url {
+                    validate_optional_spec_url(asyncapi_spec_url, state.config.is_development())?;
+                    set_doc.insert("asyncapi_spec_url", asyncapi_spec_url.as_str());
+                } else {
+                    set_doc.insert("asyncapi_spec_url", bson::Bson::Null);
+                }
+            }
+
+            if let Some(ref mode) = body.identity_propagation_mode {
+                let valid_modes = ["none", "headers", "jwt", "both"];
+                if !valid_modes.contains(&mode.as_str()) {
+                    return Err(AppError::ValidationError(format!(
+                        "identity_propagation_mode must be one of: {}",
+                        valid_modes.join(", ")
+                    )));
+                }
+                set_doc.insert("identity_propagation_mode", mode.as_str());
+            }
+            if let Some(include_uid) = body.identity_include_user_id {
+                set_doc.insert("identity_include_user_id", include_uid);
+            }
+            if let Some(include_email) = body.identity_include_email {
+                set_doc.insert("identity_include_email", include_email);
+            }
+            if let Some(include_name) = body.identity_include_name {
+                set_doc.insert("identity_include_name", include_name);
+            }
+            if let Some(ref audience) = body.identity_jwt_audience {
+                if audience.len() > 2048 {
+                    return Err(AppError::ValidationError(
+                        "identity_jwt_audience must not exceed 2048 characters".to_string(),
+                    ));
+                }
+                set_doc.insert("identity_jwt_audience", audience.as_str());
+            }
+            if let Some(inject) = body.inject_delegation_token {
+                set_doc.insert("inject_delegation_token", inject);
+            }
+            if let Some(ref scope) = body.delegation_token_scope {
+                let scope = if scope.is_empty() {
+                    "llm:proxy"
+                } else {
+                    scope.as_str()
+                };
+
+                let valid_scopes = ["llm:proxy", "proxy:*", "llm:status"];
+                for s in scope.split_whitespace() {
+                    if !valid_scopes.contains(&s) {
+                        return Err(AppError::ValidationError(format!(
+                            "Invalid delegation_token_scope '{}'. Must be one of: {}",
+                            s,
+                            valid_scopes.join(", ")
+                        )));
+                    }
+                }
+
+                set_doc.insert("delegation_token_scope", scope);
+            }
+
+            let docs_base_url = body.base_url.as_deref().unwrap_or(&service.base_url);
+            let explicit_openapi = if body.openapi_spec_url.is_some() {
+                openapi_spec_url.clone()
+            } else if refresh_openapi_url {
+                None
+            } else {
+                service.openapi_spec_url.clone()
+            };
+            let explicit_asyncapi = if body.asyncapi_spec_url.is_some() {
+                asyncapi_spec_url.clone()
+            } else if refresh_asyncapi_url {
+                None
+            } else {
+                service.asyncapi_spec_url.clone()
+            };
+            http_docs_refresh = Some(
+                api_docs_service::discover_service_docs(
+                    docs_base_url,
+                    explicit_openapi,
+                    explicit_asyncapi,
+                )
+                .await,
+            );
+        }
+        "ssh" => {
+            let has_http_only_updates = body.base_url.is_some()
+                || body.openapi_spec_url.is_some()
+                || body.asyncapi_spec_url.is_some()
+                || body.identity_propagation_mode.is_some()
+                || body.identity_include_user_id.is_some()
+                || body.identity_include_email.is_some()
+                || body.identity_include_name.is_some()
+                || body.identity_jwt_audience.is_some()
+                || body.inject_delegation_token.is_some()
+                || body.delegation_token_scope.is_some();
+            if has_http_only_updates {
+                return Err(AppError::ValidationError(
+                    "HTTP-specific fields cannot be updated on SSH services".to_string(),
+                ));
+            }
+
+            if let Some(ref ssh_config) = body.ssh_config {
+                let updated_ssh_config = ssh_service::build_ssh_config(
+                    &state.encryption_keys,
+                    &service_id,
+                    service.ssh_config.as_ref(),
+                    ssh_service::SshConfigInput {
+                        host: ssh_config.host.as_str(),
+                        port: ssh_config.port,
+                        certificate_auth_enabled: ssh_config.certificate_auth_enabled,
+                        certificate_ttl_minutes: ssh_config.certificate_ttl_minutes,
+                        allowed_principals: &ssh_config.allowed_principals,
+                    },
+                )
+                .await?;
+                set_doc.insert(
+                    "ssh_config",
+                    bson::to_bson(&updated_ssh_config).map_err(|e| {
+                        AppError::Internal(format!("BSON serialization error: {e}"))
+                    })?,
+                );
+                set_doc.insert(
+                    "base_url",
+                    ssh_service::target_base_url(&updated_ssh_config.host, updated_ssh_config.port),
+                );
+            }
+        }
+        other => {
+            return Err(AppError::Internal(format!(
+                "Unsupported service type: {other}"
+            )));
+        }
     }
 
     if set_doc.is_empty() {
@@ -578,6 +1002,37 @@ pub async fn update_service(
 
     let now = Utc::now();
     set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
+    if let Some(docs_metadata) = http_docs_refresh {
+        let refresh_openapi_url = should_refresh_openapi_url(&service, &body);
+        let refresh_asyncapi_url = should_refresh_asyncapi_url(&service, &body);
+        let next_openapi_spec_url = resolve_spec_url_update(
+            explicit_openapi_spec_url,
+            service.openapi_spec_url.as_ref(),
+            docs_metadata.openapi_spec_url.as_ref(),
+            refresh_openapi_url,
+        );
+        let next_asyncapi_spec_url = resolve_spec_url_update(
+            explicit_asyncapi_spec_url,
+            service.asyncapi_spec_url.as_ref(),
+            docs_metadata.asyncapi_spec_url.as_ref(),
+            refresh_asyncapi_url,
+        );
+        set_doc.insert(
+            "openapi_spec_url",
+            next_openapi_spec_url
+                .clone()
+                .map_or(bson::Bson::Null, bson::Bson::String),
+        );
+        set_doc.insert(
+            "asyncapi_spec_url",
+            next_asyncapi_spec_url
+                .clone()
+                .map_or(bson::Bson::Null, bson::Bson::String),
+        );
+        if refresh_openapi_url || refresh_asyncapi_url {
+            set_doc.insert("streaming_supported", docs_metadata.streaming_supported);
+        }
+    }
 
     state
         .db
@@ -586,7 +1041,9 @@ pub async fn update_service(
         .await?;
 
     // If base_url changed and service has an OIDC client, update default redirect URI
-    if let (Some(new_base_url), Some(oauth_client_id)) = (&body.base_url, &service.oauth_client_id)
+    if service.service_type == "http"
+        && let (Some(new_base_url), Some(oauth_client_id)) =
+            (&body.base_url, &service.oauth_client_id)
     {
         let new_callback = format!("{}/callback", new_base_url.trim_end_matches('/'));
         oauth_client_service::update_redirect_uris(&state.db, oauth_client_id, &[new_callback])
@@ -613,6 +1070,20 @@ pub async fn update_service(
 /// GET /api/v1/services/{service_id}/oidc-credentials
 ///
 /// Retrieve OIDC client credentials. Admin only.
+#[utoipa::path(
+    get,
+    path = "/api/v1/services/{service_id}/oidc-credentials",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    responses(
+        (status = 200, description = "OIDC client credentials", body = OidcCredentialsResponse),
+        (status = 400, description = "Service is not an OIDC service", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn get_oidc_credentials(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -682,6 +1153,21 @@ pub async fn get_oidc_credentials(
 /// PUT /api/v1/services/{service_id}/redirect-uris
 ///
 /// Update redirect URIs for an OIDC service. Admin only.
+#[utoipa::path(
+    put,
+    path = "/api/v1/services/{service_id}/redirect-uris",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    request_body = UpdateRedirectUrisRequest,
+    responses(
+        (status = 200, description = "Updated redirect URIs", body = RedirectUrisResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn update_redirect_uris(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -770,6 +1256,20 @@ pub async fn update_redirect_uris(
 /// POST /api/v1/services/{service_id}/regenerate-secret
 ///
 /// Regenerate the OIDC client secret. Admin only.
+#[utoipa::path(
+    post,
+    path = "/api/v1/services/{service_id}/regenerate-secret",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    responses(
+        (status = 200, description = "Regenerated OIDC client secret", body = RegenerateSecretResponse),
+        (status = 400, description = "Service is not an OIDC service", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
 pub async fn regenerate_oidc_secret(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -849,4 +1349,47 @@ pub async fn regenerate_oidc_secret(
         client_secret: new_secret,
         message: "Previous secret is now invalidated. Store this secret securely.".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_spec_url_update;
+
+    #[test]
+    fn resolve_spec_url_update_prefers_explicit_url() {
+        let current = "https://current.example/openapi.json".to_string();
+        let discovered = "https://discovered.example/openapi.json".to_string();
+
+        assert_eq!(
+            resolve_spec_url_update(
+                Some(Some("https://admin.example/openapi.json".to_string())),
+                Some(&current),
+                Some(&discovered),
+                true,
+            ),
+            Some("https://admin.example/openapi.json".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_spec_url_update_respects_explicit_clear() {
+        let current = "https://current.example/openapi.json".to_string();
+        let discovered = "https://discovered.example/openapi.json".to_string();
+
+        assert_eq!(
+            resolve_spec_url_update(Some(None), Some(&current), Some(&discovered), true),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_spec_url_update_uses_discovered_url_for_refreshes() {
+        let current = "https://current.example/openapi.json".to_string();
+        let discovered = "https://discovered.example/openapi.json".to_string();
+
+        assert_eq!(
+            resolve_spec_url_update(None, Some(&current), Some(&discovered), true),
+            Some("https://discovered.example/openapi.json".to_string())
+        );
+    }
 }

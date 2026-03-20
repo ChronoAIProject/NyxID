@@ -14,7 +14,7 @@ use crate::crypto::jwt;
 use crate::models::mcp_session;
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
-use crate::services::{audit_service, mcp_service};
+use crate::services::{audit_service, mcp_service, ssh_service};
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -599,6 +599,12 @@ async fn handle_tools_call(
             )
             .await;
         }
+        "nyx__ssh_exec" => {
+            return handle_mcp_ssh_exec(state, user_id, &arguments, request.id.clone()).await;
+        }
+        "nyx__ssh_list_services" => {
+            return handle_mcp_ssh_list(state, user_id, request.id.clone()).await;
+        }
         _ => {}
     }
 
@@ -1065,4 +1071,375 @@ async fn handle_meta_connect(
             tool_result(request_id, &msg, true)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// SSH meta-tool dispatch helpers
+// ---------------------------------------------------------------------------
+
+/// `nyx__ssh_exec` -- execute a command on a remote SSH service.
+async fn handle_mcp_ssh_exec(
+    state: &AppState,
+    user_id: &str,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let service_ref = match arguments.get("service").and_then(|s| s.as_str()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return tool_result(request_id, "\"service\" is required (slug or ID)", true),
+    };
+
+    let command = match arguments.get("command").and_then(|c| c.as_str()) {
+        Some(c) if !c.is_empty() => c,
+        _ => return tool_result(request_id, "\"command\" is required", true),
+    };
+
+    let principal = arguments
+        .get("principal")
+        .and_then(|p| p.as_str())
+        .unwrap_or("");
+
+    let timeout_secs = arguments
+        .get("timeout_secs")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(30)
+        .min(300) as u32;
+
+    // Resolve service by slug or ID
+    let service_id = match resolve_ssh_service_id(&state.db, service_ref).await {
+        Ok(id) => id,
+        Err(msg) => return tool_result(request_id, &msg, true),
+    };
+
+    // Get SSH config
+    let ssh_svc = match ssh_service::get_ssh_service(&state.db, &service_id).await {
+        Ok(svc) => svc,
+        Err(e) => return tool_result(request_id, &format!("SSH service error: {e}"), true),
+    };
+
+    if !ssh_svc.certificate_auth_enabled {
+        return tool_result(
+            request_id,
+            "SSH certificate auth is not enabled for this service",
+            true,
+        );
+    }
+
+    // Resolve principal: use provided or pick first allowed
+    let resolved_principal = if principal.is_empty() {
+        match ssh_svc.allowed_principals.first() {
+            Some(p) => p.clone(),
+            None => {
+                return tool_result(
+                    request_id,
+                    "No allowed principals configured and none provided",
+                    true,
+                );
+            }
+        }
+    } else {
+        principal.to_string()
+    };
+
+    if !ssh_svc
+        .allowed_principals
+        .iter()
+        .any(|p| p == &resolved_principal)
+    {
+        return tool_result(
+            request_id,
+            &format!(
+                "Principal '{}' is not allowed. Available: {}",
+                resolved_principal,
+                ssh_svc.allowed_principals.join(", ")
+            ),
+            true,
+        );
+    }
+
+    // Build the request body and call the SSH exec endpoint internally
+    let body = super::ssh_exec::SshExecRequest {
+        command: command.to_string(),
+        principal: resolved_principal.clone(),
+        timeout_secs,
+    };
+
+    // Reuse the core logic from the ssh_exec module
+    let result = execute_ssh_command_internal(state, user_id, &service_id, &ssh_svc, &body).await;
+
+    match result {
+        Ok(response) => {
+            let response_json = serde_json::json!({
+                "exit_code": response.exit_code,
+                "stdout": response.stdout,
+                "stderr": response.stderr,
+                "duration_ms": response.duration_ms,
+                "timed_out": response.timed_out,
+                "service_id": service_id,
+                "principal": resolved_principal,
+            });
+            let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
+            let is_error = response.exit_code != 0;
+            tool_result(request_id, &text, is_error)
+        }
+        Err(e) => tool_result(request_id, &format!("SSH exec failed: {e}"), true),
+    }
+}
+
+/// `nyx__ssh_list_services` -- list available SSH services.
+async fn handle_mcp_ssh_list(
+    state: &AppState,
+    user_id: &str,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+    use futures::TryStreamExt;
+
+    let filter = doc! {
+        "is_active": true,
+        "service_type": "ssh",
+    };
+
+    let services: Vec<DownstreamService> = match state
+        .db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(filter)
+        .await
+    {
+        Ok(cursor) => match cursor.try_collect().await {
+            Ok(svcs) => svcs,
+            Err(e) => {
+                tracing::error!("Failed to query SSH services: {e}");
+                return tool_result(request_id, "Failed to list SSH services", true);
+            }
+        },
+        Err(e) => {
+            tracing::error!("Failed to query SSH services: {e}");
+            return tool_result(request_id, "Failed to list SSH services", true);
+        }
+    };
+
+    let results: Vec<serde_json::Value> = services
+        .iter()
+        .filter_map(|svc| {
+            let ssh = svc.ssh_config.as_ref()?;
+            Some(serde_json::json!({
+                "service_id": svc.id,
+                "name": svc.name,
+                "slug": svc.slug,
+                "description": svc.description,
+                "host": ssh.host,
+                "port": ssh.port,
+                "certificate_auth_enabled": ssh.certificate_auth_enabled,
+                "allowed_principals": ssh.allowed_principals,
+            }))
+        })
+        .collect();
+
+    let count = results.len();
+    let response_json = serde_json::json!({
+        "services": results,
+        "count": count,
+    });
+    let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id.to_string()),
+        "mcp_ssh_list_services".to_string(),
+        Some(serde_json::json!({ "count": count })),
+        None,
+        None,
+    );
+
+    tool_result(request_id, &text, false)
+}
+
+/// Resolve an SSH service by slug or UUID ID.
+async fn resolve_ssh_service_id(
+    db: &mongodb::Database,
+    service_ref: &str,
+) -> Result<String, String> {
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+
+    // Try UUID parse first
+    if uuid::Uuid::try_parse(service_ref).is_ok() {
+        return Ok(service_ref.to_string());
+    }
+
+    // Otherwise resolve by slug
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "slug": service_ref, "service_type": "ssh", "is_active": true })
+        .await
+        .map_err(|e| format!("Database error: {e}"))?
+        .ok_or_else(|| format!("SSH service not found: {service_ref}"))?;
+
+    Ok(service.id)
+}
+
+/// Internal SSH command execution (reusable by REST handler and MCP handler).
+/// Routes through the node agent for execution.
+async fn execute_ssh_command_internal(
+    state: &AppState,
+    user_id: &str,
+    service_id: &str,
+    ssh_svc: &crate::models::downstream_service::SshServiceConfig,
+    body: &super::ssh_exec::SshExecRequest,
+) -> Result<super::ssh_exec::SshExecResponse, crate::errors::AppError> {
+    use crate::errors::AppError;
+    use crate::services::{node_routing_service, node_service};
+
+    let principal = body.principal.trim();
+    let command = body.command.trim();
+    let timeout_secs = body.timeout_secs.clamp(1, 300);
+
+    // Validate command
+    if command.is_empty() {
+        return Err(AppError::ValidationError(
+            "command must not be empty".to_string(),
+        ));
+    }
+    if command.len() > 8192 {
+        return Err(AppError::ValidationError(
+            "command must not exceed 8192 characters".to_string(),
+        ));
+    }
+    super::ssh_exec::check_dangerous_command(command)?;
+
+    // Require a node agent for SSH execution
+    let node_route = node_routing_service::resolve_node_route(
+        &state.db,
+        user_id,
+        service_id,
+        &state.node_ws_manager,
+    )
+    .await
+    .ok()
+    .flatten()
+    .ok_or_else(|| {
+        AppError::BadRequest(
+            "No node agent is bound to this SSH service. \
+             Deploy a NyxID node agent and bind it to this service to execute commands."
+                .to_string(),
+        )
+    })?;
+
+    // Session limiting
+    let session_guard = state.ssh_session_manager.try_acquire(user_id)?;
+
+    // Generate ephemeral SSH credentials (key + cert as strings, no files)
+    let ephemeral = super::ssh_web_terminal::generate_ephemeral_credentials(
+        state, ssh_svc, service_id, user_id, principal,
+    )
+    .await?;
+
+    // Execute via node agent with failover
+    let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
+        .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
+        .collect();
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let mut last_error = None;
+
+    for node_id in &all_node_ids {
+        let signing_secret = if state.config.node_hmac_signing_enabled {
+            match node_service::get_node_signing_secret(
+                &state.db,
+                state.encryption_keys.as_ref(),
+                node_id,
+            )
+            .await
+            {
+                Ok(secret) => Some(secret),
+                Err(error) => {
+                    tracing::warn!(
+                        service_id = %service_id,
+                        node_id = %node_id,
+                        error = %error,
+                        "MCP SSH exec node signing secret resolution failed"
+                    );
+                    last_error = Some(format!("Signing secret error: {error}"));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        match state
+            .node_ws_manager
+            .exec_ssh_command(
+                node_id,
+                crate::services::node_ws_manager::NodeSshExecRequest {
+                    request_id: request_id.clone(),
+                    host: ssh_svc.host.clone(),
+                    port: ssh_svc.port,
+                    principal: principal.to_string(),
+                    private_key_pem: ephemeral.private_key_pem.clone(),
+                    certificate_openssh: ephemeral.certificate_openssh.clone(),
+                    command: command.to_string(),
+                    timeout_secs,
+                },
+                signing_secret.as_ref().map(|s| s.as_slice()),
+            )
+            .await
+        {
+            Ok(result) => {
+                let _ = &session_guard;
+                drop(session_guard);
+
+                let response = super::ssh_exec::SshExecResponse {
+                    exit_code: result.exit_code,
+                    stdout: super::ssh_exec::truncate_output(result.stdout.as_bytes()),
+                    stderr: super::ssh_exec::truncate_output(result.stderr.as_bytes()),
+                    duration_ms: result.duration_ms,
+                    timed_out: result.timed_out,
+                };
+
+                // Audit log
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(user_id.to_string()),
+                    "ssh_exec_command".to_string(),
+                    Some(serde_json::json!({
+                        "service_id": service_id,
+                        "principal": principal,
+                        "command": super::ssh_exec::truncate_for_audit(command),
+                        "exit_code": response.exit_code,
+                        "duration_ms": response.duration_ms,
+                        "timed_out": response.timed_out,
+                        "via": "mcp",
+                        "routed_via": "node",
+                        "node_id": node_id,
+                    })),
+                    None,
+                    None,
+                );
+
+                return Ok(response);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    service_id = %service_id,
+                    node_id = %node_id,
+                    error = %error,
+                    "MCP SSH exec via node failed, trying next"
+                );
+                last_error = Some(error.to_string());
+            }
+        }
+    }
+
+    let _ = &session_guard;
+    drop(session_guard);
+
+    Err(AppError::Internal(format!(
+        "SSH exec failed on all nodes: {}",
+        last_error.unwrap_or_else(|| "no nodes available".to_string()),
+    )))
 }
