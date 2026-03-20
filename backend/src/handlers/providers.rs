@@ -208,6 +208,7 @@ fn provider_has_oauth_config(p: &crate::models::provider_config::ProviderConfig)
                 && p.device_code_url.is_some()
                 && p.device_token_url.is_some()
         }
+        "telegram_widget" => true,
         _ => return false,
     };
 
@@ -673,6 +674,23 @@ mod tests {
         provider.client_id_encrypted = None;
         provider.client_secret_encrypted = None;
 
+        assert!(provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn telegram_widget_provider_uses_stored_bot_credentials_for_connectability() {
+        let mut provider = make_provider("telegram_widget");
+        provider.authorization_url = None;
+        provider.token_url = None;
+        provider.device_code_url = None;
+        provider.device_token_url = None;
+
+        assert!(provider_has_oauth_config(&provider));
+
+        provider.client_secret_encrypted = None;
+        assert!(!provider_has_oauth_config(&provider));
+
+        provider.credential_mode = "user".to_string();
         assert!(provider_has_oauth_config(&provider));
     }
 }

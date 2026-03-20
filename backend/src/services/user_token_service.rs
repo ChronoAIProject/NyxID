@@ -28,6 +28,7 @@ pub struct UserProviderTokenSummary {
     pub provider_config_id: String,
     pub provider_name: String,
     pub provider_slug: String,
+    pub provider_type: String,
     pub token_type: String,
     pub status: String,
     pub label: Option<String>,
@@ -1531,6 +1532,10 @@ pub async fn list_user_tokens(
                 provider_config_id: token.provider_config_id.clone(),
                 provider_name,
                 provider_slug,
+                provider_type: provider_map
+                    .get(token.provider_config_id.as_str())
+                    .map(|provider| provider.provider_type.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
                 token_type: token.token_type.clone(),
                 status: token.status.clone(),
                 label: token.label.clone(),

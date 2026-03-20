@@ -1,13 +1,14 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use hmac::{Hmac, Mac};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TelegramLoginData {
-    pub id: i64,
+    #[serde(deserialize_with = "deserialize_telegram_id")]
+    pub id: String,
     pub first_name: String,
     #[serde(default)]
     pub last_name: Option<String>,
@@ -52,7 +53,7 @@ fn build_data_check_string(data: &TelegramLoginData) -> String {
     let mut fields = vec![
         ("auth_date", data.auth_date.to_string()),
         ("first_name", data.first_name.clone()),
-        ("id", data.id.to_string()),
+        ("id", data.id.clone()),
     ];
 
     if let Some(value) = non_empty(&data.last_name) {
@@ -78,13 +79,36 @@ fn non_empty(value: &Option<String>) -> Option<&str> {
     value.as_deref().filter(|value| !value.is_empty())
 }
 
+fn deserialize_telegram_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TelegramId {
+        String(String),
+        Integer(i64),
+    }
+
+    let id = match TelegramId::deserialize(deserializer)? {
+        TelegramId::String(value) => value,
+        TelegramId::Integer(value) => value.to_string(),
+    };
+
+    if id.is_empty() {
+        return Err(serde::de::Error::custom("Telegram id must not be empty"));
+    }
+
+    Ok(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn signed_login_data(bot_token: &str) -> TelegramLoginData {
         let mut data = TelegramLoginData {
-            id: 123_456_789,
+            id: "123456789".to_string(),
             first_name: "Nyx".to_string(),
             last_name: Some("Bot".to_string()),
             username: Some("nyxid_bot".to_string()),
@@ -134,7 +158,7 @@ mod tests {
     #[test]
     fn data_check_string_sorts_optional_fields() {
         let data = TelegramLoginData {
-            id: 42,
+            id: "42".to_string(),
             first_name: "Nyx".to_string(),
             last_name: Some("ID".to_string()),
             username: Some("nyx".to_string()),
@@ -147,5 +171,26 @@ mod tests {
             build_data_check_string(&data),
             "auth_date=1700000000\nfirst_name=Nyx\nid=42\nlast_name=ID\nusername=nyx"
         );
+    }
+
+    #[test]
+    fn deserializes_string_or_numeric_id() {
+        let string_id: TelegramLoginData = serde_json::from_value(serde_json::json!({
+            "id": "42",
+            "first_name": "Nyx",
+            "auth_date": 1700000000,
+            "hash": "abcd",
+        }))
+        .expect("string id should deserialize");
+        let numeric_id: TelegramLoginData = serde_json::from_value(serde_json::json!({
+            "id": 42,
+            "first_name": "Nyx",
+            "auth_date": 1700000000,
+            "hash": "abcd",
+        }))
+        .expect("numeric id should deserialize");
+
+        assert_eq!(string_id.id, "42");
+        assert_eq!(numeric_id.id, "42");
     }
 }
