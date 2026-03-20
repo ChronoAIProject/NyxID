@@ -1421,9 +1421,61 @@ pub struct ApiKeyProviderInput {
 }
 
 /// Input for Telegram Login Widget provider configuration fields.
+#[derive(Debug)]
 pub struct TelegramWidgetProviderInput {
     pub bot_username: Option<String>,
     pub bot_token: Option<String>,
+}
+
+fn normalize_telegram_widget_field(value: String, label: &str) -> AppResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::ValidationError(format!(
+            "{label} must not be blank for Telegram widget providers"
+        )));
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn normalize_telegram_widget_input(
+    credential_mode: &str,
+    config: TelegramWidgetProviderInput,
+) -> AppResult<TelegramWidgetProviderInput> {
+    let bot_username = config
+        .bot_username
+        .map(|value| normalize_telegram_widget_field(value, "Bot username"))
+        .transpose()?;
+    let bot_token = config
+        .bot_token
+        .map(|value| normalize_telegram_widget_field(value, "Bot token"))
+        .transpose()?;
+
+    let has_bot_username = bot_username.is_some();
+    let has_bot_token = bot_token.is_some();
+
+    if credential_mode == "admin" {
+        if !has_bot_username {
+            return Err(AppError::ValidationError(
+                "Bot username is required for telegram_widget providers in admin mode".to_string(),
+            ));
+        }
+        if !has_bot_token {
+            return Err(AppError::ValidationError(
+                "Bot token is required for telegram_widget providers in admin mode".to_string(),
+            ));
+        }
+    } else if has_bot_username != has_bot_token {
+        return Err(AppError::ValidationError(
+            "telegram_widget fallback credentials must include both bot username and bot token"
+                .to_string(),
+        ));
+    }
+
+    Ok(TelegramWidgetProviderInput {
+        bot_username,
+        bot_token,
+    })
 }
 
 /// Fields that can be updated on a provider config.
@@ -1489,6 +1541,18 @@ pub async fn create_provider(
             valid_modes.join(", ")
         )));
     }
+
+    let telegram_widget_config = if provider_type == "telegram_widget" {
+        Some(normalize_telegram_widget_input(
+            credential_mode,
+            telegram_widget_config.unwrap_or(TelegramWidgetProviderInput {
+                bot_username: None,
+                bot_token: None,
+            }),
+        )?)
+    } else {
+        telegram_widget_config
+    };
 
     // Check slug uniqueness
     let existing = db
@@ -1647,10 +1711,19 @@ pub async fn update_provider(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     provider_id: &str,
-    updates: ProviderUpdateInput,
+    mut updates: ProviderUpdateInput,
 ) -> AppResult<ProviderConfig> {
     // Verify exists
-    let _existing = get_provider(db, provider_id).await?;
+    let existing = get_provider(db, provider_id).await?;
+
+    if existing.provider_type == "telegram_widget" {
+        if let Some(value) = updates.client_id.take() {
+            updates.client_id = Some(normalize_telegram_widget_field(value, "Bot username")?);
+        }
+        if let Some(value) = updates.client_secret.take() {
+            updates.client_secret = Some(normalize_telegram_widget_field(value, "Bot token")?);
+        }
+    }
 
     let now = Utc::now();
     let mut set_doc = doc! {
@@ -1820,4 +1893,55 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
     tracing::info!(provider_id = %provider_id, "Provider deactivated, user tokens revoked, and user credentials deleted");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn telegram_widget_input_trims_bot_values() {
+        let input = TelegramWidgetProviderInput {
+            bot_username: Some("  nyxid_bot  ".to_string()),
+            bot_token: Some("  123456:ABC-DEF  ".to_string()),
+        };
+
+        let normalized = normalize_telegram_widget_input("admin", input)
+            .expect("telegram widget credentials should normalize");
+
+        assert_eq!(normalized.bot_username.as_deref(), Some("nyxid_bot"));
+        assert_eq!(normalized.bot_token.as_deref(), Some("123456:ABC-DEF"));
+    }
+
+    #[test]
+    fn telegram_widget_input_rejects_blank_bot_username() {
+        let input = TelegramWidgetProviderInput {
+            bot_username: Some("   ".to_string()),
+            bot_token: Some("123456:ABC-DEF".to_string()),
+        };
+
+        let error = normalize_telegram_widget_input("admin", input)
+            .expect_err("blank bot usernames should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "Validation error: Bot username must not be blank for Telegram widget providers"
+        );
+    }
+
+    #[test]
+    fn telegram_widget_input_rejects_blank_bot_token() {
+        let input = TelegramWidgetProviderInput {
+            bot_username: Some("nyxid_bot".to_string()),
+            bot_token: Some("   ".to_string()),
+        };
+
+        let error = normalize_telegram_widget_input("admin", input)
+            .expect_err("blank bot tokens should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "Validation error: Bot token must not be blank for Telegram widget providers"
+        );
+    }
 }

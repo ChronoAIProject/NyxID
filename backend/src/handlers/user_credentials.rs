@@ -42,11 +42,17 @@ pub struct DeleteCredentialsResponse {
     pub message: String,
 }
 
-fn validate_set_user_credentials_request<'a>(
+#[derive(Debug)]
+struct ValidatedUserCredentialsInput {
+    client_id: String,
+    client_secret: Option<String>,
+}
+
+fn validate_set_user_credentials_request(
     provider: &crate::models::provider_config::ProviderConfig,
-    body: &'a SetUserCredentialsRequest,
-) -> AppResult<Option<&'a str>> {
-    if body.client_id.is_empty() || body.client_id.len() > 500 {
+    body: &SetUserCredentialsRequest,
+) -> AppResult<ValidatedUserCredentialsInput> {
+    if body.client_id.trim().is_empty() || body.client_id.len() > 500 {
         return Err(AppError::ValidationError(
             "client_id must be between 1 and 500 characters".to_string(),
         ));
@@ -61,10 +67,24 @@ fn validate_set_user_credentials_request<'a>(
         ));
     }
 
-    let client_secret = body
-        .client_secret
-        .as_deref()
-        .filter(|value| !value.is_empty());
+    let client_id = if provider.provider_type == "telegram_widget" {
+        body.client_id.trim().to_string()
+    } else {
+        body.client_id.clone()
+    };
+
+    let client_secret = if provider.provider_type == "telegram_widget" {
+        body.client_secret
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(String::from)
+    } else {
+        body.client_secret
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(String::from)
+    };
 
     if provider.provider_type == "telegram_widget" && client_secret.is_none() {
         return Err(AppError::ValidationError(
@@ -72,7 +92,10 @@ fn validate_set_user_credentials_request<'a>(
         ));
     }
 
-    Ok(client_secret)
+    Ok(ValidatedUserCredentialsInput {
+        client_id,
+        client_secret,
+    })
 }
 
 // --- Handlers ---
@@ -132,15 +155,15 @@ pub async fn set_my_credentials(
         ));
     }
 
-    let client_secret = validate_set_user_credentials_request(&provider, &body)?;
+    let validated = validate_set_user_credentials_request(&provider, &body)?;
 
     let cred = user_credentials_service::upsert_user_credentials(
         &state.db,
         &state.encryption_keys,
         &user_id_str,
         &provider_id,
-        &body.client_id,
-        client_secret,
+        &validated.client_id,
+        validated.client_secret.as_deref(),
         body.label.as_deref(),
     )
     .await?;
@@ -261,9 +284,26 @@ mod tests {
             label: None,
         };
 
-        let client_secret = validate_set_user_credentials_request(&provider, &request)
+        let validated = validate_set_user_credentials_request(&provider, &request)
             .expect("oauth credentials without a client secret should remain valid");
 
-        assert!(client_secret.is_none());
+        assert_eq!(validated.client_id, "client-id");
+        assert!(validated.client_secret.is_none());
+    }
+
+    #[test]
+    fn telegram_widget_user_credentials_trim_bot_values() {
+        let provider = make_provider("telegram_widget");
+        let request = SetUserCredentialsRequest {
+            client_id: "  nyxid_bot  ".to_string(),
+            client_secret: Some("  123456:ABC-DEF  ".to_string()),
+            label: None,
+        };
+
+        let validated = validate_set_user_credentials_request(&provider, &request)
+            .expect("telegram widget credentials should normalize");
+
+        assert_eq!(validated.client_id, "nyxid_bot");
+        assert_eq!(validated.client_secret.as_deref(), Some("123456:ABC-DEF"));
     }
 }
