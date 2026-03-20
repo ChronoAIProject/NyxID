@@ -13,9 +13,9 @@ pub struct ServiceProviderRequirement {
     pub required: bool,
     /// Specific scopes this service needs from the provider
     pub scopes: Option<Vec<String>>,
-    /// How to inject the provider token: "bearer" | "header" | "query"
+    /// How to inject the provider token: "bearer" | "header" | "query" | "url_prefix"
     pub injection_method: String,
-    /// Header name or query param name (e.g., "Authorization", "X-API-Key")
+    /// Header name, query param name, or URL prefix literal (e.g., "Authorization", "X-API-Key", "bot")
     pub injection_key: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,

@@ -262,19 +262,28 @@ pub async fn forward_request(
     // could change DNS to point to a private IP after validation. Consider using a custom
     // DNS resolver or reqwest's `resolve` feature to check the resolved IP before connecting.
 
+    let mut request_path = path.trim_start_matches('/').to_string();
+    for credential in &delegated_credentials {
+        if credential.injection_method == "url_prefix" {
+            let prefix = format!("{}{}", credential.injection_key, credential.credential);
+            let prefix = prefix.trim_matches('/');
+            request_path = if request_path.is_empty() {
+                prefix.to_string()
+            } else {
+                format!("{prefix}/{request_path}")
+            };
+        }
+    }
+
     let url = if let Some(q) = query {
         format!(
             "{}/{}?{}",
             target.base_url.trim_end_matches('/'),
-            path.trim_start_matches('/'),
+            request_path,
             q
         )
     } else {
-        format!(
-            "{}/{}",
-            target.base_url.trim_end_matches('/'),
-            path.trim_start_matches('/')
-        )
+        format!("{}/{}", target.base_url.trim_end_matches('/'), request_path)
     };
 
     let mut request = client.request(method.clone(), &url);
@@ -340,6 +349,7 @@ pub async fn forward_request(
             "query" => {
                 request = request.query(&[(&cred.injection_key, &cred.credential)]);
             }
+            "url_prefix" => {}
             _ => {}
         }
     }

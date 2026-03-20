@@ -59,6 +59,50 @@ pub fn generate_code_challenge(verifier: &str) -> String {
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, hash)
 }
 
+async fn build_refresh_update_doc(
+    encryption_keys: &EncryptionKeys,
+    token_data: &serde_json::Value,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<bson::Document> {
+    let new_access_token = token_data["access_token"].as_str().ok_or_else(|| {
+        AppError::Internal("Missing access_token in refresh response".to_string())
+    })?;
+
+    let new_refresh_token = token_data["refresh_token"].as_str();
+    let expires_in = token_data["expires_in"].as_i64();
+
+    let access_enc = encryption_keys.encrypt(new_access_token.as_bytes()).await?;
+
+    let mut set_doc = doc! {
+        "access_token_encrypted": bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: access_enc,
+        },
+        "status": "active",
+        "error_message": bson::Bson::Null,
+        "last_refreshed_at": bson::DateTime::from_chrono(now),
+        "updated_at": bson::DateTime::from_chrono(now),
+    };
+
+    if let Some(exp) = expires_in {
+        let new_expires = now + Duration::seconds(exp);
+        set_doc.insert("expires_at", bson::DateTime::from_chrono(new_expires));
+    }
+
+    if let Some(rt) = new_refresh_token {
+        let rt_enc = encryption_keys.encrypt(rt.as_bytes()).await?;
+        set_doc.insert(
+            "refresh_token_encrypted",
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: rt_enc,
+            },
+        );
+    }
+
+    Ok(set_doc)
+}
+
 /// Refresh an OAuth2 access token using the stored refresh token.
 ///
 /// Uses a dedicated no-redirect HTTP client (SEC-H2) and truncates error
@@ -153,42 +197,11 @@ pub async fn refresh_oauth_token(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to parse refresh response: {e}")))?;
 
-    let new_access_token = token_data["access_token"].as_str().ok_or_else(|| {
-        AppError::Internal("Missing access_token in refresh response".to_string())
-    })?;
-
-    let new_refresh_token = token_data["refresh_token"].as_str();
-    let expires_in = token_data["expires_in"].as_i64();
     let now = Utc::now();
-
-    let access_enc = encryption_keys.encrypt(new_access_token.as_bytes()).await?;
-
-    let mut set_doc = doc! {
-        "access_token_encrypted": bson::Binary {
-            subtype: bson::spec::BinarySubtype::Generic,
-            bytes: access_enc,
-        },
-        "status": "active",
-        "error_message": bson::Bson::Null,
-        "last_refreshed_at": bson::DateTime::from_chrono(now),
-        "updated_at": bson::DateTime::from_chrono(now),
-    };
-
-    if let Some(exp) = expires_in {
-        let new_expires = now + Duration::seconds(exp);
-        set_doc.insert("expires_at", bson::DateTime::from_chrono(new_expires));
-    }
-
-    if let Some(rt) = new_refresh_token {
-        let rt_enc = encryption_keys.encrypt(rt.as_bytes()).await?;
-        set_doc.insert(
-            "refresh_token_encrypted",
-            bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic,
-                bytes: rt_enc,
-            },
-        );
-    }
+    let set_doc = build_refresh_update_doc(encryption_keys, &token_data, now).await?;
+    let new_access_token = token_data["access_token"]
+        .as_str()
+        .expect("refresh response access_token validated by build_refresh_update_doc");
 
     db.collection::<UserProviderToken>(COLLECTION_NAME)
         .update_one(doc! { "_id": &token.id }, doc! { "$set": set_doc })
@@ -206,6 +219,9 @@ pub async fn refresh_oauth_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::crypto::local_key_provider::LocalKeyProvider;
 
     fn test_provider() -> ProviderConfig {
         ProviderConfig {
@@ -275,5 +291,44 @@ mod tests {
             client_id_form_field(&provider, "client-123"),
             ("client_key".to_string(), "client-123".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn refresh_update_doc_persists_rotated_refresh_token() {
+        let keys = EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([7u8; 32], None)));
+        let now = Utc::now();
+        let token_data = serde_json::json!({
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token",
+            "expires_in": 3600,
+        });
+
+        let set_doc = build_refresh_update_doc(&keys, &token_data, now)
+            .await
+            .expect("refresh update doc should build");
+
+        let access_ciphertext = set_doc
+            .get_binary_generic("access_token_encrypted")
+            .expect("access token should be encrypted");
+        let refresh_ciphertext = set_doc
+            .get_binary_generic("refresh_token_encrypted")
+            .expect("refresh token should be encrypted");
+
+        let decrypted_access = String::from_utf8(
+            keys.decrypt(access_ciphertext)
+                .await
+                .expect("access token should decrypt"),
+        )
+        .expect("access token should be utf8");
+        let decrypted_refresh = String::from_utf8(
+            keys.decrypt(refresh_ciphertext)
+                .await
+                .expect("refresh token should decrypt"),
+        )
+        .expect("refresh token should be utf8");
+
+        assert_eq!(decrypted_access, "new-access-token");
+        assert_eq!(decrypted_refresh, "new-refresh-token");
+        assert!(set_doc.get_datetime("expires_at").is_ok());
     }
 }

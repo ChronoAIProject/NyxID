@@ -120,6 +120,7 @@ pub async fn resolve_delegated_credentials(
                 .unwrap_or_else(|| match req.injection_method.as_str() {
                     "bearer" => "Authorization".to_string(),
                     "query" => "api_key".to_string(),
+                    "url_prefix" => String::new(),
                     _ => "X-API-Key".to_string(),
                 });
 

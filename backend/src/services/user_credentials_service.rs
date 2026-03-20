@@ -175,7 +175,7 @@ pub struct ResolvedOAuthCredentials {
 
 pub fn provider_has_admin_oauth_credentials(provider: &ProviderConfig) -> bool {
     match provider.provider_type.as_str() {
-        "oauth2" => {
+        "oauth2" | "telegram_widget" => {
             // OAuth2 requires both client_id and client_secret for admin credentials
             provider.client_id_encrypted.is_some() && provider.client_secret_encrypted.is_some()
         }

@@ -260,7 +260,7 @@ pub async fn create_provider(
     validate_slug(&body.slug)?;
 
     // Validate provider_type
-    let valid_types = ["oauth2", "api_key", "device_code"];
+    let valid_types = ["oauth2", "api_key", "device_code", "telegram_widget"];
     if !valid_types.contains(&body.provider_type.as_str()) {
         return Err(AppError::ValidationError(format!(
             "provider_type must be one of: {}",
@@ -421,6 +421,39 @@ pub async fn create_provider(
         None
     };
 
+    let telegram_widget_config = if body.provider_type == "telegram_widget" {
+        let bot_username = body.client_id.clone();
+        let bot_token = body.client_secret.clone();
+        let has_bot_username = bot_username.is_some();
+        let has_bot_token = bot_token.is_some();
+
+        if credential_mode == "admin" {
+            if !has_bot_username {
+                return Err(AppError::ValidationError(
+                    "client_id is required for telegram_widget providers in admin mode".to_string(),
+                ));
+            }
+            if !has_bot_token {
+                return Err(AppError::ValidationError(
+                    "client_secret is required for telegram_widget providers in admin mode"
+                        .to_string(),
+                ));
+            }
+        } else if has_bot_username != has_bot_token {
+            return Err(AppError::ValidationError(
+                "telegram_widget fallback credentials must include both client_id and client_secret"
+                    .to_string(),
+            ));
+        }
+
+        Some(provider_service::TelegramWidgetProviderInput {
+            bot_username,
+            bot_token,
+        })
+    } else {
+        None
+    };
+
     let provider = provider_service::create_provider(
         &state.db,
         &state.encryption_keys,
@@ -432,6 +465,7 @@ pub async fn create_provider(
         oauth_config,
         api_key_config,
         device_code_config,
+        telegram_widget_config,
         body.description.as_deref(),
         body.icon_url.as_deref(),
         body.documentation_url.as_deref(),

@@ -7,6 +7,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
+use crate::crypto::telegram::{TelegramLoginData, verify_telegram_login};
 use crate::errors::{AppError, AppResult};
 use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
@@ -33,10 +34,13 @@ pub struct UserProviderTokenSummary {
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub connected_at: String,
+    pub metadata: Option<serde_json::Value>,
 }
 
 const OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE: &str =
     "This provider is not configured for OAuth yet. Please contact your admin.";
+const TELEGRAM_WIDGET_PROVIDER_NOT_CONFIGURED_MESSAGE: &str =
+    "This Telegram provider is not configured yet. Please contact your admin.";
 
 fn ensure_oauth_provider_configured(provider: &ProviderConfig) -> AppResult<()> {
     // URLs are always required regardless of credential mode
@@ -58,6 +62,74 @@ fn ensure_oauth_provider_configured(provider: &ProviderConfig) -> AppResult<()> 
     }
 
     Ok(())
+}
+
+fn ensure_telegram_widget_provider(provider: &ProviderConfig) -> AppResult<()> {
+    if provider.provider_type != "telegram_widget" {
+        return Err(AppError::BadRequest(
+            "This provider does not use Telegram Login".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+struct ResolvedTelegramWidgetCredentials {
+    bot_username: String,
+    bot_token: String,
+    credential_user_id: Option<String>,
+}
+
+pub struct TelegramWidgetConnectResult {
+    pub bot_username: String,
+    pub callback_url: String,
+    pub redirect_url: String,
+}
+
+async fn resolve_telegram_widget_credentials(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    provider: &ProviderConfig,
+    user_id: &str,
+) -> AppResult<ResolvedTelegramWidgetCredentials> {
+    if provider.credential_mode == "admin"
+        && !user_credentials_service::provider_has_admin_oauth_credentials(provider)
+    {
+        return Err(AppError::BadRequest(
+            TELEGRAM_WIDGET_PROVIDER_NOT_CONFIGURED_MESSAGE.to_string(),
+        ));
+    }
+
+    let resolved =
+        user_credentials_service::resolve_oauth_credentials(db, encryption_keys, provider, user_id)
+            .await
+            .map_err(|error| match error {
+                AppError::BadRequest(_) => AppError::BadRequest(
+                    TELEGRAM_WIDGET_PROVIDER_NOT_CONFIGURED_MESSAGE.to_string(),
+                ),
+                other => other,
+            })?;
+
+    let bot_username = resolved
+        .client_id
+        .trim()
+        .trim_start_matches('@')
+        .to_string();
+    if bot_username.is_empty() {
+        return Err(AppError::BadRequest(
+            TELEGRAM_WIDGET_PROVIDER_NOT_CONFIGURED_MESSAGE.to_string(),
+        ));
+    }
+
+    let bot_token = resolved.client_secret.ok_or_else(|| {
+        AppError::BadRequest(TELEGRAM_WIDGET_PROVIDER_NOT_CONFIGURED_MESSAGE.to_string())
+    })?;
+
+    Ok(ResolvedTelegramWidgetCredentials {
+        bot_username,
+        bot_token,
+        credential_user_id: resolved.credential_user_id,
+    })
 }
 
 /// Store an API key for a provider.
@@ -139,6 +211,7 @@ pub async fn store_api_key(
         token_scopes: None,
         expires_at: None,
         api_key_encrypted: Some(encrypted),
+        metadata: None,
         status: "active".to_string(),
         last_refreshed_at: None,
         last_used_at: None,
@@ -156,6 +229,124 @@ pub async fn store_api_key(
         user_id = %user_id,
         provider_id = %provider_id,
         "API key stored for provider"
+    );
+
+    Ok(token)
+}
+
+/// Return the data needed to render a Telegram Login Widget connection flow.
+pub async fn get_telegram_widget_connect_config(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    frontend_url: &str,
+    base_url: &str,
+    user_id: &str,
+    provider_id: &str,
+) -> AppResult<TelegramWidgetConnectResult> {
+    let provider = db
+        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+        .find_one(doc! { "_id": provider_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Provider not found or inactive".to_string()))?;
+
+    ensure_telegram_widget_provider(&provider)?;
+
+    let resolved =
+        resolve_telegram_widget_credentials(db, encryption_keys, &provider, user_id).await?;
+
+    Ok(TelegramWidgetConnectResult {
+        bot_username: resolved.bot_username,
+        callback_url: format!(
+            "{}/api/v1/providers/{provider_id}/connect/telegram/callback",
+            base_url.trim_end_matches('/')
+        ),
+        redirect_url: format!(
+            "{}/providers/callback?provider_id={}&provider_type=telegram",
+            frontend_url.trim_end_matches('/'),
+            urlencoding::encode(provider_id),
+        ),
+    })
+}
+
+/// Verify Telegram Login Widget data and store the resulting identity.
+pub async fn handle_telegram_widget_callback(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    provider_id: &str,
+    login_data: &TelegramLoginData,
+) -> AppResult<UserProviderToken> {
+    let provider = db
+        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+        .find_one(doc! { "_id": provider_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Provider not found or inactive".to_string()))?;
+
+    ensure_telegram_widget_provider(&provider)?;
+
+    let resolved =
+        resolve_telegram_widget_credentials(db, encryption_keys, &provider, user_id).await?;
+
+    if !verify_telegram_login(&resolved.bot_token, login_data) {
+        return Err(AppError::BadRequest(
+            "Invalid Telegram login payload".to_string(),
+        ));
+    }
+
+    let now = Utc::now();
+
+    db.collection::<UserProviderToken>(COLLECTION_NAME)
+        .delete_many(doc! {
+            "user_id": user_id,
+            "provider_config_id": provider_id,
+        })
+        .await?;
+
+    let metadata = serde_json::json!({
+        "telegram_user_id": login_data.id,
+        "first_name": &login_data.first_name,
+        "last_name": &login_data.last_name,
+        "username": &login_data.username,
+        "photo_url": &login_data.photo_url,
+        "auth_date": login_data.auth_date,
+    });
+
+    let label = login_data
+        .username
+        .as_ref()
+        .map(|username| format!("@{username}"))
+        .or_else(|| Some(login_data.first_name.clone()));
+
+    let token = UserProviderToken {
+        id: Uuid::new_v4().to_string(),
+        user_id: user_id.to_string(),
+        provider_config_id: provider_id.to_string(),
+        credential_user_id: resolved.credential_user_id,
+        token_type: "telegram_identity".to_string(),
+        access_token_encrypted: None,
+        refresh_token_encrypted: None,
+        token_scopes: None,
+        expires_at: None,
+        api_key_encrypted: None,
+        metadata: Some(metadata),
+        status: "active".to_string(),
+        last_refreshed_at: None,
+        last_used_at: None,
+        error_message: None,
+        label,
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.collection::<UserProviderToken>(COLLECTION_NAME)
+        .insert_one(&token)
+        .await?;
+
+    tracing::info!(
+        user_id = %user_id,
+        provider_id = %provider_id,
+        telegram_user_id = login_data.id,
+        "Telegram identity stored for provider"
     );
 
     Ok(token)
@@ -814,6 +1005,7 @@ async fn store_device_code_tokens(
         token_scopes: scope.map(String::from),
         expires_at: token_expires_at,
         api_key_encrypted: None,
+        metadata: None,
         status: "active".to_string(),
         last_refreshed_at: None,
         last_used_at: None,
@@ -1012,6 +1204,7 @@ pub async fn handle_oauth_callback(
         token_scopes: scope.map(String::from),
         expires_at: token_expires_at,
         api_key_encrypted: None,
+        metadata: None,
         status: "active".to_string(),
         last_refreshed_at: None,
         last_used_at: None,
@@ -1115,6 +1308,11 @@ pub async fn get_active_token(
                 api_key: None,
             })
         }
+        "telegram_identity" => Ok(DecryptedProviderToken {
+            token_type: "telegram_identity".to_string(),
+            access_token: None,
+            api_key: None,
+        }),
         other => Err(AppError::Internal(format!("Unknown token type: {other}"))),
     }
 }
@@ -1339,6 +1537,7 @@ pub async fn list_user_tokens(
                 expires_at: token.expires_at.map(|dt| dt.to_rfc3339()),
                 last_used_at: token.last_used_at.map(|dt| dt.to_rfc3339()),
                 connected_at: token.created_at.to_rfc3339(),
+                metadata: token.metadata.clone(),
             }
         })
         .collect();

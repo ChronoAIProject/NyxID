@@ -25,7 +25,7 @@ pub struct ProviderConfig {
     pub name: String,
     pub description: Option<String>,
 
-    /// "oauth2" | "api_key" | "device_code"
+    /// "oauth2" | "api_key" | "device_code" | "telegram_widget"
     pub provider_type: String,
 
     // --- OAuth2 fields (None for api_key providers) ---
@@ -33,10 +33,12 @@ pub struct ProviderConfig {
     pub token_url: Option<String>,
     pub revocation_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
-    /// NyxID's OAuth client_id for this provider (encrypted)
+    /// NyxID's provider client identifier for this provider (encrypted).
+    /// Reused by `telegram_widget` providers to store the bot username.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub client_id_encrypted: Option<Vec<u8>>,
-    /// NyxID's OAuth client_secret for this provider (encrypted)
+    /// NyxID's provider client secret for this provider (encrypted).
+    /// Reused by `telegram_widget` providers to store the bot token.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub client_secret_encrypted: Option<Vec<u8>>,
     #[serde(default)]

@@ -647,7 +647,134 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 13. Spotify (OAuth2)
+    // 13. Lark (OAuth2)
+    if !slug_exists!("lark") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "lark".to_string(),
+            name: "Lark".to_string(),
+            description: Some("Lark / Larksuite OAuth2 connection".to_string()),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(
+                "https://open.larksuite.com/open-apis/authen/v1/index".to_string(),
+            ),
+            token_url: Some(
+                "https://open.larksuite.com/open-apis/authen/v2/oauth/token".to_string(),
+            ),
+            revocation_url: None,
+            default_scopes: Some(vec![
+                "contact:user.base:readonly".to_string(),
+                "offline_access".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://open.larksuite.com/document".to_string()),
+            is_active: true,
+            credential_mode: "both".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "lark", "Seeded default provider: Lark");
+        seeded_count += 1;
+    }
+
+    // 14. Telegram Login Widget
+    if !slug_exists!("telegram") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "telegram".to_string(),
+            name: "Telegram".to_string(),
+            description: Some("Telegram Login Widget identity connection".to_string()),
+            provider_type: "telegram_widget".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://core.telegram.org/widgets/login".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "telegram", "Seeded default provider: Telegram");
+        seeded_count += 1;
+    }
+
+    // 15. Telegram Bot API (API Key)
+    if !slug_exists!("telegram-bot") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "telegram-bot".to_string(),
+            name: "Telegram Bot API".to_string(),
+            description: Some("Telegram Bot API access using a bot token".to_string()),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a bot via @BotFather and copy the bot token (format: 123456:ABC-DEF...)"
+                    .to_string(),
+            ),
+            api_key_url: Some("https://t.me/BotFather".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://core.telegram.org/bots/api".to_string()),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(
+            slug = "telegram-bot",
+            "Seeded default provider: Telegram Bot API"
+        );
+        seeded_count += 1;
+    }
+
+    // 16. Spotify (OAuth2)
     if !slug_exists!("spotify") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1059,6 +1186,14 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         injection_key: "Authorization",
     },
     DefaultServiceSeed {
+        provider_slug: "lark",
+        service_slug: "api-lark",
+        service_name: "Lark API",
+        base_url: "https://open.larksuite.com/open-apis",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
         provider_slug: "spotify",
         service_slug: "api-spotify",
         service_name: "Spotify API",
@@ -1105,6 +1240,14 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         base_url: "https://oauth.reddit.com",
         injection_method: "bearer",
         injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "telegram-bot",
+        service_slug: "api-telegram-bot",
+        service_name: "Telegram Bot API",
+        base_url: "https://api.telegram.org",
+        injection_method: "url_prefix",
+        injection_key: "bot",
     },
 ];
 
@@ -1277,6 +1420,12 @@ pub struct ApiKeyProviderInput {
     pub api_key_url: Option<String>,
 }
 
+/// Input for Telegram Login Widget provider configuration fields.
+pub struct TelegramWidgetProviderInput {
+    pub bot_username: Option<String>,
+    pub bot_token: Option<String>,
+}
+
 /// Fields that can be updated on a provider config.
 pub struct ProviderUpdateInput {
     pub name: Option<String>,
@@ -1317,6 +1466,7 @@ pub async fn create_provider(
     oauth_config: Option<OAuthProviderInput>,
     api_key_config: Option<ApiKeyProviderInput>,
     device_code_config: Option<DeviceCodeProviderInput>,
+    telegram_widget_config: Option<TelegramWidgetProviderInput>,
     description: Option<&str>,
     icon_url: Option<&str>,
     documentation_url: Option<&str>,
@@ -1325,7 +1475,7 @@ pub async fn create_provider(
     device_code_format: Option<&str>,
     client_id_param_name: Option<&str>,
 ) -> AppResult<ProviderConfig> {
-    let valid_types = ["oauth2", "api_key", "device_code"];
+    let valid_types = ["oauth2", "api_key", "device_code", "telegram_widget"];
     if !valid_types.contains(&provider_type) {
         return Err(AppError::ValidationError(format!(
             "provider_type must be one of: {}",
@@ -1372,6 +1522,16 @@ pub async fn create_provider(
             None => None,
         };
         let csec = match dc.client_secret.as_ref() {
+            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            None => None,
+        };
+        (cid, csec)
+    } else if let Some(ref tg) = telegram_widget_config {
+        let cid = match tg.bot_username.as_ref() {
+            Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
+            None => None,
+        };
+        let csec = match tg.bot_token.as_ref() {
             Some(value) => Some(encryption_keys.encrypt(value.as_bytes()).await?),
             None => None,
         };

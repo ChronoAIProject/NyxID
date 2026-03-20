@@ -17,7 +17,7 @@ pub struct UserProviderToken {
     #[serde(default)]
     pub credential_user_id: Option<String>,
 
-    /// "oauth2" | "api_key"
+    /// "oauth2" | "api_key" | "telegram_identity"
     pub token_type: String,
 
     // --- OAuth2 tokens (encrypted) ---
@@ -32,6 +32,10 @@ pub struct UserProviderToken {
     // --- API key (encrypted) ---
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub api_key_encrypted: Option<Vec<u8>>,
+
+    /// Optional provider-specific metadata for non-token identity connections.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 
     // --- Status ---
     /// "active" | "expired" | "revoked" | "refresh_failed"
@@ -73,6 +77,7 @@ mod tests {
             token_scopes: Some("openid email".to_string()),
             expires_at: Some(Utc::now()),
             api_key_encrypted: None,
+            metadata: None,
             status: "active".to_string(),
             last_refreshed_at: Some(Utc::now()),
             last_used_at: None,
@@ -103,6 +108,7 @@ mod tests {
             token_scopes: None,
             expires_at: None,
             api_key_encrypted: Some(vec![7, 8, 9]),
+            metadata: None,
             status: "active".to_string(),
             last_refreshed_at: None,
             last_used_at: None,

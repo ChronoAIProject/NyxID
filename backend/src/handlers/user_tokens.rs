@@ -7,6 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
+use crate::crypto::telegram::TelegramLoginData;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{audit_service, user_token_service};
@@ -43,6 +44,7 @@ pub struct UserTokenResponse {
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub connected_at: String,
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +61,13 @@ pub struct OAuthInitiateResponse {
 pub struct ConnectResponse {
     pub status: String,
     pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TelegramWidgetConnectResponse {
+    pub bot_username: String,
+    pub callback_url: String,
+    pub redirect_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +128,7 @@ pub async fn list_my_tokens(
             expires_at: s.expires_at,
             last_used_at: s.last_used_at,
             connected_at: s.connected_at,
+            metadata: s.metadata,
         })
         .collect();
 
@@ -171,6 +181,76 @@ pub async fn connect_api_key(
     Ok(Json(ConnectResponse {
         status: "connected".to_string(),
         message: "API key stored successfully".to_string(),
+    }))
+}
+
+/// GET /api/v1/providers/{provider_id}/connect/telegram
+pub async fn get_telegram_widget_config(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(provider_id): Path<String>,
+) -> AppResult<Json<TelegramWidgetConnectResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+
+    let config = user_token_service::get_telegram_widget_connect_config(
+        &state.db,
+        &state.encryption_keys,
+        &state.config.frontend_url,
+        &state.config.base_url,
+        &user_id_str,
+        &provider_id,
+    )
+    .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id_str),
+        "provider_telegram_widget_requested".to_string(),
+        Some(serde_json::json!({ "provider_id": &provider_id })),
+        None,
+        None,
+    );
+
+    Ok(Json(TelegramWidgetConnectResponse {
+        bot_username: config.bot_username,
+        callback_url: config.callback_url,
+        redirect_url: config.redirect_url,
+    }))
+}
+
+/// POST /api/v1/providers/{provider_id}/connect/telegram/callback
+pub async fn telegram_widget_callback(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(provider_id): Path<String>,
+    Json(body): Json<TelegramLoginData>,
+) -> AppResult<Json<ConnectResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+
+    let token = user_token_service::handle_telegram_widget_callback(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &provider_id,
+        &body,
+    )
+    .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(token.user_id.clone()),
+        "provider_token_connected".to_string(),
+        Some(serde_json::json!({
+            "provider_id": &provider_id,
+            "token_type": "telegram_identity",
+        })),
+        None,
+        None,
+    );
+
+    Ok(Json(ConnectResponse {
+        status: "connected".to_string(),
+        message: "Telegram identity connected successfully".to_string(),
     }))
 }
 

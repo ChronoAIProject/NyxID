@@ -155,7 +155,7 @@ pub async fn add_requirement(
         .ok_or_else(|| AppError::NotFound("Provider not found or inactive".to_string()))?;
 
     // Validate injection_method
-    let valid_methods = ["bearer", "header", "query"];
+    let valid_methods = ["bearer", "header", "query", "url_prefix"];
     if !valid_methods.contains(&body.injection_method.as_str()) {
         return Err(AppError::ValidationError(format!(
             "injection_method must be one of: {}",

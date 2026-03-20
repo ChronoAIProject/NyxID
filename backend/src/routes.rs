@@ -168,6 +168,14 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             get(handlers::user_tokens::initiate_oauth_connect),
         )
         .route(
+            "/{provider_id}/connect/telegram",
+            get(handlers::user_tokens::get_telegram_widget_config),
+        )
+        .route(
+            "/{provider_id}/connect/telegram/callback",
+            post(handlers::user_tokens::telegram_widget_callback),
+        )
+        .route(
             "/{provider_id}/callback",
             get(handlers::user_tokens::oauth_callback),
         )
