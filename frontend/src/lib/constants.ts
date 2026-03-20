@@ -89,7 +89,8 @@ export function isProvider(service: DownstreamService): boolean {
 export function needsUserCredentials(provider: ProviderConfig): boolean {
   if (
     provider.provider_type !== "oauth2" &&
-    provider.provider_type !== "device_code"
+    provider.provider_type !== "device_code" &&
+    provider.provider_type !== "telegram_widget"
   ) {
     return false;
   }
@@ -102,9 +103,14 @@ export function canConnectProvider(
   provider: ProviderConfig,
   hasUserCredentials = false,
 ): boolean {
-  if (provider.provider_type !== "oauth2" && provider.provider_type !== "device_code") {
+  if (
+    provider.provider_type !== "oauth2" &&
+    provider.provider_type !== "device_code" &&
+    provider.provider_type !== "telegram_widget"
+  ) {
     return true;
   }
+
   const mode = provider.credential_mode;
   if (mode === "user") {
     return hasUserCredentials;
@@ -137,6 +143,16 @@ export function getProviderConnectHint(
   hasUserCredentials = false,
 ): string | null {
   if (!canConnectProvider(provider, hasUserCredentials)) {
+    if (provider.provider_type === "telegram_widget") {
+      if (provider.credential_mode === "user") {
+        return "Set up your Telegram bot credentials first.";
+      }
+      if (provider.credential_mode === "both" && !hasUserCredentials) {
+        return "Admin bot credentials not configured. Set up your own Telegram bot.";
+      }
+      return "Admin must configure Telegram bot credentials first.";
+    }
+
     const mode = provider.credential_mode;
     if (mode === "user") {
       return "Set up your OAuth app credentials first.";

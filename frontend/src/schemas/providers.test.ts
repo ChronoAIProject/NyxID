@@ -230,15 +230,26 @@ describe("createProviderSchema", () => {
     const result = createProviderSchema.safeParse({
       ...baseValid,
       provider_type: "telegram_widget",
+      client_id: "nyxid_bot",
       client_secret: "123456:ABC-DEF",
     });
     expect(result.success).toBe(true);
+  });
+
+  it("rejects a Telegram widget provider without a bot username", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_secret: "123456:ABC-DEF",
+    });
+    expect(result.success).toBe(false);
   });
 
   it("rejects a Telegram widget provider without a bot token", () => {
     const result = createProviderSchema.safeParse({
       ...baseValid,
       provider_type: "telegram_widget",
+      client_id: "nyxid_bot",
     });
     expect(result.success).toBe(false);
   });

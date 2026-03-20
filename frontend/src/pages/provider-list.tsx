@@ -653,6 +653,28 @@ export function ProviderListPage() {
 
                     <FormField
                       control={form.control}
+                      name="client_id"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Bot Username</FormLabel>
+                          <FormControl>
+                            <Input
+                              placeholder="nyxid_bot"
+                              autoComplete="off"
+                              {...field}
+                            />
+                          </FormControl>
+                          <p className="text-xs text-muted-foreground">
+                            Telegram bot username from BotFather, without the
+                            leading @.
+                          </p>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
                       name="client_secret"
                       render={({ field }) => (
                         <FormItem>
@@ -661,6 +683,7 @@ export function ProviderListPage() {
                             <Input
                               type="password"
                               placeholder="123456:ABC-DEF..."
+                              autoComplete="off"
                               {...field}
                             />
                           </FormControl>

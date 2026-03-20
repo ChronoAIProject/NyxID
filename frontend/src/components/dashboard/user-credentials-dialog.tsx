@@ -50,6 +50,7 @@ export function UserCredentialsDialog({
   const setMutation = useSetProviderCredentials();
   const deleteMutation = useDeleteProviderCredentials();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const isTelegramWidget = provider.provider_type === "telegram_widget";
 
   const hasExisting = credentials?.has_credentials === true;
 
@@ -63,21 +64,30 @@ export function UserCredentialsDialog({
   });
 
   async function onSubmit(data: UserCredentialsFormData) {
+    const clientSecret =
+      data.client_secret && data.client_secret.trim().length > 0
+        ? data.client_secret
+        : undefined;
+
+    if (isTelegramWidget && !clientSecret) {
+      form.setError("client_secret", {
+        message: "Bot token is required for Telegram bot credentials",
+      });
+      return;
+    }
+
     try {
       await setMutation.mutateAsync({
         providerId: provider.id,
         client_id: data.client_id,
-        client_secret:
-          data.client_secret && data.client_secret.trim().length > 0
-            ? data.client_secret
-            : undefined,
+        client_secret: clientSecret,
         label:
           data.label && data.label.trim().length > 0
             ? data.label.trim()
             : undefined,
       });
       toast.success(
-        hasExisting ? "OAuth credentials updated" : "OAuth credentials saved",
+        hasExisting ? "Credentials updated" : "Credentials saved",
       );
       onClose();
     } catch (error) {
@@ -92,7 +102,7 @@ export function UserCredentialsDialog({
   async function handleDelete() {
     try {
       await deleteMutation.mutateAsync(provider.id);
-      toast.success("OAuth credentials removed");
+      toast.success("Credentials removed");
       onClose();
     } catch (error) {
       if (error instanceof ApiError) {
@@ -108,11 +118,14 @@ export function UserCredentialsDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {hasExisting ? "Manage" : "Setup"} OAuth App for {provider.name}
+            {hasExisting ? "Manage" : "Setup"}{" "}
+            {isTelegramWidget ? "Telegram Bot" : "OAuth App"} for{" "}
+            {provider.name}
           </DialogTitle>
           <DialogDescription>
-            Enter your own OAuth app credentials to connect with {provider.name}
-            . Public or PKCE-only clients can leave Client Secret blank.
+            {isTelegramWidget
+              ? `Enter your own Telegram bot username and bot token to connect with ${provider.name}.`
+              : `Enter your own OAuth app credentials to connect with ${provider.name}. Public or PKCE-only clients can leave Client Secret blank.`}
           </DialogDescription>
         </DialogHeader>
 
@@ -131,7 +144,9 @@ export function UserCredentialsDialog({
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
               >
-                How to create an OAuth app
+                {isTelegramWidget
+                  ? "How to create a Telegram bot"
+                  : "How to create an OAuth app"}
                 <ExternalLink className="h-3 w-3" />
               </a>
             )}
@@ -152,14 +167,26 @@ export function UserCredentialsDialog({
                   name="client_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client ID</FormLabel>
+                      <FormLabel>
+                        {isTelegramWidget ? "Bot Username" : "Client ID"}
+                      </FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Your OAuth app Client ID"
+                          placeholder={
+                            isTelegramWidget
+                              ? "your_bot_username"
+                              : "Your OAuth app Client ID"
+                          }
                           autoComplete="off"
                           {...field}
                         />
                       </FormControl>
+                      {isTelegramWidget && (
+                        <p className="text-xs text-muted-foreground">
+                          Enter the bot username from BotFather without the
+                          leading @.
+                        </p>
+                      )}
                       <FormMessage />
                     </FormItem>
                   )}
@@ -170,18 +197,27 @@ export function UserCredentialsDialog({
                   name="client_secret"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client Secret (optional)</FormLabel>
+                      <FormLabel>
+                        {isTelegramWidget
+                          ? "Bot Token"
+                          : "Client Secret (optional)"}
+                      </FormLabel>
                       <FormControl>
                         <Input
                           type="password"
-                          placeholder="Your OAuth app Client Secret"
+                          placeholder={
+                            isTelegramWidget
+                              ? "123456:ABC-DEF..."
+                              : "Your OAuth app Client Secret"
+                          }
                           autoComplete="off"
                           {...field}
                         />
                       </FormControl>
                       <p className="text-xs text-muted-foreground">
-                        Leave blank for public clients that do not use a client
-                        secret.
+                        {isTelegramWidget
+                          ? "Bot token from BotFather."
+                          : "Leave blank for public clients that do not use a client secret."}
                       </p>
                       <FormMessage />
                     </FormItem>

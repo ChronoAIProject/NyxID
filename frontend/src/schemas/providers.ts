@@ -222,12 +222,32 @@ export const createProviderSchema = z
         });
       }
     }
-    if (data.provider_type === "telegram_widget" && !data.client_secret) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Bot token is required for Telegram widget providers",
-        path: ["client_secret"],
-      });
+    if (data.provider_type === "telegram_widget") {
+      if (mode === "admin") {
+        if (!data.client_id) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              "Bot username is required for Telegram widget providers in admin mode",
+            path: ["client_id"],
+          });
+        }
+        if (!data.client_secret) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              "Bot token is required for Telegram widget providers in admin mode",
+            path: ["client_secret"],
+          });
+        }
+      } else if (!!data.client_id !== !!data.client_secret) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "Telegram widget fallback credentials must include both bot username and bot token",
+          path: [data.client_id ? "client_secret" : "client_id"],
+        });
+      }
     }
   });
 

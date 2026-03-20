@@ -190,7 +190,7 @@ describe("needsUserCredentials", () => {
     expect(needsUserCredentials(makeProvider({ credential_mode: "both" }))).toBe(true);
   });
 
-  it("returns false for telegram widget providers", () => {
+  it("returns true for telegram widget providers in both mode", () => {
     expect(
       needsUserCredentials(
         makeProvider({
@@ -198,7 +198,7 @@ describe("needsUserCredentials", () => {
           credential_mode: "both",
         }),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 
@@ -308,11 +308,72 @@ describe("provider connection helpers", () => {
     const provider = makeProvider({
       provider_type: "telegram_widget",
       credential_mode: "admin",
-      has_oauth_config: false,
+      has_oauth_config: true,
     });
 
     expect(canConnectProvider(provider)).toBe(true);
     expect(getProviderConnectLabel(provider)).toBe("Connect Telegram");
+  });
+
+  it("blocks unconfigured admin telegram widget providers", () => {
+    const provider = makeProvider({
+      provider_type: "telegram_widget",
+      credential_mode: "admin",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider)).toBe(false);
+    expect(getProviderConnectHint(provider)).toBe(
+      "Admin must configure Telegram bot credentials first.",
+    );
+  });
+
+  it("blocks user-mode telegram widget providers without user credentials", () => {
+    const provider = makeProvider({
+      provider_type: "telegram_widget",
+      credential_mode: "user",
+      has_oauth_config: true,
+    });
+
+    expect(canConnectProvider(provider, false)).toBe(false);
+    expect(getProviderConnectHint(provider, false)).toBe(
+      "Set up your Telegram bot credentials first.",
+    );
+  });
+
+  it("allows user-mode telegram widget providers with user credentials", () => {
+    const provider = makeProvider({
+      provider_type: "telegram_widget",
+      credential_mode: "user",
+      has_oauth_config: true,
+    });
+
+    expect(canConnectProvider(provider, true)).toBe(true);
+    expect(getProviderConnectHint(provider, true)).toBeNull();
+  });
+
+  it("blocks both-mode telegram widget providers without admin or user credentials", () => {
+    const provider = makeProvider({
+      provider_type: "telegram_widget",
+      credential_mode: "both",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider, false)).toBe(false);
+    expect(getProviderConnectHint(provider, false)).toBe(
+      "Admin bot credentials not configured. Set up your own Telegram bot.",
+    );
+  });
+
+  it("allows both-mode telegram widget providers with user credentials", () => {
+    const provider = makeProvider({
+      provider_type: "telegram_widget",
+      credential_mode: "both",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider, true)).toBe(true);
+    expect(getProviderConnectHint(provider, true)).toBeNull();
   });
 });
 

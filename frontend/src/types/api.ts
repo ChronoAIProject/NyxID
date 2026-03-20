@@ -261,6 +261,7 @@ export interface OAuthInitiateResponse {
 
 export interface TelegramWidgetConnectResponse {
   readonly bot_username: string;
+  readonly callback_url: string;
   readonly redirect_url: string;
 }
 

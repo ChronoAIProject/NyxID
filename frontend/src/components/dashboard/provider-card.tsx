@@ -77,6 +77,8 @@ export function ProviderCard({
   const connectHint = getProviderConnectHint(provider, hasUserCredentials);
   const connectLabel = getProviderConnectLabel(provider, hasUserCredentials);
   const showCredentialsSetup = needsUserCredentials(provider);
+  const credentialsLabel =
+    provider.provider_type === "telegram_widget" ? "Bot" : "OAuth App";
   const telegramIdentity =
     provider.provider_type === "telegram_widget"
       ? getTelegramIdentity(token?.metadata)
@@ -260,7 +262,7 @@ export function ProviderCard({
                   onClick={() => onSetupCredentials(provider)}
                 >
                   <Settings2 className="mr-1.5 h-3 w-3" />
-                  Setup OAuth App
+                  {`Setup ${credentialsLabel}`}
                 </Button>
               )}
               {showCredentialsSetup && hasUserCredentials && (
@@ -270,7 +272,7 @@ export function ProviderCard({
                   onClick={() => onSetupCredentials(provider)}
                 >
                   <Settings2 className="mr-1.5 h-3 w-3" />
-                  Manage App
+                  {`Manage ${credentialsLabel}`}
                 </Button>
               )}
               <Button

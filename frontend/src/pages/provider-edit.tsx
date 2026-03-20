@@ -636,8 +636,30 @@ export function ProviderEditPage() {
                   Telegram Login Widget
                 </h3>
                 <p className="text-xs text-muted-foreground">
-                  Leave the bot token blank to keep the current value.
+                  Leave fields blank to keep the current values.
                 </p>
+
+                <FormField
+                  control={form.control}
+                  name="client_id"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Bot Username</FormLabel>
+                      <FormControl>
+                        <Input
+                          placeholder="Leave blank to keep current"
+                          autoComplete="off"
+                          {...field}
+                        />
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        Telegram bot username from BotFather, without the
+                        leading @.
+                      </p>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
 
                 <FormField
                   control={form.control}
@@ -649,6 +671,7 @@ export function ProviderEditPage() {
                         <Input
                           type="password"
                           placeholder="Leave blank to keep current"
+                          autoComplete="off"
                           {...field}
                         />
                       </FormControl>
