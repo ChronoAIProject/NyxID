@@ -150,12 +150,13 @@ export function SshServiceInstructions({
       {/* Node-Agent Setup (for unreachable targets) */}
       <div className="space-y-3 rounded-[10px] border border-border bg-muted/20 p-3">
         <div className="space-y-1">
-          <h4 className="text-sm font-semibold">Node Agent (Remote Targets)</h4>
+          <h4 className="text-sm font-semibold">Node Agent (Required)</h4>
           <p className="text-xs text-muted-foreground">
-            If the SSH target is behind a firewall or not directly reachable from the
-            NyxID server, deploy a node agent on a machine that CAN reach the target.
-            The node agent establishes an outbound WebSocket connection to NyxID and
-            tunnels SSH traffic through it -- no inbound ports required.
+            A node agent is required for web terminal, command execution (API/MCP),
+            and SSH tunneling. Deploy a node agent on a machine that can reach the
+            SSH target. The node agent connects outbound to NyxID via WebSocket and
+            handles all SSH operations locally -- no inbound ports required on the
+            target network. The NyxID server never makes direct SSH connections.
           </p>
         </div>
         <CopyableField

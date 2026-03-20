@@ -3357,6 +3357,8 @@ dependencies = [
  "hex",
  "hmac",
  "keyring",
+ "nix 0.29.0",
+ "pty-process",
  "rand 0.8.5",
  "reqwest",
  "rpassword",

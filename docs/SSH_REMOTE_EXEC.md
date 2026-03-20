@@ -184,22 +184,24 @@ Command execution uses the same short-lived SSH certificate infrastructure as tu
 
 ---
 
-## 4. Node Routing
+## 4. Node Agent (Required)
 
-Commands can target SSH services behind firewalls or private networks using NyxID's node agent infrastructure. The routing is transparent to the caller.
+All SSH command execution runs on the node agent, not the NyxID server. The NyxID server never makes outbound SSH connections or writes key material to disk. This architecture matches the Teleport model for security.
 
 ### How It Works
 
-1. Caller sends `POST /api/v1/ssh/{service_id}/exec`
-2. NyxID resolves the node route for the service (same logic as SSH tunneling)
-3. If a healthy node binding exists, NyxID forwards the command execution request to the node agent
-4. The node agent opens a local connection to the SSH target, executes the command, and returns the result
-5. If no node route is available, NyxID connects directly to the SSH target
+1. Caller sends `POST /api/v1/ssh/{service_id}/exec` (or MCP `nyx__ssh_exec`)
+2. NyxID generates ephemeral SSH credentials (key + certificate)
+3. NyxID sends an `ssh_exec` message to the node agent via the existing WebSocket connection, including the credentials and command
+4. The node agent writes the credentials to temporary files, spawns `ssh` locally, captures stdout/stderr, and returns the result
+5. NyxID forwards the result to the caller
+6. If no node agent is bound to the service, the request is rejected with a clear error
 
 ### Requirements
 
-- A node agent must be deployed on a machine that can reach the SSH target
+- A node agent **must** be deployed on a machine that can reach the SSH target
 - The node must be registered with NyxID and bound to the SSH service
+- The node agent must have `ssh` (OpenSSH client) installed
 - The SSH target must be in the node's `ssh.allowed_targets` list (for private/loopback addresses)
 
 See [SSH_TUNNELING.md](SSH_TUNNELING.md) section 6 for full node agent setup instructions.

@@ -85,6 +85,15 @@ export function SshWebTerminal({
 
     const term = terminalRef.current;
     if (term !== null) {
+      // Clean up resize observers
+      const observer = (term as unknown as Record<string, unknown>)._nyxidResizeObserver;
+      if (observer instanceof ResizeObserver) {
+        observer.disconnect();
+      }
+      const windowHandler = (term as unknown as Record<string, unknown>)._nyxidWindowResizeHandler;
+      if (typeof windowHandler === "function") {
+        window.removeEventListener("resize", windowHandler as EventListener);
+      }
       term.dispose();
       terminalRef.current = null;
     }
@@ -152,6 +161,26 @@ export function SshWebTerminal({
 
     fitAddon.fit();
 
+    // Re-fit on window resize and container resize
+    const handleWindowResize = () => {
+      requestAnimationFrame(() => {
+        fitAddon.fit();
+      });
+    };
+    window.addEventListener("resize", handleWindowResize);
+
+    if (containerRef.current) {
+      const resizeObserver = new ResizeObserver(() => {
+        requestAnimationFrame(() => {
+          fitAddon.fit();
+        });
+      });
+      resizeObserver.observe(containerRef.current);
+      // Store for cleanup
+      (terminal as unknown as Record<string, unknown>)._nyxidResizeObserver = resizeObserver;
+      (terminal as unknown as Record<string, unknown>)._nyxidWindowResizeHandler = handleWindowResize;
+    }
+
     const cols = terminal.cols;
     const rows = terminal.rows;
 
@@ -184,6 +213,12 @@ export function SshWebTerminal({
             setStatus("connected");
             terminal.clear();
             terminal.focus();
+            // Re-fit to ensure terminal fills available space
+            if (fitAddonRef.current) {
+              requestAnimationFrame(() => {
+                fitAddonRef.current?.fit();
+              });
+            }
             return;
           }
 

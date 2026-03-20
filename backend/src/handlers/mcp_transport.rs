@@ -1283,6 +1283,7 @@ async fn resolve_ssh_service_id(
 }
 
 /// Internal SSH command execution (reusable by REST handler and MCP handler).
+/// Routes through the node agent for execution.
 async fn execute_ssh_command_internal(
     state: &AppState,
     user_id: &str,
@@ -1291,8 +1292,7 @@ async fn execute_ssh_command_internal(
     body: &super::ssh_exec::SshExecRequest,
 ) -> Result<super::ssh_exec::SshExecResponse, crate::errors::AppError> {
     use crate::errors::AppError;
-    use crate::services::node_routing_service;
-    use std::time::Instant;
+    use crate::services::{node_routing_service, node_service};
 
     let principal = body.principal.trim();
     let command = body.command.trim();
@@ -1311,18 +1311,7 @@ async fn execute_ssh_command_internal(
     }
     super::ssh_exec::check_dangerous_command(command)?;
 
-    // Session limiting
-    let session_guard = state.ssh_session_manager.try_acquire(user_id)?;
-
-    // Generate ephemeral SSH key + certificate
-    let temp_dir =
-        super::ssh_exec::write_ephemeral_ssh_files(state, ssh_svc, service_id, user_id, principal)
-            .await?;
-
-    let key_path = temp_dir.path().join("id_ed25519");
-    let cert_path = temp_dir.path().join("id_ed25519-cert.pub");
-
-    // Check for node routing
+    // Require a node agent for SSH execution
     let node_route = node_routing_service::resolve_node_route(
         &state.db,
         user_id,
@@ -1331,151 +1320,126 @@ async fn execute_ssh_command_internal(
     )
     .await
     .ok()
-    .flatten();
-
-    // Build ssh command
-    let mut cmd = tokio::process::Command::new("ssh");
-    cmd.arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg(format!("IdentityFile={}", key_path.display()))
-        .arg("-o")
-        .arg(format!("CertificateFile={}", cert_path.display()))
-        .arg("-o")
-        .arg("IdentitiesOnly=yes")
-        .arg("-o")
-        .arg("LogLevel=FATAL")
-        .arg("-o")
-        .arg("RequestTTY=no");
-
-    if node_route.is_some() {
-        let user_uuid = uuid::Uuid::try_parse(user_id)
-            .map_err(|e| AppError::Internal(format!("Invalid user ID format: {e}")))?;
-        let proxy_token = crate::crypto::jwt::generate_access_token(
-            &state.jwt_keys,
-            &state.config,
-            &user_uuid,
-            "openid",
-            None,
+    .flatten()
+    .ok_or_else(|| {
+        AppError::BadRequest(
+            "No node agent is bound to this SSH service. \
+             Deploy a NyxID node agent and bind it to this service to execute commands."
+                .to_string(),
         )
-        .map_err(|e| AppError::Internal(format!("Failed to generate proxy token: {e}")))?;
+    })?;
 
-        let nyxid_binary =
-            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("nyxid"));
-        let base_url = state.config.base_url.trim_end_matches('/');
+    // Session limiting
+    let session_guard = state.ssh_session_manager.try_acquire(user_id)?;
 
-        let proxy_cmd = format!(
-            "{} ssh proxy --base-url {} --service-id {}",
-            nyxid_binary.display(),
-            base_url,
-            service_id,
-        );
-        cmd.arg("-o").arg(format!("ProxyCommand={proxy_cmd}"));
-        cmd.env("NYXID_ACCESS_TOKEN", &proxy_token);
-    }
-
-    cmd.arg("-p")
-        .arg(ssh_svc.port.to_string())
-        .arg(format!("{principal}@{}", ssh_svc.host))
-        .arg(command);
-
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.stdin(std::process::Stdio::null());
-
-    let started_at = Instant::now();
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::Internal(format!("Failed to spawn ssh process: {e}")))?;
-
-    // Take stdout/stderr handles so we can read them without consuming `child`.
-    let child_stdout = child.stdout.take();
-    let child_stderr = child.stderr.take();
-
-    let read_and_wait = async {
-        let stdout_handle = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut out) = child_stdout {
-                use tokio::io::AsyncReadExt;
-                let _ = out.read_to_end(&mut buf).await;
-            }
-            buf
-        });
-        let stderr_handle = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut err) = child_stderr {
-                use tokio::io::AsyncReadExt;
-                let _ = err.read_to_end(&mut buf).await;
-            }
-            buf
-        });
-
-        let status = child.wait().await;
-        let stdout_bytes = stdout_handle.await.unwrap_or_default();
-        let stderr_bytes = stderr_handle.await.unwrap_or_default();
-        (status, stdout_bytes, stderr_bytes)
-    };
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs as u64),
-        read_and_wait,
+    // Generate ephemeral SSH credentials (key + cert as strings, no files)
+    let ephemeral = super::ssh_web_terminal::generate_ephemeral_credentials(
+        state, ssh_svc, service_id, user_id, principal,
     )
-    .await;
+    .await?;
 
-    let duration_ms = started_at.elapsed().as_millis() as u64;
+    // Execute via node agent with failover
+    let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
+        .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
+        .collect();
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let mut last_error = None;
+
+    for node_id in &all_node_ids {
+        let signing_secret = if state.config.node_hmac_signing_enabled {
+            match node_service::get_node_signing_secret(
+                &state.db,
+                state.encryption_keys.as_ref(),
+                node_id,
+            )
+            .await
+            {
+                Ok(secret) => Some(secret),
+                Err(error) => {
+                    tracing::warn!(
+                        service_id = %service_id,
+                        node_id = %node_id,
+                        error = %error,
+                        "MCP SSH exec node signing secret resolution failed"
+                    );
+                    last_error = Some(format!("Signing secret error: {error}"));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        match state
+            .node_ws_manager
+            .exec_ssh_command(
+                node_id,
+                crate::services::node_ws_manager::NodeSshExecRequest {
+                    request_id: request_id.clone(),
+                    host: ssh_svc.host.clone(),
+                    port: ssh_svc.port,
+                    principal: principal.to_string(),
+                    private_key_pem: ephemeral.private_key_pem.clone(),
+                    certificate_openssh: ephemeral.certificate_openssh.clone(),
+                    command: command.to_string(),
+                    timeout_secs,
+                },
+                signing_secret.as_ref().map(|s| s.as_slice()),
+            )
+            .await
+        {
+            Ok(result) => {
+                let _ = &session_guard;
+                drop(session_guard);
+
+                let response = super::ssh_exec::SshExecResponse {
+                    exit_code: result.exit_code,
+                    stdout: super::ssh_exec::truncate_output(result.stdout.as_bytes()),
+                    stderr: super::ssh_exec::truncate_output(result.stderr.as_bytes()),
+                    duration_ms: result.duration_ms,
+                    timed_out: result.timed_out,
+                };
+
+                // Audit log
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(user_id.to_string()),
+                    "ssh_exec_command".to_string(),
+                    Some(serde_json::json!({
+                        "service_id": service_id,
+                        "principal": principal,
+                        "command": super::ssh_exec::truncate_for_audit(command),
+                        "exit_code": response.exit_code,
+                        "duration_ms": response.duration_ms,
+                        "timed_out": response.timed_out,
+                        "via": "mcp",
+                        "routed_via": "node",
+                        "node_id": node_id,
+                    })),
+                    None,
+                    None,
+                );
+
+                return Ok(response);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    service_id = %service_id,
+                    node_id = %node_id,
+                    error = %error,
+                    "MCP SSH exec via node failed, trying next"
+                );
+                last_error = Some(error.to_string());
+            }
+        }
+    }
 
     let _ = &session_guard;
     drop(session_guard);
 
-    let response = match result {
-        Ok((Ok(status), stdout_bytes, stderr_bytes)) => {
-            let stdout = super::ssh_exec::truncate_output(&stdout_bytes);
-            let stderr = super::ssh_exec::truncate_output(&stderr_bytes);
-            let exit_code = status.code().unwrap_or(-1);
-
-            super::ssh_exec::SshExecResponse {
-                exit_code,
-                stdout,
-                stderr,
-                duration_ms,
-                timed_out: false,
-            }
-        }
-        Ok((Err(e), _, _)) => {
-            return Err(AppError::Internal(format!("SSH process failed: {e}")));
-        }
-        Err(_) => {
-            // Timeout: the async block is dropped, which drops `child`,
-            // killing the process automatically.
-            super::ssh_exec::SshExecResponse {
-                exit_code: -1,
-                stdout: String::new(),
-                stderr: "Command execution timed out".to_string(),
-                duration_ms,
-                timed_out: true,
-            }
-        }
-    };
-
-    // Audit log
-    audit_service::log_async(
-        state.db.clone(),
-        Some(user_id.to_string()),
-        "ssh_exec_command".to_string(),
-        Some(serde_json::json!({
-            "service_id": service_id,
-            "principal": principal,
-            "command": super::ssh_exec::truncate_for_audit(command),
-            "exit_code": response.exit_code,
-            "duration_ms": response.duration_ms,
-            "timed_out": response.timed_out,
-            "via": "mcp",
-        })),
-        None,
-        None,
-    );
-
-    Ok(response)
+    Err(AppError::Internal(format!(
+        "SSH exec failed on all nodes: {}",
+        last_error.unwrap_or_else(|| "no nodes available".to_string()),
+    )))
 }

@@ -337,18 +337,31 @@ In that mode NyxID only carries the TCP stream. OpenSSH and the downstream host 
 
 ---
 
-## 6. Node-Routed SSH
+## 6. Node Agent (Required for Web Terminal and Exec)
 
-If the SSH target is behind a firewall or not directly reachable from the NyxID server, deploy a node agent on a machine that CAN reach the target. The node agent establishes an outbound WebSocket connection to NyxID and tunnels SSH traffic through it -- no inbound ports required.
+A NyxID node agent is **required** for web terminal sessions and command execution (REST API and MCP). For CLI SSH tunneling (`nyxid ssh proxy`), the node agent is optional but recommended. The NyxID server never makes direct SSH connections -- all SSH operations run on the node agent for security.
+
+Deploy a node agent on a machine that can reach the SSH target. The node agent connects outbound to NyxID via WebSocket -- no inbound ports required on the target network.
 
 ### How it works
 
+**SSH tunneling (CLI):**
 1. Client connects to `GET /api/v1/ssh/{service_id}`
 2. NyxID resolves the user's active node binding for this service
 3. NyxID sends `ssh_tunnel_open` to the node over the existing node WebSocket
 4. The node agent opens a local TCP connection to `host:port` on its network
 5. Raw SSH bytes flow through `ssh_tunnel_data` messages between client and node
-6. If no healthy node route is available, NyxID falls back to opening the TCP connection itself
+
+**Web terminal:**
+1. Browser opens WebSocket to `GET /api/v1/ssh/{service_id}/terminal`
+2. NyxID generates ephemeral credentials and sends `web_terminal_open` to the node
+3. The node agent spawns `ssh` inside a PTY and bridges PTY I/O through WebSocket
+4. Terminal input/output flows as `web_terminal_data` messages
+
+**Command execution (API/MCP):**
+1. Client sends `POST /api/v1/ssh/{service_id}/exec` or MCP `nyx__ssh_exec`
+2. NyxID generates ephemeral credentials and sends `ssh_exec` to the node
+3. The node agent spawns `ssh`, captures stdout/stderr, and returns `ssh_exec_result`
 
 ### Setup
 

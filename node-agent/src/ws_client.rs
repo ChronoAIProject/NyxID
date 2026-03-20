@@ -18,6 +18,24 @@ use crate::metrics::NodeMetrics;
 use crate::proxy_executor;
 use crate::signing::{self, ReplayGuard};
 
+// ---------------------------------------------------------------------------
+// Web terminal types
+// ---------------------------------------------------------------------------
+
+const WEB_TERMINAL_PTY_READ_BUF: usize = 16 * 1024;
+
+/// Maximum bytes captured per output stream (stdout / stderr) for ssh_exec.
+const SSH_EXEC_MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB
+
+type ActiveWebTerminalMap = Arc<tokio::sync::Mutex<HashMap<String, ActiveWebTerminal>>>;
+
+struct ActiveWebTerminal {
+    pty_writer: pty_process::OwnedWritePty,
+    child: tokio::process::Child,
+    task_handle: tokio::task::JoinHandle<()>,
+    _temp_dir: tempfile::TempDir,
+}
+
 enum SshTunnelControl {
     Data(Vec<u8>),
     Close,
@@ -333,6 +351,8 @@ async fn connect_and_serve(
         String,
         ActiveSshTunnelEntry,
     >::new()));
+    let active_web_terminals: ActiveWebTerminalMap =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
     // Writer task: forwards messages from the channel to the WS sink
     let writer_task = tokio::spawn(async move {
@@ -433,6 +453,42 @@ async fn connect_and_serve(
             Some("ssh_tunnel_close") => {
                 handle_ssh_tunnel_close(&parsed, &active_ssh_tunnels).await;
             }
+            Some("web_terminal_open") => {
+                let tx_clone = tx.clone();
+                let ssh_config = config.ssh.clone();
+                let terminals = active_web_terminals.clone();
+                let secret = signing_secret.clone();
+                let replay = replay_guard.clone();
+                tokio::spawn(async move {
+                    handle_web_terminal_open(
+                        &parsed,
+                        &ssh_config,
+                        tx_clone,
+                        terminals,
+                        secret,
+                        replay,
+                    )
+                    .await;
+                });
+            }
+            Some("web_terminal_data") => {
+                handle_web_terminal_data(&parsed, &active_web_terminals).await;
+            }
+            Some("web_terminal_resize") => {
+                handle_web_terminal_resize(&parsed, &active_web_terminals).await;
+            }
+            Some("web_terminal_close") => {
+                handle_web_terminal_close(&parsed, &tx, &active_web_terminals).await;
+            }
+            Some("ssh_exec") => {
+                let tx_clone = tx.clone();
+                let ssh_config = config.ssh.clone();
+                let secret = signing_secret.clone();
+                let replay = replay_guard.clone();
+                tokio::spawn(async move {
+                    handle_ssh_exec(&parsed, &ssh_config, tx_clone, secret, replay).await;
+                });
+            }
             Some("error") => {
                 let msg = parsed["message"].as_str().unwrap_or("unknown");
                 tracing::error!(message = %msg, "Server error");
@@ -452,6 +508,7 @@ async fn connect_and_serve(
     } else {
         drain_active_ssh_tunnels(&active_ssh_tunnels).await;
     }
+    drain_active_web_terminals(&active_web_terminals).await;
     writer_task.abort();
     Ok(())
 }
@@ -930,6 +987,866 @@ fn normalize_target_host(host: &str) -> String {
         .trim_end_matches(']')
         .trim_end_matches('.')
         .to_ascii_lowercase()
+}
+
+// ---------------------------------------------------------------------------
+// SSH exec handler
+// ---------------------------------------------------------------------------
+
+async fn handle_ssh_exec(
+    parsed: &serde_json::Value,
+    ssh_config: &SshConfig,
+    tx: mpsc::Sender<String>,
+    signing_secret: Option<SharedSigningSecret>,
+    replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
+) {
+    let request_id = match parsed["request_id"].as_str() {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => {
+            tracing::warn!("ssh_exec missing request_id");
+            return;
+        }
+    };
+
+    // Verify HMAC signature if signing is enabled
+    if let Some(secret) = signing_secret.as_deref()
+        && let Err(error) =
+            verify_signed_ssh_exec(parsed, &request_id, secret.as_str(), &replay_guard).await
+    {
+        let _ = send_ssh_exec_result(&tx, &request_id, -1, &[], &[], 0, false, Some(error)).await;
+        return;
+    }
+
+    let host = match parsed["host"].as_str() {
+        Some(h) if !h.is_empty() => h.to_string(),
+        _ => {
+            tracing::warn!(request_id = %request_id, "ssh_exec missing host");
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some("missing_host"),
+            )
+            .await;
+            return;
+        }
+    };
+    let port = match parsed["port"].as_u64() {
+        Some(p) if u16::try_from(p).is_ok() => p as u16,
+        _ => {
+            tracing::warn!(request_id = %request_id, "ssh_exec missing or invalid port");
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some("invalid_port"),
+            )
+            .await;
+            return;
+        }
+    };
+    let principal = match parsed["principal"].as_str() {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => {
+            tracing::warn!(request_id = %request_id, "ssh_exec missing principal");
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some("missing_principal"),
+            )
+            .await;
+            return;
+        }
+    };
+    let private_key_pem = match parsed["private_key_pem"].as_str() {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => {
+            tracing::warn!(request_id = %request_id, "ssh_exec missing private_key_pem");
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some("missing_private_key"),
+            )
+            .await;
+            return;
+        }
+    };
+    let certificate_openssh = parsed["certificate_openssh"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let command = match parsed["command"].as_str() {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => {
+            tracing::warn!(request_id = %request_id, "ssh_exec missing command");
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some("missing_command"),
+            )
+            .await;
+            return;
+        }
+    };
+    let timeout_secs = parsed["timeout_secs"].as_u64().unwrap_or(30).clamp(1, 300);
+
+    // Validate target against SSH config policy
+    if let Err(error) = validate_node_ssh_target(ssh_config, &host, port).await {
+        tracing::warn!(
+            request_id = %request_id,
+            host = %host,
+            port,
+            %error,
+            "ssh exec target rejected by node policy"
+        );
+        let error = format!("target_not_allowed:{error}");
+        let _ = send_ssh_exec_result(&tx, &request_id, -1, &[], &[], 0, false, Some(&error)).await;
+        return;
+    }
+
+    // Write key + cert to temp files
+    let temp_dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(error) => {
+            tracing::error!(request_id = %request_id, %error, "failed to create temp dir for SSH exec");
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some("internal_error"),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let key_path = temp_dir.path().join("id_key");
+    if let Err(error) = write_temp_key_file(&key_path, &private_key_pem) {
+        tracing::error!(request_id = %request_id, %error, "failed to write temp SSH key for exec");
+        let _ = send_ssh_exec_result(
+            &tx,
+            &request_id,
+            -1,
+            &[],
+            &[],
+            0,
+            false,
+            Some("internal_error"),
+        )
+        .await;
+        return;
+    }
+
+    let cert_path = certificate_openssh.as_ref().map(|cert| {
+        let path = temp_dir.path().join("id_key-cert.pub");
+        (path, cert.clone())
+    });
+    if let Some((ref path, ref cert_content)) = cert_path
+        && let Err(error) = std::fs::write(path, cert_content)
+    {
+        tracing::error!(request_id = %request_id, %error, "failed to write temp SSH certificate for exec");
+        let _ = send_ssh_exec_result(
+            &tx,
+            &request_id,
+            -1,
+            &[],
+            &[],
+            0,
+            false,
+            Some("internal_error"),
+        )
+        .await;
+        return;
+    }
+
+    // Build SSH command (no PTY needed for exec)
+    let identity_file_opt = format!("IdentityFile={}", key_path.display());
+    let port_str = port.to_string();
+    let user_host = format!("{principal}@{host}");
+    let cert_file_opt = cert_path
+        .as_ref()
+        .map(|(path, _)| format!("CertificateFile={}", path.display()));
+
+    let mut ssh_args: Vec<&str> = vec![
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        &identity_file_opt,
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "LogLevel=FATAL",
+        "-o",
+        "RequestTTY=no",
+    ];
+    if let Some(ref cert_opt) = cert_file_opt {
+        ssh_args.extend_from_slice(&["-o", cert_opt.as_str()]);
+    }
+    ssh_args.extend_from_slice(&["-p", &port_str, &user_host]);
+    ssh_args.push(&command);
+
+    let started_at = std::time::Instant::now();
+
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.args(&ssh_args);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.stdin(std::process::Stdio::null());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(error) => {
+            tracing::error!(request_id = %request_id, %error, "failed to spawn ssh for exec");
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some("ssh_spawn_failed"),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let child_stdout = child.stdout.take();
+    let child_stderr = child.stderr.take();
+
+    let read_and_wait = async {
+        let stdout_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut out) = child_stdout {
+                use tokio::io::AsyncReadExt;
+                // Cap output to prevent memory exhaustion
+                let _ = (&mut out)
+                    .take(SSH_EXEC_MAX_OUTPUT_BYTES as u64)
+                    .read_to_end(&mut buf)
+                    .await;
+            }
+            buf
+        });
+        let stderr_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut err) = child_stderr {
+                use tokio::io::AsyncReadExt;
+                let _ = (&mut err)
+                    .take(SSH_EXEC_MAX_OUTPUT_BYTES as u64)
+                    .read_to_end(&mut buf)
+                    .await;
+            }
+            buf
+        });
+
+        let status = child.wait().await;
+        let stdout_bytes = stdout_handle.await.unwrap_or_default();
+        let stderr_bytes = stderr_handle.await.unwrap_or_default();
+        (status, stdout_bytes, stderr_bytes)
+    };
+
+    let result =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), read_and_wait).await;
+
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+
+    // temp_dir is dropped here, cleaning up key files
+
+    match result {
+        Ok((Ok(status), stdout_bytes, stderr_bytes)) => {
+            let exit_code = status.code().unwrap_or(-1);
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                exit_code,
+                &stdout_bytes,
+                &stderr_bytes,
+                duration_ms,
+                false,
+                None,
+            )
+            .await;
+            tracing::info!(
+                request_id = %request_id,
+                host = %host,
+                port,
+                principal = %principal,
+                exit_code,
+                duration_ms,
+                "ssh exec completed"
+            );
+        }
+        Ok((Err(error), _, _)) => {
+            tracing::error!(request_id = %request_id, %error, "ssh exec process failed");
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                duration_ms,
+                false,
+                Some("ssh_process_failed"),
+            )
+            .await;
+        }
+        Err(_) => {
+            // Timeout: child is dropped (killed) by the async block drop
+            tracing::warn!(
+                request_id = %request_id,
+                timeout_secs,
+                "ssh exec timed out"
+            );
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                b"Command execution timed out",
+                duration_ms,
+                true,
+                None,
+            )
+            .await;
+        }
+    }
+}
+
+async fn verify_signed_ssh_exec(
+    parsed: &serde_json::Value,
+    request_id: &str,
+    signing_secret: &str,
+    replay_guard: &Arc<tokio::sync::Mutex<ReplayGuard>>,
+) -> std::result::Result<(), &'static str> {
+    let timestamp = parsed["timestamp"].as_str();
+    let nonce = parsed["nonce"].as_str();
+    let signature = parsed["hmac"].as_str();
+
+    let (Some(timestamp), Some(nonce), Some(signature)) = (timestamp, nonce, signature) else {
+        tracing::warn!(request_id = %request_id, "ssh_exec missing HMAC fields");
+        return Err("missing_hmac_fields");
+    };
+
+    if !signing::verify_ssh_exec_signature(parsed, signing_secret, signature) {
+        tracing::warn!(request_id = %request_id, "ssh_exec HMAC verification failed");
+        return Err("invalid_hmac_signature");
+    }
+
+    let mut guard = replay_guard.lock().await;
+    if !guard.check(timestamp, nonce) {
+        tracing::warn!(request_id = %request_id, "ssh_exec rejected by replay guard");
+        return Err("replay_or_expired_timestamp");
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_ssh_exec_result(
+    tx: &mpsc::Sender<String>,
+    request_id: &str,
+    exit_code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+    duration_ms: u64,
+    timed_out: bool,
+    error: Option<&str>,
+) -> bool {
+    let stdout_b64 = base64::engine::general_purpose::STANDARD.encode(stdout);
+    let stderr_b64 = base64::engine::general_purpose::STANDARD.encode(stderr);
+
+    send_ws_message(
+        tx,
+        serde_json::json!({
+            "type": "ssh_exec_result",
+            "request_id": request_id,
+            "exit_code": exit_code,
+            "stdout": stdout_b64,
+            "stderr": stderr_b64,
+            "duration_ms": duration_ms,
+            "timed_out": timed_out,
+            "error": error,
+        })
+        .to_string(),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Web terminal handlers
+// ---------------------------------------------------------------------------
+
+async fn handle_web_terminal_open(
+    parsed: &serde_json::Value,
+    ssh_config: &SshConfig,
+    tx: mpsc::Sender<String>,
+    active_terminals: ActiveWebTerminalMap,
+    signing_secret: Option<SharedSigningSecret>,
+    replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
+) {
+    let session_id = match parsed["session_id"].as_str() {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => {
+            tracing::warn!("web_terminal_open missing session_id");
+            return;
+        }
+    };
+
+    // Verify HMAC signature if signing is enabled
+    if let Some(secret) = signing_secret.as_deref()
+        && let Err(error) =
+            verify_signed_web_terminal_open(parsed, &session_id, secret.as_str(), &replay_guard)
+                .await
+    {
+        let _ = send_web_terminal_closed(&tx, &session_id, Some(error)).await;
+        return;
+    }
+
+    let host = match parsed["host"].as_str() {
+        Some(h) if !h.is_empty() => h.to_string(),
+        _ => {
+            tracing::warn!(session_id = %session_id, "web_terminal_open missing host");
+            let _ = send_web_terminal_closed(&tx, &session_id, Some("missing_host")).await;
+            return;
+        }
+    };
+    let port = match parsed["port"].as_u64() {
+        Some(p) if u16::try_from(p).is_ok() => p as u16,
+        _ => {
+            tracing::warn!(session_id = %session_id, "web_terminal_open missing or invalid port");
+            let _ = send_web_terminal_closed(&tx, &session_id, Some("invalid_port")).await;
+            return;
+        }
+    };
+    let principal = match parsed["principal"].as_str() {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => {
+            tracing::warn!(session_id = %session_id, "web_terminal_open missing principal");
+            let _ = send_web_terminal_closed(&tx, &session_id, Some("missing_principal")).await;
+            return;
+        }
+    };
+    let private_key_pem = match parsed["private_key_pem"].as_str() {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => {
+            tracing::warn!(session_id = %session_id, "web_terminal_open missing private_key_pem");
+            let _ = send_web_terminal_closed(&tx, &session_id, Some("missing_private_key")).await;
+            return;
+        }
+    };
+    let certificate_openssh = parsed["certificate_openssh"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    let cols = parsed["cols"].as_u64().unwrap_or(80) as u16;
+    let rows = parsed["rows"].as_u64().unwrap_or(24) as u16;
+
+    // Validate target against SSH config policy
+    if let Err(error) = validate_node_ssh_target(ssh_config, &host, port).await {
+        tracing::warn!(
+            session_id = %session_id,
+            host = %host,
+            port,
+            %error,
+            "web terminal target rejected by node policy"
+        );
+        let error = format!("target_not_allowed:{error}");
+        let _ = send_web_terminal_closed(&tx, &session_id, Some(error.as_str())).await;
+        return;
+    }
+
+    // Check for duplicate or capacity limit
+    {
+        let guard = active_terminals.lock().await;
+        if guard.contains_key(&session_id) {
+            let _ = send_web_terminal_closed(&tx, &session_id, Some("duplicate_session_id")).await;
+            return;
+        }
+        if guard.len() >= ssh_config.max_tunnels {
+            let _ =
+                send_web_terminal_closed(&tx, &session_id, Some("too_many_active_terminals")).await;
+            return;
+        }
+    }
+
+    // Write SSH key material to temp files
+    let temp_dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(error) => {
+            tracing::error!(session_id = %session_id, %error, "failed to create temp dir for SSH keys");
+            let _ = send_web_terminal_closed(&tx, &session_id, Some("internal_error")).await;
+            return;
+        }
+    };
+
+    let key_path = temp_dir.path().join("id_key");
+    if let Err(error) = write_temp_key_file(&key_path, &private_key_pem) {
+        tracing::error!(session_id = %session_id, %error, "failed to write temp SSH key");
+        let _ = send_web_terminal_closed(&tx, &session_id, Some("internal_error")).await;
+        return;
+    }
+
+    let cert_path = certificate_openssh.as_ref().map(|cert| {
+        // OpenSSH expects the certificate file next to the key, named <key>-cert.pub
+        let path = temp_dir.path().join("id_key-cert.pub");
+        (path, cert.clone())
+    });
+    if let Some((ref path, ref cert_content)) = cert_path
+        && let Err(error) = std::fs::write(path, cert_content)
+    {
+        tracing::error!(session_id = %session_id, %error, "failed to write temp SSH certificate");
+        let _ = send_web_terminal_closed(&tx, &session_id, Some("internal_error")).await;
+        return;
+    }
+
+    // Open PTY and spawn SSH
+    let (pty, pts) = match pty_process::open() {
+        Ok(pair) => pair,
+        Err(error) => {
+            tracing::error!(session_id = %session_id, %error, "failed to open PTY");
+            let _ = send_web_terminal_closed(&tx, &session_id, Some("pty_open_failed")).await;
+            return;
+        }
+    };
+
+    if let Err(error) = pty.resize(pty_process::Size::new(rows, cols)) {
+        tracing::error!(session_id = %session_id, %error, "failed to resize PTY");
+        let _ = send_web_terminal_closed(&tx, &session_id, Some("pty_resize_failed")).await;
+        return;
+    }
+
+    // Set PTY to raw mode so control characters (Ctrl+C, Ctrl+Z, etc.) and
+    // special keys (for top, vim, etc.) pass through to the remote shell.
+    {
+        use std::os::fd::AsFd;
+        if let Ok(mut termios) = nix::sys::termios::tcgetattr(pty.as_fd()) {
+            nix::sys::termios::cfmakeraw(&mut termios);
+            let _ = nix::sys::termios::tcsetattr(
+                pty.as_fd(),
+                nix::sys::termios::SetArg::TCSANOW,
+                &termios,
+            );
+        }
+    }
+
+    let identity_file_opt = format!("IdentityFile={}", key_path.display());
+    let port_str = port.to_string();
+    let user_host = format!("{principal}@{host}");
+    let cert_file_opt = cert_path
+        .as_ref()
+        .map(|(path, _)| format!("CertificateFile={}", path.display()));
+
+    let mut ssh_args: Vec<&str> = vec![
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        &identity_file_opt,
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "RequestTTY=no",
+        "-o",
+        "LogLevel=FATAL",
+    ];
+    if let Some(ref cert_opt) = cert_file_opt {
+        ssh_args.extend_from_slice(&["-o", cert_opt.as_str()]);
+    }
+    let remote_cmd = format!(
+        "export TERM=xterm-256color COLUMNS={cols} LINES={rows}; \
+         script -q /dev/null sh -c 'stty cols {cols} rows {rows} 2>/dev/null; exec $SHELL -il' 2>/dev/null \
+         || exec $SHELL -il"
+    );
+    ssh_args.extend_from_slice(&["-p", &port_str, &user_host]);
+    ssh_args.push(&remote_cmd);
+
+    let cmd = pty_process::Command::new("ssh");
+    let child = match cmd.args(&ssh_args).spawn(pts) {
+        Ok(c) => c,
+        Err(error) => {
+            tracing::error!(session_id = %session_id, %error, "failed to spawn SSH in PTY");
+            let _ = send_web_terminal_closed(&tx, &session_id, Some("ssh_spawn_failed")).await;
+            return;
+        }
+    };
+
+    // Send started notification
+    if !send_ws_message(
+        &tx,
+        serde_json::json!({
+            "type": "web_terminal_started",
+            "session_id": session_id,
+        })
+        .to_string(),
+    )
+    .await
+    {
+        return;
+    }
+
+    // Split PTY and spawn reader task
+    let (mut pty_reader, pty_writer) = pty.into_split();
+    let reader_session_id = session_id.clone();
+    let reader_tx = tx.clone();
+    let reader_terminals = active_terminals.clone();
+    let task_handle = tokio::spawn(async move {
+        let mut buf = [0u8; WEB_TERMINAL_PTY_READ_BUF];
+        loop {
+            match pty_reader.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                    if !send_ws_message(
+                        &reader_tx,
+                        serde_json::json!({
+                            "type": "web_terminal_data",
+                            "session_id": reader_session_id,
+                            "data": encoded,
+                        })
+                        .to_string(),
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    // EIO is expected when the child process exits on the PTY
+                    if error.raw_os_error() != Some(nix::libc::EIO) {
+                        tracing::debug!(
+                            session_id = %reader_session_id,
+                            %error,
+                            "PTY read error"
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Reader finished: clean up entry and notify server
+        let _ = remove_web_terminal_entry(&reader_terminals, &reader_session_id).await;
+        let _ = send_web_terminal_closed(&reader_tx, &reader_session_id, None).await;
+    });
+
+    // Store the terminal entry
+    active_terminals.lock().await.insert(
+        session_id.clone(),
+        ActiveWebTerminal {
+            pty_writer,
+            child,
+            task_handle,
+            _temp_dir: temp_dir,
+        },
+    );
+
+    tracing::info!(
+        session_id = %session_id,
+        host = %host,
+        port,
+        principal = %principal,
+        "web terminal session started"
+    );
+}
+
+async fn verify_signed_web_terminal_open(
+    parsed: &serde_json::Value,
+    session_id: &str,
+    signing_secret: &str,
+    replay_guard: &Arc<tokio::sync::Mutex<ReplayGuard>>,
+) -> std::result::Result<(), &'static str> {
+    let timestamp = parsed["timestamp"].as_str();
+    let nonce = parsed["nonce"].as_str();
+    let signature = parsed["hmac"].as_str();
+
+    let (Some(timestamp), Some(nonce), Some(signature)) = (timestamp, nonce, signature) else {
+        tracing::warn!(session_id = %session_id, "web_terminal_open missing HMAC fields");
+        return Err("missing_hmac_fields");
+    };
+
+    if !signing::verify_web_terminal_signature(parsed, signing_secret, signature) {
+        tracing::warn!(session_id = %session_id, "web_terminal_open HMAC verification failed");
+        return Err("invalid_hmac_signature");
+    }
+
+    let mut guard = replay_guard.lock().await;
+    if !guard.check(timestamp, nonce) {
+        tracing::warn!(session_id = %session_id, "web_terminal_open rejected by replay guard");
+        return Err("replay_or_expired_timestamp");
+    }
+
+    Ok(())
+}
+
+async fn handle_web_terminal_data(
+    parsed: &serde_json::Value,
+    active_terminals: &ActiveWebTerminalMap,
+) {
+    let Some(session_id) = parsed["session_id"].as_str() else {
+        tracing::warn!("web_terminal_data missing session_id");
+        return;
+    };
+    let Some(encoded_data) = parsed["data"].as_str() else {
+        tracing::warn!(session_id, "web_terminal_data missing data");
+        return;
+    };
+
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(encoded_data) {
+        Ok(b) => b,
+        Err(error) => {
+            tracing::warn!(session_id, %error, "invalid base64 in web_terminal_data");
+            return;
+        }
+    };
+
+    let mut guard = active_terminals.lock().await;
+    if let Some(terminal) = guard.get_mut(session_id)
+        && let Err(error) = terminal.pty_writer.write_all(&bytes).await
+    {
+        tracing::warn!(session_id, %error, "failed to write to PTY");
+    }
+}
+
+async fn handle_web_terminal_resize(
+    parsed: &serde_json::Value,
+    active_terminals: &ActiveWebTerminalMap,
+) {
+    let Some(session_id) = parsed["session_id"].as_str() else {
+        tracing::warn!("web_terminal_resize missing session_id");
+        return;
+    };
+    let cols = match parsed["cols"].as_u64() {
+        Some(c) if u16::try_from(c).is_ok() => c as u16,
+        _ => {
+            tracing::warn!(session_id, "web_terminal_resize missing or invalid cols");
+            return;
+        }
+    };
+    let rows = match parsed["rows"].as_u64() {
+        Some(r) if u16::try_from(r).is_ok() => r as u16,
+        _ => {
+            tracing::warn!(session_id, "web_terminal_resize missing or invalid rows");
+            return;
+        }
+    };
+
+    let guard = active_terminals.lock().await;
+    if let Some(terminal) = guard.get(session_id)
+        && let Err(error) = terminal
+            .pty_writer
+            .resize(pty_process::Size::new(rows, cols))
+    {
+        tracing::warn!(session_id, %error, "failed to resize PTY");
+    }
+}
+
+async fn handle_web_terminal_close(
+    parsed: &serde_json::Value,
+    tx: &mpsc::Sender<String>,
+    active_terminals: &ActiveWebTerminalMap,
+) {
+    let Some(session_id) = parsed["session_id"].as_str() else {
+        tracing::warn!("web_terminal_close missing session_id");
+        return;
+    };
+
+    if let Some(mut terminal) = remove_web_terminal_entry(active_terminals, session_id).await {
+        let _ = terminal.child.kill().await;
+        terminal.task_handle.abort();
+        let _ = send_web_terminal_closed(tx, session_id, None).await;
+        tracing::info!(session_id, "web terminal session closed by server");
+    }
+}
+
+async fn remove_web_terminal_entry(
+    active_terminals: &ActiveWebTerminalMap,
+    session_id: &str,
+) -> Option<ActiveWebTerminal> {
+    active_terminals.lock().await.remove(session_id)
+}
+
+async fn drain_active_web_terminals(active_terminals: &ActiveWebTerminalMap) {
+    let entries = {
+        let mut guard = active_terminals.lock().await;
+        guard.drain().collect::<Vec<_>>()
+    };
+
+    for (session_id, mut terminal) in entries {
+        let _ = terminal.child.kill().await;
+        terminal.task_handle.abort();
+        tracing::debug!(session_id = %session_id, "web terminal drained on disconnect");
+    }
+}
+
+async fn send_web_terminal_closed(
+    tx: &mpsc::Sender<String>,
+    session_id: &str,
+    error: Option<&str>,
+) -> bool {
+    send_ws_message(
+        tx,
+        serde_json::json!({
+            "type": "web_terminal_closed",
+            "session_id": session_id,
+            "error": error,
+        })
+        .to_string(),
+    )
+    .await
+}
+
+/// Write key material to a temp file with 0600 permissions.
+fn write_temp_key_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content)?;
+    }
+    Ok(())
 }
 
 async fn send_ws_message(tx: &mpsc::Sender<String>, message: String) -> bool {

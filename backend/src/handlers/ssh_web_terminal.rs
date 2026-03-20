@@ -11,13 +11,12 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use mongodb::bson::doc;
 use serde::Deserialize;
-use tokio::io::AsyncReadExt;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, ssh_service};
+use crate::services::{audit_service, node_routing_service, node_service, ssh_service};
 
 use super::ssh_tunnel::authorize_ssh_access;
 
@@ -146,8 +145,8 @@ async fn handle_web_terminal(
         }
     }
 
-    // ----- Write ephemeral SSH key + certificate to temp files -----
-    let temp_dir = match write_ephemeral_ssh_files(
+    // ----- Generate ephemeral SSH credentials -----
+    let ephemeral = match generate_ephemeral_credentials(
         &state,
         &ssh_svc,
         &service_id,
@@ -156,7 +155,7 @@ async fn handle_web_terminal(
     )
     .await
     {
-        Ok(dir) => dir,
+        Ok(creds) => creds,
         Err(error) => {
             tracing::warn!(service_id = %service_id, error = %error, "Web terminal: credential gen failed");
             send_error_and_close(&mut socket, "Failed to generate SSH credentials").await;
@@ -164,33 +163,8 @@ async fn handle_web_terminal(
         }
     };
 
-    let key_path = temp_dir.path().join("id_ed25519");
-    let cert_path = temp_dir.path().join("id_ed25519-cert.pub");
-
-    // ----- Create PTY and spawn ssh with pty-process -----
-    // pty-process calls setsid() + TIOCSCTTY in pre_exec, giving ssh
-    // a proper controlling terminal for PTY negotiation.
-    let (pty, pts) = match pty_process::open() {
-        Ok(pair) => pair,
-        Err(error) => {
-            tracing::warn!(error = %error, "Web terminal: PTY open failed");
-            send_error_and_close(&mut socket, "Failed to create PTY").await;
-            return;
-        }
-    };
-
-    if let Err(error) = pty.resize(pty_process::Size::new(rows as u16, cols as u16)) {
-        tracing::warn!(error = %error, "Web terminal: PTY resize failed");
-    }
-
-    // Don't request a remote PTY from sshd (it rejects it on some macOS
-    // configurations). Instead, run `script` on the remote side to create
-    // a PTY there, giving us an interactive shell with prompt.
-    let remote_cmd = "TERM=xterm-256color script -q /dev/null $SHELL -il 2>/dev/null || TERM=xterm-256color exec $SHELL -il";
-
-    // Check if this service is node-routed. If so, use ProxyCommand to
-    // tunnel through the node agent via the existing NyxID WebSocket tunnel.
-    let node_route = crate::services::node_routing_service::resolve_node_route(
+    // ----- Check for node route -----
+    let node_route = node_routing_service::resolve_node_route(
         &state.db,
         &user_id,
         &service_id,
@@ -200,107 +174,147 @@ async fn handle_web_terminal(
     .ok()
     .flatten();
 
-    let nyxid_binary =
-        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("nyxid"));
-    let base_url = state.config.base_url.trim_end_matches('/');
+    if let Some(node_route) = node_route {
+        handle_node_web_terminal(
+            state, service_id, ssh_svc, principal, cols, rows, socket, user_id, session_id,
+            started_at, ip_address, user_agent, node_route, ephemeral,
+        )
+        .await;
+    } else {
+        tracing::warn!(
+            service_id = %service_id,
+            "Web terminal: no node agent bound to this service"
+        );
+        send_error_and_close(
+            &mut socket,
+            "No node agent is bound to this SSH service. \
+             Deploy a NyxID node agent on the target's network and bind it to this service.",
+        )
+        .await;
+    }
+}
 
-    let mut cmd = pty_process::Command::new("ssh")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg(format!("IdentityFile={}", key_path.display()))
-        .arg("-o")
-        .arg(format!("CertificateFile={}", cert_path.display()))
-        .arg("-o")
-        .arg("IdentitiesOnly=yes")
-        .arg("-o")
-        .arg("RequestTTY=no")
-        .arg("-o")
-        .arg("LogLevel=FATAL");
+/// Ephemeral SSH credentials (key + certificate) for node-routed SSH sessions.
+/// Sent to the node agent as strings -- no files written to the NyxID server.
+pub(crate) struct EphemeralSshCredentials {
+    pub(crate) private_key_pem: String,
+    pub(crate) certificate_openssh: String,
+}
 
-    // If node-routed, add ProxyCommand to tunnel through the node agent.
-    // Generate a short-lived access token for the ProxyCommand to authenticate.
-    if node_route.is_some() {
-        let proxy_token = match crate::crypto::jwt::generate_access_token(
-            &state.jwt_keys,
-            &state.config,
-            &auth_user.user_id,
-            "openid",
-            None,
-        ) {
-            Ok(token) => token,
-            Err(error) => {
-                tracing::warn!(error = %error, "Web terminal: failed to generate proxy token");
-                send_error_and_close(&mut socket, "Failed to generate proxy credentials").await;
-                return;
+// ---- Node-routed web terminal ----
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_node_web_terminal(
+    state: AppState,
+    service_id: String,
+    ssh_svc: crate::models::downstream_service::SshServiceConfig,
+    principal: String,
+    cols: u32,
+    rows: u32,
+    mut socket: WebSocket,
+    user_id: String,
+    session_id: String,
+    started_at: Instant,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    node_route: node_routing_service::NodeRoute,
+    ephemeral: EphemeralSshCredentials,
+) {
+    let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
+        .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
+        .collect();
+
+    let mut terminal_rx = None;
+    let mut selected_node_id = None;
+
+    for node_id in all_node_ids {
+        let signing_secret = if state.config.node_hmac_signing_enabled {
+            match node_service::get_node_signing_secret(
+                &state.db,
+                state.encryption_keys.as_ref(),
+                node_id,
+            )
+            .await
+            {
+                Ok(secret) => Some(secret),
+                Err(error) => {
+                    tracing::warn!(
+                        service_id = %service_id,
+                        node_id = %node_id,
+                        error = %error,
+                        "Web terminal node signing secret resolution failed"
+                    );
+                    continue;
+                }
             }
+        } else {
+            None
         };
 
-        let proxy_cmd = format!(
-            "{} ssh proxy --base-url {} --service-id {}",
-            nyxid_binary.display(),
-            base_url,
-            service_id,
-        );
-        cmd = cmd
-            .arg("-o")
-            .arg(format!("ProxyCommand={proxy_cmd}"))
-            .env("NYXID_ACCESS_TOKEN", &proxy_token);
-        tracing::info!(service_id = %service_id, "Web terminal: using node-routed ProxyCommand");
+        match state
+            .node_ws_manager
+            .open_web_terminal(
+                node_id,
+                crate::services::node_ws_manager::NodeWebTerminalRequest {
+                    session_id: session_id.clone(),
+                    service_id: service_id.clone(),
+                    host: ssh_svc.host.clone(),
+                    port: ssh_svc.port,
+                    principal: principal.clone(),
+                    private_key_pem: ephemeral.private_key_pem.clone(),
+                    certificate_openssh: ephemeral.certificate_openssh.clone(),
+                    cols,
+                    rows,
+                },
+                signing_secret.as_ref().map(|s| s.as_slice()),
+            )
+            .await
+        {
+            Ok(rx) => {
+                terminal_rx = Some(rx);
+                selected_node_id = Some(node_id.to_string());
+                break;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    service_id = %service_id,
+                    node_id = %node_id,
+                    error = %error,
+                    "Web terminal node open failed, trying next"
+                );
+            }
+        }
     }
 
-    let cmd = cmd
-        .arg("-p")
-        .arg(ssh_svc.port.to_string())
-        .arg(format!("{principal}@{}", ssh_svc.host))
-        .arg(remote_cmd)
-        .env("TERM", "xterm-256color");
-
-    let mut child = match cmd.spawn(pts) {
-        Ok(child) => child,
-        Err(error) => {
-            tracing::warn!(service_id = %service_id, error = %error, "Web terminal: ssh spawn failed");
-            send_error_and_close(&mut socket, "Failed to start SSH").await;
-            log_failed(
-                &state,
-                &user_id,
-                &service_id,
-                &session_id,
-                &ssh_svc,
-                &error.to_string(),
-                &ip_address,
-                &user_agent,
-            );
-            return;
-        }
+    let Some(mut terminal_rx) = terminal_rx else {
+        tracing::warn!(
+            service_id = %service_id,
+            session_id = %session_id,
+            "Web terminal: all node attempts failed"
+        );
+        send_error_and_close(
+            &mut socket,
+            "Failed to connect through the node agent. Ensure the node agent is running and bound to this service.",
+        )
+        .await;
+        return;
     };
 
-    // Set PTY master to raw mode so control characters (Ctrl+C, Ctrl+Z, etc.)
-    // and special keys (for top, vim, etc.) are passed through to the remote
-    // shell instead of being intercepted locally.
-    {
-        use std::os::fd::AsFd;
-        if let Ok(mut termios) = nix::sys::termios::tcgetattr(pty.as_fd()) {
-            nix::sys::termios::cfmakeraw(&mut termios);
-            let _ = nix::sys::termios::tcsetattr(
-                pty.as_fd(),
-                nix::sys::termios::SetArg::TCSANOW,
-                &termios,
-            );
-        }
-    }
+    let node_id = selected_node_id.expect("selected_node_id is set when terminal_rx is Some");
+    tracing::info!(
+        service_id = %service_id,
+        node_id = %node_id,
+        session_id = %session_id,
+        "Web terminal: session opened via node"
+    );
 
-    tracing::info!(service_id = %service_id, "Web terminal: ssh spawned with pty-process");
-
-    // ----- Send connected -----
+    // Send connected message to browser
     if socket
         .send(Message::Text(server_connected_msg(cols, rows).into()))
         .await
         .is_err()
     {
-        let _ = child.kill().await;
+        close_node_web_terminal(&state, &node_id, &session_id, "browser_send_failed");
         return;
     }
 
@@ -314,19 +328,18 @@ async fn handle_web_terminal(
             "principal": principal,
             "target_host": ssh_svc.host,
             "target_port": ssh_svc.port,
+            "routed_via": "node",
+            "node_id": node_id,
         })),
         ip_address.clone(),
         user_agent.clone(),
     );
 
-    // ----- Bridge loop: PTY master <-> WebSocket -----
-    let (mut pty_reader, mut pty_writer) = pty.into_split();
-
+    // ----- Bridge loop: browser WebSocket <-> node agent -----
     let idle_timeout = Duration::from_secs(DEFAULT_WEB_TERMINAL_IDLE_TIMEOUT_SECS);
     let max_duration = Duration::from_secs(state.config.ssh_max_tunnel_duration_secs);
     let mut from_client_bytes: u64 = 0;
     let mut to_client_bytes: u64 = 0;
-    let mut pty_buf = vec![0u8; 8192];
 
     let max_timer = tokio::time::sleep(max_duration);
     tokio::pin!(max_timer);
@@ -348,16 +361,19 @@ async fn handle_web_terminal(
                 match ws_msg {
                     Some(Ok(Message::Binary(data))) => {
                         from_client_bytes += data.len() as u64;
-                        if tokio::io::AsyncWriteExt::write_all(&mut pty_writer, &data).await.is_err() {
-                            break "pty_write_failed";
+                        if state.node_ws_manager.send_web_terminal_data(&node_id, &session_id, &data).is_err() {
+                            break "node_terminal_send_failed";
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(ClientControl::Resize { cols: c, rows: r }) =
                             serde_json::from_str::<ClientControl>(&text)
                         {
-                            let _ = pty_writer.resize(
-                                pty_process::Size::new(r.clamp(2, 200) as u16, c.clamp(10, 500) as u16),
+                            let _ = state.node_ws_manager.send_web_terminal_resize(
+                                &node_id,
+                                &session_id,
+                                c.clamp(10, 500),
+                                r.clamp(2, 200),
                             );
                         }
                     }
@@ -371,24 +387,29 @@ async fn handle_web_terminal(
                     Some(Err(_)) => break "client_error",
                 }
             }
-            n = pty_reader.read(&mut pty_buf) => {
+            terminal_msg = terminal_rx.recv() => {
                 idle_timer.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
-                match n {
-                    Ok(0) => break "pty_eof",
-                    Ok(n) => {
-                        to_client_bytes += n as u64;
-                        if socket.send(Message::Binary(pty_buf[..n].to_vec().into())).await.is_err() {
+                match terminal_msg {
+                    Some(crate::services::node_ws_manager::WebTerminalChunk::Data(bytes)) => {
+                        to_client_bytes += bytes.len() as u64;
+                        if socket.send(Message::Binary(bytes.into())).await.is_err() {
                             break "client_write_failed";
                         }
                     }
-                    Err(e) if e.raw_os_error() == Some(5) => break "pty_closed",
-                    Err(_) => break "pty_read_error",
+                    Some(crate::services::node_ws_manager::WebTerminalChunk::Closed(error)) => {
+                        break if error.is_some() {
+                            "node_terminal_closed_with_error"
+                        } else {
+                            "node_terminal_closed"
+                        };
+                    }
+                    None => break "node_terminal_channel_closed",
                 }
             }
         }
     };
 
-    let _ = child.kill().await;
+    close_node_web_terminal(&state, &node_id, &session_id, "session_cleanup");
     let _ = socket.close().await;
 
     audit_service::log_async(
@@ -399,6 +420,8 @@ async fn handle_web_terminal(
             "service_id": service_id,
             "session_id": session_id,
             "principal": principal,
+            "routed_via": "node",
+            "node_id": node_id,
             "duration_ms": started_at.elapsed().as_millis() as u64,
             "bytes_from_client": from_client_bytes,
             "bytes_to_client": to_client_bytes,
@@ -409,13 +432,32 @@ async fn handle_web_terminal(
     );
 }
 
-async fn write_ephemeral_ssh_files(
+fn close_node_web_terminal(state: &AppState, node_id: &str, session_id: &str, reason: &str) {
+    if let Err(error) = state
+        .node_ws_manager
+        .close_web_terminal(node_id, session_id)
+    {
+        tracing::warn!(
+            node_id,
+            session_id,
+            reason,
+            error = %error,
+            "Failed to close node-routed web terminal"
+        );
+    }
+}
+
+// ---- Helpers ----
+
+/// Generate an ephemeral SSH key pair and certificate for a node-routed SSH session.
+/// Returns the PEM-encoded private key and OpenSSH certificate strings.
+pub(crate) async fn generate_ephemeral_credentials(
     state: &AppState,
     ssh_svc: &crate::models::downstream_service::SshServiceConfig,
     service_id: &str,
     user_id: &str,
     principal: &str,
-) -> AppResult<tempfile::TempDir> {
+) -> AppResult<EphemeralSshCredentials> {
     let mut rng = rand::rngs::OsRng;
     let ephemeral_key = ssh_key::PrivateKey::random(&mut rng, ssh_key::Algorithm::Ed25519)
         .map_err(|e| AppError::Internal(format!("Failed to generate ephemeral key: {e}")))?;
@@ -447,28 +489,10 @@ async fn write_ephemeral_ssh_files(
     )
     .await?;
 
-    let temp_dir = tempfile::tempdir()
-        .map_err(|e| AppError::Internal(format!("Failed to create temp dir: {e}")))?;
-
-    let key_path = temp_dir.path().join("id_ed25519");
-    let cert_path = temp_dir.path().join("id_ed25519-cert.pub");
-
-    tokio::fs::write(&key_path, private_key_openssh.as_bytes())
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to write key: {e}")))?;
-    tokio::fs::write(&cert_path, issued.certificate.as_bytes())
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to write cert: {e}")))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to set key permissions: {e}")))?;
-    }
-
-    Ok(temp_dir)
+    Ok(EphemeralSshCredentials {
+        private_key_pem: private_key_openssh.to_string(),
+        certificate_openssh: issued.certificate,
+    })
 }
 
 async fn send_error_and_close(socket: &mut WebSocket, message: &str) {
@@ -476,33 +500,6 @@ async fn send_error_and_close(socket: &mut WebSocket, message: &str) {
         .send(Message::Text(server_error_msg(message).into()))
         .await;
     let _ = socket.close().await;
-}
-
-#[allow(clippy::too_many_arguments)]
-fn log_failed(
-    state: &AppState,
-    user_id: &str,
-    service_id: &str,
-    session_id: &str,
-    ssh_svc: &crate::models::downstream_service::SshServiceConfig,
-    error: &str,
-    ip_address: &Option<String>,
-    user_agent: &Option<String>,
-) {
-    audit_service::log_async(
-        state.db.clone(),
-        Some(user_id.to_string()),
-        "ssh_web_terminal_connect_failed".to_string(),
-        Some(serde_json::json!({
-            "service_id": service_id,
-            "session_id": session_id,
-            "target_host": ssh_svc.host,
-            "target_port": ssh_svc.port,
-            "error": error,
-        })),
-        ip_address.clone(),
-        user_agent.clone(),
-    );
 }
 
 #[cfg(test)]

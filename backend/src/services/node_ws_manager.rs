@@ -10,6 +10,7 @@ use crate::errors::{AppError, AppResult};
 
 const STREAM_BUFFER_CAPACITY: usize = 256;
 const SSH_TUNNEL_BUFFER_CAPACITY: usize = 256;
+const WEB_TERMINAL_BUFFER_CAPACITY: usize = 256;
 
 /// Request sent to a node via WebSocket.
 #[derive(Clone)]
@@ -74,6 +75,13 @@ pub enum SshTunnelChunk {
     Closed(Option<String>),
 }
 
+/// A chunk in a node-backed web terminal session.
+#[derive(Debug)]
+pub enum WebTerminalChunk {
+    Data(Vec<u8>),
+    Closed(Option<String>),
+}
+
 pub(crate) enum NodeProxyOutcome {
     Response(ProxyResponseType),
     RetryableFailure(String),
@@ -93,6 +101,52 @@ pub(crate) enum PendingSshTunnel {
     Active(mpsc::Sender<SshTunnelChunk>),
 }
 
+pub(crate) enum PendingWebTerminal {
+    Awaiting(oneshot::Sender<AppResult<mpsc::Receiver<WebTerminalChunk>>>),
+    Active(mpsc::Sender<WebTerminalChunk>),
+}
+
+pub(crate) type PendingSshExec = oneshot::Sender<NodeSshExecResult>;
+
+/// Request sent to a node to execute an SSH command.
+#[derive(Clone)]
+pub struct NodeSshExecRequest {
+    pub request_id: String,
+    pub host: String,
+    pub port: u16,
+    pub principal: String,
+    pub private_key_pem: String,
+    pub certificate_openssh: String,
+    pub command: String,
+    pub timeout_secs: u32,
+}
+
+/// Result received from a node after SSH command execution.
+#[derive(Debug)]
+pub struct NodeSshExecResult {
+    pub request_id: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u64,
+    pub timed_out: bool,
+    pub error: Option<String>,
+}
+
+/// Request sent to a node to open a web terminal session.
+#[derive(Clone)]
+pub struct NodeWebTerminalRequest {
+    pub session_id: String,
+    pub service_id: String,
+    pub host: String,
+    pub port: u16,
+    pub principal: String,
+    pub private_key_pem: String,
+    pub certificate_openssh: String,
+    pub cols: u32,
+    pub rows: u32,
+}
+
 /// Outbound command for a node connection writer task.
 #[derive(Clone, Debug)]
 pub(crate) enum NodeOutboundMessage {
@@ -109,6 +163,10 @@ struct NodeConnection {
     pending: Arc<DashMap<String, PendingRequest>>,
     /// Pending and active SSH tunnel sessions keyed by session_id
     ssh_tunnels: Arc<DashMap<String, PendingSshTunnel>>,
+    /// Pending and active web terminal sessions keyed by session_id
+    web_terminals: Arc<DashMap<String, PendingWebTerminal>>,
+    /// Pending SSH exec requests keyed by request_id
+    ssh_exec_requests: Arc<DashMap<String, PendingSshExec>>,
 }
 
 /// In-memory WebSocket connection manager for credential nodes.
@@ -187,6 +245,71 @@ struct WsSshTunnelClose {
     session_id: String,
 }
 
+#[derive(Debug, Serialize)]
+struct WsSshExec {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    request_id: String,
+    host: String,
+    port: u16,
+    principal: String,
+    private_key_pem: String,
+    certificate_openssh: String,
+    command: String,
+    timeout_secs: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hmac: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WsWebTerminalOpen {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    session_id: String,
+    service_id: String,
+    host: String,
+    port: u16,
+    principal: String,
+    private_key_pem: String,
+    certificate_openssh: String,
+    cols: u32,
+    rows: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hmac: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WsWebTerminalData {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    session_id: String,
+    data: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WsWebTerminalResize {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    session_id: String,
+    cols: u32,
+    rows: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct WsWebTerminalClose {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    session_id: String,
+}
+
 /// JSON proxy_response from node.
 #[derive(Debug, Deserialize)]
 pub struct WsProxyResponseMsg {
@@ -254,6 +377,46 @@ pub struct WsSshTunnelClosedMsg {
     pub error: Option<String>,
 }
 
+/// JSON ssh_exec_result from node.
+#[derive(Debug, Deserialize)]
+pub struct WsSshExecResultMsg {
+    pub request_id: String,
+    #[serde(default)]
+    pub exit_code: i32,
+    #[serde(default)]
+    pub stdout: Option<String>,
+    #[serde(default)]
+    pub stderr: Option<String>,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub timed_out: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// JSON web_terminal_started from node.
+#[derive(Debug, Deserialize)]
+pub struct WsWebTerminalStartedMsg {
+    pub session_id: String,
+}
+
+/// JSON web_terminal_data from node.
+#[derive(Debug, Deserialize)]
+pub struct WsWebTerminalDataMsg {
+    pub session_id: String,
+    #[serde(default)]
+    pub data: Option<String>,
+}
+
+/// JSON web_terminal_closed from node.
+#[derive(Debug, Deserialize)]
+pub struct WsWebTerminalClosedMsg {
+    pub session_id: String,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// Compute HMAC-SHA256 signature for a proxy request.
 pub fn compute_hmac_signature(
     secret: &[u8],
@@ -305,6 +468,56 @@ pub fn compute_ssh_tunnel_hmac_signature(
     let message = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         timestamp, nonce, session_id, service_id, host, port
+    );
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
+    mac.update(message.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Compute HMAC-SHA256 signature for an SSH exec request.
+/// Message format matches the node agent's `verify_ssh_exec_signature`:
+/// `{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}`
+pub fn compute_ssh_exec_hmac_signature(
+    secret: &[u8],
+    timestamp: &str,
+    nonce: &str,
+    request_id: &str,
+    host: &str,
+    port: u16,
+    principal: &str,
+) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let message = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        timestamp, nonce, request_id, host, port, principal
+    );
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
+    mac.update(message.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Compute HMAC-SHA256 signature for a web terminal open request.
+/// Message format matches the node agent's `verify_web_terminal_signature`:
+/// `{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}`
+pub fn compute_web_terminal_hmac_signature(
+    secret: &[u8],
+    timestamp: &str,
+    nonce: &str,
+    session_id: &str,
+    host: &str,
+    port: u16,
+    principal: &str,
+) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let message = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        timestamp, nonce, session_id, host, port, principal
     );
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
@@ -373,6 +586,8 @@ impl NodeWsManager {
     ) -> Arc<DashMap<String, PendingRequest>> {
         let pending = Arc::new(DashMap::new());
         let ssh_tunnels = Arc::new(DashMap::new());
+        let web_terminals = Arc::new(DashMap::new());
+        let ssh_exec_requests = Arc::new(DashMap::new());
         let return_pending = pending.clone();
 
         self.connections.insert(
@@ -381,6 +596,8 @@ impl NodeWsManager {
                 tx,
                 pending,
                 ssh_tunnels,
+                web_terminals,
+                ssh_exec_requests,
             },
         );
 
@@ -393,6 +610,8 @@ impl NodeWsManager {
         if let Some((_, conn)) = self.connections.remove(node_id) {
             conn.pending.clear();
             conn.ssh_tunnels.clear();
+            conn.web_terminals.clear();
+            conn.ssh_exec_requests.clear();
         }
     }
 
@@ -403,6 +622,8 @@ impl NodeWsManager {
         if let Some((_, conn)) = self.connections.remove(node_id) {
             conn.pending.clear();
             conn.ssh_tunnels.clear();
+            conn.web_terminals.clear();
+            conn.ssh_exec_requests.clear();
             let close_msg = NodeOutboundMessage::Close {
                 code,
                 reason: reason.to_string(),
@@ -980,6 +1201,375 @@ impl NodeWsManager {
                 }
                 PendingSshTunnel::Active(tx) => {
                     let _ = tx.try_send(SshTunnelChunk::Closed(error));
+                }
+            }
+        }
+    }
+
+    // ---- SSH exec (non-interactive command execution) ----
+
+    /// Execute an SSH command on a connected node and wait for the result.
+    /// If `signing_secret` is provided, the request is HMAC-signed.
+    pub async fn exec_ssh_command(
+        &self,
+        node_id: &str,
+        request: NodeSshExecRequest,
+        signing_secret: Option<&[u8]>,
+    ) -> AppResult<NodeSshExecResult> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let request_id = request.request_id.clone();
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        conn.ssh_exec_requests.insert(request_id.clone(), resp_tx);
+
+        let (timestamp, nonce, hmac) = if let Some(secret) = signing_secret {
+            let ts = chrono::Utc::now().to_rfc3339();
+            let n = uuid::Uuid::new_v4().to_string();
+            let sig = compute_ssh_exec_hmac_signature(
+                secret,
+                &ts,
+                &n,
+                &request.request_id,
+                &request.host,
+                request.port,
+                &request.principal,
+            );
+            (Some(ts), Some(n), Some(sig))
+        } else {
+            (None, None, None)
+        };
+
+        let msg = serde_json::to_string(&WsSshExec {
+            msg_type: "ssh_exec",
+            request_id: request.request_id,
+            host: request.host,
+            port: request.port,
+            principal: request.principal,
+            private_key_pem: request.private_key_pem,
+            certificate_openssh: request.certificate_openssh,
+            command: request.command,
+            timeout_secs: request.timeout_secs,
+            timestamp,
+            nonce,
+            hmac,
+        })
+        .map_err(|e| {
+            conn.ssh_exec_requests.remove(&request_id);
+            AppError::Internal(format!("Failed to serialize SSH exec request: {e}"))
+        })?;
+
+        match conn.tx.try_send(NodeOutboundMessage::Text(msg)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                conn.ssh_exec_requests.remove(&request_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} write buffer full"
+                )));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                conn.ssh_exec_requests.remove(&request_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} connection closed"
+                )));
+            }
+        }
+
+        drop(conn);
+
+        // Use the configured proxy timeout plus the command timeout as the
+        // total wait time (the node agent has its own timeout for the SSH
+        // process, but we need a server-side deadline too).
+        let total_timeout =
+            std::time::Duration::from_secs(self.proxy_timeout_secs + request.timeout_secs as u64);
+        match tokio::time::timeout(total_timeout, resp_rx).await {
+            Ok(Ok(result)) => {
+                if let Some(ref error) = result.error {
+                    Err(AppError::Internal(format!("Node SSH exec error: {error}")))
+                } else {
+                    Ok(result)
+                }
+            }
+            Ok(Err(_)) => Err(AppError::NodeOffline(format!(
+                "Node {node_id} disconnected during SSH exec"
+            ))),
+            Err(_) => {
+                if let Some(conn) = self.connections.get(node_id) {
+                    conn.ssh_exec_requests.remove(&request_id);
+                }
+                Err(AppError::NodeProxyTimeout)
+            }
+        }
+    }
+
+    /// Deliver an ssh_exec_result from a node. Called by the WS reader task.
+    pub fn deliver_ssh_exec_result(&self, node_id: &str, result: NodeSshExecResult) {
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some((_, sender)) = conn.ssh_exec_requests.remove(&result.request_id)
+        {
+            let _ = sender.send(result);
+        }
+    }
+
+    // ---- Web terminal session management ----
+
+    /// Open a web terminal session on a connected node and await the started acknowledgement.
+    pub async fn open_web_terminal(
+        &self,
+        node_id: &str,
+        request: NodeWebTerminalRequest,
+        signing_secret: Option<&[u8]>,
+    ) -> AppResult<mpsc::Receiver<WebTerminalChunk>> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let session_id = request.session_id.clone();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        conn.web_terminals
+            .insert(session_id.clone(), PendingWebTerminal::Awaiting(ready_tx));
+
+        let (timestamp, nonce, signature) = if let Some(secret) = signing_secret {
+            let ts = chrono::Utc::now().to_rfc3339();
+            let n = uuid::Uuid::new_v4().to_string();
+            let sig = compute_web_terminal_hmac_signature(
+                secret,
+                &ts,
+                &n,
+                &request.session_id,
+                &request.host,
+                request.port,
+                &request.principal,
+            );
+            (Some(ts), Some(n), Some(sig))
+        } else {
+            (None, None, None)
+        };
+
+        let msg = serde_json::to_string(&WsWebTerminalOpen {
+            msg_type: "web_terminal_open",
+            session_id: request.session_id,
+            service_id: request.service_id,
+            host: request.host,
+            port: request.port,
+            principal: request.principal,
+            private_key_pem: request.private_key_pem,
+            certificate_openssh: request.certificate_openssh,
+            cols: request.cols,
+            rows: request.rows,
+            timestamp,
+            nonce,
+            hmac: signature,
+        })
+        .map_err(|e| {
+            conn.web_terminals.remove(&session_id);
+            AppError::Internal(format!(
+                "Failed to serialize web terminal open request: {e}"
+            ))
+        })?;
+
+        match conn.tx.try_send(NodeOutboundMessage::Text(msg)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                conn.web_terminals.remove(&session_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} write buffer full"
+                )));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                conn.web_terminals.remove(&session_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} connection closed"
+                )));
+            }
+        }
+
+        drop(conn);
+
+        let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
+        match tokio::time::timeout(timeout, ready_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(AppError::NodeOffline(format!(
+                "Node {node_id} disconnected during web terminal open"
+            ))),
+            Err(_) => {
+                if let Some(conn) = self.connections.get(node_id) {
+                    conn.web_terminals.remove(&session_id);
+                }
+                Err(AppError::NodeProxyTimeout)
+            }
+        }
+    }
+
+    /// Forward terminal input bytes to an active web terminal session on a node.
+    pub fn send_web_terminal_data(
+        &self,
+        node_id: &str,
+        session_id: &str,
+        data: &[u8],
+    ) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        if !conn.web_terminals.contains_key(session_id) {
+            return Err(AppError::NodeOffline(format!(
+                "Web terminal session {session_id} is not active"
+            )));
+        }
+
+        let msg = serde_json::to_string(&WsWebTerminalData {
+            msg_type: "web_terminal_data",
+            session_id: session_id.to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(data),
+        })
+        .map_err(|e| AppError::Internal(format!("Failed to serialize web terminal data: {e}")))?;
+
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(msg))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+
+        Ok(())
+    }
+
+    /// Send a resize event to an active web terminal session on a node.
+    pub fn send_web_terminal_resize(
+        &self,
+        node_id: &str,
+        session_id: &str,
+        cols: u32,
+        rows: u32,
+    ) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+
+        let msg = serde_json::to_string(&WsWebTerminalResize {
+            msg_type: "web_terminal_resize",
+            session_id: session_id.to_string(),
+            cols,
+            rows,
+        })
+        .map_err(|e| AppError::Internal(format!("Failed to serialize web terminal resize: {e}")))?;
+
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(msg))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+
+        Ok(())
+    }
+
+    /// Request closure of an active web terminal session on a node.
+    pub fn close_web_terminal(&self, node_id: &str, session_id: &str) -> AppResult<()> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let msg = serde_json::to_string(&WsWebTerminalClose {
+            msg_type: "web_terminal_close",
+            session_id: session_id.to_string(),
+        })
+        .map_err(|e| AppError::Internal(format!("Failed to serialize web terminal close: {e}")))?;
+        conn.tx
+            .try_send(NodeOutboundMessage::Text(msg))
+            .map_err(|_| {
+                AppError::NodeOffline(format!("Node {node_id} connection closed or buffer full"))
+            })?;
+        conn.web_terminals.remove(session_id);
+        Ok(())
+    }
+
+    /// Deliver a web_terminal_started event from a node.
+    pub fn deliver_web_terminal_started(&self, node_id: &str, session_id: &str) -> bool {
+        let Some(conn) = self.connections.get(node_id) else {
+            return false;
+        };
+        let Some((_, pending)) = conn.web_terminals.remove(session_id) else {
+            return false;
+        };
+
+        match pending {
+            PendingWebTerminal::Awaiting(sender) => {
+                let (tx, rx) = mpsc::channel(WEB_TERMINAL_BUFFER_CAPACITY);
+                let sent = sender.send(Ok(rx)).is_ok();
+                if sent {
+                    conn.web_terminals
+                        .insert(session_id.to_string(), PendingWebTerminal::Active(tx));
+                }
+                sent
+            }
+            PendingWebTerminal::Active(tx) => {
+                conn.web_terminals
+                    .insert(session_id.to_string(), PendingWebTerminal::Active(tx));
+                true
+            }
+        }
+    }
+
+    /// Deliver web terminal output data from a node.
+    pub fn deliver_web_terminal_data(&self, node_id: &str, session_id: &str, data: Vec<u8>) {
+        if let Some(conn) = self.connections.get(node_id) {
+            let send_result = {
+                let Some(pending) = conn.web_terminals.get(session_id) else {
+                    return;
+                };
+                let PendingWebTerminal::Active(tx) = pending.value() else {
+                    return;
+                };
+                tx.try_send(WebTerminalChunk::Data(data))
+            };
+
+            match send_result {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        session_id = %session_id,
+                        capacity = WEB_TERMINAL_BUFFER_CAPACITY,
+                        "Dropping web terminal due to full receive buffer"
+                    );
+                    let close_msg = serde_json::to_string(&WsWebTerminalClose {
+                        msg_type: "web_terminal_close",
+                        session_id: session_id.to_string(),
+                    });
+                    if let Ok(close_msg) = close_msg {
+                        let _ = conn.tx.try_send(NodeOutboundMessage::Text(close_msg));
+                    }
+                    conn.web_terminals.remove(session_id);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    conn.web_terminals.remove(session_id);
+                }
+            }
+        }
+    }
+
+    /// Deliver a web_terminal_closed event from a node.
+    pub fn deliver_web_terminal_closed(
+        &self,
+        node_id: &str,
+        session_id: &str,
+        error: Option<String>,
+    ) {
+        if let Some(conn) = self.connections.get(node_id)
+            && let Some((_, pending)) = conn.web_terminals.remove(session_id)
+        {
+            match pending {
+                PendingWebTerminal::Awaiting(sender) => {
+                    let _ =
+                        sender.send(Err(AppError::NodeOffline(error.unwrap_or_else(|| {
+                            "Web terminal closed before starting".to_string()
+                        }))));
+                }
+                PendingWebTerminal::Active(tx) => {
+                    let _ = tx.try_send(WebTerminalChunk::Closed(error));
                 }
             }
         }

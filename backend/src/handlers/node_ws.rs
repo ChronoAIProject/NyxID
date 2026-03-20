@@ -13,9 +13,10 @@ use crate::models::node::{NodeMetadata, NodeStatus};
 use crate::services::{
     audit_service, node_service,
     node_ws_manager::{
-        NodeOutboundMessage, NodeProxyResponse, NodeWsManager, WsProxyResponseChunkMsg,
-        WsProxyResponseEndMsg, WsProxyResponseStartMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg,
-        WsSshTunnelOpenedMsg,
+        NodeOutboundMessage, NodeProxyResponse, NodeSshExecResult, NodeWsManager,
+        WsProxyResponseChunkMsg, WsProxyResponseEndMsg, WsProxyResponseStartMsg,
+        WsSshExecResultMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg, WsSshTunnelOpenedMsg,
+        WsWebTerminalClosedMsg, WsWebTerminalDataMsg, WsWebTerminalStartedMsg,
     },
 };
 
@@ -74,6 +75,14 @@ enum NodeMessage {
     SshTunnelData(WsSshTunnelDataMsg),
     #[serde(rename = "ssh_tunnel_closed")]
     SshTunnelClosed(WsSshTunnelClosedMsg),
+    #[serde(rename = "web_terminal_started")]
+    WebTerminalStarted(WsWebTerminalStartedMsg),
+    #[serde(rename = "web_terminal_data")]
+    WebTerminalData(WsWebTerminalDataMsg),
+    #[serde(rename = "web_terminal_closed")]
+    WebTerminalClosed(WsWebTerminalClosedMsg),
+    #[serde(rename = "ssh_exec_result")]
+    SshExecResult(WsSshExecResultMsg),
 }
 
 fn decode_base64_payload(
@@ -509,6 +518,66 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                     &node_id_reader,
                     &closed.session_id,
                     closed.error,
+                );
+            }
+            NodeMessage::WebTerminalStarted(started) => {
+                if !ws_manager.deliver_web_terminal_started(&node_id_reader, &started.session_id) {
+                    tracing::debug!(
+                        node_id = %node_id_reader,
+                        session_id = %started.session_id,
+                        "Dropped web terminal started event for unknown session"
+                    );
+                }
+            }
+            NodeMessage::WebTerminalData(data) => {
+                if let Some(bytes) = decode_base64_payload(
+                    data.data.as_deref(),
+                    "web_terminal_data",
+                    &data.session_id,
+                ) {
+                    ws_manager.deliver_web_terminal_data(&node_id_reader, &data.session_id, bytes);
+                } else {
+                    ws_manager.deliver_web_terminal_closed(
+                        &node_id_reader,
+                        &data.session_id,
+                        Some("invalid_base64_payload".to_string()),
+                    );
+                }
+            }
+            NodeMessage::WebTerminalClosed(closed) => {
+                ws_manager.deliver_web_terminal_closed(
+                    &node_id_reader,
+                    &closed.session_id,
+                    closed.error,
+                );
+            }
+            NodeMessage::SshExecResult(result) => {
+                let stdout = decode_base64_payload(
+                    result.stdout.as_deref(),
+                    "ssh_exec_result",
+                    &result.request_id,
+                )
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
+                let stderr = decode_base64_payload(
+                    result.stderr.as_deref(),
+                    "ssh_exec_result",
+                    &result.request_id,
+                )
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
+
+                ws_manager.deliver_ssh_exec_result(
+                    &node_id_reader,
+                    NodeSshExecResult {
+                        request_id: result.request_id,
+                        exit_code: result.exit_code,
+                        stdout,
+                        stderr,
+                        duration_ms: result.duration_ms,
+                        timed_out: result.timed_out,
+                        error: result.error,
+                    },
                 );
             }
             NodeMessage::Register { .. } | NodeMessage::Auth { .. } => {
