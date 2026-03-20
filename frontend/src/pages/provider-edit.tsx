@@ -8,6 +8,7 @@ import {
   type UpdateProviderFormData,
 } from "@/schemas/providers";
 import { ApiError } from "@/lib/api-client";
+import { getProviderTypeLabel } from "@/lib/constants";
 import { PageHeader } from "@/components/shared/page-header";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -32,12 +33,6 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AlertCircle } from "lucide-react";
 import { toast } from "sonner";
-
-const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
-  oauth2: "OAuth 2.0",
-  api_key: "API Key",
-  device_code: "Device Code",
-};
 
 function splitScopes(raw: string | undefined): readonly string[] | undefined {
   if (!raw || raw.trim() === "") return undefined;
@@ -179,6 +174,7 @@ export function ProviderEditPage() {
 
   const isOAuth = watchedProviderType === "oauth2";
   const isDeviceCode = watchedProviderType === "device_code";
+  const isTelegramWidget = watchedProviderType === "telegram_widget";
 
   return (
     <div className="space-y-8">
@@ -231,8 +227,7 @@ export function ProviderEditPage() {
             <div>
               <p className="text-sm font-medium mb-1">Provider Type</p>
               <Badge variant="secondary">
-                {PROVIDER_TYPE_LABELS[provider.provider_type] ??
-                  provider.provider_type}
+                {getProviderTypeLabel(provider.provider_type)}
               </Badge>
               <p className="text-xs text-muted-foreground mt-1">
                 Provider type cannot be changed after creation.
@@ -634,7 +629,40 @@ export function ProviderEditPage() {
               </>
             )}
 
-            {!isOAuth && !isDeviceCode && (
+            {isTelegramWidget && (
+              <>
+                <Separator className="my-2" />
+                <h3 className="text-sm font-semibold">
+                  Telegram Login Widget
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Leave the bot token blank to keep the current value.
+                </p>
+
+                <FormField
+                  control={form.control}
+                  name="client_secret"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Bot Token</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="password"
+                          placeholder="Leave blank to keep current"
+                          {...field}
+                        />
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        BotFather token used to verify Telegram widget logins.
+                      </p>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </>
+            )}
+
+            {!isOAuth && !isDeviceCode && !isTelegramWidget && (
               <>
                 <Separator className="my-2" />
                 <h3 className="text-sm font-semibold">

@@ -6,6 +6,7 @@ import {
   canConnectProvider,
   getProviderConnectHint,
   getProviderConnectLabel,
+  getProviderTypeLabel,
   needsUserCredentials,
   getAuthTypeLabel,
   isOidcService,
@@ -188,6 +189,17 @@ describe("needsUserCredentials", () => {
   it("returns true for both mode", () => {
     expect(needsUserCredentials(makeProvider({ credential_mode: "both" }))).toBe(true);
   });
+
+  it("returns false for telegram widget providers", () => {
+    expect(
+      needsUserCredentials(
+        makeProvider({
+          provider_type: "telegram_widget",
+          credential_mode: "both",
+        }),
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("provider connection helpers", () => {
@@ -290,6 +302,29 @@ describe("provider connection helpers", () => {
     });
 
     expect(canConnectProvider(provider, false)).toBe(true);
+  });
+
+  it("keeps telegram widget providers connectable", () => {
+    const provider = makeProvider({
+      provider_type: "telegram_widget",
+      credential_mode: "admin",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider)).toBe(true);
+    expect(getProviderConnectLabel(provider)).toBe("Connect Telegram");
+  });
+});
+
+describe("getProviderTypeLabel", () => {
+  it("returns the Telegram widget label", () => {
+    expect(getProviderTypeLabel("telegram_widget")).toBe("Telegram Widget");
+  });
+
+  it("returns the Telegram identity label", () => {
+    expect(getProviderTypeLabel("telegram_identity")).toBe(
+      "Telegram Identity",
+    );
   });
 });
 

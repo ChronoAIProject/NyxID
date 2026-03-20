@@ -87,6 +87,13 @@ export function isProvider(service: DownstreamService): boolean {
 }
 
 export function needsUserCredentials(provider: ProviderConfig): boolean {
+  if (
+    provider.provider_type !== "oauth2" &&
+    provider.provider_type !== "device_code"
+  ) {
+    return false;
+  }
+
   const mode = provider.credential_mode;
   return mode === "user" || mode === "both";
 }
@@ -116,6 +123,10 @@ export function getProviderConnectLabel(
     return "Setup required";
   }
 
+  if (provider.provider_type === "telegram_widget") {
+    return "Connect Telegram";
+  }
+
   return provider.provider_type === "device_code"
     ? "Connect via OAuth"
     : "Connect";
@@ -137,6 +148,23 @@ export function getProviderConnectHint(
   }
 
   return null;
+}
+
+export function getProviderTypeLabel(type: string): string {
+  switch (type) {
+    case "oauth2":
+      return "OAuth 2.0";
+    case "api_key":
+      return "API Key";
+    case "device_code":
+      return "Device Code";
+    case "telegram_widget":
+      return "Telegram Widget";
+    case "telegram_identity":
+      return "Telegram Identity";
+    default:
+      return type;
+  }
 }
 
 export function getCredentialInputType(service: DownstreamService): {

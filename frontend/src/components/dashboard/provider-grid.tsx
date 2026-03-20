@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import type { ProviderConfig } from "@/types/api";
 import {
   useProviders,
@@ -26,6 +27,7 @@ import { ApiError } from "@/lib/api-client";
 import { hardRedirect } from "@/lib/navigation";
 
 export function ProviderGrid() {
+  const navigate = useNavigate();
   const { data: providers, isLoading: providersLoading } = useProviders();
   const { data: tokens, isLoading: tokensLoading } = useMyProviderTokens();
   const { data: llmStatus } = useLlmStatus();
@@ -58,6 +60,11 @@ export function ProviderGrid() {
       setApiKeyDialog(provider);
     } else if (provider.provider_type === "device_code") {
       setDeviceCodeDialog(provider);
+    } else if (provider.provider_type === "telegram_widget") {
+      void navigate({
+        to: "/providers/$providerId/connect/telegram",
+        params: { providerId: provider.id },
+      });
     } else {
       void handleOAuthConnect(provider.id);
     }

@@ -9,6 +9,7 @@ import {
   PROVIDER_TYPES,
 } from "@/schemas/providers";
 import { ApiError } from "@/lib/api-client";
+import { getProviderTypeLabel } from "@/lib/constants";
 import { formatDate } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -49,12 +50,6 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { Plus, Plug, Shield } from "lucide-react";
 import { toast } from "sonner";
-
-const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
-  oauth2: "OAuth 2.0",
-  api_key: "API Key",
-  device_code: "Device Code",
-};
 
 function splitScopes(raw: string | undefined): readonly string[] | undefined {
   if (!raw || raw.trim() === "") return undefined;
@@ -137,7 +132,7 @@ export function ProviderListPage() {
             Manage Providers
           </h2>
           <p className="text-sm text-muted-foreground">
-            Create and manage OAuth and API key providers.
+            Create and manage OAuth, Telegram, and API key providers.
           </p>
         </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
@@ -233,7 +228,7 @@ export function ProviderListPage() {
                         <SelectContent>
                           {PROVIDER_TYPES.map((type) => (
                             <SelectItem key={type} value={type}>
-                              {PROVIDER_TYPE_LABELS[type] ?? type}
+                              {getProviderTypeLabel(type)}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -649,6 +644,37 @@ export function ProviderListPage() {
                   </>
                 )}
 
+                {watchedProviderType === "telegram_widget" && (
+                  <>
+                    <Separator />
+                    <h4 className="text-sm font-semibold">
+                      Telegram Login Widget
+                    </h4>
+
+                    <FormField
+                      control={form.control}
+                      name="client_secret"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Bot Token</FormLabel>
+                          <FormControl>
+                            <Input
+                              type="password"
+                              placeholder="123456:ABC-DEF..."
+                              {...field}
+                            />
+                          </FormControl>
+                          <p className="text-xs text-muted-foreground">
+                            BotFather token used to verify the signed Telegram
+                            login payload.
+                          </p>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </>
+                )}
+
                 <DialogFooter>
                   <Button
                     type="button"
@@ -716,8 +742,7 @@ export function ProviderListPage() {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <Badge variant="secondary">
-                        {PROVIDER_TYPE_LABELS[provider.provider_type] ??
-                          provider.provider_type}
+                        {getProviderTypeLabel(provider.provider_type)}
                       </Badge>
                       <Badge
                         variant={provider.is_active ? "success" : "secondary"}

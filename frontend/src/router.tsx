@@ -27,6 +27,7 @@ import {
   ProvidersLayout,
   ProvidersPage,
   ProvidersCallbackPage,
+  ProviderTelegramConnectPage,
   ProviderListPage,
   ProviderDetailPage,
   ProviderEditPage,
@@ -234,6 +235,12 @@ const providersCallbackRoute = createRoute({
   component: ProvidersCallbackPage,
 });
 
+const providerTelegramConnectRoute = createRoute({
+  path: "$providerId/connect/telegram",
+  getParentRoute: () => providersLayout,
+  component: ProviderTelegramConnectPage,
+});
+
 const providerManageRoute = createRoute({
   path: "manage",
   getParentRoute: () => providersLayout,
@@ -365,13 +372,14 @@ const routeTree = rootRoute.addChildren([
       serviceEditRoute,
     ]),
     connectionsRoute,
-    providersLayout.addChildren([
-      providersIndexRoute,
-      providersCallbackRoute,
-      providerManageRoute,
-      providerDetailRoute,
-      providerEditRoute,
-    ]),
+  providersLayout.addChildren([
+    providersIndexRoute,
+    providersCallbackRoute,
+    providerTelegramConnectRoute,
+    providerManageRoute,
+    providerDetailRoute,
+    providerEditRoute,
+  ]),
     settingsRoute,
     consentsRoute,
     guideRoute,

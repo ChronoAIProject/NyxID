@@ -10,7 +10,12 @@ import {
 
 describe("PROVIDER_TYPES", () => {
   it("contains expected types", () => {
-    expect(PROVIDER_TYPES).toEqual(["oauth2", "api_key", "device_code"]);
+    expect(PROVIDER_TYPES).toEqual([
+      "oauth2",
+      "api_key",
+      "device_code",
+      "telegram_widget",
+    ]);
   });
 });
 
@@ -221,6 +226,23 @@ describe("createProviderSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts a Telegram widget provider when a bot token is supplied", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_secret: "123456:ABC-DEF",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a Telegram widget provider without a bot token", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("accepts user-mode device_code provider without admin client_id", () => {
     const result = createProviderSchema.safeParse({
       ...baseValid,
@@ -342,6 +364,14 @@ describe("updateProviderSchema", () => {
       provider_type: "device_code",
       authorization_url: "https://auth.example.com/authorize",
       token_url: "https://auth.example.com/token",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts telegram widget update data", () => {
+    const result = updateProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
     });
     expect(result.success).toBe(true);
   });

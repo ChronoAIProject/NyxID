@@ -52,6 +52,18 @@ describe("getProviderBrand", () => {
     expect(brand.color).toBe("#000000");
   });
 
+  it("returns Lark brand for 'lark' slug", () => {
+    const brand = getProviderBrand("lark");
+    expect(brand.label).toBe("Lark");
+    expect(brand.initial).toBe("La");
+  });
+
+  it("returns Telegram brand for 'telegram' slug", () => {
+    const brand = getProviderBrand("telegram");
+    expect(brand.label).toBe("Telegram");
+    expect(brand.initial).toBe("Tg");
+  });
+
   it("returns default brand for unknown slug", () => {
     const brand = getProviderBrand("unknown-provider");
     expect(brand.label).toBe("");
@@ -71,6 +83,8 @@ describe("hasKnownBrand", () => {
     expect(hasKnownBrand("openai-codex")).toBe(true);
     expect(hasKnownBrand("deepseek")).toBe(true);
     expect(hasKnownBrand("twitter")).toBe(true);
+    expect(hasKnownBrand("lark")).toBe(true);
+    expect(hasKnownBrand("telegram")).toBe(true);
   });
 
   it("returns false for unknown slugs", () => {

@@ -197,13 +197,20 @@ export interface PublicConfig {
 }
 
 export type CredentialMode = "admin" | "user" | "both";
+export type ProviderType =
+  | "oauth2"
+  | "api_key"
+  | "device_code"
+  | "telegram_widget";
+
+export type ProviderTokenMetadataValue = string | number | boolean | null;
 
 export interface ProviderConfig {
   readonly id: string;
   readonly slug: string;
   readonly name: string;
   readonly description: string | null;
-  readonly provider_type: "oauth2" | "api_key" | "device_code";
+  readonly provider_type: ProviderType;
   readonly has_oauth_config: boolean;
   readonly credential_mode: CredentialMode;
   readonly default_scopes: readonly string[] | null;
@@ -238,6 +245,9 @@ export interface UserProviderToken {
   readonly provider_name: string;
   readonly provider_slug: string;
   readonly provider_type: string;
+  readonly metadata:
+    | Readonly<Record<string, ProviderTokenMetadataValue>>
+    | null;
   readonly status: "active" | "expired" | "revoked" | "refresh_failed";
   readonly label: string | null;
   readonly expires_at: string | null;
@@ -247,6 +257,26 @@ export interface UserProviderToken {
 
 export interface OAuthInitiateResponse {
   readonly authorization_url: string;
+}
+
+export interface TelegramWidgetConnectResponse {
+  readonly bot_username: string;
+  readonly redirect_url: string;
+}
+
+export interface TelegramLoginCallbackRequest {
+  readonly id: string;
+  readonly first_name: string;
+  readonly last_name?: string;
+  readonly username?: string;
+  readonly photo_url?: string;
+  readonly auth_date: number;
+  readonly hash: string;
+}
+
+export interface ProviderConnectResponse {
+  readonly status: string;
+  readonly message: string;
 }
 
 export interface DeviceCodeInitiateResponse {

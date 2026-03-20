@@ -7,11 +7,13 @@ import {
   canConnectProvider,
   getProviderConnectHint,
   getProviderConnectLabel,
+  getProviderTypeLabel,
   needsUserCredentials,
 } from "@/lib/constants";
 import { ProviderStatusBadge } from "./provider-status-badge";
 import { LlmReadyBadge } from "./llm-ready-badge";
 import { getProviderBrand, hasKnownBrand } from "@/lib/provider-branding";
+import { getTelegramIdentity } from "@/lib/telegram-login";
 import { formatDate } from "@/lib/utils";
 import {
   Card,
@@ -22,6 +24,11 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
+} from "@/components/ui/avatar";
 import {
   Plug,
   Unlink,
@@ -70,6 +77,17 @@ export function ProviderCard({
   const connectHint = getProviderConnectHint(provider, hasUserCredentials);
   const connectLabel = getProviderConnectLabel(provider, hasUserCredentials);
   const showCredentialsSetup = needsUserCredentials(provider);
+  const telegramIdentity =
+    provider.provider_type === "telegram_widget"
+      ? getTelegramIdentity(token?.metadata)
+      : null;
+  const avatarFallback =
+    telegramIdentity?.displayName
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() ?? "")
+      .join("") ?? "";
 
   return (
     <Card
@@ -133,11 +151,7 @@ export function ProviderCard({
                 <LlmReadyBadge llmStatus={llmStatus} gatewayUrl={gatewayUrl} />
               )}
               <Badge variant="outline" className="text-[10px]">
-                {provider.provider_type === "api_key"
-                  ? "API Key"
-                  : provider.provider_type === "device_code"
-                    ? "Device Code"
-                    : "OAuth"}
+                {getProviderTypeLabel(provider.provider_type)}
               </Badge>
             </div>
           </div>
@@ -146,6 +160,31 @@ export function ProviderCard({
       <CardContent>
         {isConnected && token ? (
           <div className="flex flex-col gap-3">
+            {telegramIdentity && (
+              <div className="flex items-center gap-3 rounded-lg border border-border/70 bg-background/70 p-2.5">
+                <Avatar className="h-9 w-9 border-primary/30">
+                  {telegramIdentity.photoUrl && (
+                    <AvatarImage
+                      src={telegramIdentity.photoUrl}
+                      alt={telegramIdentity.displayName}
+                    />
+                  )}
+                  <AvatarFallback>
+                    {avatarFallback.length > 0 ? avatarFallback : "TG"}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">
+                    {telegramIdentity.displayName}
+                  </p>
+                  {telegramIdentity.subtitle && (
+                    <p className="truncate text-xs text-muted-foreground">
+                      {telegramIdentity.subtitle}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
             <div className="flex flex-col gap-0.5">
               <span className="text-xs text-muted-foreground">
                 Connected {formatDate(token.connected_at)}

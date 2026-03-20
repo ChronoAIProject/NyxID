@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useProvider, useDeleteProvider } from "@/hooks/use-providers";
+import { getProviderTypeLabel } from "@/lib/constants";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -19,12 +20,6 @@ import {
 } from "@/components/ui/dialog";
 import { Pencil, Trash2, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
-
-const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
-  oauth2: "OAuth 2.0",
-  api_key: "API Key",
-  device_code: "Device Code",
-};
 
 export function ProviderDetailPage() {
   const { providerId } = useParams({ strict: false }) as {
@@ -78,6 +73,7 @@ export function ProviderDetailPage() {
 
   const isOAuth = provider.provider_type === "oauth2";
   const isDeviceCode = provider.provider_type === "device_code";
+  const isTelegramWidget = provider.provider_type === "telegram_widget";
 
   return (
     <div className="space-y-8">
@@ -119,10 +115,7 @@ export function ProviderDetailPage() {
         <DetailRow label="Slug" value={provider.slug} copyable />
         <DetailRow
           label="Provider Type"
-          value={
-            PROVIDER_TYPE_LABELS[provider.provider_type] ??
-            provider.provider_type
-          }
+          value={getProviderTypeLabel(provider.provider_type)}
           badge
         />
         <DetailRow
@@ -229,7 +222,22 @@ export function ProviderDetailPage() {
         </>
       )}
 
-      {!isOAuth && !isDeviceCode && (
+      {isTelegramWidget && (
+        <>
+          <Separator />
+          <DetailSection title="Telegram Login Widget">
+            <div className="text-sm">
+              <span className="text-muted-foreground block mb-1">Flow</span>
+              <p className="text-sm">
+                Uses Telegram&apos;s signed Login Widget flow and stores a
+                verified Telegram identity instead of OAuth tokens.
+              </p>
+            </div>
+          </DetailSection>
+        </>
+      )}
+
+      {!isOAuth && !isDeviceCode && !isTelegramWidget && (
         <>
           <Separator />
           <DetailSection title="API Key Configuration">

@@ -50,6 +50,11 @@ export const ProvidersCallbackPage = lazy(() =>
     default: m.ProvidersCallbackPage,
   })),
 );
+export const ProviderTelegramConnectPage = lazy(() =>
+  import("@/pages/provider-telegram-connect").then((m) => ({
+    default: m.ProviderTelegramConnectPage,
+  })),
+);
 export const ProviderListPage = lazy(() =>
   import("@/pages/provider-list").then((m) => ({
     default: m.ProviderListPage,

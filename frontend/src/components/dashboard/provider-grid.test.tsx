@@ -14,9 +14,21 @@ const mocks = vi.hoisted(() => ({
   useMyProviderCredentials: vi.fn(),
   useLlmStatus: vi.fn(),
   hardRedirect: vi.fn(),
+  navigate: vi.fn(),
   toastError: vi.fn(),
   toastSuccess: vi.fn(),
 }));
+
+vi.mock("@tanstack/react-router", async () => {
+  const actual = await vi.importActual<typeof import("@tanstack/react-router")>(
+    "@tanstack/react-router",
+  );
+
+  return {
+    ...actual,
+    useNavigate: () => mocks.navigate,
+  };
+});
 
 vi.mock("@/hooks/use-providers", () => ({
   useProviders: mocks.useProviders,

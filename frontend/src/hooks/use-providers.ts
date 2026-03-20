@@ -7,6 +7,9 @@ import type {
   UserTokenListResponse,
   UserProviderCredentials,
   OAuthInitiateResponse,
+  TelegramWidgetConnectResponse,
+  TelegramLoginCallbackRequest,
+  ProviderConnectResponse,
   DeviceCodeInitiateResponse,
   DeviceCodePollRequest,
   DeviceCodePollResponse,
@@ -75,6 +78,42 @@ export function useInitiateOAuth() {
       return api.get<OAuthInitiateResponse>(
         `/providers/${providerId}/connect/oauth`,
       );
+    },
+  });
+}
+
+export function useTelegramConnectConfig(providerId: string) {
+  return useQuery({
+    queryKey: ["providers", providerId, "telegram-connect"],
+    queryFn: async (): Promise<TelegramWidgetConnectResponse> => {
+      return api.get<TelegramWidgetConnectResponse>(
+        `/providers/${providerId}/connect/telegram`,
+      );
+    },
+    enabled: providerId.length > 0,
+  });
+}
+
+export function useCompleteTelegramConnect() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      providerId,
+      data,
+    }: {
+      readonly providerId: string;
+      readonly data: TelegramLoginCallbackRequest;
+    }): Promise<ProviderConnectResponse> => {
+      return api.post<ProviderConnectResponse>(
+        `/providers/${providerId}/connect/telegram/callback`,
+        data,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
+      void queryClient.invalidateQueries({ queryKey: ["providers"] });
+      void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
     },
   });
 }
