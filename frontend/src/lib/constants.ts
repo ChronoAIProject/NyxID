@@ -95,7 +95,14 @@ export function canConnectProvider(
   provider: ProviderConfig,
   hasUserCredentials = false,
 ): boolean {
-  if (provider.provider_type !== "oauth2" && provider.provider_type !== "device_code") {
+  if (
+    provider.provider_type !== "oauth2" &&
+    provider.provider_type !== "device_code" &&
+    provider.provider_type !== "telegram_widget"
+  ) {
+    return true;
+  }
+  if (provider.provider_type === "telegram_widget") {
     return true;
   }
   const mode = provider.credential_mode;
@@ -116,9 +123,9 @@ export function getProviderConnectLabel(
     return "Setup required";
   }
 
-  return provider.provider_type === "device_code"
-    ? "Connect via OAuth"
-    : "Connect";
+  if (provider.provider_type === "device_code") return "Connect via OAuth";
+  if (provider.provider_type === "telegram_widget") return "Login with Telegram";
+  return "Connect";
 }
 
 export function getProviderConnectHint(

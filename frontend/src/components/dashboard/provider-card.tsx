@@ -137,7 +137,9 @@ export function ProviderCard({
                   ? "API Key"
                   : provider.provider_type === "device_code"
                     ? "Device Code"
-                    : "OAuth"}
+                    : provider.provider_type === "telegram_widget"
+                      ? "Telegram"
+                      : "OAuth"}
               </Badge>
             </div>
           </div>

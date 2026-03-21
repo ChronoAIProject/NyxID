@@ -10,7 +10,7 @@ import {
 
 describe("PROVIDER_TYPES", () => {
   it("contains expected types", () => {
-    expect(PROVIDER_TYPES).toEqual(["oauth2", "api_key", "device_code"]);
+    expect(PROVIDER_TYPES).toEqual(["oauth2", "api_key", "device_code", "telegram_widget"]);
   });
 });
 

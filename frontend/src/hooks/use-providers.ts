@@ -11,6 +11,8 @@ import type {
   DeviceCodePollRequest,
   DeviceCodePollResponse,
   ServiceProviderRequirement,
+  TelegramWidgetConfig,
+  TelegramLoginData,
 } from "@/types/api";
 
 export function useProviders() {
@@ -142,6 +144,43 @@ export function useRefreshProviderToken() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
       void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
+    },
+  });
+}
+
+// --- Telegram Login Widget hooks ---
+
+export function useTelegramWidgetConfig(providerId: string) {
+  return useQuery({
+    queryKey: ["telegram-widget-config", providerId],
+    queryFn: async (): Promise<TelegramWidgetConfig> => {
+      return api.get<TelegramWidgetConfig>(
+        `/providers/${providerId}/connect/telegram`,
+      );
+    },
+    enabled: providerId.length > 0,
+  });
+}
+
+export function useConnectTelegramWidget() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      providerId,
+      data,
+    }: {
+      readonly providerId: string;
+      readonly data: TelegramLoginData;
+    }): Promise<UserProviderToken> => {
+      return api.post<UserProviderToken>(
+        `/providers/${providerId}/connect/telegram/callback`,
+        data,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
+      void queryClient.invalidateQueries({ queryKey: ["providers"] });
     },
   });
 }

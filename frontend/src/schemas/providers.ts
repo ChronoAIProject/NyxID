@@ -33,7 +33,7 @@ export const connectApiKeySchema = z.object({
 
 export type ConnectApiKeyFormData = z.infer<typeof connectApiKeySchema>;
 
-export const PROVIDER_TYPES = ["oauth2", "api_key", "device_code"] as const;
+export const PROVIDER_TYPES = ["oauth2", "api_key", "device_code", "telegram_widget"] as const;
 
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
