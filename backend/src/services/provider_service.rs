@@ -29,6 +29,7 @@ const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
     "tiktok",
     "twitch",
     "reddit",
+    "lark",
 ];
 
 /// Seed default AI provider configurations at startup (idempotent).
@@ -945,6 +946,145 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 20. Lark / Larksuite (OAuth2)
+    if !slug_exists!("lark") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "lark".to_string(),
+            name: "Lark".to_string(),
+            description: Some(
+                "Lark (Larksuite) account access via OAuth 2.0".to_string(),
+            ),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(
+                "https://open.larksuite.com/open-apis/authen/v1/index".to_string(),
+            ),
+            token_url: Some(
+                "https://open.larksuite.com/open-apis/authen/v2/oauth/token".to_string(),
+            ),
+            revocation_url: None,
+            default_scopes: Some(vec![
+                "contact:user.base:readonly".to_string(),
+                "offline_access".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://open.larksuite.com/document/server-docs/authentication-management/access-token/authorize-user-access-token"
+                    .to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "lark", "Seeded default provider: Lark");
+        seeded_count += 1;
+    }
+
+    // 21. Telegram Login Widget (telegram_widget)
+    if !slug_exists!("telegram") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "telegram".to_string(),
+            name: "Telegram".to_string(),
+            description: Some(
+                "Telegram identity verification via Login Widget (HMAC-SHA256)".to_string(),
+            ),
+            provider_type: "telegram_widget".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            // client_secret_encrypted is reused to store the encrypted bot token
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://core.telegram.org/widgets/login".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "telegram", "Seeded default provider: Telegram Login");
+        seeded_count += 1;
+    }
+
+    // 22. Telegram Bot API (API Key)
+    if !slug_exists!("telegram-bot") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "telegram-bot".to_string(),
+            name: "Telegram Bot API".to_string(),
+            description: Some(
+                "Access the Telegram Bot API to send messages and manage bots".to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a bot via @BotFather on Telegram and copy the bot token (format: 123456:ABC-DEF...)"
+                    .to_string(),
+            ),
+            api_key_url: Some("https://t.me/BotFather".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://core.telegram.org/bots/api".to_string()),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(
+            slug = "telegram-bot",
+            "Seeded default provider: Telegram Bot API"
+        );
+        seeded_count += 1;
+    }
+
     if seeded_count > 0 {
         tracing::info!(count = seeded_count, "Default provider seeding complete");
     }
@@ -1103,6 +1243,22 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_slug: "api-reddit",
         service_name: "Reddit API",
         base_url: "https://oauth.reddit.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "lark",
+        service_slug: "api-lark",
+        service_name: "Lark API",
+        base_url: "https://open.larksuite.com/open-apis",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "telegram-bot",
+        service_slug: "api-telegram-bot",
+        service_name: "Telegram Bot API",
+        base_url: "https://api.telegram.org",
         injection_method: "bearer",
         injection_key: "Authorization",
     },
@@ -1325,7 +1481,7 @@ pub async fn create_provider(
     device_code_format: Option<&str>,
     client_id_param_name: Option<&str>,
 ) -> AppResult<ProviderConfig> {
-    let valid_types = ["oauth2", "api_key", "device_code"];
+    let valid_types = ["oauth2", "api_key", "device_code", "telegram_widget"];
     if !valid_types.contains(&provider_type) {
         return Err(AppError::ValidationError(format!(
             "provider_type must be one of: {}",

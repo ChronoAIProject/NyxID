@@ -144,6 +144,7 @@ pub async fn store_api_key(
         last_used_at: None,
         error_message: None,
         label: label.map(String::from),
+        metadata: None,
         created_at: now,
         updated_at: now,
     };
@@ -156,6 +157,118 @@ pub async fn store_api_key(
         user_id = %user_id,
         provider_id = %provider_id,
         "API key stored for provider"
+    );
+
+    Ok(token)
+}
+
+/// Store a verified Telegram identity for a user.
+///
+/// Called after the Telegram Login Widget callback has been verified via
+/// HMAC-SHA256.  No tokens are stored — only the verified identity metadata.
+pub async fn store_telegram_identity(
+    db: &mongodb::Database,
+    user_id: &str,
+    provider_id: &str,
+    data: &crate::crypto::telegram::TelegramLoginData,
+) -> AppResult<UserProviderToken> {
+    // Verify provider exists and is active
+    let provider = db
+        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+        .find_one(doc! { "_id": provider_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Provider not found or inactive".to_string()))?;
+
+    if provider.provider_type != "telegram_widget" {
+        return Err(AppError::BadRequest(
+            "This provider requires Telegram Login Widget connection".to_string(),
+        ));
+    }
+
+    // Check if user already has a token for this provider
+    let existing = db
+        .collection::<UserProviderToken>(COLLECTION_NAME)
+        .find_one(doc! {
+            "user_id": user_id,
+            "provider_config_id": provider_id,
+            "status": { "$ne": "revoked" },
+        })
+        .await?;
+
+    let now = Utc::now();
+
+    let mut metadata = HashMap::new();
+    metadata.insert("telegram_user_id".to_string(), data.id.to_string());
+    metadata.insert("first_name".to_string(), data.first_name.clone());
+    if let Some(ref ln) = data.last_name {
+        metadata.insert("last_name".to_string(), ln.clone());
+    }
+    if let Some(ref un) = data.username {
+        metadata.insert("username".to_string(), un.clone());
+    }
+    if let Some(ref pu) = data.photo_url {
+        metadata.insert("photo_url".to_string(), pu.clone());
+    }
+
+    if let Some(existing_token) = existing {
+        // Update existing token metadata
+        let meta_doc = metadata
+            .iter()
+            .map(|(k, v)| (format!("metadata.{k}"), bson::Bson::String(v.clone())))
+            .collect::<bson::Document>();
+        let mut set_doc = doc! {
+            "status": "active",
+            "error_message": bson::Bson::Null,
+            "updated_at": bson::DateTime::from_chrono(now),
+        };
+        set_doc.extend(meta_doc);
+
+        db.collection::<UserProviderToken>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &existing_token.id },
+                doc! { "$set": set_doc },
+            )
+            .await?;
+
+        let updated = db
+            .collection::<UserProviderToken>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &existing_token.id })
+            .await?
+            .ok_or_else(|| AppError::Internal("Token disappeared after update".to_string()))?;
+
+        return Ok(updated);
+    }
+
+    let token = UserProviderToken {
+        id: Uuid::new_v4().to_string(),
+        user_id: user_id.to_string(),
+        provider_config_id: provider_id.to_string(),
+        credential_user_id: None,
+        token_type: "telegram_identity".to_string(),
+        access_token_encrypted: None,
+        refresh_token_encrypted: None,
+        token_scopes: None,
+        expires_at: None,
+        api_key_encrypted: None,
+        status: "active".to_string(),
+        last_refreshed_at: None,
+        last_used_at: None,
+        error_message: None,
+        label: None,
+        metadata: Some(metadata),
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.collection::<UserProviderToken>(COLLECTION_NAME)
+        .insert_one(&token)
+        .await?;
+
+    tracing::info!(
+        user_id = %user_id,
+        provider_id = %provider_id,
+        telegram_user_id = %data.id,
+        "Telegram identity stored for provider"
     );
 
     Ok(token)
@@ -819,6 +932,7 @@ async fn store_device_code_tokens(
         last_used_at: None,
         error_message: None,
         label: None,
+        metadata: None,
         created_at: now,
         updated_at: now,
     };
@@ -1017,6 +1131,7 @@ pub async fn handle_oauth_callback(
         last_used_at: None,
         error_message: None,
         label: None,
+        metadata: None,
         created_at: now,
         updated_at: now,
     };

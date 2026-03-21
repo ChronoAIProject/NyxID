@@ -572,6 +572,120 @@ pub async fn poll_device_code(
     }))
 }
 
+// --- Telegram Login Widget types & handlers ---
+
+#[derive(Debug, Serialize)]
+pub struct TelegramConnectConfigResponse {
+    pub bot_username: String,
+}
+
+/// GET /api/v1/providers/{provider_id}/connect/telegram
+///
+/// Returns the Telegram bot username needed to render the Login Widget on the
+/// frontend.
+pub async fn get_telegram_connect_config(
+    State(state): State<AppState>,
+    _auth_user: AuthUser,
+    Path(provider_id): Path<String>,
+) -> AppResult<Json<TelegramConnectConfigResponse>> {
+    let provider = crate::services::provider_service::get_provider(&state.db, &provider_id).await?;
+
+    if provider.provider_type != "telegram_widget" {
+        return Err(AppError::BadRequest(
+            "This endpoint is only for Telegram Login Widget providers".to_string(),
+        ));
+    }
+
+    if !provider.is_active {
+        return Err(AppError::BadRequest(
+            "Provider is not active".to_string(),
+        ));
+    }
+
+    // Bot username is stored in the description field of the provider seed
+    // (e.g. "Telegram Login (bot: @YourBotUsername)"). For a clean approach,
+    // we use the `api_key_url` field which stores the BotFather link, but the
+    // bot_username must be configured by the admin. We look for it in
+    // `client_id_param_name` which the seed repurposes for bot_username.
+    let bot_username = provider.client_id_param_name.ok_or_else(|| {
+        AppError::BadRequest(
+            "Telegram bot username not configured for this provider".to_string(),
+        )
+    })?;
+
+    Ok(Json(TelegramConnectConfigResponse { bot_username }))
+}
+
+/// POST /api/v1/providers/{provider_id}/connect/telegram/callback
+///
+/// Receives Telegram Login Widget data, verifies the HMAC-SHA256 signature,
+/// and stores the verified identity as a `telegram_identity` token.
+pub async fn telegram_callback(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(provider_id): Path<String>,
+    Json(body): Json<crate::crypto::telegram::TelegramLoginData>,
+) -> AppResult<Json<ConnectResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+
+    let provider = crate::services::provider_service::get_provider(&state.db, &provider_id).await?;
+
+    if provider.provider_type != "telegram_widget" {
+        return Err(AppError::BadRequest(
+            "This endpoint is only for Telegram Login Widget providers".to_string(),
+        ));
+    }
+
+    if !provider.is_active {
+        return Err(AppError::BadRequest(
+            "Provider is not active".to_string(),
+        ));
+    }
+
+    // Bot token is stored in client_secret_encrypted
+    let bot_token_enc = provider.client_secret_encrypted.ok_or_else(|| {
+        AppError::BadRequest(
+            "Telegram bot token not configured for this provider".to_string(),
+        )
+    })?;
+
+    let bot_token_bytes = zeroize::Zeroizing::new(
+        state.encryption_keys.decrypt(&bot_token_enc).await?,
+    );
+    let bot_token = String::from_utf8((*bot_token_bytes).clone())
+        .map_err(|e| AppError::Internal(format!("Failed to decode bot token: {e}")))?;
+
+    // Verify HMAC signature and auth_date freshness
+    crate::crypto::telegram::verify_telegram_login(&bot_token, &body)?;
+
+    // Store the verified identity
+    user_token_service::store_telegram_identity(
+        &state.db,
+        &user_id_str,
+        &provider_id,
+        &body,
+    )
+    .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id_str),
+        "provider_token_connected".to_string(),
+        Some(serde_json::json!({
+            "provider_id": &provider_id,
+            "token_type": "telegram_identity",
+            "telegram_user_id": body.id,
+        })),
+        None,
+        None,
+    );
+
+    Ok(Json(ConnectResponse {
+        status: "connected".to_string(),
+        message: "Telegram identity verified and stored".to_string(),
+    }))
+}
+
 /// Return a user-safe error message for redirects, matching the sanitization
 /// applied by `AppError::into_response` for JSON errors. Internal/database
 /// errors are replaced with a generic message so implementation details never

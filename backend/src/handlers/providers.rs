@@ -260,7 +260,7 @@ pub async fn create_provider(
     validate_slug(&body.slug)?;
 
     // Validate provider_type
-    let valid_types = ["oauth2", "api_key", "device_code"];
+    let valid_types = ["oauth2", "api_key", "device_code", "telegram_widget"];
     if !valid_types.contains(&body.provider_type.as_str()) {
         return Err(AppError::ValidationError(format!(
             "provider_type must be one of: {}",
