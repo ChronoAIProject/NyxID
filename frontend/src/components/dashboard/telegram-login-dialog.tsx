@@ -16,6 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
+import { telegramLoginDataSchema } from "@/schemas/providers";
 
 declare global {
   interface Window {
@@ -75,7 +76,12 @@ export function TelegramLoginDialog({
 
   const handleTelegramAuth = useCallback(
     (user: TelegramLoginData) => {
-      connectMutation.mutate({ providerId: provider.id, data: user });
+      const result = telegramLoginDataSchema.safeParse(user);
+      if (!result.success) {
+        connectMutation.reset();
+        return;
+      }
+      connectMutation.mutate({ providerId: provider.id, data: result.data });
     },
     [connectMutation, provider.id],
   );

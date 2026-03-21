@@ -85,6 +85,8 @@ fn contains_percent_encoded_path_breaker(value: &str) -> bool {
     lower.contains("%2f")
         || lower.contains("%5c")
         || lower.contains("%00")
+        || lower.contains("%3f")
+        || lower.contains("%23")
         || lower.split('/').any(|segment| {
             let decoded_dots = segment.replace("%2e", ".");
             decoded_dots == "." || decoded_dots == ".."
@@ -94,6 +96,8 @@ fn contains_percent_encoded_path_breaker(value: &str) -> bool {
 pub(crate) fn validate_requested_proxy_path(path: &str) -> AppResult<()> {
     if path.contains('\\')
         || path.contains('\0')
+        || path.contains('?')
+        || path.contains('#')
         || path.contains("//")
         || contains_dot_segment(path)
         || contains_percent_encoded_path_breaker(path)
@@ -663,8 +667,13 @@ mod tests {
     #[tokio::test]
     async fn forward_request_rejects_percent_encoded_requested_path_injection() {
         for path in [
+            "sendMessage?chat_id=1",
+            "sendMessage#fragment",
             "folder%2FsendMessage",
             "folder%2fsendMessage",
+            "folder%3Fchat_id=1",
+            "folder%3fchat_id=1",
+            "folder%23fragment",
             "%2e%2e",
             "%2e.",
             ".%2e",

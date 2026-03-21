@@ -933,6 +933,46 @@ mod tests {
             "svc:folder\\sendMessage"
         );
 
+        let question_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%3Fchat_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(question_response.status(), StatusCode::OK);
+        let question_body = to_bytes(question_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&question_body).unwrap(),
+            "svc:folder?chat_id=1"
+        );
+
+        let hash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%23fragment")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(hash_response.status(), StatusCode::OK);
+        let hash_body = to_bytes(hash_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&hash_body).unwrap(),
+            "svc:folder#fragment"
+        );
+
         let dotdot_response = app
             .clone()
             .oneshot(
@@ -1016,6 +1056,48 @@ mod tests {
             "svc:folder%5CsendMessage"
         );
 
+        let double_encoded_question_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%253Fchat_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_question_response.status(), StatusCode::OK);
+        let double_encoded_question_body =
+            to_bytes(double_encoded_question_response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_question_body).unwrap(),
+            "svc:folder%3Fchat_id=1"
+        );
+
+        let double_encoded_hash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%2523fragment")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_hash_response.status(), StatusCode::OK);
+        let double_encoded_hash_body =
+            to_bytes(double_encoded_hash_response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_hash_body).unwrap(),
+            "svc:folder%23fragment"
+        );
+
         let double_encoded_nul_response = app
             .clone()
             .oneshot(
@@ -1040,8 +1122,13 @@ mod tests {
     #[test]
     fn node_proxy_path_injection_rejects_breakers() {
         for path in [
+            "/sendMessage?chat_id=1",
+            "/sendMessage#fragment",
             "/folder%2FsendMessage",
             "/folder%2fsendMessage",
+            "/folder%3Fchat_id=1",
+            "/folder%3fchat_id=1",
+            "/folder%23fragment",
             "/%2e%2e",
             "/%2e.",
             "/.%2e",
