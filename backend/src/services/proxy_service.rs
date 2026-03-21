@@ -37,7 +37,9 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
 ];
 
 fn validate_path_injection_prefix(value: &str) -> AppResult<()> {
-    if value.contains('/')
+    if value.trim().is_empty()
+        || value.chars().any(char::is_whitespace)
+        || value.contains('/')
         || value.contains('\\')
         || value.contains('?')
         || value.contains('#')
@@ -55,7 +57,9 @@ fn validate_path_injection_prefix(value: &str) -> AppResult<()> {
 }
 
 fn validate_path_injection_credential(value: &str) -> AppResult<()> {
-    if value.contains('/')
+    if value.trim().is_empty()
+        || value.chars().any(char::is_whitespace)
+        || value.contains('/')
         || value.contains('\\')
         || value.contains('?')
         || value.contains('#')
@@ -612,7 +616,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forward_request_rejects_invalid_delegated_path_credentials() {
+    async fn forward_request_rejects_invalid_path_injection_credentials() {
         let err = forward_request(
             &Client::new(),
             &make_proxy_target("http://127.0.0.1".to_string()),
@@ -636,6 +640,35 @@ mod tests {
             err.to_string().contains("Reconnect the provider"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_blank_or_whitespace_path_injection_credentials() {
+        for credential in ["", "   ", "123 456", " 123456:ABC-DEF"] {
+            let err = forward_request(
+                &Client::new(),
+                &make_proxy_target("http://127.0.0.1".to_string()),
+                reqwest::Method::POST,
+                "sendMessage",
+                None,
+                reqwest::header::HeaderMap::new(),
+                None,
+                vec![],
+                vec![DelegatedCredential {
+                    provider_slug: "telegram-bot".to_string(),
+                    injection_method: "path".to_string(),
+                    injection_key: "bot".to_string(),
+                    credential: credential.to_string(),
+                }],
+            )
+            .await
+            .expect_err("blank or whitespace path credential should be rejected");
+
+            assert!(
+                err.to_string().contains("Reconnect the provider"),
+                "unexpected error for '{credential}': {err}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -666,7 +699,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forward_request_rejects_percent_encoded_path_credential() {
+    async fn forward_request_rejects_blank_or_whitespace_path_injection_prefix() {
+        for injection_key in ["", "   ", " bot"] {
+            let err = forward_request(
+                &Client::new(),
+                &make_proxy_target("http://127.0.0.1".to_string()),
+                reqwest::Method::POST,
+                "sendMessage",
+                None,
+                reqwest::header::HeaderMap::new(),
+                None,
+                vec![],
+                vec![DelegatedCredential {
+                    provider_slug: "telegram-bot".to_string(),
+                    injection_method: "path".to_string(),
+                    injection_key: injection_key.to_string(),
+                    credential: "123456:ABC-DEF".to_string(),
+                }],
+            )
+            .await
+            .expect_err("blank or whitespace path prefix should be rejected");
+
+            assert!(
+                err.to_string().contains("Please contact your admin"),
+                "unexpected error for '{injection_key}': {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_percent_encoded_path_injection_credential() {
         let err = forward_request(
             &Client::new(),
             &make_proxy_target("http://127.0.0.1".to_string()),
@@ -693,7 +755,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forward_request_rejects_percent_encoded_path_prefix() {
+    async fn forward_request_rejects_percent_encoded_path_injection_prefix() {
         let err = forward_request(
             &Client::new(),
             &make_proxy_target("http://127.0.0.1".to_string()),

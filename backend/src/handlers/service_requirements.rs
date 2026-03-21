@@ -89,7 +89,8 @@ fn validate_path_injection_key(key: &str) -> AppResult<()> {
         ));
     }
 
-    if key.contains('/')
+    if key.chars().any(char::is_whitespace)
+        || key.contains('/')
         || key.contains('\\')
         || key.contains('?')
         || key.contains('#')
@@ -412,5 +413,17 @@ mod tests {
             err.to_string()
                 .contains("injection_key is required for path injection")
         );
+    }
+
+    #[test]
+    fn path_injection_key_rejects_whitespace_characters() {
+        for input in [" bot", "bot ", "bot token", "bot\ttoken"] {
+            let err =
+                validate_path_injection_key(input).expect_err("whitespace should be rejected");
+            assert!(
+                err.to_string().contains("invalid characters"),
+                "unexpected error for '{input}': {err}"
+            );
+        }
     }
 }
