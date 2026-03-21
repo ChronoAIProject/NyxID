@@ -95,6 +95,7 @@ async fn execute_proxy(
 ) -> AppResult<Response> {
     let user_id_str = auth_user.user_id.to_string();
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
+    proxy_service::validate_requested_proxy_path(path)?;
 
     // Resolve node routing FIRST so node-backed users bypass credential checks
     let node_route = node_routing_service::resolve_node_route(
@@ -254,6 +255,12 @@ async fn execute_proxy(
     // node_route was resolved earlier (before credential check) to allow node-backed
     // users to bypass credential requirements.
     if let Some(node_route) = node_route {
+        let node_path = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        };
+
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -261,11 +268,7 @@ async fn execute_proxy(
             service_slug: target.service.slug.clone(),
             base_url: target.base_url.clone(),
             method: method_str.clone(),
-            path: if path.starts_with('/') {
-                path.to_string()
-            } else {
-                format!("/{path}")
-            },
+            path: node_path,
             query: query.clone(),
             headers: node_forward_headers,
             body: body.as_ref().map(|b| b.to_vec()),
@@ -823,6 +826,7 @@ mod tests {
     use super::{
         is_chat_completions_proxy_path, is_codex_transport_path, should_enforce_runtime_approval,
     };
+    use crate::services::proxy_service::validate_requested_proxy_path;
     use crate::mw::auth::AuthMethod;
     use axum::{
         Router,
@@ -930,6 +934,7 @@ mod tests {
         );
 
         let dotdot_response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/svc/%2e%2e")
@@ -947,6 +952,120 @@ mod tests {
             std::str::from_utf8(&dotdot_body).unwrap(),
             "svc:.."
         );
+
+        let double_encoded_dotdot_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/%252e%252e")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_dotdot_response.status(), StatusCode::OK);
+        let double_encoded_dotdot_body =
+            to_bytes(double_encoded_dotdot_response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_dotdot_body).unwrap(),
+            "svc:%2e%2e"
+        );
+
+        let double_encoded_slash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%252FsendMessage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_slash_response.status(), StatusCode::OK);
+        let double_encoded_slash_body =
+            to_bytes(double_encoded_slash_response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_slash_body).unwrap(),
+            "svc:folder%2FsendMessage"
+        );
+
+        let double_encoded_backslash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%255CsendMessage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_backslash_response.status(), StatusCode::OK);
+        let double_encoded_backslash_body =
+            to_bytes(double_encoded_backslash_response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_backslash_body).unwrap(),
+            "svc:folder%5CsendMessage"
+        );
+
+        let double_encoded_nul_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/%2500")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_nul_response.status(), StatusCode::OK);
+        let double_encoded_nul_body = to_bytes(double_encoded_nul_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_nul_body).unwrap(),
+            "svc:%00"
+        );
+    }
+
+    #[test]
+    fn node_proxy_path_injection_rejects_breakers() {
+        for path in [
+            "/folder%2FsendMessage",
+            "/folder%2fsendMessage",
+            "/%2e%2e",
+            "/%2e.",
+            "/.%2e",
+            "/%2E%2E",
+            "/%2E.",
+            "/.%2E",
+            "/folder%5CsendMessage",
+            "/folder%5csendMessage",
+            "/%00",
+            "/folder\\sendMessage",
+        ] {
+            let err =
+                validate_requested_proxy_path(path).expect_err("path breaker should be rejected");
+            assert!(
+                err.to_string().contains("Invalid proxy path"),
+                "unexpected error for '{path}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn node_proxy_path_injection_allows_non_segment_dot_sequences() {
+        validate_requested_proxy_path("/v1/foo..bar/foo%2ebar")
+            .expect("non-segment dot sequences should be allowed");
     }
 }
 

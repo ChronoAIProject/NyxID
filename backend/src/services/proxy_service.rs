@@ -76,13 +76,39 @@ fn validate_path_injection_credential(value: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn contains_dot_segment(value: &str) -> bool {
+    value.split('/').any(|segment| segment == "." || segment == "..")
+}
+
+fn contains_percent_encoded_path_breaker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("%2f")
+        || lower.contains("%5c")
+        || lower.contains("%00")
+        || lower.split('/').any(|segment| {
+            let decoded_dots = segment.replace("%2e", ".");
+            decoded_dots == "." || decoded_dots == ".."
+        })
+}
+
+pub(crate) fn validate_requested_proxy_path(path: &str) -> AppResult<()> {
+    if path.contains('\\')
+        || path.contains('\0')
+        || path.contains("//")
+        || contains_dot_segment(path)
+        || contains_percent_encoded_path_breaker(path)
+    {
+        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
+    }
+
+    Ok(())
+}
+
 fn build_forward_path(
     path: &str,
     delegated_credentials: &[DelegatedCredential],
 ) -> AppResult<String> {
-    if path.contains('\\') || path.contains('\0') || path.contains("..") || path.contains("//") {
-        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
-    }
+    validate_requested_proxy_path(path)?;
 
     let mut prefix_segments = Vec::new();
     for cred in delegated_credentials {
@@ -102,14 +128,7 @@ fn build_forward_path(
         format!("{}/{}", prefix_segments.join("/"), trimmed_path)
     };
 
-    if final_path.contains('\\')
-        || final_path.contains('\0')
-        || final_path.contains("//")
-        || final_path.contains("..")
-    {
-        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
-    }
-
+    validate_requested_proxy_path(&final_path)?;
     Ok(final_path)
 }
 
@@ -639,6 +658,79 @@ mod tests {
             err.to_string().contains("Invalid proxy path"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_percent_encoded_requested_path_injection() {
+        for path in [
+            "folder%2FsendMessage",
+            "folder%2fsendMessage",
+            "%2e%2e",
+            "%2e.",
+            ".%2e",
+            "%2E%2E",
+            "%2E.",
+            ".%2E",
+            "folder%5CsendMessage",
+            "folder%5csendMessage",
+            "%00",
+        ] {
+            let err = forward_request(
+                &Client::new(),
+                &make_proxy_target("http://127.0.0.1".to_string()),
+                reqwest::Method::POST,
+                path,
+                None,
+                reqwest::header::HeaderMap::new(),
+                None,
+                vec![],
+                vec![],
+            )
+            .await
+            .expect_err("percent-encoded requested path breaker should be rejected");
+
+            assert!(
+                err.to_string().contains("Invalid proxy path"),
+                "unexpected error for '{path}': {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_request_allows_non_segment_dot_sequences_in_path_injection() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/{*path}", post(capture_request))
+            .with_state(sender);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let response = forward_request(
+            &Client::new(),
+            &make_proxy_target(format!("http://{addr}")),
+            reqwest::Method::POST,
+            "v1/foo..bar/foo%2ebar",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![],
+        )
+        .await
+        .expect("non-segment dot sequences should be allowed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(captured.path, "/v1/foo..bar/foo%2ebar");
+
+        server.abort();
     }
 
     #[tokio::test]
