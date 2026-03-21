@@ -149,6 +149,22 @@ export function ProviderCard({
         {isConnected && token ? (
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-0.5">
+              {provider.provider_type === "telegram_widget" && token.metadata && (
+                <div className="flex items-center gap-2">
+                  {token.metadata.photo_url && (
+                    <img
+                      src={token.metadata.photo_url}
+                      alt=""
+                      className="h-5 w-5 rounded-full"
+                    />
+                  )}
+                  <span className="text-xs font-medium">
+                    {token.metadata.username
+                      ? `@${token.metadata.username}`
+                      : token.metadata.first_name ?? "Telegram User"}
+                  </span>
+                </div>
+              )}
               <span className="text-xs text-muted-foreground">
                 Connected {formatDate(token.connected_at)}
               </span>

@@ -291,6 +291,16 @@ describe("provider connection helpers", () => {
 
     expect(canConnectProvider(provider, false)).toBe(true);
   });
+
+  it("always allows telegram_widget providers", () => {
+    const provider = makeProvider({
+      provider_type: "telegram_widget",
+      has_oauth_config: false,
+    });
+
+    expect(canConnectProvider(provider, false)).toBe(true);
+    expect(getProviderConnectLabel(provider)).toBe("Login with Telegram");
+  });
 });
 
 describe("getCredentialInputType", () => {

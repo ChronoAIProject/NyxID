@@ -243,6 +243,7 @@ export interface UserProviderToken {
   readonly expires_at: string | null;
   readonly last_used_at: string | null;
   readonly connected_at: string;
+  readonly metadata?: Readonly<Record<string, string>> | null;
 }
 
 export interface OAuthInitiateResponse {
@@ -328,7 +329,7 @@ export interface SocialTokenExchangeResponse {
 
 export interface TelegramWidgetConfig {
   readonly bot_username: string;
-  readonly redirect_url: string;
+  readonly redirect_url?: string;
 }
 
 export interface TelegramLoginData {
