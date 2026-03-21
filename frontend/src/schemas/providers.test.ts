@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   connectApiKeySchema,
   createProviderSchema,
+  telegramLoginDataSchema,
   updateProviderSchema,
   userCredentialsSchema,
   PROVIDER_TYPES,
@@ -10,7 +11,12 @@ import {
 
 describe("PROVIDER_TYPES", () => {
   it("contains expected types", () => {
-    expect(PROVIDER_TYPES).toEqual(["oauth2", "api_key", "device_code", "telegram_widget"]);
+    expect(PROVIDER_TYPES).toEqual([
+      "oauth2",
+      "api_key",
+      "device_code",
+      "telegram_widget",
+    ]);
   });
 });
 
@@ -113,6 +119,45 @@ describe("connectApiKeySchema", () => {
       api_key: "sk-valid",
       label: "a".repeat(201),
     });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("telegramLoginDataSchema", () => {
+  it("accepts valid Telegram login data", () => {
+    const result = telegramLoginDataSchema.safeParse({
+      id: 12345,
+      first_name: "Nyx",
+      username: "nyx_user",
+      photo_url: "https://t.me/i/userpic/photo.jpg",
+      auth_date: 1_742_518_400,
+      hash: "a".repeat(64),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("coerces numeric string fields from the widget payload", () => {
+    const result = telegramLoginDataSchema.safeParse({
+      id: "12345",
+      first_name: "Nyx",
+      auth_date: "1742518400",
+      hash: "b".repeat(64),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.id).toBe(12345);
+    expect(result.data?.auth_date).toBe(1742518400);
+  });
+
+  it("rejects malformed Telegram login hashes", () => {
+    const result = telegramLoginDataSchema.safeParse({
+      id: 12345,
+      first_name: "Nyx",
+      auth_date: 1_742_518_400,
+      hash: "deadbeef",
+    });
+
     expect(result.success).toBe(false);
   });
 });

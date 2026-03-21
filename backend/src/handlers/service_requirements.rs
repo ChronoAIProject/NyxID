@@ -82,6 +82,29 @@ fn canonicalize_requirement_injection(
     )
 }
 
+fn validate_path_injection_key(key: &str) -> AppResult<()> {
+    if key.trim().is_empty() {
+        return Err(AppError::ValidationError(
+            "injection_key is required for path injection".to_string(),
+        ));
+    }
+
+    if key.contains('/')
+        || key.contains('\\')
+        || key.contains('?')
+        || key.contains('#')
+        || key.contains('\0')
+        || key.contains("..")
+        || key.contains('%')
+    {
+        return Err(AppError::ValidationError(
+            "injection_key contains invalid characters for path injection".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 // --- Handlers ---
 
 /// GET /api/v1/services/{service_id}/requirements
@@ -183,8 +206,22 @@ pub async fn add_requirement(
         )));
     }
 
-    // Validate injection_key against blocklist
-    if let Some(ref key) = body.injection_key {
+    let (injection_method, injection_key) = canonicalize_requirement_injection(
+        &provider.slug,
+        &body.injection_method,
+        body.injection_key.as_deref(),
+    );
+
+    // Path injection requires a non-blank injection_key.
+    if injection_method == "path" {
+        let key = injection_key.as_deref().ok_or_else(|| {
+            AppError::ValidationError("injection_key is required for path injection".to_string())
+        })?;
+        validate_path_injection_key(key)?;
+    }
+
+    // Validate injection_key against blocklist after provider-specific canonicalization.
+    if let Some(ref key) = injection_key {
         let key_lower = key.to_lowercase();
         if BLOCKED_INJECTION_KEYS.contains(&key_lower.as_str()) {
             return Err(AppError::ValidationError(format!(
@@ -212,11 +249,6 @@ pub async fn add_requirement(
 
     let id = Uuid::new_v4().to_string();
     let now = Utc::now();
-    let (injection_method, injection_key) = canonicalize_requirement_injection(
-        &provider.slug,
-        &body.injection_method,
-        body.injection_key.as_deref(),
-    );
 
     let requirement = ServiceProviderRequirement {
         id: id.clone(),
@@ -313,7 +345,9 @@ pub async fn remove_requirement(
 
 #[cfg(test)]
 mod tests {
-    use super::canonicalize_requirement_injection;
+    use super::{
+        BLOCKED_INJECTION_KEYS, canonicalize_requirement_injection, validate_path_injection_key,
+    };
 
     #[test]
     fn telegram_bot_requirements_are_canonicalized_to_path_bot() {
@@ -331,5 +365,52 @@ mod tests {
 
         assert_eq!(method, "header");
         assert_eq!(key.as_deref(), Some("X-API-Key"));
+    }
+
+    #[test]
+    fn telegram_bot_canonicalization_happens_before_blocklist_validation() {
+        let (_, key) =
+            canonicalize_requirement_injection("telegram-bot", "bearer", Some("Authorization"));
+
+        assert_eq!(key.as_deref(), Some("bot"));
+        assert!(!BLOCKED_INJECTION_KEYS.contains(&key.unwrap().to_lowercase().as_str()));
+    }
+
+    #[test]
+    fn path_injection_key_rejects_path_breaking_characters() {
+        let err =
+            validate_path_injection_key("bot/").expect_err("slash should be rejected for path key");
+
+        assert!(err.to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn path_injection_key_rejects_percent_encoded_separators() {
+        for input in ["%2f", "%5c", "%2e%2e", "bot%2fmalicious", "pre%fix"] {
+            let err = validate_path_injection_key(input).expect_err(&format!(
+                "percent-encoded input '{input}' should be rejected"
+            ));
+            assert!(
+                err.to_string().contains("invalid characters"),
+                "unexpected error for '{input}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_injection_key_rejects_blank_values() {
+        let err = validate_path_injection_key("")
+            .expect_err("empty key should be rejected for path injection");
+        assert!(
+            err.to_string()
+                .contains("injection_key is required for path injection")
+        );
+
+        let err = validate_path_injection_key("   ")
+            .expect_err("whitespace-only key should be rejected for path injection");
+        assert!(
+            err.to_string()
+                .contains("injection_key is required for path injection")
+        );
     }
 }

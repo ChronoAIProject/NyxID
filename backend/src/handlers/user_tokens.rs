@@ -591,28 +591,8 @@ pub async fn get_telegram_connect_config(
     _auth_user: AuthUser,
     Path(provider_id): Path<String>,
 ) -> AppResult<Json<TelegramConnectConfigResponse>> {
-    let provider = crate::services::provider_service::get_provider(&state.db, &provider_id).await?;
-
-    if provider.provider_type != "telegram_widget" {
-        return Err(AppError::BadRequest(
-            "This endpoint is only for Telegram Login Widget providers".to_string(),
-        ));
-    }
-
-    if !provider.is_active {
-        return Err(AppError::BadRequest("Provider is not active".to_string()));
-    }
-
-    // Telegram providers reuse `client_id_param_name` for the bot username
-    // and `client_secret_encrypted` for the bot token.
-    let bot_username = provider.client_id_param_name.ok_or_else(|| {
-        AppError::BadRequest("Telegram bot username not configured for this provider".to_string())
-    })?;
-    if provider.client_secret_encrypted.is_none() {
-        return Err(AppError::BadRequest(
-            "Telegram bot token not configured for this provider".to_string(),
-        ));
-    }
+    let bot_username =
+        user_token_service::get_telegram_connect_bot_username(&state.db, &provider_id).await?;
 
     Ok(Json(TelegramConnectConfigResponse { bot_username }))
 }
@@ -629,34 +609,14 @@ pub async fn telegram_callback(
 ) -> AppResult<Json<ConnectResponse>> {
     let user_id_str = auth_user.user_id.to_string();
 
-    let provider = crate::services::provider_service::get_provider(&state.db, &provider_id).await?;
-
-    if provider.provider_type != "telegram_widget" {
-        return Err(AppError::BadRequest(
-            "This endpoint is only for Telegram Login Widget providers".to_string(),
-        ));
-    }
-
-    if !provider.is_active {
-        return Err(AppError::BadRequest("Provider is not active".to_string()));
-    }
-
-    // Bot token is stored in client_secret_encrypted
-    let bot_token_enc = provider.client_secret_encrypted.ok_or_else(|| {
-        AppError::BadRequest("Telegram bot token not configured for this provider".to_string())
-    })?;
-
-    let bot_token_bytes =
-        zeroize::Zeroizing::new(state.encryption_keys.decrypt(&bot_token_enc).await?);
-    let bot_token = std::str::from_utf8(bot_token_bytes.as_slice())
-        .map_err(|e| AppError::Internal(format!("Failed to decode bot token: {e}")))?;
-
-    // Verify HMAC signature and auth_date freshness
-    crate::crypto::telegram::verify_telegram_login(bot_token, &body)?;
-
-    // Store the verified identity
-    user_token_service::store_telegram_identity(&state.db, &user_id_str, &provider_id, &body)
-        .await?;
+    user_token_service::connect_telegram_widget(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &provider_id,
+        &body,
+    )
+    .await?;
 
     audit_service::log_async(
         state.db.clone(),
@@ -741,5 +701,61 @@ mod tests {
             .expect_err("mismatched session should fail");
 
         assert!(matches!(err, AppError::BadRequest(message) if message == "Session mismatch"));
+    }
+
+    #[test]
+    fn user_token_response_serializes_telegram_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert("telegram_user_id".to_string(), "12345".to_string());
+        metadata.insert("first_name".to_string(), "Nyx".to_string());
+        metadata.insert("username".to_string(), "nyx_user".to_string());
+        metadata.insert(
+            "photo_url".to_string(),
+            "https://t.me/i/userpic/photo.jpg".to_string(),
+        );
+
+        let response = UserTokenResponse {
+            provider_id: "provider-1".to_string(),
+            provider_name: "Telegram".to_string(),
+            provider_slug: "telegram".to_string(),
+            provider_type: "telegram_widget".to_string(),
+            status: "active".to_string(),
+            label: None,
+            expires_at: None,
+            last_used_at: None,
+            connected_at: "2026-01-01T00:00:00Z".to_string(),
+            metadata: Some(metadata),
+        };
+
+        let json = serde_json::to_value(&response).expect("serialization");
+
+        assert_eq!(json["provider_type"], "telegram_widget");
+        assert_eq!(json["metadata"]["telegram_user_id"], "12345");
+        assert_eq!(json["metadata"]["username"], "nyx_user");
+        assert_eq!(
+            json["metadata"]["photo_url"],
+            "https://t.me/i/userpic/photo.jpg"
+        );
+        assert_eq!(json["metadata"]["first_name"], "Nyx");
+    }
+
+    #[test]
+    fn user_token_response_omits_metadata_when_none() {
+        let response = UserTokenResponse {
+            provider_id: "provider-1".to_string(),
+            provider_name: "GitHub".to_string(),
+            provider_slug: "github".to_string(),
+            provider_type: "oauth2".to_string(),
+            status: "active".to_string(),
+            label: None,
+            expires_at: None,
+            last_used_at: None,
+            connected_at: "2026-01-01T00:00:00Z".to_string(),
+            metadata: None,
+        };
+
+        let json = serde_json::to_value(&response).expect("serialization");
+
+        assert!(json.get("metadata").is_none());
     }
 }

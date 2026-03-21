@@ -33,7 +33,27 @@ export const connectApiKeySchema = z.object({
 
 export type ConnectApiKeyFormData = z.infer<typeof connectApiKeySchema>;
 
-export const PROVIDER_TYPES = ["oauth2", "api_key", "device_code", "telegram_widget"] as const;
+const optionalTelegramString = z.string().trim().min(1);
+
+export const telegramLoginDataSchema = z.object({
+  id: z.coerce.number().int().positive(),
+  first_name: z.string().trim().min(1, "First name is required"),
+  last_name: optionalTelegramString.optional(),
+  username: optionalTelegramString.optional(),
+  photo_url: z.string().url("Photo URL must be a valid URL").optional(),
+  auth_date: z.coerce.number().int().positive(),
+  hash: z
+    .string()
+    .trim()
+    .regex(/^[a-fA-F0-9]{64}$/, "Invalid Telegram login hash"),
+});
+
+export const PROVIDER_TYPES = [
+  "oauth2",
+  "api_key",
+  "device_code",
+  "telegram_widget",
+] as const;
 
 export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
@@ -221,7 +241,8 @@ export const createProviderSchema = z
       if (data.credential_mode && data.credential_mode !== "admin") {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "Telegram widget providers only support admin credential mode",
+          message:
+            "Telegram widget providers only support admin credential mode",
           path: ["credential_mode"],
         });
       }

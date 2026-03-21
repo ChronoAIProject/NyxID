@@ -90,6 +90,7 @@ fn normalize_telegram_bot_api_key(raw: &str) -> AppResult<String> {
         || normalized.contains('?')
         || normalized.contains('#')
         || normalized.contains('\0')
+        || normalized.contains('%')
         || normalized.contains("..")
     {
         return Err(AppError::ValidationError(
@@ -98,6 +99,25 @@ fn normalize_telegram_bot_api_key(raw: &str) -> AppResult<String> {
     }
 
     Ok(normalized.to_string())
+}
+
+async fn get_active_telegram_widget_provider(
+    db: &mongodb::Database,
+    provider_id: &str,
+) -> AppResult<ProviderConfig> {
+    let provider = db
+        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+        .find_one(doc! { "_id": provider_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Provider not found or inactive".to_string()))?;
+
+    if provider.provider_type != "telegram_widget" {
+        return Err(AppError::BadRequest(
+            "This provider requires Telegram Login Widget connection".to_string(),
+        ));
+    }
+
+    Ok(provider)
 }
 
 fn ensure_oauth_provider_configured(provider: &ProviderConfig) -> AppResult<()> {
@@ -229,29 +249,61 @@ pub async fn store_api_key(
     Ok(token)
 }
 
+/// Return the Telegram bot username needed to render the Login Widget.
+///
+/// Verifies that the provider is an active Telegram Login Widget provider and
+/// that the required bot configuration exists.
+pub async fn get_telegram_connect_bot_username(
+    db: &mongodb::Database,
+    provider_id: &str,
+) -> AppResult<String> {
+    let provider = get_active_telegram_widget_provider(db, provider_id).await?;
+
+    let bot_username = provider.client_id_param_name.ok_or_else(|| {
+        AppError::BadRequest("Telegram bot username not configured for this provider".to_string())
+    })?;
+    if provider.client_secret_encrypted.is_none() {
+        return Err(AppError::BadRequest(
+            "Telegram bot token not configured for this provider".to_string(),
+        ));
+    }
+
+    Ok(bot_username)
+}
+
+/// Verify Telegram Login Widget callback data and persist the resulting
+/// identity metadata for the user.
+pub async fn connect_telegram_widget(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    provider_id: &str,
+    data: &crate::crypto::telegram::TelegramLoginData,
+) -> AppResult<UserProviderToken> {
+    let provider = get_active_telegram_widget_provider(db, provider_id).await?;
+
+    let bot_token_enc = provider.client_secret_encrypted.ok_or_else(|| {
+        AppError::BadRequest("Telegram bot token not configured for this provider".to_string())
+    })?;
+    let bot_token_bytes = Zeroizing::new(encryption_keys.decrypt(&bot_token_enc).await?);
+    let bot_token = std::str::from_utf8(bot_token_bytes.as_slice())
+        .map_err(|e| AppError::Internal(format!("Failed to decode bot token: {e}")))?;
+
+    crate::crypto::telegram::verify_telegram_login(bot_token, data)?;
+
+    store_telegram_identity(db, user_id, provider_id, data).await
+}
+
 /// Store a verified Telegram identity for a user.
 ///
-/// Called after the Telegram Login Widget callback has been verified via
-/// HMAC-SHA256.  No tokens are stored — only the verified identity metadata.
-pub async fn store_telegram_identity(
+/// Called only after the Telegram Login Widget callback has already been
+/// verified. No tokens are stored — only the verified identity metadata.
+async fn store_telegram_identity(
     db: &mongodb::Database,
     user_id: &str,
     provider_id: &str,
     data: &crate::crypto::telegram::TelegramLoginData,
 ) -> AppResult<UserProviderToken> {
-    // Verify provider exists and is active
-    let provider = db
-        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
-        .find_one(doc! { "_id": provider_id, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Provider not found or inactive".to_string()))?;
-
-    if provider.provider_type != "telegram_widget" {
-        return Err(AppError::BadRequest(
-            "This provider requires Telegram Login Widget connection".to_string(),
-        ));
-    }
-
     // Check if user already has a token for this provider
     let existing = db
         .collection::<UserProviderToken>(COLLECTION_NAME)
@@ -1681,5 +1733,9 @@ mod tests {
         let slash =
             normalize_telegram_bot_api_key("123456:ABC/DEF").expect_err("slash should be rejected");
         assert!(slash.to_string().contains("invalid characters"));
+
+        let percent = normalize_telegram_bot_api_key("123456:ABC%2FDEF")
+            .expect_err("percent-encoded slash should be rejected");
+        assert!(percent.to_string().contains("invalid characters"));
     }
 }

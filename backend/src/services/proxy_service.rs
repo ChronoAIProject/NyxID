@@ -36,16 +36,36 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "x-correlation-id",
 ];
 
-fn validate_path_injection_part(value: &str) -> AppResult<()> {
+fn validate_path_injection_prefix(value: &str) -> AppResult<()> {
     if value.contains('/')
         || value.contains('\\')
         || value.contains('?')
         || value.contains('#')
         || value.contains('\0')
         || value.contains("..")
+        || value.contains('%')
     {
-        return Err(AppError::Internal(
-            "Invalid delegated credential for path injection".to_string(),
+        return Err(AppError::BadRequest(
+            "Service requirement is misconfigured for path injection. Please contact your admin."
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_path_injection_credential(value: &str) -> AppResult<()> {
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('\0')
+        || value.contains("..")
+        || value.contains('%')
+    {
+        return Err(AppError::BadRequest(
+            "Stored provider credential is invalid for path injection. Reconnect the provider."
+                .to_string(),
         ));
     }
 
@@ -63,8 +83,8 @@ fn build_forward_path(
     let mut prefix_segments = Vec::new();
     for cred in delegated_credentials {
         if cred.injection_method == "path" {
-            validate_path_injection_part(&cred.injection_key)?;
-            validate_path_injection_part(&cred.credential)?;
+            validate_path_injection_prefix(&cred.injection_key)?;
+            validate_path_injection_credential(&cred.credential)?;
             prefix_segments.push(format!("{}{}", cred.injection_key, cred.credential));
         }
     }
@@ -613,7 +633,88 @@ mod tests {
         .expect_err("invalid path credential should be rejected");
 
         assert!(
-            err.to_string().contains("path injection"),
+            err.to_string().contains("Reconnect the provider"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_invalid_path_injection_prefix() {
+        let err = forward_request(
+            &Client::new(),
+            &make_proxy_target("http://127.0.0.1".to_string()),
+            reqwest::Method::POST,
+            "sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![DelegatedCredential {
+                provider_slug: "telegram-bot".to_string(),
+                injection_method: "path".to_string(),
+                injection_key: "bot/".to_string(),
+                credential: "123456:ABC-DEF".to_string(),
+            }],
+        )
+        .await
+        .expect_err("invalid path prefix should be rejected");
+
+        assert!(
+            err.to_string().contains("Please contact your admin"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_percent_encoded_path_credential() {
+        let err = forward_request(
+            &Client::new(),
+            &make_proxy_target("http://127.0.0.1".to_string()),
+            reqwest::Method::POST,
+            "sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![DelegatedCredential {
+                provider_slug: "telegram-bot".to_string(),
+                injection_method: "path".to_string(),
+                injection_key: "bot".to_string(),
+                credential: "123%2f456".to_string(),
+            }],
+        )
+        .await
+        .expect_err("percent-encoded path credential should be rejected");
+
+        assert!(
+            err.to_string().contains("Reconnect the provider"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_percent_encoded_path_prefix() {
+        let err = forward_request(
+            &Client::new(),
+            &make_proxy_target("http://127.0.0.1".to_string()),
+            reqwest::Method::POST,
+            "sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![DelegatedCredential {
+                provider_slug: "telegram-bot".to_string(),
+                injection_method: "path".to_string(),
+                injection_key: "bot%2f".to_string(),
+                credential: "123456:ABC-DEF".to_string(),
+            }],
+        )
+        .await
+        .expect_err("percent-encoded path prefix should be rejected");
+
+        assert!(
+            err.to_string().contains("Please contact your admin"),
             "unexpected error: {err}"
         );
     }

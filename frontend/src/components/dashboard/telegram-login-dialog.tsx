@@ -49,18 +49,26 @@ export function TelegramLoginDialog({
     if (connectMutation.isPending) return "submitting";
     if (config) return "ready";
     return "loading";
-  }, [configError, connectMutation.isError, connectMutation.isSuccess, connectMutation.isPending, config]);
+  }, [
+    configError,
+    connectMutation.isError,
+    connectMutation.isSuccess,
+    connectMutation.isPending,
+    config,
+  ]);
 
   const errorMessage = useMemo(() => {
     if (configError) {
-      return configError instanceof ApiError
+      return configError instanceof Error
         ? configError.message
         : "Failed to load Telegram login configuration";
     }
     if (connectMutation.error) {
       return connectMutation.error instanceof ApiError
         ? connectMutation.error.message
-        : "Failed to verify Telegram login";
+        : connectMutation.error instanceof Error
+          ? connectMutation.error.message
+          : "Failed to verify Telegram login";
     }
     return "";
   }, [configError, connectMutation.error]);

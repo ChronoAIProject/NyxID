@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
+import { telegramLoginDataSchema } from "@/schemas/providers";
 import type {
   MessageResponse,
   ProviderConfig,
@@ -126,7 +127,9 @@ export function useDisconnectProvider() {
 
   return useMutation({
     mutationFn: async (providerId: string): Promise<ProviderActionResponse> => {
-      return api.delete<ProviderActionResponse>(`/providers/${providerId}/disconnect`);
+      return api.delete<ProviderActionResponse>(
+        `/providers/${providerId}/disconnect`,
+      );
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
@@ -141,7 +144,9 @@ export function useRefreshProviderToken() {
 
   return useMutation({
     mutationFn: async (providerId: string): Promise<ProviderActionResponse> => {
-      return api.post<ProviderActionResponse>(`/providers/${providerId}/refresh`);
+      return api.post<ProviderActionResponse>(
+        `/providers/${providerId}/refresh`,
+      );
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
@@ -175,9 +180,10 @@ export function useConnectTelegramWidget() {
       readonly providerId: string;
       readonly data: TelegramLoginData;
     }): Promise<ProviderActionResponse> => {
+      const parsedData = telegramLoginDataSchema.parse(data);
       return api.post<ProviderActionResponse>(
         `/providers/${providerId}/connect/telegram/callback`,
-        data,
+        parsedData,
       );
     },
     onSuccess: () => {
@@ -236,7 +242,9 @@ export function useDeleteProviderCredentials() {
 
   return useMutation({
     mutationFn: async (providerId: string): Promise<MessageResponse> => {
-      return api.delete<MessageResponse>(`/providers/${providerId}/credentials`);
+      return api.delete<MessageResponse>(
+        `/providers/${providerId}/credentials`,
+      );
     },
     onSuccess: (_data, providerId) => {
       void queryClient.invalidateQueries({
