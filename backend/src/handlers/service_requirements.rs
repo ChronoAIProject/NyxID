@@ -106,6 +106,10 @@ fn validate_path_injection_key(key: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn provider_supports_requirements(provider_type: &str) -> bool {
+    matches!(provider_type, "oauth2" | "api_key" | "device_code")
+}
+
 // --- Handlers ---
 
 /// GET /api/v1/services/{service_id}/requirements
@@ -197,6 +201,13 @@ pub async fn add_requirement(
         .find_one(doc! { "_id": &body.provider_config_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Provider not found or inactive".to_string()))?;
+
+    if !provider_supports_requirements(&provider.provider_type) {
+        return Err(AppError::ValidationError(format!(
+            "provider_type '{}' cannot be used as a service requirement",
+            provider.provider_type
+        )));
+    }
 
     // Validate injection_method
     let valid_methods = ["bearer", "header", "query", "path"];
@@ -347,7 +358,8 @@ pub async fn remove_requirement(
 #[cfg(test)]
 mod tests {
     use super::{
-        BLOCKED_INJECTION_KEYS, canonicalize_requirement_injection, validate_path_injection_key,
+        BLOCKED_INJECTION_KEYS, canonicalize_requirement_injection, provider_supports_requirements,
+        validate_path_injection_key,
     };
 
     #[test]
@@ -425,5 +437,13 @@ mod tests {
                 "unexpected error for '{input}': {err}"
             );
         }
+    }
+
+    #[test]
+    fn telegram_widget_providers_cannot_be_used_as_service_requirements() {
+        assert!(!provider_supports_requirements("telegram_widget"));
+        assert!(provider_supports_requirements("oauth2"));
+        assert!(provider_supports_requirements("api_key"));
+        assert!(provider_supports_requirements("device_code"));
     }
 }
