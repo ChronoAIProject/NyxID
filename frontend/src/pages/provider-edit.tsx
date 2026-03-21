@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useProvider, useUpdateProvider } from "@/hooks/use-providers";
 import {
@@ -123,7 +123,10 @@ export function ProviderEditPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
 
-  const watchedProviderType = form.watch("provider_type");
+  const watchedProviderType = useWatch({
+    control: form.control,
+    name: "provider_type",
+  });
 
   async function onSubmit(data: UpdateProviderFormData) {
     if (!provider) return;

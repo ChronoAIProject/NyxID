@@ -287,6 +287,15 @@ export interface ProviderListResponse {
   readonly providers: readonly ProviderConfig[];
 }
 
+export interface MessageResponse {
+  readonly message: string;
+}
+
+export interface ProviderActionResponse {
+  readonly status: string;
+  readonly message: string;
+}
+
 export interface LlmProviderStatus {
   readonly provider_slug: string;
   readonly provider_name: string;

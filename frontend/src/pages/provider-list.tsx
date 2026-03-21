@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useProviders, useCreateProvider } from "@/hooks/use-providers";
 import {
@@ -105,8 +105,14 @@ export function ProviderListPage() {
     },
   });
 
-  const watchedProviderType = form.watch("provider_type");
-  const watchedCredentialMode = form.watch("credential_mode");
+  const watchedProviderType = useWatch({
+    control: form.control,
+    name: "provider_type",
+  });
+  const watchedCredentialMode = useWatch({
+    control: form.control,
+    name: "credential_mode",
+  });
 
   async function onSubmit(data: CreateProviderFormData) {
     try {
