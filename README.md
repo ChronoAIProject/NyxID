@@ -746,7 +746,7 @@ NyxID supports user-operated **credential nodes** that keep API keys and tokens 
 2. Navigate to **Credential Nodes** in the dashboard and click **Register Node**
 3. Register the agent: `nyxid-node register --token nyx_nreg_... --url wss://your-server/api/v1/nodes/ws`
    - Add `--keychain` to store secrets in the OS keychain instead of encrypted file
-4. Add credentials: `nyxid-node credentials add --service openai --header "Authorization: Bearer sk-..."`
+4. Add credentials: `nyxid-node credentials add --service openai --header Authorization --secret-format bearer`
 5. Start the agent: `nyxid-node start`
 6. Bind services to the node from the node detail page
 7. (Optional) Migrate storage: `nyxid-node migrate --to keychain`
@@ -754,6 +754,7 @@ NyxID supports user-operated **credential nodes** that keep API keys and tokens 
 For the agent user guide, see **[docs/NYXID_NODE.md](docs/NYXID_NODE.md)**.
 For setup instructions, see **[docs/NODE_PROXY.md](docs/NODE_PROXY.md)**.
 For the WebSocket protocol specification, see **[docs/NODE_PROXY_PROTOCOL.md](docs/NODE_PROXY_PROTOCOL.md)**.
+For an install playbook suitable for operators or coding agents, see **[docs/NYXID_NODE_AGENT_PLAYBOOK.md](docs/NYXID_NODE_AGENT_PLAYBOOK.md)**.
 
 ---
 

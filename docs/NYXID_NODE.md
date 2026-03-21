@@ -2,6 +2,8 @@
 
 `nyxid-node` is a lightweight Rust binary that runs on your infrastructure as a credential node agent. It connects to a NyxID server via WebSocket, receives proxy requests, injects locally stored credentials, and forwards requests to downstream services. Credentials never leave your infrastructure.
 
+For an installation playbook that a human operator or coding agent can follow directly from this repository checkout, see [`docs/NYXID_NODE_AGENT_PLAYBOOK.md`](./NYXID_NODE_AGENT_PLAYBOOK.md).
+
 ---
 
 ## Table of Contents
@@ -143,7 +145,8 @@ Credentials are stored locally using the configured storage backend -- either AE
 ```bash
 nyxid-node credentials add \
   --service openai \
-  --header "Authorization: Bearer sk-proj-..."
+  --header Authorization \
+  --secret-format bearer
 ```
 
 ### Add a Credential (Query Parameter Injection)
@@ -151,7 +154,7 @@ nyxid-node credentials add \
 ```bash
 nyxid-node credentials add \
   --service stripe \
-  --query-param "api_key=sk_live_..."
+  --query-param api_key
 ```
 
 ### List Credentials
