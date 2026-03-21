@@ -80,7 +80,7 @@ fn build_forward_path(
     path: &str,
     delegated_credentials: &[DelegatedCredential],
 ) -> AppResult<String> {
-    if path.contains("..") || path.contains("//") {
+    if path.contains('\\') || path.contains('\0') || path.contains("..") || path.contains("//") {
         return Err(AppError::BadRequest("Invalid proxy path".to_string()));
     }
 
@@ -102,7 +102,11 @@ fn build_forward_path(
         format!("{}/{}", prefix_segments.join("/"), trimmed_path)
     };
 
-    if final_path.contains("//") || final_path.contains("..") {
+    if final_path.contains('\\')
+        || final_path.contains('\0')
+        || final_path.contains("//")
+        || final_path.contains("..")
+    {
         return Err(AppError::BadRequest("Invalid proxy path".to_string()));
     }
 
@@ -613,6 +617,28 @@ mod tests {
         assert_eq!(captured.path, "/bot123456:ABC-DEF/sendMessage");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_backslash_in_requested_path_injection() {
+        let err = forward_request(
+            &Client::new(),
+            &make_proxy_target("http://127.0.0.1".to_string()),
+            reqwest::Method::POST,
+            "folder\\sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![],
+        )
+        .await
+        .expect_err("backslash in requested path should be rejected");
+
+        assert!(
+            err.to_string().contains("Invalid proxy path"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

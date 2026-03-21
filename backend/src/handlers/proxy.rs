@@ -55,7 +55,7 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "x-correlation-id",
 ];
 
-/// ANY /api/v1/proxy/:service_id/*path
+/// ANY /api/v1/proxy/{service_id}/{*path}
 ///
 /// Forward the request to the downstream service with credential injection,
 /// identity propagation, and delegated provider credentials.
@@ -68,7 +68,7 @@ pub async fn proxy_request(
     execute_proxy(&state, &auth_user, &service_id, &path, request).await
 }
 
-/// ANY /api/v1/proxy/s/:slug/*path
+/// ANY /api/v1/proxy/s/{slug}/{*path}
 ///
 /// Resolve the service by slug, then forward via the shared proxy pipeline.
 pub async fn proxy_request_by_slug(
@@ -824,6 +824,14 @@ mod tests {
         is_chat_completions_proxy_path, is_codex_transport_path, should_enforce_runtime_approval,
     };
     use crate::mw::auth::AuthMethod;
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        extract::Path,
+        http::{Request, StatusCode},
+        routing::get,
+    };
+    use tower::ServiceExt;
 
     #[test]
     fn session_auth_bypasses_even_when_required() {
@@ -871,6 +879,74 @@ mod tests {
         assert!(is_chat_completions_proxy_path("chat/completions"));
         assert!(is_chat_completions_proxy_path("/v1/chat/completions"));
         assert!(!is_chat_completions_proxy_path("responses"));
+    }
+
+    #[tokio::test]
+    async fn wildcard_path_extractor_decodes_percent_encoded_path_injection_breakers() {
+        async fn capture_path(Path((service_id, path)): Path<(String, String)>) -> String {
+            format!("{service_id}:{path}")
+        }
+
+        let app = Router::new().route("/{service_id}/{*path}", get(capture_path));
+
+        let slash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%2FsendMessage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(slash_response.status(), StatusCode::OK);
+        let slash_body = to_bytes(slash_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&slash_body).unwrap(),
+            "svc:folder/sendMessage"
+        );
+
+        let backslash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%5CsendMessage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(backslash_response.status(), StatusCode::OK);
+        let backslash_body = to_bytes(backslash_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&backslash_body).unwrap(),
+            "svc:folder\\sendMessage"
+        );
+
+        let dotdot_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/%2e%2e")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(dotdot_response.status(), StatusCode::OK);
+        let dotdot_body = to_bytes(dotdot_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&dotdot_body).unwrap(),
+            "svc:.."
+        );
     }
 }
 
