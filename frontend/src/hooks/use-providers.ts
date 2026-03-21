@@ -181,6 +181,7 @@ export function useConnectTelegramWidget() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
       void queryClient.invalidateQueries({ queryKey: ["providers"] });
+      void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
     },
   });
 }

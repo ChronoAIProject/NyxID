@@ -97,12 +97,8 @@ export function canConnectProvider(
 ): boolean {
   if (
     provider.provider_type !== "oauth2" &&
-    provider.provider_type !== "device_code" &&
-    provider.provider_type !== "telegram_widget"
+    provider.provider_type !== "device_code"
   ) {
-    return true;
-  }
-  if (provider.provider_type === "telegram_widget") {
     return true;
   }
   const mode = provider.credential_mode;

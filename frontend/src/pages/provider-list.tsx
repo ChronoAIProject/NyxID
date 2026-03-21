@@ -54,6 +54,7 @@ const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
   oauth2: "OAuth 2.0",
   api_key: "API Key",
   device_code: "Device Code",
+  telegram_widget: "Telegram Widget",
 };
 
 function splitScopes(raw: string | undefined): readonly string[] | undefined {
