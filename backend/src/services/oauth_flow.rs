@@ -276,4 +276,48 @@ mod tests {
             ("client_key".to_string(), "client-123".to_string())
         );
     }
+
+    /// Verify that when a provider rotates the refresh token (like Lark),
+    /// the new refresh_token is parsed from the response JSON.
+    #[test]
+    fn refresh_response_with_rotated_refresh_token_is_parsed() {
+        let response_json: serde_json::Value = serde_json::json!({
+            "access_token": "new-access-token",
+            "refresh_token": "rotated-refresh-token",
+            "expires_in": 3600,
+            "token_type": "bearer"
+        });
+
+        let new_access = response_json["access_token"].as_str();
+        let new_refresh = response_json["refresh_token"].as_str();
+        let expires_in = response_json["expires_in"].as_i64();
+
+        assert_eq!(new_access, Some("new-access-token"));
+        assert_eq!(
+            new_refresh,
+            Some("rotated-refresh-token"),
+            "Rotated refresh_token must be captured from response"
+        );
+        assert_eq!(expires_in, Some(3600));
+    }
+
+    /// Verify that when a provider does NOT rotate the refresh token,
+    /// the field is absent (None) and only the access token is updated.
+    #[test]
+    fn refresh_response_without_refresh_token_returns_none() {
+        let response_json: serde_json::Value = serde_json::json!({
+            "access_token": "new-access-token",
+            "expires_in": 3600,
+            "token_type": "bearer"
+        });
+
+        let new_access = response_json["access_token"].as_str();
+        let new_refresh = response_json["refresh_token"].as_str();
+
+        assert_eq!(new_access, Some("new-access-token"));
+        assert!(
+            new_refresh.is_none(),
+            "Should be None when provider does not rotate refresh tokens"
+        );
+    }
 }

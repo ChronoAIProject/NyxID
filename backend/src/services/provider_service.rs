@@ -996,6 +996,56 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 20b. Feishu (China variant of Lark, OAuth2)
+    if !slug_exists!("feishu") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "feishu".to_string(),
+            name: "Feishu".to_string(),
+            description: Some(
+                "Feishu (飞书) account access via OAuth 2.0 (China region)".to_string(),
+            ),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(
+                "https://open.feishu.cn/open-apis/authen/v1/index".to_string(),
+            ),
+            token_url: Some(
+                "https://open.feishu.cn/open-apis/authen/v2/oauth/token".to_string(),
+            ),
+            revocation_url: None,
+            default_scopes: Some(vec![
+                "contact:user.base:readonly".to_string(),
+                "offline_access".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://open.feishu.cn/document/server-docs/authentication-management/access-token/authorize-user-access-token"
+                    .to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "feishu", "Seeded default provider: Feishu");
+        seeded_count += 1;
+    }
+
     // 21. Telegram Login Widget (telegram_widget)
     if !slug_exists!("telegram") {
         let provider = ProviderConfig {
@@ -1259,6 +1309,14 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_slug: "api-telegram-bot",
         service_name: "Telegram Bot API",
         base_url: "https://api.telegram.org",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "feishu",
+        service_slug: "api-feishu",
+        service_name: "Feishu API",
+        base_url: "https://open.feishu.cn/open-apis",
         injection_method: "bearer",
         injection_key: "Authorization",
     },
