@@ -79,6 +79,7 @@ export function ProviderDetailPage() {
 
   const isOAuth = provider.provider_type === "oauth2";
   const isDeviceCode = provider.provider_type === "device_code";
+  const isApiKey = provider.provider_type === "api_key";
 
   return (
     <div className="space-y-8">
@@ -230,7 +231,7 @@ export function ProviderDetailPage() {
         </>
       )}
 
-      {!isOAuth && !isDeviceCode && (
+      {isApiKey && (
         <>
           <Separator />
           <DetailSection title="API Key Configuration">

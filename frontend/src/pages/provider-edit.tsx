@@ -180,6 +180,7 @@ export function ProviderEditPage() {
 
   const isOAuth = watchedProviderType === "oauth2";
   const isDeviceCode = watchedProviderType === "device_code";
+  const isApiKey = watchedProviderType === "api_key";
 
   return (
     <div className="space-y-8">
@@ -635,7 +636,7 @@ export function ProviderEditPage() {
               </>
             )}
 
-            {!isOAuth && !isDeviceCode && (
+            {isApiKey && (
               <>
                 <Separator className="my-2" />
                 <h3 className="text-sm font-semibold">
