@@ -210,9 +210,14 @@ URL: {{ issue.url }}
 1. You are on branch `symphony/issue-{{ issue.identifier | remove: "#" }}` (created from `main`).
 2. Commit with conventional messages (`feat:`, `fix:`, `refactor:`).
 3. Push your commits to the branch.
-4. Check if a PR already exists: `gh pr list --head symphony/issue-{{ issue.identifier | remove: "#" }} --json number --jq '.[0].number'`
-5. If no PR exists, create one: `gh pr create --title "{{ issue.identifier }}: {{ issue.title }}" --body "Closes {{ issue.identifier }}" --label symphony`
-6. If a PR already exists (another parallel agent created it), just push - the PR updates automatically.
+4. Create a PR if one doesn't exist:
+   ```bash
+   PR=$(gh pr list --head "symphony/issue-{{ issue.identifier | remove: '#' }}" --json number --jq '.[0].number')
+   if [ -z "$PR" ]; then
+     gh pr create --title "{{ issue.identifier }}: {{ issue.title }}" --body "Closes {{ issue.identifier }}" --label symphony
+   fi
+   ```
+5. If a PR already exists (another parallel agent created it), just push - the PR updates automatically.
 
 **IMPORTANT:** All agents working on the same issue share the same branch and PR. Do NOT create separate branches or PRs.
 
@@ -233,7 +238,7 @@ Use exactly ONE persistent comment on issue {{ issue.identifier }} as your workp
 3. Implement the changes. Update the workpad as tasks complete.
 4. Run tests relevant to your changes.
 5. Commit and push. Create a PR if one doesn't exist (see Git Workflow).
-6. **STOP implementing.** Symphony will automatically move the issue to `code-review` when all parallel agents finish.
+6. **STOP implementing.** Symphony will automatically move the issue to `code-review` when all parallel agents finish. It will also remove routing labels (`backend`, `frontend`).
 
 ## Rework Flow
 
