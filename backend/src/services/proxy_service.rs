@@ -1,5 +1,6 @@
 use mongodb::bson::doc;
 use reqwest::Client;
+use url::form_urlencoded;
 use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -19,6 +20,12 @@ pub struct ProxyTarget {
     pub auth_key_name: String,
     pub credential: String,
     pub service: DownstreamService,
+}
+
+pub(crate) struct PreparedDelegatedRequest {
+    pub path: String,
+    pub query: Option<String>,
+    pub delegated_headers: Vec<(String, String)>,
 }
 
 /// Headers that are safe to forward to downstream services.
@@ -77,7 +84,9 @@ fn validate_path_injection_credential(value: &str) -> AppResult<()> {
 }
 
 fn contains_dot_segment(value: &str) -> bool {
-    value.split('/').any(|segment| segment == "." || segment == "..")
+    value
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
 }
 
 fn contains_percent_encoded_path_breaker(value: &str) -> bool {
@@ -108,7 +117,7 @@ pub(crate) fn validate_requested_proxy_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn build_forward_path(
+pub(crate) fn build_forward_path(
     path: &str,
     delegated_credentials: &[DelegatedCredential],
 ) -> AppResult<String> {
@@ -134,6 +143,49 @@ fn build_forward_path(
 
     validate_requested_proxy_path(&final_path)?;
     Ok(final_path)
+}
+
+pub(crate) fn prepare_delegated_request(
+    path: &str,
+    query: Option<&str>,
+    delegated_credentials: &[DelegatedCredential],
+) -> AppResult<PreparedDelegatedRequest> {
+    let mut delegated_headers = Vec::new();
+    let mut forwarded_query = query
+        .map(str::to_string)
+        .filter(|existing| !existing.is_empty());
+
+    for cred in delegated_credentials {
+        match cred.injection_method.as_str() {
+            "bearer" => delegated_headers.push((
+                cred.injection_key.clone(),
+                format!("Bearer {}", cred.credential),
+            )),
+            "header" => {
+                delegated_headers.push((cred.injection_key.clone(), cred.credential.clone()));
+            }
+            "query" => {
+                let encoded = form_urlencoded::Serializer::new(String::new())
+                    .append_pair(&cred.injection_key, &cred.credential)
+                    .finish();
+                match forwarded_query.as_mut() {
+                    Some(existing) => {
+                        existing.push('&');
+                        existing.push_str(&encoded);
+                    }
+                    None => forwarded_query = Some(encoded),
+                }
+            }
+            "path" => {}
+            _ => {}
+        }
+    }
+
+    Ok(PreparedDelegatedRequest {
+        path: build_forward_path(path, delegated_credentials)?,
+        query: forwarded_query,
+        delegated_headers,
+    })
 }
 
 /// Resolve a downstream service by its slug.
@@ -352,25 +404,25 @@ pub async fn forward_request(
     identity_headers: Vec<(String, String)>,
     delegated_credentials: Vec<DelegatedCredential>,
 ) -> AppResult<reqwest::Response> {
-    let forwarded_path = build_forward_path(path, &delegated_credentials)?;
+    let prepared = prepare_delegated_request(path, query, &delegated_credentials)?;
 
     // TODO(SEC-H1): Re-validate the resolved IP at proxy time to prevent DNS rebinding.
     // Currently base_url is only validated at service creation/update time. An attacker
     // could change DNS to point to a private IP after validation. Consider using a custom
     // DNS resolver or reqwest's `resolve` feature to check the resolved IP before connecting.
 
-    let url = if let Some(q) = query {
+    let url = if let Some(q) = prepared.query.as_deref() {
         format!(
             "{}/{}?{}",
             target.base_url.trim_end_matches('/'),
-            forwarded_path,
+            prepared.path,
             q
         )
     } else {
         format!(
             "{}/{}",
             target.base_url.trim_end_matches('/'),
-            forwarded_path
+            prepared.path
         )
     };
 
@@ -424,22 +476,9 @@ pub async fn forward_request(
         }
     }
 
-    // Inject delegated provider credentials
-    for cred in &delegated_credentials {
-        match cred.injection_method.as_str() {
-            "bearer" => {
-                request =
-                    request.header(&cred.injection_key, format!("Bearer {}", cred.credential));
-            }
-            "header" => {
-                request = request.header(&cred.injection_key, &cred.credential);
-            }
-            "query" => {
-                request = request.query(&[(&cred.injection_key, &cred.credential)]);
-            }
-            "path" => {}
-            _ => {}
-        }
+    // Inject delegated provider credentials that are represented as headers.
+    for (name, value) in &prepared.delegated_headers {
+        request = request.header(name, value);
     }
 
     if let Some(ref body_bytes) = body {
@@ -497,6 +536,7 @@ mod tests {
     #[derive(Debug)]
     struct CapturedRequest {
         path: String,
+        query: Option<String>,
         content_type: Option<String>,
         body: Vec<u8>,
     }
@@ -509,6 +549,7 @@ mod tests {
     ) -> StatusCode {
         let _ = sender.send(CapturedRequest {
             path: uri.path().to_string(),
+            query: uri.query().map(ToString::to_string),
             content_type: headers
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
@@ -638,8 +679,51 @@ mod tests {
 
         let captured = receiver.recv().await.expect("captured request");
         assert_eq!(captured.path, "/bot123456:ABC-DEF/sendMessage");
+        assert_eq!(captured.query, None);
 
         server.abort();
+    }
+
+    #[test]
+    fn prepare_delegated_request_appends_query_params_and_headers() {
+        let prepared = prepare_delegated_request(
+            "models",
+            Some("stream=true"),
+            &[
+                DelegatedCredential {
+                    provider_slug: "github".to_string(),
+                    injection_method: "bearer".to_string(),
+                    injection_key: "Authorization".to_string(),
+                    credential: "user-token".to_string(),
+                },
+                DelegatedCredential {
+                    provider_slug: "custom".to_string(),
+                    injection_method: "header".to_string(),
+                    injection_key: "X-Provider-Key".to_string(),
+                    credential: "secret".to_string(),
+                },
+                DelegatedCredential {
+                    provider_slug: "custom".to_string(),
+                    injection_method: "query".to_string(),
+                    injection_key: "api_key".to_string(),
+                    credential: "abc 123".to_string(),
+                },
+            ],
+        )
+        .expect("delegated request should prepare");
+
+        assert_eq!(prepared.path, "models");
+        assert_eq!(
+            prepared.query.as_deref(),
+            Some("stream=true&api_key=abc+123")
+        );
+        assert_eq!(
+            prepared.delegated_headers,
+            vec![
+                ("Authorization".to_string(), "Bearer user-token".to_string()),
+                ("X-Provider-Key".to_string(), "secret".to_string()),
+            ]
+        );
     }
 
     #[tokio::test]

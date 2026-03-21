@@ -251,15 +251,130 @@ async fn execute_proxy(
         Some(body_bytes)
     };
 
+    // === Delegated Credentials ===
+    // Resolve delegated credentials before the node/standard branch split so that
+    // node-routed requests also get path-injection prefixes (e.g. Telegram Bot API
+    // `/bot<TOKEN>/method`) and header/query credential injection.
+    let delegated = delegation_service::resolve_delegated_credentials(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        service_id,
+    )
+    .await
+    .map_err(|e| AppError::BadRequest(format!("Provider credentials not available: {e}")))?;
+
+    // Build identity headers before the node/direct split so both proxy paths
+    // preserve the same downstream identity and delegation context.
+    let mut identity_headers = Vec::new();
+
+    if target.service.identity_propagation_mode != "none" {
+        let user = state
+            .db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id_str })
+            .await?;
+
+        if let Some(ref user) = user {
+            if matches!(
+                target.service.identity_propagation_mode.as_str(),
+                "headers" | "both"
+            ) {
+                identity_headers = identity_service::build_identity_headers(user, &target.service);
+            }
+
+            if matches!(
+                target.service.identity_propagation_mode.as_str(),
+                "jwt" | "both"
+            ) {
+                match identity_service::generate_identity_assertion(
+                    &state.jwt_keys,
+                    &state.config,
+                    user,
+                    &target.service,
+                ) {
+                    Ok(assertion) => {
+                        identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            service_id = %service_id,
+                            error = %e,
+                            "Failed to generate identity assertion"
+                        );
+                    }
+                }
+            }
+        }
+
+        match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id_str).await {
+            Ok(rbac) => {
+                if !rbac.role_slugs.is_empty() {
+                    identity_headers
+                        .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
+                }
+                if !rbac.permissions.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Permissions".to_string(),
+                        rbac.permissions.join(","),
+                    ));
+                }
+                if !rbac.group_slugs.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Groups".to_string(),
+                        rbac.group_slugs.join(","),
+                    ));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    user_id = %user_id_str,
+                    error = %e,
+                    "Failed to resolve RBAC for identity headers"
+                );
+            }
+        }
+    }
+
+    if target.service.inject_delegation_token {
+        let user_uuid = auth_user.user_id;
+
+        match crate::crypto::jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_uuid,
+            &target.service.delegation_token_scope,
+            &target.service.slug,
+            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+        ) {
+            Ok(delegation_token) => {
+                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    service_id = %service_id,
+                    error = %e,
+                    "Failed to generate delegation token for proxy"
+                );
+            }
+        }
+    }
+
     // === Node Proxy Routing (v2: failover + streaming + metrics + HMAC signing) ===
     // node_route was resolved earlier (before credential check) to allow node-backed
     // users to bypass credential requirements.
     if let Some(node_route) = node_route {
-        let node_path = if path.starts_with('/') {
-            path.to_string()
+        let prepared =
+            proxy_service::prepare_delegated_request(path, query.as_deref(), &delegated)?;
+        let node_path = if prepared.path.starts_with('/') {
+            prepared.path.clone()
         } else {
-            format!("/{path}")
+            format!("/{}", prepared.path)
         };
+
+        let mut enriched_headers = node_forward_headers;
+        enriched_headers.extend(identity_headers.iter().cloned());
+        enriched_headers.extend(prepared.delegated_headers.iter().cloned());
 
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
@@ -269,8 +384,8 @@ async fn execute_proxy(
             base_url: target.base_url.clone(),
             method: method_str.clone(),
             path: node_path,
-            query: query.clone(),
-            headers: node_forward_headers,
+            query: prepared.query,
+            headers: enriched_headers,
             body: body.as_ref().map(|b| b.to_vec()),
         };
 
@@ -497,117 +612,6 @@ async fn execute_proxy(
     }
     // === END Node Proxy Routing ===
 
-    // Build identity headers if configured on the service
-    let mut identity_headers = Vec::new();
-
-    if target.service.identity_propagation_mode != "none" {
-        // Fetch user for identity propagation
-        let user = state
-            .db
-            .collection::<User>(USERS)
-            .find_one(doc! { "_id": &user_id_str })
-            .await?;
-
-        if let Some(ref user) = user {
-            // Add identity headers (for "headers" or "both" modes)
-            if matches!(
-                target.service.identity_propagation_mode.as_str(),
-                "headers" | "both"
-            ) {
-                identity_headers = identity_service::build_identity_headers(user, &target.service);
-            }
-
-            // Generate identity JWT assertion (for "jwt" or "both" modes)
-            if matches!(
-                target.service.identity_propagation_mode.as_str(),
-                "jwt" | "both"
-            ) {
-                match identity_service::generate_identity_assertion(
-                    &state.jwt_keys,
-                    &state.config,
-                    user,
-                    &target.service,
-                ) {
-                    Ok(assertion) => {
-                        identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            service_id = %service_id,
-                            error = %e,
-                            "Failed to generate identity assertion"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Resolve user RBAC and inject as headers so downstream services can
-        // enforce permission checks without needing JWT verification.
-        match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id_str).await {
-            Ok(rbac) => {
-                if !rbac.role_slugs.is_empty() {
-                    identity_headers
-                        .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
-                }
-                if !rbac.permissions.is_empty() {
-                    identity_headers.push((
-                        "X-NyxID-User-Permissions".to_string(),
-                        rbac.permissions.join(","),
-                    ));
-                }
-                if !rbac.group_slugs.is_empty() {
-                    identity_headers.push((
-                        "X-NyxID-User-Groups".to_string(),
-                        rbac.group_slugs.join(","),
-                    ));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    user_id = %user_id_str,
-                    error = %e,
-                    "Failed to resolve RBAC for identity headers"
-                );
-            }
-        }
-    }
-
-    // Generate delegation token if configured on the service
-    if target.service.inject_delegation_token {
-        let user_uuid = auth_user.user_id;
-
-        match crate::crypto::jwt::generate_delegated_access_token(
-            &state.jwt_keys,
-            &state.config,
-            &user_uuid,
-            &target.service.delegation_token_scope,
-            &target.service.slug,
-            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
-        ) {
-            Ok(delegation_token) => {
-                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    service_id = %service_id,
-                    error = %e,
-                    "Failed to generate delegation token for proxy"
-                );
-            }
-        }
-    }
-
-    // Resolve delegated credentials. Required provider connections must succeed.
-    let delegated = delegation_service::resolve_delegated_credentials(
-        &state.db,
-        &state.encryption_keys,
-        &user_id_str,
-        service_id,
-    )
-    .await
-    .map_err(|e| AppError::BadRequest(format!("Provider credentials not available: {e}")))?;
-
     // method, query, all_headers, body were already extracted above
     let reqwest_method = match method {
         Method::GET => reqwest::Method::GET,
@@ -826,8 +830,8 @@ mod tests {
     use super::{
         is_chat_completions_proxy_path, is_codex_transport_path, should_enforce_runtime_approval,
     };
-    use crate::services::proxy_service::validate_requested_proxy_path;
     use crate::mw::auth::AuthMethod;
+    use crate::services::proxy_service::validate_requested_proxy_path;
     use axum::{
         Router,
         body::{Body, to_bytes},
@@ -988,10 +992,7 @@ mod tests {
         let dotdot_body = to_bytes(dotdot_response.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(
-            std::str::from_utf8(&dotdot_body).unwrap(),
-            "svc:.."
-        );
+        assert_eq!(std::str::from_utf8(&dotdot_body).unwrap(), "svc:..");
 
         let double_encoded_dotdot_response = app
             .clone()
