@@ -27,12 +27,14 @@ pub struct UserProviderTokenSummary {
     pub provider_config_id: String,
     pub provider_name: String,
     pub provider_slug: String,
+    pub provider_type: String,
     pub token_type: String,
     pub status: String,
     pub label: Option<String>,
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub connected_at: String,
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 const OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE: &str =
@@ -224,10 +226,7 @@ pub async fn store_telegram_identity(
         set_doc.extend(meta_doc);
 
         db.collection::<UserProviderToken>(COLLECTION_NAME)
-            .update_one(
-                doc! { "_id": &existing_token.id },
-                doc! { "$set": set_doc },
-            )
+            .update_one(doc! { "_id": &existing_token.id }, doc! { "$set": set_doc })
             .await?;
 
         let updated = db
@@ -1403,6 +1402,34 @@ async fn send_revocation_request(
     Ok(())
 }
 
+fn build_user_token_summary(
+    token: &UserProviderToken,
+    provider: Option<&ProviderConfig>,
+) -> UserProviderTokenSummary {
+    let (provider_name, provider_slug, provider_type) = match provider {
+        Some(p) => (p.name.clone(), p.slug.clone(), p.provider_type.clone()),
+        None => (
+            "Unknown".to_string(),
+            "unknown".to_string(),
+            token.token_type.clone(),
+        ),
+    };
+
+    UserProviderTokenSummary {
+        provider_config_id: token.provider_config_id.clone(),
+        provider_name,
+        provider_slug,
+        provider_type,
+        token_type: token.token_type.clone(),
+        status: token.status.clone(),
+        label: token.label.clone(),
+        expires_at: token.expires_at.map(|dt| dt.to_rfc3339()),
+        last_used_at: token.last_used_at.map(|dt| dt.to_rfc3339()),
+        connected_at: token.created_at.to_rfc3339(),
+        metadata: token.metadata.clone(),
+    }
+}
+
 /// List all providers the user has connected to, with status.
 ///
 /// Uses a single batch query for provider lookups (CR-4/5/6: fix N+1).
@@ -1438,25 +1465,110 @@ pub async fn list_user_tokens(
     let summaries = tokens
         .iter()
         .map(|token| {
-            let (provider_name, provider_slug) =
-                match provider_map.get(token.provider_config_id.as_str()) {
-                    Some(p) => (p.name.clone(), p.slug.clone()),
-                    None => ("Unknown".to_string(), "unknown".to_string()),
-                };
-
-            UserProviderTokenSummary {
-                provider_config_id: token.provider_config_id.clone(),
-                provider_name,
-                provider_slug,
-                token_type: token.token_type.clone(),
-                status: token.status.clone(),
-                label: token.label.clone(),
-                expires_at: token.expires_at.map(|dt| dt.to_rfc3339()),
-                last_used_at: token.last_used_at.map(|dt| dt.to_rfc3339()),
-                connected_at: token.created_at.to_rfc3339(),
-            }
+            build_user_token_summary(
+                token,
+                provider_map.get(token.provider_config_id.as_str()).copied(),
+            )
         })
         .collect();
 
     Ok(summaries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_user_token_summary;
+    use crate::models::provider_config::ProviderConfig;
+    use crate::models::user_provider_token::UserProviderToken;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    fn make_provider(provider_type: &str) -> ProviderConfig {
+        ProviderConfig {
+            id: "provider-1".to_string(),
+            slug: "telegram".to_string(),
+            name: "Telegram".to_string(),
+            description: None,
+            provider_type: provider_type.to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: Some(vec![1, 2, 3]),
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: Some("NyxIdBot".to_string()),
+            created_by: "system".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn make_token(token_type: &str) -> UserProviderToken {
+        let mut metadata = HashMap::new();
+        metadata.insert("username".to_string(), "nyx_user".to_string());
+
+        UserProviderToken {
+            id: "token-1".to_string(),
+            user_id: "user-1".to_string(),
+            provider_config_id: "provider-1".to_string(),
+            credential_user_id: None,
+            token_type: token_type.to_string(),
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            api_key_encrypted: None,
+            status: "active".to_string(),
+            last_refreshed_at: None,
+            last_used_at: None,
+            error_message: None,
+            label: None,
+            metadata: Some(metadata),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn summary_uses_provider_type_and_preserves_metadata() {
+        let provider = make_provider("telegram_widget");
+        let token = make_token("telegram_identity");
+
+        let summary = build_user_token_summary(&token, Some(&provider));
+
+        assert_eq!(summary.provider_type, "telegram_widget");
+        assert_eq!(summary.token_type, "telegram_identity");
+        assert_eq!(
+            summary
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("username")),
+            Some(&"nyx_user".to_string())
+        );
+    }
+
+    #[test]
+    fn summary_falls_back_to_token_type_when_provider_is_missing() {
+        let token = make_token("api_key");
+
+        let summary = build_user_token_summary(&token, None);
+
+        assert_eq!(summary.provider_type, "api_key");
+        assert_eq!(summary.provider_name, "Unknown");
+        assert_eq!(summary.provider_slug, "unknown");
+    }
 }

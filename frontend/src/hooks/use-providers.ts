@@ -269,6 +269,7 @@ export function useCreateProvider() {
       readonly hosted_callback_url?: string;
       readonly api_key_instructions?: string;
       readonly api_key_url?: string;
+      readonly client_id_param_name?: string;
       readonly icon_url?: string;
       readonly documentation_url?: string;
     }): Promise<ProviderConfig> => {
@@ -301,6 +302,7 @@ export function useUpdateProvider(providerId: string) {
       readonly hosted_callback_url?: string;
       readonly api_key_instructions?: string;
       readonly api_key_url?: string;
+      readonly client_id_param_name?: string;
       readonly icon_url?: string;
       readonly documentation_url?: string;
     }): Promise<ProviderConfig> => {

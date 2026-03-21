@@ -89,7 +89,6 @@ export function TelegramLoginDialog({
     script.setAttribute("data-telegram-login", config.bot_username);
     script.setAttribute("data-size", "large");
     script.setAttribute("data-onauth", "onTelegramAuth(user)");
-    script.setAttribute("data-request-access", "write");
     container.appendChild(script);
     scriptRef.current = script;
 

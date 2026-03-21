@@ -150,8 +150,7 @@ mod tests {
             username: None,
             photo_url: None,
             auth_date: chrono::Utc::now().timestamp(),
-            hash: "0000000000000000000000000000000000000000000000000000000000000000"
-                .to_string(),
+            hash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
         };
 
         let result = verify_telegram_login(bot_token, &data);

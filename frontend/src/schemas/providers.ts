@@ -217,6 +217,29 @@ export const createProviderSchema = z
         });
       }
     }
+    if (data.provider_type === "telegram_widget") {
+      if (data.credential_mode && data.credential_mode !== "admin") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Telegram widget providers only support admin credential mode",
+          path: ["credential_mode"],
+        });
+      }
+      if (!data.client_id_param_name?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Bot username is required for Telegram widget providers",
+          path: ["client_id_param_name"],
+        });
+      }
+      if (!data.client_secret?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Bot token is required for Telegram widget providers",
+          path: ["client_secret"],
+        });
+      }
+    }
   });
 
 export type CreateProviderFormData = z.infer<typeof createProviderSchema>;
@@ -260,6 +283,39 @@ export const updateProviderSchema = z
           path: ["token_url"],
         });
       }
+    }
+    if (
+      data.provider_type === "telegram_widget" &&
+      data.credential_mode &&
+      data.credential_mode !== "admin"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Telegram widget providers only support admin credential mode",
+        path: ["credential_mode"],
+      });
+    }
+    if (
+      data.provider_type === "telegram_widget" &&
+      data.client_id_param_name &&
+      !data.client_id_param_name.trim()
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Bot username must not be blank",
+        path: ["client_id_param_name"],
+      });
+    }
+    if (
+      data.provider_type === "telegram_widget" &&
+      data.client_secret &&
+      !data.client_secret.trim()
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Bot token must not be blank",
+        path: ["client_secret"],
+      });
     }
     // Note: device_code_url and device_token_url are optional on update (blank = keep current)
   });

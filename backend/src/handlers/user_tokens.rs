@@ -43,6 +43,8 @@ pub struct UserTokenResponse {
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub connected_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,12 +115,13 @@ pub async fn list_my_tokens(
             provider_id: s.provider_config_id,
             provider_name: s.provider_name,
             provider_slug: s.provider_slug,
-            provider_type: s.token_type,
+            provider_type: s.provider_type,
             status: s.status,
             label: s.label,
             expires_at: s.expires_at,
             last_used_at: s.last_used_at,
             connected_at: s.connected_at,
+            metadata: s.metadata,
         })
         .collect();
 
@@ -597,21 +600,19 @@ pub async fn get_telegram_connect_config(
     }
 
     if !provider.is_active {
-        return Err(AppError::BadRequest(
-            "Provider is not active".to_string(),
-        ));
+        return Err(AppError::BadRequest("Provider is not active".to_string()));
     }
 
-    // Bot username is stored in the description field of the provider seed
-    // (e.g. "Telegram Login (bot: @YourBotUsername)"). For a clean approach,
-    // we use the `api_key_url` field which stores the BotFather link, but the
-    // bot_username must be configured by the admin. We look for it in
-    // `client_id_param_name` which the seed repurposes for bot_username.
+    // Telegram providers reuse `client_id_param_name` for the bot username
+    // and `client_secret_encrypted` for the bot token.
     let bot_username = provider.client_id_param_name.ok_or_else(|| {
-        AppError::BadRequest(
-            "Telegram bot username not configured for this provider".to_string(),
-        )
+        AppError::BadRequest("Telegram bot username not configured for this provider".to_string())
     })?;
+    if provider.client_secret_encrypted.is_none() {
+        return Err(AppError::BadRequest(
+            "Telegram bot token not configured for this provider".to_string(),
+        ));
+    }
 
     Ok(Json(TelegramConnectConfigResponse { bot_username }))
 }
@@ -637,21 +638,16 @@ pub async fn telegram_callback(
     }
 
     if !provider.is_active {
-        return Err(AppError::BadRequest(
-            "Provider is not active".to_string(),
-        ));
+        return Err(AppError::BadRequest("Provider is not active".to_string()));
     }
 
     // Bot token is stored in client_secret_encrypted
     let bot_token_enc = provider.client_secret_encrypted.ok_or_else(|| {
-        AppError::BadRequest(
-            "Telegram bot token not configured for this provider".to_string(),
-        )
+        AppError::BadRequest("Telegram bot token not configured for this provider".to_string())
     })?;
 
-    let bot_token_bytes = zeroize::Zeroizing::new(
-        state.encryption_keys.decrypt(&bot_token_enc).await?,
-    );
+    let bot_token_bytes =
+        zeroize::Zeroizing::new(state.encryption_keys.decrypt(&bot_token_enc).await?);
     let bot_token = String::from_utf8((*bot_token_bytes).clone())
         .map_err(|e| AppError::Internal(format!("Failed to decode bot token: {e}")))?;
 
@@ -659,13 +655,8 @@ pub async fn telegram_callback(
     crate::crypto::telegram::verify_telegram_login(&bot_token, &body)?;
 
     // Store the verified identity
-    user_token_service::store_telegram_identity(
-        &state.db,
-        &user_id_str,
-        &provider_id,
-        &body,
-    )
-    .await?;
+    user_token_service::store_telegram_identity(&state.db, &user_id_str, &provider_id, &body)
+        .await?;
 
     audit_service::log_async(
         state.db.clone(),

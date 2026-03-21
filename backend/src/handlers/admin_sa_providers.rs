@@ -101,7 +101,7 @@ pub async fn list_sa_providers(
             provider_id: s.provider_config_id,
             provider_name: s.provider_name,
             provider_slug: s.provider_slug,
-            provider_type: s.token_type,
+            provider_type: s.provider_type,
             status: s.status,
             label: s.label,
             expires_at: s.expires_at,

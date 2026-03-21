@@ -81,6 +81,7 @@ export function ProviderEditPage() {
       is_active: true,
       client_id: "",
       client_secret: "",
+      client_id_param_name: "",
       supports_pkce: true,
       device_code_url: "",
       device_token_url: "",
@@ -108,6 +109,7 @@ export function ProviderEditPage() {
         is_active: provider.is_active,
         client_id: "",
         client_secret: "",
+        client_id_param_name: provider.client_id_param_name ?? "",
         supports_pkce: provider.supports_pkce,
         device_code_url: "",
         device_token_url: "",
@@ -181,6 +183,7 @@ export function ProviderEditPage() {
   const isOAuth = watchedProviderType === "oauth2";
   const isDeviceCode = watchedProviderType === "device_code";
   const isApiKey = watchedProviderType === "api_key";
+  const isTelegram = watchedProviderType === "telegram_widget";
 
   return (
     <div className="space-y-8">
@@ -629,6 +632,60 @@ export function ProviderEditPage() {
                           {...field}
                         />
                       </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </>
+            )}
+
+            {isTelegram && (
+              <>
+                <Separator className="my-2" />
+                <h3 className="text-sm font-semibold">
+                  Telegram Widget Configuration
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Leave the bot token blank to keep the current secret.
+                </p>
+
+                <FormField
+                  control={form.control}
+                  name="client_id_param_name"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Bot Username</FormLabel>
+                      <FormControl>
+                        <Input
+                          placeholder="NyxIdBot"
+                          {...field}
+                        />
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        Enter the BotFather username without the leading
+                        <span className="font-mono"> @</span>.
+                      </p>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name="client_secret"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Bot Token</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="password"
+                          placeholder="Leave blank to keep current"
+                          {...field}
+                        />
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        Only fill this in when rotating the Telegram bot token.
+                      </p>
                       <FormMessage />
                     </FormItem>
                   )}

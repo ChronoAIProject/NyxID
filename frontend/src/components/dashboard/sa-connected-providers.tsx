@@ -49,7 +49,10 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
 
   const connectedProviderIds = new Set(saProviders?.map((t) => t.provider_id) ?? []);
   const availableProviders = (allProviders ?? []).filter(
-    (p) => p.is_active && !connectedProviderIds.has(p.id),
+    (p) =>
+      p.is_active &&
+      p.provider_type !== "telegram_widget" &&
+      !connectedProviderIds.has(p.id),
   );
 
   async function handleConnectApiKey(apiKey: string, label?: string) {

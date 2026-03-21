@@ -1071,9 +1071,7 @@ pub async fn seed_default_providers(
             api_key_instructions: None,
             api_key_url: None,
             icon_url: None,
-            documentation_url: Some(
-                "https://core.telegram.org/widgets/login".to_string(),
-            ),
+            documentation_url: Some("https://core.telegram.org/widgets/login".to_string()),
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
@@ -1491,6 +1489,12 @@ pub struct ApiKeyProviderInput {
     pub api_key_url: Option<String>,
 }
 
+/// Input for Telegram Widget provider configuration fields.
+pub struct TelegramWidgetProviderInput {
+    pub bot_token: String,
+    pub bot_username: String,
+}
+
 /// Fields that can be updated on a provider config.
 pub struct ProviderUpdateInput {
     pub name: Option<String>,
@@ -1531,6 +1535,7 @@ pub async fn create_provider(
     oauth_config: Option<OAuthProviderInput>,
     api_key_config: Option<ApiKeyProviderInput>,
     device_code_config: Option<DeviceCodeProviderInput>,
+    telegram_widget_config: Option<TelegramWidgetProviderInput>,
     description: Option<&str>,
     icon_url: Option<&str>,
     documentation_url: Option<&str>,
@@ -1552,6 +1557,11 @@ pub async fn create_provider(
             "credential_mode must be one of: {}",
             valid_modes.join(", ")
         )));
+    }
+    if provider_type == "telegram_widget" && credential_mode != "admin" {
+        return Err(AppError::ValidationError(
+            "telegram_widget providers only support credential_mode=admin".to_string(),
+        ));
     }
 
     // Check slug uniqueness
@@ -1590,8 +1600,17 @@ pub async fn create_provider(
             None => None,
         };
         (cid, csec)
+    } else if let Some(ref tw) = telegram_widget_config {
+        let bot_token = normalize_telegram_bot_token(&tw.bot_token)?;
+        let csec = encryption_keys.encrypt(bot_token.as_bytes()).await?;
+        (None, Some(csec))
     } else {
         (None, None)
+    };
+    let normalized_client_id_param_name = if let Some(ref tw) = telegram_widget_config {
+        Some(normalize_telegram_bot_username(&tw.bot_username)?)
+    } else {
+        client_id_param_name.map(String::from)
     };
 
     let provider = ProviderConfig {
@@ -1648,7 +1667,7 @@ pub async fn create_provider(
         token_endpoint_auth_method: token_endpoint_auth_method.to_string(),
         extra_auth_params,
         device_code_format: device_code_format.unwrap_or("rfc8628").to_string(),
-        client_id_param_name: client_id_param_name.map(String::from),
+        client_id_param_name: normalized_client_id_param_name,
         created_by: created_by.to_string(),
         created_at: now,
         updated_at: now,
@@ -1704,7 +1723,15 @@ pub async fn update_provider(
     updates: ProviderUpdateInput,
 ) -> AppResult<ProviderConfig> {
     // Verify exists
-    let _existing = get_provider(db, provider_id).await?;
+    let existing = get_provider(db, provider_id).await?;
+    if existing.provider_type == "telegram_widget"
+        && let Some(ref mode) = updates.credential_mode
+        && mode != "admin"
+    {
+        return Err(AppError::ValidationError(
+            "telegram_widget providers only support credential_mode=admin".to_string(),
+        ));
+    }
 
     let now = Utc::now();
     let mut set_doc = doc! {
@@ -1743,7 +1770,12 @@ pub async fn update_provider(
         );
     }
     if let Some(ref csec) = updates.client_secret {
-        let enc = encryption_keys.encrypt(csec.as_bytes()).await?;
+        let secret_value = if existing.provider_type == "telegram_widget" {
+            normalize_telegram_bot_token(csec)?
+        } else {
+            csec.clone()
+        };
+        let enc = encryption_keys.encrypt(secret_value.as_bytes()).await?;
         set_doc.insert(
             "client_secret_encrypted",
             bson::Binary {
@@ -1817,7 +1849,12 @@ pub async fn update_provider(
         set_doc.insert("device_code_format", format.as_str());
     }
     if let Some(ref name) = updates.client_id_param_name {
-        set_doc.insert("client_id_param_name", name.as_str());
+        let value = if existing.provider_type == "telegram_widget" {
+            normalize_telegram_bot_username(name)?
+        } else {
+            name.clone()
+        };
+        set_doc.insert("client_id_param_name", value);
     }
 
     use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
@@ -1836,6 +1873,38 @@ pub async fn update_provider(
     tracing::info!(provider_id = %provider_id, "Provider config updated");
 
     Ok(updated)
+}
+
+fn normalize_telegram_bot_username(raw: &str) -> AppResult<String> {
+    let normalized = raw.trim().trim_start_matches('@');
+    if normalized.is_empty() {
+        return Err(AppError::ValidationError(
+            "Telegram bot username must not be empty".to_string(),
+        ));
+    }
+    if normalized.chars().any(char::is_whitespace) {
+        return Err(AppError::ValidationError(
+            "Telegram bot username must not contain whitespace".to_string(),
+        ));
+    }
+
+    Ok(normalized.to_string())
+}
+
+fn normalize_telegram_bot_token(raw: &str) -> AppResult<String> {
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return Err(AppError::ValidationError(
+            "Telegram bot token must not be empty".to_string(),
+        ));
+    }
+    if normalized.chars().any(char::is_whitespace) {
+        return Err(AppError::ValidationError(
+            "Telegram bot token must not contain whitespace".to_string(),
+        ));
+    }
+
+    Ok(normalized.to_string())
 }
 
 /// Soft-delete a provider. Also revokes all user tokens for this provider.
@@ -1874,4 +1943,57 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
     tracing::info!(provider_id = %provider_id, "Provider deactivated, user tokens revoked, and user credentials deleted");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_telegram_bot_token, normalize_telegram_bot_username};
+    use crate::errors::AppError;
+
+    #[test]
+    fn normalize_telegram_bot_username_trims_whitespace_and_at_prefix() {
+        let normalized = normalize_telegram_bot_username("  @NyxIdBot  ")
+            .expect("username should be normalized");
+
+        assert_eq!(normalized, "NyxIdBot");
+    }
+
+    #[test]
+    fn normalize_telegram_bot_username_rejects_whitespace() {
+        let err = normalize_telegram_bot_username("Nyx Id Bot")
+            .expect_err("whitespace should be rejected");
+
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message == "Telegram bot username must not contain whitespace"
+        ));
+    }
+
+    #[test]
+    fn normalize_telegram_bot_token_trims_surrounding_whitespace() {
+        let normalized = normalize_telegram_bot_token(" 123456:ABC-DEF123 \n")
+            .expect("token should be normalized");
+
+        assert_eq!(normalized, "123456:ABC-DEF123");
+    }
+
+    #[test]
+    fn normalize_telegram_bot_token_rejects_blank_or_embedded_whitespace() {
+        let blank =
+            normalize_telegram_bot_token("   ").expect_err("blank token should be rejected");
+        assert!(matches!(
+            blank,
+            AppError::ValidationError(message)
+                if message == "Telegram bot token must not be empty"
+        ));
+
+        let spaced = normalize_telegram_bot_token("123456:ABC DEF")
+            .expect_err("tokens with embedded whitespace should be rejected");
+        assert!(matches!(
+            spaced,
+            AppError::ValidationError(message)
+                if message == "Telegram bot token must not contain whitespace"
+        ));
+    }
 }

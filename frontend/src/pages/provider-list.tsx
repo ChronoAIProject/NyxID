@@ -93,6 +93,7 @@ export function ProviderListPage() {
       default_scopes: "",
       client_id: "",
       client_secret: "",
+      client_id_param_name: "",
       supports_pkce: true,
       device_code_url: "",
       device_token_url: "",
@@ -138,7 +139,7 @@ export function ProviderListPage() {
             Manage Providers
           </h2>
           <p className="text-sm text-muted-foreground">
-            Create and manage OAuth and API key providers.
+            Create and manage OAuth, Telegram, device code, and API key providers.
           </p>
         </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
@@ -595,6 +596,58 @@ export function ProviderListPage() {
                           </FormControl>
                           <p className="text-xs text-muted-foreground">
                             Optional for public OAuth clients.
+                          </p>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </>
+                )}
+
+                {watchedProviderType === "telegram_widget" && (
+                  <>
+                    <Separator />
+                    <h4 className="text-sm font-semibold">
+                      Telegram Widget Configuration
+                    </h4>
+
+                    <FormField
+                      control={form.control}
+                      name="client_id_param_name"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Bot Username</FormLabel>
+                          <FormControl>
+                            <Input
+                              placeholder="NyxIdBot"
+                              {...field}
+                            />
+                          </FormControl>
+                          <p className="text-xs text-muted-foreground">
+                            Enter the BotFather username without the leading
+                            <span className="font-mono"> @</span>.
+                          </p>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name="client_secret"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Bot Token</FormLabel>
+                          <FormControl>
+                            <Input
+                              type="password"
+                              placeholder="123456:ABC-DEF1234567890"
+                              {...field}
+                            />
+                          </FormControl>
+                          <p className="text-xs text-muted-foreground">
+                            BotFather token used to verify Telegram Login Widget
+                            callbacks.
                           </p>
                           <FormMessage />
                         </FormItem>

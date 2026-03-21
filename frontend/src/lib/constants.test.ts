@@ -292,14 +292,27 @@ describe("provider connection helpers", () => {
     expect(canConnectProvider(provider, false)).toBe(true);
   });
 
-  it("always allows telegram_widget providers", () => {
+  it("allows configured telegram_widget providers", () => {
+    const provider = makeProvider({
+      provider_type: "telegram_widget",
+      has_oauth_config: true,
+    });
+
+    expect(canConnectProvider(provider, false)).toBe(true);
+    expect(getProviderConnectLabel(provider)).toBe("Login with Telegram");
+  });
+
+  it("blocks unconfigured telegram_widget providers", () => {
     const provider = makeProvider({
       provider_type: "telegram_widget",
       has_oauth_config: false,
     });
 
-    expect(canConnectProvider(provider, false)).toBe(true);
-    expect(getProviderConnectLabel(provider)).toBe("Login with Telegram");
+    expect(canConnectProvider(provider, false)).toBe(false);
+    expect(getProviderConnectLabel(provider)).toBe("Setup required");
+    expect(getProviderConnectHint(provider, false)).toBe(
+      "Admin must configure the Telegram bot username and bot token first.",
+    );
   });
 });
 

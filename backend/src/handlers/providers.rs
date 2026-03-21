@@ -195,11 +195,15 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
     }
 }
 
-/// Check whether a provider has enough configuration to start an OAuth flow.
+/// Check whether a provider has enough configuration to start a connection flow.
 ///
-/// - For `"user"` mode: true if the shared OAuth URLs are configured.
-/// - For `"admin"`/`"both"` mode: true if OAuth URLs AND admin-level credentials are configured.
+/// - OAuth providers: true when their URLs and required credentials are set.
+/// - Telegram widget providers: true when the bot username and bot token are set.
 fn provider_has_oauth_config(p: &crate::models::provider_config::ProviderConfig) -> bool {
+    if p.provider_type == "telegram_widget" {
+        return p.client_id_param_name.is_some() && p.client_secret_encrypted.is_some();
+    }
+
     let has_urls = match p.provider_type.as_str() {
         "oauth2" => p.authorization_url.is_some() && p.token_url.is_some(),
         "device_code" => {
@@ -275,6 +279,11 @@ pub async fn create_provider(
             "credential_mode must be one of: {}",
             valid_credential_modes.join(", ")
         )));
+    }
+    if body.provider_type == "telegram_widget" && credential_mode != "admin" {
+        return Err(AppError::ValidationError(
+            "telegram_widget providers only support credential_mode=admin".to_string(),
+        ));
     }
 
     let token_endpoint_auth_method = body
@@ -421,6 +430,37 @@ pub async fn create_provider(
         None
     };
 
+    let telegram_widget_config = if body.provider_type == "telegram_widget" {
+        let bot_token = body.client_secret.as_ref().ok_or_else(|| {
+            AppError::ValidationError(
+                "Bot token (client_secret) is required for telegram_widget providers".to_string(),
+            )
+        })?;
+        if bot_token.is_empty() {
+            return Err(AppError::ValidationError(
+                "Bot token (client_secret) must not be empty for telegram_widget providers"
+                    .to_string(),
+            ));
+        }
+        let bot_username = body.client_id_param_name.as_ref().ok_or_else(|| {
+            AppError::ValidationError(
+                "Bot username (client_id_param_name) is required for telegram_widget providers"
+                    .to_string(),
+            )
+        })?;
+        if bot_username.is_empty() {
+            return Err(AppError::ValidationError(
+                "Bot username must not be empty for telegram_widget providers".to_string(),
+            ));
+        }
+        Some(provider_service::TelegramWidgetProviderInput {
+            bot_token: bot_token.clone(),
+            bot_username: bot_username.clone(),
+        })
+    } else {
+        None
+    };
+
     let provider = provider_service::create_provider(
         &state.db,
         &state.encryption_keys,
@@ -432,6 +472,7 @@ pub async fn create_provider(
         oauth_config,
         api_key_config,
         device_code_config,
+        telegram_widget_config,
         body.description.as_deref(),
         body.icon_url.as_deref(),
         body.documentation_url.as_deref(),
@@ -638,6 +679,31 @@ mod tests {
         provider.credential_mode = "user".to_string();
         provider.client_id_encrypted = None;
         provider.client_secret_encrypted = None;
+
+        assert!(provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn telegram_widget_requires_bot_username() {
+        let mut provider = make_provider("telegram_widget");
+        provider.client_id_param_name = None;
+
+        assert!(!provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn telegram_widget_requires_bot_token() {
+        let mut provider = make_provider("telegram_widget");
+        provider.client_id_param_name = Some("NyxIdBot".to_string());
+        provider.client_secret_encrypted = None;
+
+        assert!(!provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn telegram_widget_is_connectable_when_bot_is_configured() {
+        let mut provider = make_provider("telegram_widget");
+        provider.client_id_param_name = Some("NyxIdBot".to_string());
 
         assert!(provider_has_oauth_config(&provider));
     }
