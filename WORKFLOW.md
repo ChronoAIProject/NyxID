@@ -221,15 +221,33 @@ URL: {{ issue.url }}
 
 **IMPORTANT:** All agents working on the same issue share the same branch and PR. Do NOT create separate branches or PRs.
 
-## Symphony Workpad (Single Persistent Comment)
+## Symphony Workpad
 
-Use exactly ONE persistent comment on issue {{ issue.identifier }} as your workpad. NEVER create additional comments.
+Use ONE persistent comment per agent role as your workpad. NEVER create additional comments.
+
+{% if stage.role %}**Your workpad marker:** `## Symphony Workpad ({{ stage.role }})`{% else %}**Your workpad marker:** `## Symphony Workpad`{% endif %}
 
 **Finding or creating the workpad:**
-1. Search existing comments: `gh api repos/ChronoAIProject/NyxID/issues/{{ issue.identifier | remove: "#" }}/comments --jq '.[] | select(.body | contains("## Symphony Workpad")) | .id'`
-2. If found, reuse that comment ID for ALL updates.
-3. If not found, create once: `gh issue comment {{ issue.identifier }} --body "## Symphony Workpad"`
-4. Save the comment ID and update via: `gh api repos/ChronoAIProject/NyxID/issues/comments/{id} -X PATCH -f body="..."`
+```bash
+{% if stage.role %}MARKER="## Symphony Workpad ({{ stage.role }})"{% else %}MARKER="## Symphony Workpad"{% endif %}
+COMMENT_ID=$(gh api repos/ChronoAIProject/NyxID/issues/{{ issue.identifier | remove: "#" }}/comments --jq ".[] | select(.body | contains(\"$MARKER\")) | .id")
+if [ -z "$COMMENT_ID" ]; then
+  gh issue comment {{ issue.identifier }} --body "$MARKER
+- [ ] Planning
+- [ ] Implementation
+- [ ] Tests"
+  COMMENT_ID=$(gh api repos/ChronoAIProject/NyxID/issues/{{ issue.identifier | remove: "#" }}/comments --jq ".[] | select(.body | contains(\"$MARKER\")) | .id")
+fi
+```
+
+**Updating (NEVER create a new comment):**
+```bash
+gh api repos/ChronoAIProject/NyxID/issues/comments/$COMMENT_ID -X PATCH -f body="$MARKER
+- [x] Done task
+- [ ] Next task"
+```
+
+When working in parallel, each agent has its own workpad (e.g., `## Symphony Workpad (backend-implementer)`).
 
 ## Execution Flow
 
