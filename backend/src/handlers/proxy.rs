@@ -55,7 +55,7 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "x-correlation-id",
 ];
 
-/// ANY /api/v1/proxy/:service_id/*path
+/// ANY /api/v1/proxy/{service_id}/{*path}
 ///
 /// Forward the request to the downstream service with credential injection,
 /// identity propagation, and delegated provider credentials.
@@ -68,7 +68,7 @@ pub async fn proxy_request(
     execute_proxy(&state, &auth_user, &service_id, &path, request).await
 }
 
-/// ANY /api/v1/proxy/s/:slug/*path
+/// ANY /api/v1/proxy/s/{slug}/{*path}
 ///
 /// Resolve the service by slug, then forward via the shared proxy pipeline.
 pub async fn proxy_request_by_slug(
@@ -95,6 +95,7 @@ async fn execute_proxy(
 ) -> AppResult<Response> {
     let user_id_str = auth_user.user_id.to_string();
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
+    proxy_service::validate_requested_proxy_path(path)?;
 
     // Resolve node routing FIRST so node-backed users bypass credential checks
     let node_route = node_routing_service::resolve_node_route(
@@ -250,10 +251,131 @@ async fn execute_proxy(
         Some(body_bytes)
     };
 
+    // === Delegated Credentials ===
+    // Resolve delegated credentials before the node/standard branch split so that
+    // node-routed requests also get path-injection prefixes (e.g. Telegram Bot API
+    // `/bot<TOKEN>/method`) and header/query credential injection.
+    let delegated = delegation_service::resolve_delegated_credentials(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        service_id,
+    )
+    .await
+    .map_err(|e| AppError::BadRequest(format!("Provider credentials not available: {e}")))?;
+
+    // Build identity headers before the node/direct split so both proxy paths
+    // preserve the same downstream identity and delegation context.
+    let mut identity_headers = Vec::new();
+
+    if target.service.identity_propagation_mode != "none" {
+        let user = state
+            .db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &user_id_str })
+            .await?;
+
+        if let Some(ref user) = user {
+            if matches!(
+                target.service.identity_propagation_mode.as_str(),
+                "headers" | "both"
+            ) {
+                identity_headers = identity_service::build_identity_headers(user, &target.service);
+            }
+
+            if matches!(
+                target.service.identity_propagation_mode.as_str(),
+                "jwt" | "both"
+            ) {
+                match identity_service::generate_identity_assertion(
+                    &state.jwt_keys,
+                    &state.config,
+                    user,
+                    &target.service,
+                ) {
+                    Ok(assertion) => {
+                        identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            service_id = %service_id,
+                            error = %e,
+                            "Failed to generate identity assertion"
+                        );
+                    }
+                }
+            }
+        }
+
+        match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id_str).await {
+            Ok(rbac) => {
+                if !rbac.role_slugs.is_empty() {
+                    identity_headers
+                        .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
+                }
+                if !rbac.permissions.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Permissions".to_string(),
+                        rbac.permissions.join(","),
+                    ));
+                }
+                if !rbac.group_slugs.is_empty() {
+                    identity_headers.push((
+                        "X-NyxID-User-Groups".to_string(),
+                        rbac.group_slugs.join(","),
+                    ));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    user_id = %user_id_str,
+                    error = %e,
+                    "Failed to resolve RBAC for identity headers"
+                );
+            }
+        }
+    }
+
+    if target.service.inject_delegation_token {
+        let user_uuid = auth_user.user_id;
+
+        match crate::crypto::jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_uuid,
+            &target.service.delegation_token_scope,
+            &target.service.slug,
+            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+        ) {
+            Ok(delegation_token) => {
+                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    service_id = %service_id,
+                    error = %e,
+                    "Failed to generate delegation token for proxy"
+                );
+            }
+        }
+    }
+
     // === Node Proxy Routing (v2: failover + streaming + metrics + HMAC signing) ===
     // node_route was resolved earlier (before credential check) to allow node-backed
     // users to bypass credential requirements.
     if let Some(node_route) = node_route {
+        let prepared =
+            proxy_service::prepare_delegated_request(path, query.as_deref(), &delegated)?;
+        let node_path = if prepared.path.starts_with('/') {
+            prepared.path.clone()
+        } else {
+            format!("/{}", prepared.path)
+        };
+
+        let mut enriched_headers = node_forward_headers;
+        enriched_headers.extend(identity_headers.iter().cloned());
+        enriched_headers.extend(prepared.delegated_headers.iter().cloned());
+
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -261,13 +383,9 @@ async fn execute_proxy(
             service_slug: target.service.slug.clone(),
             base_url: target.base_url.clone(),
             method: method_str.clone(),
-            path: if path.starts_with('/') {
-                path.to_string()
-            } else {
-                format!("/{path}")
-            },
-            query: query.clone(),
-            headers: node_forward_headers,
+            path: node_path,
+            query: prepared.query,
+            headers: enriched_headers,
             body: body.as_ref().map(|b| b.to_vec()),
         };
 
@@ -494,117 +612,6 @@ async fn execute_proxy(
     }
     // === END Node Proxy Routing ===
 
-    // Build identity headers if configured on the service
-    let mut identity_headers = Vec::new();
-
-    if target.service.identity_propagation_mode != "none" {
-        // Fetch user for identity propagation
-        let user = state
-            .db
-            .collection::<User>(USERS)
-            .find_one(doc! { "_id": &user_id_str })
-            .await?;
-
-        if let Some(ref user) = user {
-            // Add identity headers (for "headers" or "both" modes)
-            if matches!(
-                target.service.identity_propagation_mode.as_str(),
-                "headers" | "both"
-            ) {
-                identity_headers = identity_service::build_identity_headers(user, &target.service);
-            }
-
-            // Generate identity JWT assertion (for "jwt" or "both" modes)
-            if matches!(
-                target.service.identity_propagation_mode.as_str(),
-                "jwt" | "both"
-            ) {
-                match identity_service::generate_identity_assertion(
-                    &state.jwt_keys,
-                    &state.config,
-                    user,
-                    &target.service,
-                ) {
-                    Ok(assertion) => {
-                        identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            service_id = %service_id,
-                            error = %e,
-                            "Failed to generate identity assertion"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Resolve user RBAC and inject as headers so downstream services can
-        // enforce permission checks without needing JWT verification.
-        match crate::services::rbac_helpers::resolve_user_rbac(&state.db, &user_id_str).await {
-            Ok(rbac) => {
-                if !rbac.role_slugs.is_empty() {
-                    identity_headers
-                        .push(("X-NyxID-User-Roles".to_string(), rbac.role_slugs.join(",")));
-                }
-                if !rbac.permissions.is_empty() {
-                    identity_headers.push((
-                        "X-NyxID-User-Permissions".to_string(),
-                        rbac.permissions.join(","),
-                    ));
-                }
-                if !rbac.group_slugs.is_empty() {
-                    identity_headers.push((
-                        "X-NyxID-User-Groups".to_string(),
-                        rbac.group_slugs.join(","),
-                    ));
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    user_id = %user_id_str,
-                    error = %e,
-                    "Failed to resolve RBAC for identity headers"
-                );
-            }
-        }
-    }
-
-    // Generate delegation token if configured on the service
-    if target.service.inject_delegation_token {
-        let user_uuid = auth_user.user_id;
-
-        match crate::crypto::jwt::generate_delegated_access_token(
-            &state.jwt_keys,
-            &state.config,
-            &user_uuid,
-            &target.service.delegation_token_scope,
-            &target.service.slug,
-            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
-        ) {
-            Ok(delegation_token) => {
-                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    service_id = %service_id,
-                    error = %e,
-                    "Failed to generate delegation token for proxy"
-                );
-            }
-        }
-    }
-
-    // Resolve delegated credentials. Required provider connections must succeed.
-    let delegated = delegation_service::resolve_delegated_credentials(
-        &state.db,
-        &state.encryption_keys,
-        &user_id_str,
-        service_id,
-    )
-    .await
-    .map_err(|e| AppError::BadRequest(format!("Provider credentials not available: {e}")))?;
-
     // method, query, all_headers, body were already extracted above
     let reqwest_method = match method {
         Method::GET => reqwest::Method::GET,
@@ -824,6 +831,15 @@ mod tests {
         is_chat_completions_proxy_path, is_codex_transport_path, should_enforce_runtime_approval,
     };
     use crate::mw::auth::AuthMethod;
+    use crate::services::proxy_service::validate_requested_proxy_path;
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        extract::Path,
+        http::{Request, StatusCode},
+        routing::get,
+    };
+    use tower::ServiceExt;
 
     #[test]
     fn session_auth_bypasses_even_when_required() {
@@ -871,6 +887,273 @@ mod tests {
         assert!(is_chat_completions_proxy_path("chat/completions"));
         assert!(is_chat_completions_proxy_path("/v1/chat/completions"));
         assert!(!is_chat_completions_proxy_path("responses"));
+    }
+
+    #[tokio::test]
+    async fn wildcard_path_extractor_decodes_percent_encoded_path_injection_breakers() {
+        async fn capture_path(Path((service_id, path)): Path<(String, String)>) -> String {
+            format!("{service_id}:{path}")
+        }
+
+        let app = Router::new().route("/{service_id}/{*path}", get(capture_path));
+
+        let slash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%2FsendMessage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(slash_response.status(), StatusCode::OK);
+        let slash_body = to_bytes(slash_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&slash_body).unwrap(),
+            "svc:folder/sendMessage"
+        );
+
+        let backslash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%5CsendMessage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(backslash_response.status(), StatusCode::OK);
+        let backslash_body = to_bytes(backslash_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&backslash_body).unwrap(),
+            "svc:folder\\sendMessage"
+        );
+
+        let question_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%3Fchat_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(question_response.status(), StatusCode::OK);
+        let question_body = to_bytes(question_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&question_body).unwrap(),
+            "svc:folder?chat_id=1"
+        );
+
+        let hash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%23fragment")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(hash_response.status(), StatusCode::OK);
+        let hash_body = to_bytes(hash_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&hash_body).unwrap(),
+            "svc:folder#fragment"
+        );
+
+        let dotdot_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/%2e%2e")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(dotdot_response.status(), StatusCode::OK);
+        let dotdot_body = to_bytes(dotdot_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(std::str::from_utf8(&dotdot_body).unwrap(), "svc:..");
+
+        let double_encoded_dotdot_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/%252e%252e")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_dotdot_response.status(), StatusCode::OK);
+        let double_encoded_dotdot_body =
+            to_bytes(double_encoded_dotdot_response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_dotdot_body).unwrap(),
+            "svc:%2e%2e"
+        );
+
+        let double_encoded_slash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%252FsendMessage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_slash_response.status(), StatusCode::OK);
+        let double_encoded_slash_body =
+            to_bytes(double_encoded_slash_response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_slash_body).unwrap(),
+            "svc:folder%2FsendMessage"
+        );
+
+        let double_encoded_backslash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%255CsendMessage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_backslash_response.status(), StatusCode::OK);
+        let double_encoded_backslash_body =
+            to_bytes(double_encoded_backslash_response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_backslash_body).unwrap(),
+            "svc:folder%5CsendMessage"
+        );
+
+        let double_encoded_question_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%253Fchat_id=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_question_response.status(), StatusCode::OK);
+        let double_encoded_question_body =
+            to_bytes(double_encoded_question_response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_question_body).unwrap(),
+            "svc:folder%3Fchat_id=1"
+        );
+
+        let double_encoded_hash_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/folder%2523fragment")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_hash_response.status(), StatusCode::OK);
+        let double_encoded_hash_body =
+            to_bytes(double_encoded_hash_response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_hash_body).unwrap(),
+            "svc:folder%23fragment"
+        );
+
+        let double_encoded_nul_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/svc/%2500")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(double_encoded_nul_response.status(), StatusCode::OK);
+        let double_encoded_nul_body = to_bytes(double_encoded_nul_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&double_encoded_nul_body).unwrap(),
+            "svc:%00"
+        );
+    }
+
+    #[test]
+    fn node_proxy_path_injection_rejects_breakers() {
+        for path in [
+            "/sendMessage?chat_id=1",
+            "/sendMessage#fragment",
+            "/folder%2FsendMessage",
+            "/folder%2fsendMessage",
+            "/folder%3Fchat_id=1",
+            "/folder%3fchat_id=1",
+            "/folder%23fragment",
+            "/%2e%2e",
+            "/%2e.",
+            "/.%2e",
+            "/%2E%2E",
+            "/%2E.",
+            "/.%2E",
+            "/folder%5CsendMessage",
+            "/folder%5csendMessage",
+            "/%00",
+            "/folder\\sendMessage",
+        ] {
+            let err =
+                validate_requested_proxy_path(path).expect_err("path breaker should be rejected");
+            assert!(
+                err.to_string().contains("Invalid proxy path"),
+                "unexpected error for '{path}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn node_proxy_path_injection_allows_non_segment_dot_sequences() {
+        validate_requested_proxy_path("/v1/foo..bar/foo%2ebar")
+            .expect("non-segment dot sequences should be allowed");
     }
 }
 

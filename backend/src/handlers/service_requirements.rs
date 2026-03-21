@@ -67,6 +67,49 @@ pub struct DeleteRequirementResponse {
     pub message: String,
 }
 
+fn canonicalize_requirement_injection(
+    provider_slug: &str,
+    injection_method: &str,
+    injection_key: Option<&str>,
+) -> (String, Option<String>) {
+    if provider_slug == "telegram-bot" {
+        return ("path".to_string(), Some("bot".to_string()));
+    }
+
+    (
+        injection_method.to_string(),
+        injection_key.map(String::from),
+    )
+}
+
+fn validate_path_injection_key(key: &str) -> AppResult<()> {
+    if key.trim().is_empty() {
+        return Err(AppError::ValidationError(
+            "injection_key is required for path injection".to_string(),
+        ));
+    }
+
+    if key.chars().any(char::is_whitespace)
+        || key.contains('/')
+        || key.contains('\\')
+        || key.contains('?')
+        || key.contains('#')
+        || key.contains('\0')
+        || key.contains("..")
+        || key.contains('%')
+    {
+        return Err(AppError::ValidationError(
+            "injection_key contains invalid characters for path injection".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn provider_supports_requirements(provider_type: &str) -> bool {
+    matches!(provider_type, "oauth2" | "api_key" | "device_code")
+}
+
 // --- Handlers ---
 
 /// GET /api/v1/services/{service_id}/requirements
@@ -113,6 +156,11 @@ pub async fn list_requirements(
                     Some(p) => (p.name.clone(), p.slug.clone()),
                     None => ("Unknown".to_string(), "unknown".to_string()),
                 };
+            let (injection_method, injection_key) = canonicalize_requirement_injection(
+                &provider_slug,
+                &req.injection_method,
+                req.injection_key.as_deref(),
+            );
             RequirementResponse {
                 id: req.id,
                 service_id: req.service_id,
@@ -121,8 +169,8 @@ pub async fn list_requirements(
                 provider_slug,
                 required: req.required,
                 scopes: req.scopes,
-                injection_method: req.injection_method,
-                injection_key: req.injection_key,
+                injection_method,
+                injection_key,
                 created_at: req.created_at.to_rfc3339(),
                 updated_at: req.updated_at.to_rfc3339(),
             }
@@ -154,8 +202,15 @@ pub async fn add_requirement(
         .await?
         .ok_or_else(|| AppError::NotFound("Provider not found or inactive".to_string()))?;
 
+    if !provider_supports_requirements(&provider.provider_type) {
+        return Err(AppError::ValidationError(format!(
+            "provider_type '{}' cannot be used as a service requirement",
+            provider.provider_type
+        )));
+    }
+
     // Validate injection_method
-    let valid_methods = ["bearer", "header", "query"];
+    let valid_methods = ["bearer", "header", "query", "path"];
     if !valid_methods.contains(&body.injection_method.as_str()) {
         return Err(AppError::ValidationError(format!(
             "injection_method must be one of: {}",
@@ -163,8 +218,22 @@ pub async fn add_requirement(
         )));
     }
 
-    // Validate injection_key against blocklist
-    if let Some(ref key) = body.injection_key {
+    let (injection_method, injection_key) = canonicalize_requirement_injection(
+        &provider.slug,
+        &body.injection_method,
+        body.injection_key.as_deref(),
+    );
+
+    // Path injection requires a non-blank injection_key.
+    if injection_method == "path" {
+        let key = injection_key.as_deref().ok_or_else(|| {
+            AppError::ValidationError("injection_key is required for path injection".to_string())
+        })?;
+        validate_path_injection_key(key)?;
+    }
+
+    // Validate injection_key against blocklist after provider-specific canonicalization.
+    if let Some(ref key) = injection_key {
         let key_lower = key.to_lowercase();
         if BLOCKED_INJECTION_KEYS.contains(&key_lower.as_str()) {
             return Err(AppError::ValidationError(format!(
@@ -199,8 +268,8 @@ pub async fn add_requirement(
         provider_config_id: body.provider_config_id.clone(),
         required: body.required,
         scopes: body.scopes,
-        injection_method: body.injection_method,
-        injection_key: body.injection_key,
+        injection_method,
+        injection_key,
         created_at: now,
         updated_at: now,
     };
@@ -284,4 +353,97 @@ pub async fn remove_requirement(
     Ok(Json(DeleteRequirementResponse {
         message: "Requirement removed".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BLOCKED_INJECTION_KEYS, canonicalize_requirement_injection, provider_supports_requirements,
+        validate_path_injection_key,
+    };
+
+    #[test]
+    fn telegram_bot_requirements_are_canonicalized_to_path_bot() {
+        let (method, key) =
+            canonicalize_requirement_injection("telegram-bot", "bearer", Some("Authorization"));
+
+        assert_eq!(method, "path");
+        assert_eq!(key.as_deref(), Some("bot"));
+    }
+
+    #[test]
+    fn non_telegram_requirements_keep_original_injection() {
+        let (method, key) =
+            canonicalize_requirement_injection("github", "header", Some("X-API-Key"));
+
+        assert_eq!(method, "header");
+        assert_eq!(key.as_deref(), Some("X-API-Key"));
+    }
+
+    #[test]
+    fn telegram_bot_canonicalization_happens_before_blocklist_validation() {
+        let (_, key) =
+            canonicalize_requirement_injection("telegram-bot", "bearer", Some("Authorization"));
+
+        assert_eq!(key.as_deref(), Some("bot"));
+        assert!(!BLOCKED_INJECTION_KEYS.contains(&key.unwrap().to_lowercase().as_str()));
+    }
+
+    #[test]
+    fn path_injection_key_rejects_path_breaking_characters() {
+        let err =
+            validate_path_injection_key("bot/").expect_err("slash should be rejected for path key");
+
+        assert!(err.to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn path_injection_key_rejects_percent_encoded_separators() {
+        for input in ["%2f", "%5c", "%2e%2e", "bot%2fmalicious", "pre%fix"] {
+            let err = validate_path_injection_key(input).expect_err(&format!(
+                "percent-encoded input '{input}' should be rejected"
+            ));
+            assert!(
+                err.to_string().contains("invalid characters"),
+                "unexpected error for '{input}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_injection_key_rejects_blank_values() {
+        let err = validate_path_injection_key("")
+            .expect_err("empty key should be rejected for path injection");
+        assert!(
+            err.to_string()
+                .contains("injection_key is required for path injection")
+        );
+
+        let err = validate_path_injection_key("   ")
+            .expect_err("whitespace-only key should be rejected for path injection");
+        assert!(
+            err.to_string()
+                .contains("injection_key is required for path injection")
+        );
+    }
+
+    #[test]
+    fn path_injection_key_rejects_whitespace_characters() {
+        for input in [" bot", "bot ", "bot token", "bot\ttoken"] {
+            let err =
+                validate_path_injection_key(input).expect_err("whitespace should be rejected");
+            assert!(
+                err.to_string().contains("invalid characters"),
+                "unexpected error for '{input}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn telegram_widget_providers_cannot_be_used_as_service_requirements() {
+        assert!(!provider_supports_requirements("telegram_widget"));
+        assert!(provider_supports_requirements("oauth2"));
+        assert!(provider_supports_requirements("api_key"));
+        assert!(provider_supports_requirements("device_code"));
+    }
 }

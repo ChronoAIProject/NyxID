@@ -203,7 +203,7 @@ export interface ProviderConfig {
   readonly slug: string;
   readonly name: string;
   readonly description: string | null;
-  readonly provider_type: "oauth2" | "api_key" | "device_code";
+  readonly provider_type: "oauth2" | "api_key" | "device_code" | "telegram_widget";
   readonly has_oauth_config: boolean;
   readonly credential_mode: CredentialMode;
   readonly default_scopes: readonly string[] | null;
@@ -243,6 +243,7 @@ export interface UserProviderToken {
   readonly expires_at: string | null;
   readonly last_used_at: string | null;
   readonly connected_at: string;
+  readonly metadata?: Readonly<Record<string, string>> | null;
 }
 
 export interface OAuthInitiateResponse {
@@ -286,6 +287,15 @@ export interface ProviderListResponse {
   readonly providers: readonly ProviderConfig[];
 }
 
+export interface MessageResponse {
+  readonly message: string;
+}
+
+export interface ProviderActionResponse {
+  readonly status: string;
+  readonly message: string;
+}
+
 export interface LlmProviderStatus {
   readonly provider_slug: string;
   readonly provider_name: string;
@@ -324,4 +334,19 @@ export interface SocialTokenExchangeResponse {
   readonly id_token?: string;
   readonly scope: string;
   readonly issued_token_type: string;
+}
+
+export interface TelegramWidgetConfig {
+  readonly bot_username: string;
+  readonly redirect_url?: string;
+}
+
+export interface TelegramLoginData {
+  readonly id: number;
+  readonly first_name: string;
+  readonly last_name?: string;
+  readonly username?: string;
+  readonly photo_url?: string;
+  readonly auth_date: number;
+  readonly hash: string;
 }

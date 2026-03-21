@@ -57,7 +57,9 @@ export function ServiceRequirementsView({
                     ? "Bearer token"
                     : req.injection_method === "header"
                       ? `Header: ${req.injection_key ?? ""}`
-                      : `Query: ${req.injection_key ?? ""}`}
+                      : req.injection_method === "path"
+                        ? `Path prefix: ${req.injection_key ?? ""}`
+                        : `Query: ${req.injection_key ?? ""}`}
                 </p>
               </div>
             </div>

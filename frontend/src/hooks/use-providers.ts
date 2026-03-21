@@ -1,16 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
+import { telegramLoginDataSchema } from "@/schemas/providers";
 import type {
+  MessageResponse,
   ProviderConfig,
   ProviderListResponse,
-  UserProviderToken,
+  ProviderActionResponse,
   UserTokenListResponse,
+  UserProviderToken,
   UserProviderCredentials,
   OAuthInitiateResponse,
   DeviceCodeInitiateResponse,
   DeviceCodePollRequest,
   DeviceCodePollResponse,
   ServiceProviderRequirement,
+  TelegramWidgetConfig,
+  TelegramLoginData,
 } from "@/types/api";
 
 export function useProviders() {
@@ -55,8 +60,8 @@ export function useConnectApiKey() {
       readonly providerId: string;
       readonly apiKey: string;
       readonly label?: string;
-    }): Promise<UserProviderToken> => {
-      return api.post<UserProviderToken>(
+    }): Promise<ProviderActionResponse> => {
+      return api.post<ProviderActionResponse>(
         `/providers/${providerId}/connect/api-key`,
         { api_key: apiKey, label },
       );
@@ -121,8 +126,10 @@ export function useDisconnectProvider() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (providerId: string): Promise<void> => {
-      return api.delete<void>(`/providers/${providerId}/disconnect`);
+    mutationFn: async (providerId: string): Promise<ProviderActionResponse> => {
+      return api.delete<ProviderActionResponse>(
+        `/providers/${providerId}/disconnect`,
+      );
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
@@ -136,11 +143,52 @@ export function useRefreshProviderToken() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (providerId: string): Promise<void> => {
-      return api.post<void>(`/providers/${providerId}/refresh`);
+    mutationFn: async (providerId: string): Promise<ProviderActionResponse> => {
+      return api.post<ProviderActionResponse>(
+        `/providers/${providerId}/refresh`,
+      );
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
+      void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
+    },
+  });
+}
+
+// --- Telegram Login Widget hooks ---
+
+export function useTelegramWidgetConfig(providerId: string) {
+  return useQuery({
+    queryKey: ["telegram-widget-config", providerId],
+    queryFn: async (): Promise<TelegramWidgetConfig> => {
+      return api.get<TelegramWidgetConfig>(
+        `/providers/${providerId}/connect/telegram`,
+      );
+    },
+    enabled: providerId.length > 0,
+  });
+}
+
+export function useConnectTelegramWidget() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      providerId,
+      data,
+    }: {
+      readonly providerId: string;
+      readonly data: TelegramLoginData;
+    }): Promise<ProviderActionResponse> => {
+      const parsedData = telegramLoginDataSchema.parse(data);
+      return api.post<ProviderActionResponse>(
+        `/providers/${providerId}/connect/telegram/callback`,
+        parsedData,
+      );
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["provider-tokens"] });
+      void queryClient.invalidateQueries({ queryKey: ["providers"] });
       void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
     },
   });
@@ -193,8 +241,10 @@ export function useDeleteProviderCredentials() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (providerId: string): Promise<void> => {
-      return api.delete<void>(`/providers/${providerId}/credentials`);
+    mutationFn: async (providerId: string): Promise<MessageResponse> => {
+      return api.delete<MessageResponse>(
+        `/providers/${providerId}/credentials`,
+      );
     },
     onSuccess: (_data, providerId) => {
       void queryClient.invalidateQueries({
@@ -226,9 +276,13 @@ export function useCreateProvider() {
       readonly supports_pkce?: boolean;
       readonly device_code_url?: string;
       readonly device_token_url?: string;
+      readonly device_verification_url?: string;
       readonly hosted_callback_url?: string;
       readonly api_key_instructions?: string;
       readonly api_key_url?: string;
+      readonly extra_auth_params?: Readonly<Record<string, string>>;
+      readonly device_code_format?: "rfc8628" | "openai";
+      readonly client_id_param_name?: string;
       readonly icon_url?: string;
       readonly documentation_url?: string;
     }): Promise<ProviderConfig> => {
@@ -258,9 +312,13 @@ export function useUpdateProvider(providerId: string) {
       readonly supports_pkce?: boolean;
       readonly device_code_url?: string;
       readonly device_token_url?: string;
+      readonly device_verification_url?: string;
       readonly hosted_callback_url?: string;
       readonly api_key_instructions?: string;
       readonly api_key_url?: string;
+      readonly extra_auth_params?: Readonly<Record<string, string>>;
+      readonly device_code_format?: "rfc8628" | "openai";
+      readonly client_id_param_name?: string;
       readonly icon_url?: string;
       readonly documentation_url?: string;
     }): Promise<ProviderConfig> => {
@@ -279,11 +337,14 @@ export function useDeleteProvider() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (id: string): Promise<void> => {
-      return api.delete<void>(`/providers/${id}`);
+    mutationFn: async (id: string): Promise<MessageResponse> => {
+      return api.delete<MessageResponse>(`/providers/${id}`);
     },
-    onSuccess: () => {
+    onSuccess: (_data, id) => {
       void queryClient.invalidateQueries({ queryKey: ["providers"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["providers", id],
+      });
     },
   });
 }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +19,7 @@ pub struct UserProviderToken {
     #[serde(default)]
     pub credential_user_id: Option<String>,
 
-    /// "oauth2" | "api_key"
+    /// "oauth2" | "api_key" | "telegram_identity"
     pub token_type: String,
 
     // --- OAuth2 tokens (encrypted) ---
@@ -44,6 +46,12 @@ pub struct UserProviderToken {
 
     // --- User metadata ---
     pub label: Option<String>,
+
+    /// Arbitrary key-value metadata for provider-specific data.
+    /// Used by `telegram_identity` tokens to store `telegram_user_id`,
+    /// `username`, `photo_url`, etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
 
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -78,6 +86,7 @@ mod tests {
             last_used_at: None,
             error_message: None,
             label: Some("My Google Token".to_string()),
+            metadata: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -108,6 +117,7 @@ mod tests {
             last_used_at: None,
             error_message: None,
             label: None,
+            metadata: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

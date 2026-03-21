@@ -24,6 +24,7 @@ const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
   oauth2: "OAuth 2.0",
   api_key: "API Key",
   device_code: "Device Code",
+  telegram_widget: "Telegram Widget",
 };
 
 export function ProviderDetailPage() {
@@ -78,6 +79,8 @@ export function ProviderDetailPage() {
 
   const isOAuth = provider.provider_type === "oauth2";
   const isDeviceCode = provider.provider_type === "device_code";
+  const isApiKey = provider.provider_type === "api_key";
+  const isTelegram = provider.provider_type === "telegram_widget";
 
   return (
     <div className="space-y-8">
@@ -229,7 +232,7 @@ export function ProviderDetailPage() {
         </>
       )}
 
-      {!isOAuth && !isDeviceCode && (
+      {isApiKey && (
         <>
           <Separator />
           <DetailSection title="API Key Configuration">
@@ -250,6 +253,29 @@ export function ProviderDetailPage() {
                 copyable
               />
             )}
+          </DetailSection>
+        </>
+      )}
+
+      {isTelegram && (
+        <>
+          <Separator />
+          <DetailSection title="Telegram Widget Configuration">
+            <DetailRow
+              label="Configured"
+              value={provider.has_oauth_config ? "Yes" : "No"}
+              badge
+              badgeVariant={provider.has_oauth_config ? "success" : "secondary"}
+            />
+            <DetailRow
+              label="Bot Username"
+              value={
+                provider.client_id_param_name
+                  ? `@${provider.client_id_param_name}`
+                  : "Not set"
+              }
+              copyable={provider.client_id_param_name !== null}
+            />
           </DetailSection>
         </>
       )}

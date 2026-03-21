@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useProviders, useCreateProvider } from "@/hooks/use-providers";
 import {
@@ -8,6 +8,10 @@ import {
   type CreateProviderFormData,
   PROVIDER_TYPES,
 } from "@/schemas/providers";
+import {
+  buildCreateProviderPayload,
+  getProviderTypeFieldResets,
+} from "./provider-list.helpers";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -54,23 +58,8 @@ const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
   oauth2: "OAuth 2.0",
   api_key: "API Key",
   device_code: "Device Code",
+  telegram_widget: "Telegram Widget",
 };
-
-function splitScopes(raw: string | undefined): readonly string[] | undefined {
-  if (!raw || raw.trim() === "") return undefined;
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
-
-function stripEmptyStrings<T extends Record<string, unknown>>(
-  obj: T,
-): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(obj).filter(([, v]) => v !== "" && v !== undefined),
-  );
-}
 
 export function ProviderListPage() {
   const { data: providers, isLoading } = useProviders();
@@ -92,6 +81,7 @@ export function ProviderListPage() {
       default_scopes: "",
       client_id: "",
       client_secret: "",
+      client_id_param_name: "",
       supports_pkce: true,
       device_code_url: "",
       device_token_url: "",
@@ -103,19 +93,21 @@ export function ProviderListPage() {
     },
   });
 
-  const watchedProviderType = form.watch("provider_type");
-  const watchedCredentialMode = form.watch("credential_mode");
+  const watchedProviderType = useWatch({
+    control: form.control,
+    name: "provider_type",
+  });
+  const watchedCredentialMode = useWatch({
+    control: form.control,
+    name: "credential_mode",
+  });
 
   async function onSubmit(data: CreateProviderFormData) {
     try {
-      const cleaned = stripEmptyStrings({
-        ...data,
-        default_scopes: splitScopes(data.default_scopes),
-        supports_pkce:
-          data.provider_type === "oauth2" ? data.supports_pkce : undefined,
-      });
       await createMutation.mutateAsync(
-        cleaned as Parameters<typeof createMutation.mutateAsync>[0],
+        buildCreateProviderPayload(data) as Parameters<
+          typeof createMutation.mutateAsync
+        >[0],
       );
       toast.success("Provider created successfully");
       setCreateOpen(false);
@@ -137,7 +129,8 @@ export function ProviderListPage() {
             Manage Providers
           </h2>
           <p className="text-sm text-muted-foreground">
-            Create and manage OAuth and API key providers.
+            Create and manage OAuth, Telegram, device code, and API key
+            providers.
           </p>
         </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
@@ -223,7 +216,48 @@ export function ProviderListPage() {
                       <FormLabel>Provider Type</FormLabel>
                       <Select
                         value={field.value}
-                        onValueChange={field.onChange}
+                        onValueChange={(nextValue) => {
+                          const nextType =
+                            nextValue as CreateProviderFormData["provider_type"];
+                          const resets = getProviderTypeFieldResets(
+                            field.value,
+                            nextType,
+                          );
+
+                          field.onChange(nextType);
+
+                          if (resets.credential_mode !== undefined) {
+                            form.setValue(
+                              "credential_mode",
+                              resets.credential_mode,
+                              {
+                                shouldDirty: false,
+                                shouldValidate: false,
+                              },
+                            );
+                          }
+
+                          if (resets.client_id_param_name !== undefined) {
+                            form.setValue(
+                              "client_id_param_name",
+                              resets.client_id_param_name,
+                              {
+                                shouldDirty: false,
+                                shouldValidate: false,
+                              },
+                            );
+                          }
+
+                          if (
+                            resets.credential_mode !== undefined ||
+                            resets.client_id_param_name !== undefined
+                          ) {
+                            form.clearErrors([
+                              "credential_mode",
+                              "client_id_param_name",
+                            ]);
+                          }
+                        }}
                       >
                         <FormControl>
                           <SelectTrigger>
@@ -594,6 +628,55 @@ export function ProviderListPage() {
                           </FormControl>
                           <p className="text-xs text-muted-foreground">
                             Optional for public OAuth clients.
+                          </p>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </>
+                )}
+
+                {watchedProviderType === "telegram_widget" && (
+                  <>
+                    <Separator />
+                    <h4 className="text-sm font-semibold">
+                      Telegram Widget Configuration
+                    </h4>
+
+                    <FormField
+                      control={form.control}
+                      name="client_id_param_name"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Bot Username</FormLabel>
+                          <FormControl>
+                            <Input placeholder="NyxIdBot" {...field} />
+                          </FormControl>
+                          <p className="text-xs text-muted-foreground">
+                            Enter the BotFather username without the leading
+                            <span className="font-mono"> @</span>.
+                          </p>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name="client_secret"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Bot Token</FormLabel>
+                          <FormControl>
+                            <Input
+                              type="password"
+                              placeholder="123456:ABC-DEF1234567890"
+                              {...field}
+                            />
+                          </FormControl>
+                          <p className="text-xs text-muted-foreground">
+                            BotFather token used to verify Telegram Login Widget
+                            callbacks.
                           </p>
                           <FormMessage />
                         </FormItem>

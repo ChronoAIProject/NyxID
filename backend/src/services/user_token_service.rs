@@ -27,16 +27,98 @@ pub struct UserProviderTokenSummary {
     pub provider_config_id: String,
     pub provider_name: String,
     pub provider_slug: String,
+    pub provider_type: String,
     pub token_type: String,
     pub status: String,
     pub label: Option<String>,
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub connected_at: String,
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 const OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE: &str =
     "This provider is not configured for OAuth yet. Please contact your admin.";
+
+fn build_telegram_identity_metadata(
+    data: &crate::crypto::telegram::TelegramLoginData,
+) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    metadata.insert("telegram_user_id".to_string(), data.id.to_string());
+    metadata.insert("first_name".to_string(), data.first_name.clone());
+    if let Some(ref ln) = data.last_name {
+        metadata.insert("last_name".to_string(), ln.clone());
+    }
+    if let Some(ref un) = data.username {
+        metadata.insert("username".to_string(), un.clone());
+    }
+    if let Some(ref pu) = data.photo_url {
+        metadata.insert("photo_url".to_string(), pu.clone());
+    }
+    metadata
+}
+
+fn build_telegram_identity_update_doc(
+    metadata: &HashMap<String, String>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<bson::Document> {
+    let metadata_bson = bson::to_bson(metadata)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize Telegram metadata: {e}")))?;
+
+    Ok(doc! {
+        "status": "active",
+        "error_message": bson::Bson::Null,
+        "metadata": metadata_bson,
+        "updated_at": bson::DateTime::from_chrono(now),
+    })
+}
+
+fn normalize_telegram_bot_api_key(raw: &str) -> AppResult<String> {
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return Err(AppError::ValidationError(
+            "Telegram bot token must not be empty".to_string(),
+        ));
+    }
+    if normalized.chars().any(char::is_whitespace) {
+        return Err(AppError::ValidationError(
+            "Telegram bot token must not contain whitespace".to_string(),
+        ));
+    }
+    if normalized.contains('/')
+        || normalized.contains('\\')
+        || normalized.contains('?')
+        || normalized.contains('#')
+        || normalized.contains('\0')
+        || normalized.contains('%')
+        || normalized.contains("..")
+    {
+        return Err(AppError::ValidationError(
+            "Telegram bot token contains invalid characters".to_string(),
+        ));
+    }
+
+    Ok(normalized.to_string())
+}
+
+async fn get_active_telegram_widget_provider(
+    db: &mongodb::Database,
+    provider_id: &str,
+) -> AppResult<ProviderConfig> {
+    let provider = db
+        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+        .find_one(doc! { "_id": provider_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Provider not found or inactive".to_string()))?;
+
+    if provider.provider_type != "telegram_widget" {
+        return Err(AppError::BadRequest(
+            "This provider requires Telegram Login Widget connection".to_string(),
+        ));
+    }
+
+    Ok(provider)
+}
 
 fn ensure_oauth_provider_configured(provider: &ProviderConfig) -> AppResult<()> {
     // URLs are always required regardless of credential mode
@@ -82,11 +164,16 @@ pub async fn store_api_key(
         ));
     }
 
-    if api_key.is_empty() {
-        return Err(AppError::ValidationError(
-            "API key must not be empty".to_string(),
-        ));
-    }
+    let api_key_to_store = if provider.slug == "telegram-bot" {
+        normalize_telegram_bot_api_key(api_key)?
+    } else {
+        if api_key.is_empty() {
+            return Err(AppError::ValidationError(
+                "API key must not be empty".to_string(),
+            ));
+        }
+        api_key.to_string()
+    };
 
     // Check if user already has a token for this provider
     let existing = db
@@ -99,7 +186,7 @@ pub async fn store_api_key(
         .await?;
 
     let now = Utc::now();
-    let encrypted = encryption_keys.encrypt(api_key.as_bytes()).await?;
+    let encrypted = encryption_keys.encrypt(api_key_to_store.as_bytes()).await?;
 
     if let Some(existing_token) = existing {
         // Update existing token
@@ -144,6 +231,7 @@ pub async fn store_api_key(
         last_used_at: None,
         error_message: None,
         label: label.map(String::from),
+        metadata: None,
         created_at: now,
         updated_at: now,
     };
@@ -156,6 +244,127 @@ pub async fn store_api_key(
         user_id = %user_id,
         provider_id = %provider_id,
         "API key stored for provider"
+    );
+
+    Ok(token)
+}
+
+/// Return the Telegram bot username needed to render the Login Widget.
+///
+/// Verifies that the provider is an active Telegram Login Widget provider and
+/// that the required bot configuration exists.
+pub async fn get_telegram_connect_bot_username(
+    db: &mongodb::Database,
+    provider_id: &str,
+) -> AppResult<String> {
+    let provider = get_active_telegram_widget_provider(db, provider_id).await?;
+
+    let bot_username = provider.client_id_param_name.ok_or_else(|| {
+        AppError::BadRequest("Telegram bot username not configured for this provider".to_string())
+    })?;
+    if provider.client_secret_encrypted.is_none() {
+        return Err(AppError::BadRequest(
+            "Telegram bot token not configured for this provider".to_string(),
+        ));
+    }
+
+    Ok(bot_username)
+}
+
+/// Verify Telegram Login Widget callback data and persist the resulting
+/// identity metadata for the user.
+pub async fn connect_telegram_widget(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    provider_id: &str,
+    data: &crate::crypto::telegram::TelegramLoginData,
+) -> AppResult<UserProviderToken> {
+    let provider = get_active_telegram_widget_provider(db, provider_id).await?;
+
+    let bot_token_enc = provider.client_secret_encrypted.ok_or_else(|| {
+        AppError::BadRequest("Telegram bot token not configured for this provider".to_string())
+    })?;
+    let bot_token_bytes = Zeroizing::new(encryption_keys.decrypt(&bot_token_enc).await?);
+    let bot_token = std::str::from_utf8(bot_token_bytes.as_slice())
+        .map_err(|e| AppError::Internal(format!("Failed to decode bot token: {e}")))?;
+
+    crate::crypto::telegram::verify_telegram_login(bot_token, data)?;
+
+    store_telegram_identity(db, user_id, provider_id, data).await
+}
+
+/// Store a verified Telegram identity for a user.
+///
+/// Called only after the Telegram Login Widget callback has already been
+/// verified. No tokens are stored — only the verified identity metadata.
+async fn store_telegram_identity(
+    db: &mongodb::Database,
+    user_id: &str,
+    provider_id: &str,
+    data: &crate::crypto::telegram::TelegramLoginData,
+) -> AppResult<UserProviderToken> {
+    // Check if user already has a token for this provider
+    let existing = db
+        .collection::<UserProviderToken>(COLLECTION_NAME)
+        .find_one(doc! {
+            "user_id": user_id,
+            "provider_config_id": provider_id,
+            "status": { "$ne": "revoked" },
+        })
+        .await?;
+
+    let now = Utc::now();
+
+    let metadata = build_telegram_identity_metadata(data);
+
+    if let Some(existing_token) = existing {
+        // Replace the full metadata object so stale optional fields do not survive reconnects.
+        let set_doc = build_telegram_identity_update_doc(&metadata, now)?;
+
+        db.collection::<UserProviderToken>(COLLECTION_NAME)
+            .update_one(doc! { "_id": &existing_token.id }, doc! { "$set": set_doc })
+            .await?;
+
+        let updated = db
+            .collection::<UserProviderToken>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &existing_token.id })
+            .await?
+            .ok_or_else(|| AppError::Internal("Token disappeared after update".to_string()))?;
+
+        return Ok(updated);
+    }
+
+    let token = UserProviderToken {
+        id: Uuid::new_v4().to_string(),
+        user_id: user_id.to_string(),
+        provider_config_id: provider_id.to_string(),
+        credential_user_id: None,
+        token_type: "telegram_identity".to_string(),
+        access_token_encrypted: None,
+        refresh_token_encrypted: None,
+        token_scopes: None,
+        expires_at: None,
+        api_key_encrypted: None,
+        status: "active".to_string(),
+        last_refreshed_at: None,
+        last_used_at: None,
+        error_message: None,
+        label: None,
+        metadata: Some(metadata),
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.collection::<UserProviderToken>(COLLECTION_NAME)
+        .insert_one(&token)
+        .await?;
+
+    tracing::info!(
+        user_id = %user_id,
+        provider_id = %provider_id,
+        telegram_user_id = %data.id,
+        "Telegram identity stored for provider"
     );
 
     Ok(token)
@@ -819,6 +1028,7 @@ async fn store_device_code_tokens(
         last_used_at: None,
         error_message: None,
         label: None,
+        metadata: None,
         created_at: now,
         updated_at: now,
     };
@@ -1017,6 +1227,7 @@ pub async fn handle_oauth_callback(
         last_used_at: None,
         error_message: None,
         label: None,
+        metadata: None,
         created_at: now,
         updated_at: now,
     };
@@ -1288,6 +1499,34 @@ async fn send_revocation_request(
     Ok(())
 }
 
+fn build_user_token_summary(
+    token: &UserProviderToken,
+    provider: Option<&ProviderConfig>,
+) -> UserProviderTokenSummary {
+    let (provider_name, provider_slug, provider_type) = match provider {
+        Some(p) => (p.name.clone(), p.slug.clone(), p.provider_type.clone()),
+        None => (
+            "Unknown".to_string(),
+            "unknown".to_string(),
+            token.token_type.clone(),
+        ),
+    };
+
+    UserProviderTokenSummary {
+        provider_config_id: token.provider_config_id.clone(),
+        provider_name,
+        provider_slug,
+        provider_type,
+        token_type: token.token_type.clone(),
+        status: token.status.clone(),
+        label: token.label.clone(),
+        expires_at: token.expires_at.map(|dt| dt.to_rfc3339()),
+        last_used_at: token.last_used_at.map(|dt| dt.to_rfc3339()),
+        connected_at: token.created_at.to_rfc3339(),
+        metadata: token.metadata.clone(),
+    }
+}
+
 /// List all providers the user has connected to, with status.
 ///
 /// Uses a single batch query for provider lookups (CR-4/5/6: fix N+1).
@@ -1323,25 +1562,180 @@ pub async fn list_user_tokens(
     let summaries = tokens
         .iter()
         .map(|token| {
-            let (provider_name, provider_slug) =
-                match provider_map.get(token.provider_config_id.as_str()) {
-                    Some(p) => (p.name.clone(), p.slug.clone()),
-                    None => ("Unknown".to_string(), "unknown".to_string()),
-                };
-
-            UserProviderTokenSummary {
-                provider_config_id: token.provider_config_id.clone(),
-                provider_name,
-                provider_slug,
-                token_type: token.token_type.clone(),
-                status: token.status.clone(),
-                label: token.label.clone(),
-                expires_at: token.expires_at.map(|dt| dt.to_rfc3339()),
-                last_used_at: token.last_used_at.map(|dt| dt.to_rfc3339()),
-                connected_at: token.created_at.to_rfc3339(),
-            }
+            build_user_token_summary(
+                token,
+                provider_map.get(token.provider_config_id.as_str()).copied(),
+            )
         })
         .collect();
 
     Ok(summaries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_telegram_identity_metadata, build_telegram_identity_update_doc,
+        build_user_token_summary, normalize_telegram_bot_api_key,
+    };
+    use crate::crypto::telegram::TelegramLoginData;
+    use crate::models::provider_config::ProviderConfig;
+    use crate::models::user_provider_token::UserProviderToken;
+    use chrono::Utc;
+    use mongodb::bson::Bson;
+    use std::collections::HashMap;
+
+    fn make_provider(provider_type: &str) -> ProviderConfig {
+        ProviderConfig {
+            id: "provider-1".to_string(),
+            slug: "telegram".to_string(),
+            name: "Telegram".to_string(),
+            description: None,
+            provider_type: provider_type.to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: Some(vec![1, 2, 3]),
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: Some("NyxIdBot".to_string()),
+            created_by: "system".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn make_token(token_type: &str) -> UserProviderToken {
+        let mut metadata = HashMap::new();
+        metadata.insert("username".to_string(), "nyx_user".to_string());
+
+        UserProviderToken {
+            id: "token-1".to_string(),
+            user_id: "user-1".to_string(),
+            provider_config_id: "provider-1".to_string(),
+            credential_user_id: None,
+            token_type: token_type.to_string(),
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            api_key_encrypted: None,
+            status: "active".to_string(),
+            last_refreshed_at: None,
+            last_used_at: None,
+            error_message: None,
+            label: None,
+            metadata: Some(metadata),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn summary_uses_provider_type_and_preserves_metadata() {
+        let provider = make_provider("telegram_widget");
+        let token = make_token("telegram_identity");
+
+        let summary = build_user_token_summary(&token, Some(&provider));
+
+        assert_eq!(summary.provider_type, "telegram_widget");
+        assert_eq!(summary.token_type, "telegram_identity");
+        assert_eq!(
+            summary
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("username")),
+            Some(&"nyx_user".to_string())
+        );
+    }
+
+    #[test]
+    fn summary_falls_back_to_token_type_when_provider_is_missing() {
+        let token = make_token("api_key");
+
+        let summary = build_user_token_summary(&token, None);
+
+        assert_eq!(summary.provider_type, "api_key");
+        assert_eq!(summary.provider_name, "Unknown");
+        assert_eq!(summary.provider_slug, "unknown");
+    }
+
+    #[test]
+    fn telegram_identity_metadata_omits_missing_optional_fields() {
+        let data = TelegramLoginData {
+            id: 12345,
+            first_name: "Nyx".to_string(),
+            last_name: None,
+            username: None,
+            photo_url: None,
+            auth_date: Utc::now().timestamp(),
+            hash: "hash".to_string(),
+        };
+
+        let metadata = build_telegram_identity_metadata(&data);
+
+        assert_eq!(metadata.get("telegram_user_id"), Some(&"12345".to_string()));
+        assert_eq!(metadata.get("first_name"), Some(&"Nyx".to_string()));
+        assert!(!metadata.contains_key("last_name"));
+        assert!(!metadata.contains_key("username"));
+        assert!(!metadata.contains_key("photo_url"));
+    }
+
+    #[test]
+    fn telegram_identity_update_replaces_metadata_document() {
+        let mut metadata = HashMap::new();
+        metadata.insert("telegram_user_id".to_string(), "12345".to_string());
+        metadata.insert("first_name".to_string(), "Nyx".to_string());
+
+        let update = build_telegram_identity_update_doc(&metadata, Utc::now()).expect("update doc");
+
+        assert_eq!(update.get_str("status").unwrap(), "active");
+        assert_eq!(update.get("error_message"), Some(&Bson::Null));
+        assert!(update.get("metadata.username").is_none());
+        assert_eq!(
+            update
+                .get_document("metadata")
+                .unwrap()
+                .get_str("first_name")
+                .unwrap(),
+            "Nyx"
+        );
+    }
+
+    #[test]
+    fn normalize_telegram_bot_api_key_trims_surrounding_whitespace() {
+        let normalized = normalize_telegram_bot_api_key(" 123456:ABC-DEF123 \n")
+            .expect("token should normalize");
+
+        assert_eq!(normalized, "123456:ABC-DEF123");
+    }
+
+    #[test]
+    fn normalize_telegram_bot_api_key_rejects_whitespace_and_path_breakers() {
+        let whitespace = normalize_telegram_bot_api_key("123456:ABC DEF")
+            .expect_err("whitespace should be rejected");
+        assert!(whitespace.to_string().contains("whitespace"));
+
+        let slash =
+            normalize_telegram_bot_api_key("123456:ABC/DEF").expect_err("slash should be rejected");
+        assert!(slash.to_string().contains("invalid characters"));
+
+        let percent = normalize_telegram_bot_api_key("123456:ABC%2FDEF")
+            .expect_err("percent-encoded slash should be rejected");
+        assert!(percent.to_string().contains("invalid characters"));
+    }
 }

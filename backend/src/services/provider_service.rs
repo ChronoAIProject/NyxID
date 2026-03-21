@@ -29,6 +29,7 @@ const SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS: &[&str] = &[
     "tiktok",
     "twitch",
     "reddit",
+    "lark",
 ];
 
 /// Seed default AI provider configurations at startup (idempotent).
@@ -945,6 +946,193 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 20. Lark / Larksuite (OAuth2)
+    if !slug_exists!("lark") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "lark".to_string(),
+            name: "Lark".to_string(),
+            description: Some(
+                "Lark (Larksuite) account access via OAuth 2.0".to_string(),
+            ),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(
+                "https://open.larksuite.com/open-apis/authen/v1/index".to_string(),
+            ),
+            token_url: Some(
+                "https://open.larksuite.com/open-apis/authen/v2/oauth/token".to_string(),
+            ),
+            revocation_url: None,
+            default_scopes: Some(vec![
+                "contact:user.base:readonly".to_string(),
+                "offline_access".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://open.larksuite.com/document/server-docs/authentication-management/access-token/authorize-user-access-token"
+                    .to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "lark", "Seeded default provider: Lark");
+        seeded_count += 1;
+    }
+
+    // 20b. Feishu (China variant of Lark, OAuth2)
+    if !slug_exists!("feishu") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "feishu".to_string(),
+            name: "Feishu".to_string(),
+            description: Some(
+                "Feishu (飞书) account access via OAuth 2.0 (China region)".to_string(),
+            ),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some(
+                "https://open.feishu.cn/open-apis/authen/v1/index".to_string(),
+            ),
+            token_url: Some(
+                "https://open.feishu.cn/open-apis/authen/v2/oauth/token".to_string(),
+            ),
+            revocation_url: None,
+            default_scopes: Some(vec![
+                "contact:user.base:readonly".to_string(),
+                "offline_access".to_string(),
+            ]),
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://open.feishu.cn/document/server-docs/authentication-management/access-token/authorize-user-access-token"
+                    .to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "feishu", "Seeded default provider: Feishu");
+        seeded_count += 1;
+    }
+
+    // 21. Telegram Login Widget (telegram_widget)
+    if !slug_exists!("telegram") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "telegram".to_string(),
+            name: "Telegram".to_string(),
+            description: Some(
+                "Telegram identity verification via Login Widget (HMAC-SHA256)".to_string(),
+            ),
+            provider_type: "telegram_widget".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            // client_secret_encrypted is reused to store the encrypted bot token
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some("https://core.telegram.org/widgets/login".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "telegram", "Seeded default provider: Telegram Login");
+        seeded_count += 1;
+    }
+
+    // 22. Telegram Bot API (API Key)
+    if !slug_exists!("telegram-bot") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "telegram-bot".to_string(),
+            name: "Telegram Bot API".to_string(),
+            description: Some(
+                "Access the Telegram Bot API to send messages and manage bots".to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a bot via @BotFather on Telegram and copy the bot token (format: 123456:ABC-DEF...)"
+                    .to_string(),
+            ),
+            api_key_url: Some("https://t.me/BotFather".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://core.telegram.org/bots/api".to_string()),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(
+            slug = "telegram-bot",
+            "Seeded default provider: Telegram Bot API"
+        );
+        seeded_count += 1;
+    }
+
     if seeded_count > 0 {
         tracing::info!(count = seeded_count, "Default provider seeding complete");
     }
@@ -1103,6 +1291,30 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_slug: "api-reddit",
         service_name: "Reddit API",
         base_url: "https://oauth.reddit.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "lark",
+        service_slug: "api-lark",
+        service_name: "Lark API",
+        base_url: "https://open.larksuite.com/open-apis",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+    },
+    DefaultServiceSeed {
+        provider_slug: "telegram-bot",
+        service_slug: "api-telegram-bot",
+        service_name: "Telegram Bot API",
+        base_url: "https://api.telegram.org",
+        injection_method: "path",
+        injection_key: "bot",
+    },
+    DefaultServiceSeed {
+        provider_slug: "feishu",
+        service_slug: "api-feishu",
+        service_name: "Feishu API",
+        base_url: "https://open.feishu.cn/open-apis",
         injection_method: "bearer",
         injection_key: "Authorization",
     },
@@ -1277,6 +1489,12 @@ pub struct ApiKeyProviderInput {
     pub api_key_url: Option<String>,
 }
 
+/// Input for Telegram Widget provider configuration fields.
+pub struct TelegramWidgetProviderInput {
+    pub bot_token: String,
+    pub bot_username: String,
+}
+
 /// Fields that can be updated on a provider config.
 pub struct ProviderUpdateInput {
     pub name: Option<String>,
@@ -1317,6 +1535,7 @@ pub async fn create_provider(
     oauth_config: Option<OAuthProviderInput>,
     api_key_config: Option<ApiKeyProviderInput>,
     device_code_config: Option<DeviceCodeProviderInput>,
+    telegram_widget_config: Option<TelegramWidgetProviderInput>,
     description: Option<&str>,
     icon_url: Option<&str>,
     documentation_url: Option<&str>,
@@ -1325,7 +1544,7 @@ pub async fn create_provider(
     device_code_format: Option<&str>,
     client_id_param_name: Option<&str>,
 ) -> AppResult<ProviderConfig> {
-    let valid_types = ["oauth2", "api_key", "device_code"];
+    let valid_types = ["oauth2", "api_key", "device_code", "telegram_widget"];
     if !valid_types.contains(&provider_type) {
         return Err(AppError::ValidationError(format!(
             "provider_type must be one of: {}",
@@ -1338,6 +1557,11 @@ pub async fn create_provider(
             "credential_mode must be one of: {}",
             valid_modes.join(", ")
         )));
+    }
+    if provider_type == "telegram_widget" && credential_mode != "admin" {
+        return Err(AppError::ValidationError(
+            "telegram_widget providers only support credential_mode=admin".to_string(),
+        ));
     }
 
     // Check slug uniqueness
@@ -1376,8 +1600,17 @@ pub async fn create_provider(
             None => None,
         };
         (cid, csec)
+    } else if let Some(ref tw) = telegram_widget_config {
+        let bot_token = normalize_telegram_bot_token(&tw.bot_token)?;
+        let csec = encryption_keys.encrypt(bot_token.as_bytes()).await?;
+        (None, Some(csec))
     } else {
         (None, None)
+    };
+    let normalized_client_id_param_name = if let Some(ref tw) = telegram_widget_config {
+        Some(normalize_telegram_bot_username(&tw.bot_username)?)
+    } else {
+        client_id_param_name.map(String::from)
     };
 
     let provider = ProviderConfig {
@@ -1434,7 +1667,7 @@ pub async fn create_provider(
         token_endpoint_auth_method: token_endpoint_auth_method.to_string(),
         extra_auth_params,
         device_code_format: device_code_format.unwrap_or("rfc8628").to_string(),
-        client_id_param_name: client_id_param_name.map(String::from),
+        client_id_param_name: normalized_client_id_param_name,
         created_by: created_by.to_string(),
         created_at: now,
         updated_at: now,
@@ -1490,7 +1723,15 @@ pub async fn update_provider(
     updates: ProviderUpdateInput,
 ) -> AppResult<ProviderConfig> {
     // Verify exists
-    let _existing = get_provider(db, provider_id).await?;
+    let existing = get_provider(db, provider_id).await?;
+    if existing.provider_type == "telegram_widget"
+        && let Some(ref mode) = updates.credential_mode
+        && mode != "admin"
+    {
+        return Err(AppError::ValidationError(
+            "telegram_widget providers only support credential_mode=admin".to_string(),
+        ));
+    }
 
     let now = Utc::now();
     let mut set_doc = doc! {
@@ -1529,7 +1770,12 @@ pub async fn update_provider(
         );
     }
     if let Some(ref csec) = updates.client_secret {
-        let enc = encryption_keys.encrypt(csec.as_bytes()).await?;
+        let secret_value = if existing.provider_type == "telegram_widget" {
+            normalize_telegram_bot_token(csec)?
+        } else {
+            csec.clone()
+        };
+        let enc = encryption_keys.encrypt(secret_value.as_bytes()).await?;
         set_doc.insert(
             "client_secret_encrypted",
             bson::Binary {
@@ -1603,7 +1849,12 @@ pub async fn update_provider(
         set_doc.insert("device_code_format", format.as_str());
     }
     if let Some(ref name) = updates.client_id_param_name {
-        set_doc.insert("client_id_param_name", name.as_str());
+        let value = if existing.provider_type == "telegram_widget" {
+            normalize_telegram_bot_username(name)?
+        } else {
+            name.clone()
+        };
+        set_doc.insert("client_id_param_name", value);
     }
 
     use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
@@ -1622,6 +1873,38 @@ pub async fn update_provider(
     tracing::info!(provider_id = %provider_id, "Provider config updated");
 
     Ok(updated)
+}
+
+fn normalize_telegram_bot_username(raw: &str) -> AppResult<String> {
+    let normalized = raw.trim().trim_start_matches('@');
+    if normalized.is_empty() {
+        return Err(AppError::ValidationError(
+            "Telegram bot username must not be empty".to_string(),
+        ));
+    }
+    if normalized.chars().any(char::is_whitespace) {
+        return Err(AppError::ValidationError(
+            "Telegram bot username must not contain whitespace".to_string(),
+        ));
+    }
+
+    Ok(normalized.to_string())
+}
+
+fn normalize_telegram_bot_token(raw: &str) -> AppResult<String> {
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return Err(AppError::ValidationError(
+            "Telegram bot token must not be empty".to_string(),
+        ));
+    }
+    if normalized.chars().any(char::is_whitespace) {
+        return Err(AppError::ValidationError(
+            "Telegram bot token must not contain whitespace".to_string(),
+        ));
+    }
+
+    Ok(normalized.to_string())
 }
 
 /// Soft-delete a provider. Also revokes all user tokens for this provider.
@@ -1660,4 +1943,57 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
     tracing::info!(provider_id = %provider_id, "Provider deactivated, user tokens revoked, and user credentials deleted");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_telegram_bot_token, normalize_telegram_bot_username};
+    use crate::errors::AppError;
+
+    #[test]
+    fn normalize_telegram_bot_username_trims_whitespace_and_at_prefix() {
+        let normalized = normalize_telegram_bot_username("  @NyxIdBot  ")
+            .expect("username should be normalized");
+
+        assert_eq!(normalized, "NyxIdBot");
+    }
+
+    #[test]
+    fn normalize_telegram_bot_username_rejects_whitespace() {
+        let err = normalize_telegram_bot_username("Nyx Id Bot")
+            .expect_err("whitespace should be rejected");
+
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message == "Telegram bot username must not contain whitespace"
+        ));
+    }
+
+    #[test]
+    fn normalize_telegram_bot_token_trims_surrounding_whitespace() {
+        let normalized = normalize_telegram_bot_token(" 123456:ABC-DEF123 \n")
+            .expect("token should be normalized");
+
+        assert_eq!(normalized, "123456:ABC-DEF123");
+    }
+
+    #[test]
+    fn normalize_telegram_bot_token_rejects_blank_or_embedded_whitespace() {
+        let blank =
+            normalize_telegram_bot_token("   ").expect_err("blank token should be rejected");
+        assert!(matches!(
+            blank,
+            AppError::ValidationError(message)
+                if message == "Telegram bot token must not be empty"
+        ));
+
+        let spaced = normalize_telegram_bot_token("123456:ABC DEF")
+            .expect_err("tokens with embedded whitespace should be rejected");
+        assert!(matches!(
+            spaced,
+            AppError::ValidationError(message)
+                if message == "Telegram bot token must not contain whitespace"
+        ));
+    }
 }

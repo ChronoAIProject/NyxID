@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useProvider, useUpdateProvider } from "@/hooks/use-providers";
 import {
@@ -37,6 +37,7 @@ const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
   oauth2: "OAuth 2.0",
   api_key: "API Key",
   device_code: "Device Code",
+  telegram_widget: "Telegram Widget",
 };
 
 function splitScopes(raw: string | undefined): readonly string[] | undefined {
@@ -80,6 +81,7 @@ export function ProviderEditPage() {
       is_active: true,
       client_id: "",
       client_secret: "",
+      client_id_param_name: "",
       supports_pkce: true,
       device_code_url: "",
       device_token_url: "",
@@ -107,6 +109,7 @@ export function ProviderEditPage() {
         is_active: provider.is_active,
         client_id: "",
         client_secret: "",
+        client_id_param_name: provider.client_id_param_name ?? "",
         supports_pkce: provider.supports_pkce,
         device_code_url: "",
         device_token_url: "",
@@ -120,7 +123,10 @@ export function ProviderEditPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
 
-  const watchedProviderType = form.watch("provider_type");
+  const watchedProviderType = useWatch({
+    control: form.control,
+    name: "provider_type",
+  });
 
   async function onSubmit(data: UpdateProviderFormData) {
     if (!provider) return;
@@ -179,6 +185,8 @@ export function ProviderEditPage() {
 
   const isOAuth = watchedProviderType === "oauth2";
   const isDeviceCode = watchedProviderType === "device_code";
+  const isApiKey = watchedProviderType === "api_key";
+  const isTelegram = watchedProviderType === "telegram_widget";
 
   return (
     <div className="space-y-8">
@@ -634,7 +642,61 @@ export function ProviderEditPage() {
               </>
             )}
 
-            {!isOAuth && !isDeviceCode && (
+            {isTelegram && (
+              <>
+                <Separator className="my-2" />
+                <h3 className="text-sm font-semibold">
+                  Telegram Widget Configuration
+                </h3>
+                <p className="text-xs text-muted-foreground">
+                  Leave the bot token blank to keep the current secret.
+                </p>
+
+                <FormField
+                  control={form.control}
+                  name="client_id_param_name"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Bot Username</FormLabel>
+                      <FormControl>
+                        <Input
+                          placeholder="NyxIdBot"
+                          {...field}
+                        />
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        Enter the BotFather username without the leading
+                        <span className="font-mono"> @</span>.
+                      </p>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name="client_secret"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Bot Token</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="password"
+                          placeholder="Leave blank to keep current"
+                          {...field}
+                        />
+                      </FormControl>
+                      <p className="text-xs text-muted-foreground">
+                        Only fill this in when rotating the Telegram bot token.
+                      </p>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </>
+            )}
+
+            {isApiKey && (
               <>
                 <Separator className="my-2" />
                 <h3 className="text-sm font-semibold">

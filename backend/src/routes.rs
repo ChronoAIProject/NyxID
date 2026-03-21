@@ -180,6 +180,14 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             post(handlers::user_tokens::poll_device_code),
         )
         .route(
+            "/{provider_id}/connect/telegram",
+            get(handlers::user_tokens::get_telegram_connect_config),
+        )
+        .route(
+            "/{provider_id}/connect/telegram/callback",
+            post(handlers::user_tokens::telegram_callback),
+        )
+        .route(
             "/{provider_id}/disconnect",
             delete(handlers::user_tokens::disconnect_provider),
         )

@@ -55,6 +55,10 @@ vi.mock("./user-credentials-dialog", () => ({
   UserCredentialsDialog: () => null,
 }));
 
+vi.mock("./telegram-login-dialog", () => ({
+  TelegramLoginDialog: () => null,
+}));
+
 const provider: ProviderConfig = {
   id: "provider-twitter",
   slug: "twitter",

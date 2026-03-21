@@ -43,6 +43,8 @@ pub struct UserTokenResponse {
     pub expires_at: Option<String>,
     pub last_used_at: Option<String>,
     pub connected_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,12 +115,13 @@ pub async fn list_my_tokens(
             provider_id: s.provider_config_id,
             provider_name: s.provider_name,
             provider_slug: s.provider_slug,
-            provider_type: s.token_type,
+            provider_type: s.provider_type,
             status: s.status,
             label: s.label,
             expires_at: s.expires_at,
             last_used_at: s.last_used_at,
             connected_at: s.connected_at,
+            metadata: s.metadata,
         })
         .collect();
 
@@ -572,6 +575,68 @@ pub async fn poll_device_code(
     }))
 }
 
+// --- Telegram Login Widget types & handlers ---
+
+#[derive(Debug, Serialize)]
+pub struct TelegramConnectConfigResponse {
+    pub bot_username: String,
+}
+
+/// GET /api/v1/providers/{provider_id}/connect/telegram
+///
+/// Returns the Telegram bot username needed to render the Login Widget on the
+/// frontend.
+pub async fn get_telegram_connect_config(
+    State(state): State<AppState>,
+    _auth_user: AuthUser,
+    Path(provider_id): Path<String>,
+) -> AppResult<Json<TelegramConnectConfigResponse>> {
+    let bot_username =
+        user_token_service::get_telegram_connect_bot_username(&state.db, &provider_id).await?;
+
+    Ok(Json(TelegramConnectConfigResponse { bot_username }))
+}
+
+/// POST /api/v1/providers/{provider_id}/connect/telegram/callback
+///
+/// Receives Telegram Login Widget data, verifies the HMAC-SHA256 signature,
+/// and stores the verified identity as a `telegram_identity` token.
+pub async fn telegram_callback(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(provider_id): Path<String>,
+    Json(body): Json<crate::crypto::telegram::TelegramLoginData>,
+) -> AppResult<Json<ConnectResponse>> {
+    let user_id_str = auth_user.user_id.to_string();
+
+    user_token_service::connect_telegram_widget(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &provider_id,
+        &body,
+    )
+    .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(user_id_str),
+        "provider_token_connected".to_string(),
+        Some(serde_json::json!({
+            "provider_id": &provider_id,
+            "token_type": "telegram_identity",
+            "telegram_user_id": body.id,
+        })),
+        None,
+        None,
+    );
+
+    Ok(Json(ConnectResponse {
+        status: "connected".to_string(),
+        message: "Telegram identity verified and stored".to_string(),
+    }))
+}
+
 /// Return a user-safe error message for redirects, matching the sanitization
 /// applied by `AppError::into_response` for JSON errors. Internal/database
 /// errors are replaced with a generic message so implementation details never
@@ -636,5 +701,61 @@ mod tests {
             .expect_err("mismatched session should fail");
 
         assert!(matches!(err, AppError::BadRequest(message) if message == "Session mismatch"));
+    }
+
+    #[test]
+    fn user_token_response_serializes_telegram_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert("telegram_user_id".to_string(), "12345".to_string());
+        metadata.insert("first_name".to_string(), "Nyx".to_string());
+        metadata.insert("username".to_string(), "nyx_user".to_string());
+        metadata.insert(
+            "photo_url".to_string(),
+            "https://t.me/i/userpic/photo.jpg".to_string(),
+        );
+
+        let response = UserTokenResponse {
+            provider_id: "provider-1".to_string(),
+            provider_name: "Telegram".to_string(),
+            provider_slug: "telegram".to_string(),
+            provider_type: "telegram_widget".to_string(),
+            status: "active".to_string(),
+            label: None,
+            expires_at: None,
+            last_used_at: None,
+            connected_at: "2026-01-01T00:00:00Z".to_string(),
+            metadata: Some(metadata),
+        };
+
+        let json = serde_json::to_value(&response).expect("serialization");
+
+        assert_eq!(json["provider_type"], "telegram_widget");
+        assert_eq!(json["metadata"]["telegram_user_id"], "12345");
+        assert_eq!(json["metadata"]["username"], "nyx_user");
+        assert_eq!(
+            json["metadata"]["photo_url"],
+            "https://t.me/i/userpic/photo.jpg"
+        );
+        assert_eq!(json["metadata"]["first_name"], "Nyx");
+    }
+
+    #[test]
+    fn user_token_response_omits_metadata_when_none() {
+        let response = UserTokenResponse {
+            provider_id: "provider-1".to_string(),
+            provider_name: "GitHub".to_string(),
+            provider_slug: "github".to_string(),
+            provider_type: "oauth2".to_string(),
+            status: "active".to_string(),
+            label: None,
+            expires_at: None,
+            last_used_at: None,
+            connected_at: "2026-01-01T00:00:00Z".to_string(),
+            metadata: None,
+        };
+
+        let json = serde_json::to_value(&response).expect("serialization");
+
+        assert!(json.get("metadata").is_none());
     }
 }

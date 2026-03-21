@@ -1,5 +1,6 @@
 use mongodb::bson::doc;
 use reqwest::Client;
+use url::form_urlencoded;
 use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -21,6 +22,12 @@ pub struct ProxyTarget {
     pub service: DownstreamService,
 }
 
+pub(crate) struct PreparedDelegatedRequest {
+    pub path: String,
+    pub query: Option<String>,
+    pub delegated_headers: Vec<(String, String)>,
+}
+
 /// Headers that are safe to forward to downstream services.
 /// Uses an allowlist approach to prevent leaking sensitive headers.
 const ALLOWED_FORWARD_HEADERS: &[&str] = &[
@@ -35,6 +42,151 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "x-request-id",
     "x-correlation-id",
 ];
+
+fn validate_path_injection_prefix(value: &str) -> AppResult<()> {
+    if value.trim().is_empty()
+        || value.chars().any(char::is_whitespace)
+        || value.contains('/')
+        || value.contains('\\')
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('\0')
+        || value.contains("..")
+        || value.contains('%')
+    {
+        return Err(AppError::BadRequest(
+            "Service requirement is misconfigured for path injection. Please contact your admin."
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_path_injection_credential(value: &str) -> AppResult<()> {
+    if value.trim().is_empty()
+        || value.chars().any(char::is_whitespace)
+        || value.contains('/')
+        || value.contains('\\')
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('\0')
+        || value.contains("..")
+        || value.contains('%')
+    {
+        return Err(AppError::BadRequest(
+            "Stored provider credential is invalid for path injection. Reconnect the provider."
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn contains_dot_segment(value: &str) -> bool {
+    value
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+}
+
+fn contains_percent_encoded_path_breaker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("%2f")
+        || lower.contains("%5c")
+        || lower.contains("%00")
+        || lower.contains("%3f")
+        || lower.contains("%23")
+        || lower.split('/').any(|segment| {
+            let decoded_dots = segment.replace("%2e", ".");
+            decoded_dots == "." || decoded_dots == ".."
+        })
+}
+
+pub(crate) fn validate_requested_proxy_path(path: &str) -> AppResult<()> {
+    if path.contains('\\')
+        || path.contains('\0')
+        || path.contains('?')
+        || path.contains('#')
+        || path.contains("//")
+        || contains_dot_segment(path)
+        || contains_percent_encoded_path_breaker(path)
+    {
+        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn build_forward_path(
+    path: &str,
+    delegated_credentials: &[DelegatedCredential],
+) -> AppResult<String> {
+    validate_requested_proxy_path(path)?;
+
+    let mut prefix_segments = Vec::new();
+    for cred in delegated_credentials {
+        if cred.injection_method == "path" {
+            validate_path_injection_prefix(&cred.injection_key)?;
+            validate_path_injection_credential(&cred.credential)?;
+            prefix_segments.push(format!("{}{}", cred.injection_key, cred.credential));
+        }
+    }
+
+    let trimmed_path = path.trim_start_matches('/');
+    let final_path = if prefix_segments.is_empty() {
+        trimmed_path.to_string()
+    } else if trimmed_path.is_empty() {
+        prefix_segments.join("/")
+    } else {
+        format!("{}/{}", prefix_segments.join("/"), trimmed_path)
+    };
+
+    validate_requested_proxy_path(&final_path)?;
+    Ok(final_path)
+}
+
+pub(crate) fn prepare_delegated_request(
+    path: &str,
+    query: Option<&str>,
+    delegated_credentials: &[DelegatedCredential],
+) -> AppResult<PreparedDelegatedRequest> {
+    let mut delegated_headers = Vec::new();
+    let mut forwarded_query = query
+        .map(str::to_string)
+        .filter(|existing| !existing.is_empty());
+
+    for cred in delegated_credentials {
+        match cred.injection_method.as_str() {
+            "bearer" => delegated_headers.push((
+                cred.injection_key.clone(),
+                format!("Bearer {}", cred.credential),
+            )),
+            "header" => {
+                delegated_headers.push((cred.injection_key.clone(), cred.credential.clone()));
+            }
+            "query" => {
+                let encoded = form_urlencoded::Serializer::new(String::new())
+                    .append_pair(&cred.injection_key, &cred.credential)
+                    .finish();
+                match forwarded_query.as_mut() {
+                    Some(existing) => {
+                        existing.push('&');
+                        existing.push_str(&encoded);
+                    }
+                    None => forwarded_query = Some(encoded),
+                }
+            }
+            "path" => {}
+            _ => {}
+        }
+    }
+
+    Ok(PreparedDelegatedRequest {
+        path: build_forward_path(path, delegated_credentials)?,
+        query: forwarded_query,
+        delegated_headers,
+    })
+}
 
 /// Resolve a downstream service by its slug.
 /// Returns the service document or NotFound.
@@ -252,28 +404,25 @@ pub async fn forward_request(
     identity_headers: Vec<(String, String)>,
     delegated_credentials: Vec<DelegatedCredential>,
 ) -> AppResult<reqwest::Response> {
-    // SEC-H3: Reject paths containing traversal sequences
-    if path.contains("..") || path.contains("//") {
-        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
-    }
+    let prepared = prepare_delegated_request(path, query, &delegated_credentials)?;
 
     // TODO(SEC-H1): Re-validate the resolved IP at proxy time to prevent DNS rebinding.
     // Currently base_url is only validated at service creation/update time. An attacker
     // could change DNS to point to a private IP after validation. Consider using a custom
     // DNS resolver or reqwest's `resolve` feature to check the resolved IP before connecting.
 
-    let url = if let Some(q) = query {
+    let url = if let Some(q) = prepared.query.as_deref() {
         format!(
             "{}/{}?{}",
             target.base_url.trim_end_matches('/'),
-            path.trim_start_matches('/'),
+            prepared.path,
             q
         )
     } else {
         format!(
             "{}/{}",
             target.base_url.trim_end_matches('/'),
-            path.trim_start_matches('/')
+            prepared.path
         )
     };
 
@@ -327,21 +476,9 @@ pub async fn forward_request(
         }
     }
 
-    // Inject delegated provider credentials
-    for cred in &delegated_credentials {
-        match cred.injection_method.as_str() {
-            "bearer" => {
-                request =
-                    request.header(&cred.injection_key, format!("Bearer {}", cred.credential));
-            }
-            "header" => {
-                request = request.header(&cred.injection_key, &cred.credential);
-            }
-            "query" => {
-                request = request.query(&[(&cred.injection_key, &cred.credential)]);
-            }
-            _ => {}
-        }
+    // Inject delegated provider credentials that are represented as headers.
+    for (name, value) in &prepared.delegated_headers {
+        request = request.header(name, value);
     }
 
     if let Some(ref body_bytes) = body {
@@ -390,7 +527,7 @@ mod tests {
         Router,
         body::Bytes,
         extract::State,
-        http::{HeaderMap, StatusCode},
+        http::{HeaderMap, StatusCode, Uri},
         routing::post,
     };
     use chrono::Utc;
@@ -398,16 +535,21 @@ mod tests {
 
     #[derive(Debug)]
     struct CapturedRequest {
+        path: String,
+        query: Option<String>,
         content_type: Option<String>,
         body: Vec<u8>,
     }
 
     async fn capture_request(
         State(sender): State<mpsc::UnboundedSender<CapturedRequest>>,
+        uri: Uri,
         headers: HeaderMap,
         body: Bytes,
     ) -> StatusCode {
         let _ = sender.send(CapturedRequest {
+            path: uri.path().to_string(),
+            query: uri.query().map(ToString::to_string),
             content_type: headers
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
@@ -492,9 +634,361 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(captured.path, "/upload");
         assert_eq!(captured.content_type.as_deref(), Some("application/zip"));
         assert_eq!(captured.body, b"PK\x03\x04");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_injects_delegated_path_credentials_into_url() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/{*path}", post(capture_request))
+            .with_state(sender);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let response = forward_request(
+            &Client::new(),
+            &make_proxy_target(format!("http://{addr}")),
+            reqwest::Method::POST,
+            "sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![DelegatedCredential {
+                provider_slug: "telegram-bot".to_string(),
+                injection_method: "path".to_string(),
+                injection_key: "bot".to_string(),
+                credential: "123456:ABC-DEF".to_string(),
+            }],
+        )
+        .await
+        .expect("proxy request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(captured.path, "/bot123456:ABC-DEF/sendMessage");
+        assert_eq!(captured.query, None);
+
+        server.abort();
+    }
+
+    #[test]
+    fn prepare_delegated_request_appends_query_params_and_headers() {
+        let prepared = prepare_delegated_request(
+            "models",
+            Some("stream=true"),
+            &[
+                DelegatedCredential {
+                    provider_slug: "github".to_string(),
+                    injection_method: "bearer".to_string(),
+                    injection_key: "Authorization".to_string(),
+                    credential: "user-token".to_string(),
+                },
+                DelegatedCredential {
+                    provider_slug: "custom".to_string(),
+                    injection_method: "header".to_string(),
+                    injection_key: "X-Provider-Key".to_string(),
+                    credential: "secret".to_string(),
+                },
+                DelegatedCredential {
+                    provider_slug: "custom".to_string(),
+                    injection_method: "query".to_string(),
+                    injection_key: "api_key".to_string(),
+                    credential: "abc 123".to_string(),
+                },
+            ],
+        )
+        .expect("delegated request should prepare");
+
+        assert_eq!(prepared.path, "models");
+        assert_eq!(
+            prepared.query.as_deref(),
+            Some("stream=true&api_key=abc+123")
+        );
+        assert_eq!(
+            prepared.delegated_headers,
+            vec![
+                ("Authorization".to_string(), "Bearer user-token".to_string()),
+                ("X-Provider-Key".to_string(), "secret".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_backslash_in_requested_path_injection() {
+        let err = forward_request(
+            &Client::new(),
+            &make_proxy_target("http://127.0.0.1".to_string()),
+            reqwest::Method::POST,
+            "folder\\sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![],
+        )
+        .await
+        .expect_err("backslash in requested path should be rejected");
+
+        assert!(
+            err.to_string().contains("Invalid proxy path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_percent_encoded_requested_path_injection() {
+        for path in [
+            "sendMessage?chat_id=1",
+            "sendMessage#fragment",
+            "folder%2FsendMessage",
+            "folder%2fsendMessage",
+            "folder%3Fchat_id=1",
+            "folder%3fchat_id=1",
+            "folder%23fragment",
+            "%2e%2e",
+            "%2e.",
+            ".%2e",
+            "%2E%2E",
+            "%2E.",
+            ".%2E",
+            "folder%5CsendMessage",
+            "folder%5csendMessage",
+            "%00",
+        ] {
+            let err = forward_request(
+                &Client::new(),
+                &make_proxy_target("http://127.0.0.1".to_string()),
+                reqwest::Method::POST,
+                path,
+                None,
+                reqwest::header::HeaderMap::new(),
+                None,
+                vec![],
+                vec![],
+            )
+            .await
+            .expect_err("percent-encoded requested path breaker should be rejected");
+
+            assert!(
+                err.to_string().contains("Invalid proxy path"),
+                "unexpected error for '{path}': {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_request_allows_non_segment_dot_sequences_in_path_injection() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/{*path}", post(capture_request))
+            .with_state(sender);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let response = forward_request(
+            &Client::new(),
+            &make_proxy_target(format!("http://{addr}")),
+            reqwest::Method::POST,
+            "v1/foo..bar/foo%2ebar",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![],
+        )
+        .await
+        .expect("non-segment dot sequences should be allowed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(captured.path, "/v1/foo..bar/foo%2ebar");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_invalid_path_injection_credentials() {
+        let err = forward_request(
+            &Client::new(),
+            &make_proxy_target("http://127.0.0.1".to_string()),
+            reqwest::Method::POST,
+            "sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![DelegatedCredential {
+                provider_slug: "telegram-bot".to_string(),
+                injection_method: "path".to_string(),
+                injection_key: "bot".to_string(),
+                credential: "bad/token".to_string(),
+            }],
+        )
+        .await
+        .expect_err("invalid path credential should be rejected");
+
+        assert!(
+            err.to_string().contains("Reconnect the provider"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_blank_or_whitespace_path_injection_credentials() {
+        for credential in ["", "   ", "123 456", " 123456:ABC-DEF"] {
+            let err = forward_request(
+                &Client::new(),
+                &make_proxy_target("http://127.0.0.1".to_string()),
+                reqwest::Method::POST,
+                "sendMessage",
+                None,
+                reqwest::header::HeaderMap::new(),
+                None,
+                vec![],
+                vec![DelegatedCredential {
+                    provider_slug: "telegram-bot".to_string(),
+                    injection_method: "path".to_string(),
+                    injection_key: "bot".to_string(),
+                    credential: credential.to_string(),
+                }],
+            )
+            .await
+            .expect_err("blank or whitespace path credential should be rejected");
+
+            assert!(
+                err.to_string().contains("Reconnect the provider"),
+                "unexpected error for '{credential}': {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_invalid_path_injection_prefix() {
+        let err = forward_request(
+            &Client::new(),
+            &make_proxy_target("http://127.0.0.1".to_string()),
+            reqwest::Method::POST,
+            "sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![DelegatedCredential {
+                provider_slug: "telegram-bot".to_string(),
+                injection_method: "path".to_string(),
+                injection_key: "bot/".to_string(),
+                credential: "123456:ABC-DEF".to_string(),
+            }],
+        )
+        .await
+        .expect_err("invalid path prefix should be rejected");
+
+        assert!(
+            err.to_string().contains("Please contact your admin"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_blank_or_whitespace_path_injection_prefix() {
+        for injection_key in ["", "   ", " bot"] {
+            let err = forward_request(
+                &Client::new(),
+                &make_proxy_target("http://127.0.0.1".to_string()),
+                reqwest::Method::POST,
+                "sendMessage",
+                None,
+                reqwest::header::HeaderMap::new(),
+                None,
+                vec![],
+                vec![DelegatedCredential {
+                    provider_slug: "telegram-bot".to_string(),
+                    injection_method: "path".to_string(),
+                    injection_key: injection_key.to_string(),
+                    credential: "123456:ABC-DEF".to_string(),
+                }],
+            )
+            .await
+            .expect_err("blank or whitespace path prefix should be rejected");
+
+            assert!(
+                err.to_string().contains("Please contact your admin"),
+                "unexpected error for '{injection_key}': {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_percent_encoded_path_injection_credential() {
+        let err = forward_request(
+            &Client::new(),
+            &make_proxy_target("http://127.0.0.1".to_string()),
+            reqwest::Method::POST,
+            "sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![DelegatedCredential {
+                provider_slug: "telegram-bot".to_string(),
+                injection_method: "path".to_string(),
+                injection_key: "bot".to_string(),
+                credential: "123%2f456".to_string(),
+            }],
+        )
+        .await
+        .expect_err("percent-encoded path credential should be rejected");
+
+        assert!(
+            err.to_string().contains("Reconnect the provider"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_percent_encoded_path_injection_prefix() {
+        let err = forward_request(
+            &Client::new(),
+            &make_proxy_target("http://127.0.0.1".to_string()),
+            reqwest::Method::POST,
+            "sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![DelegatedCredential {
+                provider_slug: "telegram-bot".to_string(),
+                injection_method: "path".to_string(),
+                injection_key: "bot%2f".to_string(),
+                credential: "123456:ABC-DEF".to_string(),
+            }],
+        )
+        .await
+        .expect_err("percent-encoded path prefix should be rejected");
+
+        assert!(
+            err.to_string().contains("Please contact your admin"),
+            "unexpected error: {err}"
+        );
     }
 }

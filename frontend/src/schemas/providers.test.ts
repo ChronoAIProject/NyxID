@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   connectApiKeySchema,
   createProviderSchema,
+  telegramLoginDataSchema,
   updateProviderSchema,
   userCredentialsSchema,
   PROVIDER_TYPES,
@@ -10,7 +11,12 @@ import {
 
 describe("PROVIDER_TYPES", () => {
   it("contains expected types", () => {
-    expect(PROVIDER_TYPES).toEqual(["oauth2", "api_key", "device_code"]);
+    expect(PROVIDER_TYPES).toEqual([
+      "oauth2",
+      "api_key",
+      "device_code",
+      "telegram_widget",
+    ]);
   });
 });
 
@@ -113,6 +119,45 @@ describe("connectApiKeySchema", () => {
       api_key: "sk-valid",
       label: "a".repeat(201),
     });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("telegramLoginDataSchema", () => {
+  it("accepts valid Telegram login data", () => {
+    const result = telegramLoginDataSchema.safeParse({
+      id: 12345,
+      first_name: "Nyx",
+      username: "nyx_user",
+      photo_url: "https://t.me/i/userpic/photo.jpg",
+      auth_date: 1_742_518_400,
+      hash: "a".repeat(64),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("coerces numeric string fields from the widget payload", () => {
+    const result = telegramLoginDataSchema.safeParse({
+      id: "12345",
+      first_name: "Nyx",
+      auth_date: "1742518400",
+      hash: "b".repeat(64),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.id).toBe(12345);
+    expect(result.data?.auth_date).toBe(1742518400);
+  });
+
+  it("rejects malformed Telegram login hashes", () => {
+    const result = telegramLoginDataSchema.safeParse({
+      id: 12345,
+      first_name: "Nyx",
+      auth_date: 1_742_518_400,
+      hash: "deadbeef",
+    });
+
     expect(result.success).toBe(false);
   });
 });
@@ -258,6 +303,65 @@ describe("createProviderSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("accepts valid telegram_widget provider", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "NyxIdBot",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects telegram_widget provider without bot username", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget provider without bot token", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "NyxIdBot",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget provider with blank bot username", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "   ",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget provider with blank bot token", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "NyxIdBot",
+      client_secret: "   ",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget provider in non-admin mode", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      credential_mode: "user",
+      client_id_param_name: "NyxIdBot",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(false);
+  });
+
   it("rejects slug with uppercase letters", () => {
     const result = createProviderSchema.safeParse({
       ...baseValid,
@@ -344,5 +448,23 @@ describe("updateProviderSchema", () => {
       token_url: "https://auth.example.com/token",
     });
     expect(result.success).toBe(true);
+  });
+
+  it("rejects telegram_widget update with blank bot username", () => {
+    const result = updateProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "   ",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget update with blank bot token", () => {
+    const result = updateProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_secret: "   ",
+    });
+    expect(result.success).toBe(false);
   });
 });

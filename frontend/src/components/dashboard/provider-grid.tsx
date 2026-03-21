@@ -13,6 +13,7 @@ import { useLlmStatus } from "@/hooks/use-llm-gateway";
 import { ProviderCard } from "./provider-card";
 import { ApiKeyDialog } from "./api-key-dialog";
 import { DeviceCodeDialog } from "./device-code-dialog";
+import { TelegramLoginDialog } from "./telegram-login-dialog";
 import { UserCredentialsDialog } from "./user-credentials-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -39,6 +40,8 @@ export function ProviderGrid() {
   );
   const [deviceCodeDialog, setDeviceCodeDialog] =
     useState<ProviderConfig | null>(null);
+  const [telegramDialog, setTelegramDialog] =
+    useState<ProviderConfig | null>(null);
   const [credentialsDialog, setCredentialsDialog] =
     useState<ProviderConfig | null>(null);
   // Track which provider is currently being acted upon for per-card disabled state
@@ -58,6 +61,8 @@ export function ProviderGrid() {
       setApiKeyDialog(provider);
     } else if (provider.provider_type === "device_code") {
       setDeviceCodeDialog(provider);
+    } else if (provider.provider_type === "telegram_widget") {
+      setTelegramDialog(provider);
     } else {
       void handleOAuthConnect(provider.id);
     }
@@ -210,6 +215,13 @@ export function ProviderGrid() {
         <DeviceCodeDialog
           provider={deviceCodeDialog}
           onClose={() => setDeviceCodeDialog(null)}
+        />
+      )}
+
+      {telegramDialog !== null && (
+        <TelegramLoginDialog
+          provider={telegramDialog}
+          onClose={() => setTelegramDialog(null)}
         />
       )}
 
