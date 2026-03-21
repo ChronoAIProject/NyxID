@@ -40,6 +40,66 @@ pub struct UserProviderTokenSummary {
 const OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE: &str =
     "This provider is not configured for OAuth yet. Please contact your admin.";
 
+fn build_telegram_identity_metadata(
+    data: &crate::crypto::telegram::TelegramLoginData,
+) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    metadata.insert("telegram_user_id".to_string(), data.id.to_string());
+    metadata.insert("first_name".to_string(), data.first_name.clone());
+    if let Some(ref ln) = data.last_name {
+        metadata.insert("last_name".to_string(), ln.clone());
+    }
+    if let Some(ref un) = data.username {
+        metadata.insert("username".to_string(), un.clone());
+    }
+    if let Some(ref pu) = data.photo_url {
+        metadata.insert("photo_url".to_string(), pu.clone());
+    }
+    metadata
+}
+
+fn build_telegram_identity_update_doc(
+    metadata: &HashMap<String, String>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<bson::Document> {
+    let metadata_bson = bson::to_bson(metadata)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize Telegram metadata: {e}")))?;
+
+    Ok(doc! {
+        "status": "active",
+        "error_message": bson::Bson::Null,
+        "metadata": metadata_bson,
+        "updated_at": bson::DateTime::from_chrono(now),
+    })
+}
+
+fn normalize_telegram_bot_api_key(raw: &str) -> AppResult<String> {
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return Err(AppError::ValidationError(
+            "Telegram bot token must not be empty".to_string(),
+        ));
+    }
+    if normalized.chars().any(char::is_whitespace) {
+        return Err(AppError::ValidationError(
+            "Telegram bot token must not contain whitespace".to_string(),
+        ));
+    }
+    if normalized.contains('/')
+        || normalized.contains('\\')
+        || normalized.contains('?')
+        || normalized.contains('#')
+        || normalized.contains('\0')
+        || normalized.contains("..")
+    {
+        return Err(AppError::ValidationError(
+            "Telegram bot token contains invalid characters".to_string(),
+        ));
+    }
+
+    Ok(normalized.to_string())
+}
+
 fn ensure_oauth_provider_configured(provider: &ProviderConfig) -> AppResult<()> {
     // URLs are always required regardless of credential mode
     if provider.authorization_url.is_none() || provider.token_url.is_none() {
@@ -84,11 +144,16 @@ pub async fn store_api_key(
         ));
     }
 
-    if api_key.is_empty() {
-        return Err(AppError::ValidationError(
-            "API key must not be empty".to_string(),
-        ));
-    }
+    let api_key_to_store = if provider.slug == "telegram-bot" {
+        normalize_telegram_bot_api_key(api_key)?
+    } else {
+        if api_key.is_empty() {
+            return Err(AppError::ValidationError(
+                "API key must not be empty".to_string(),
+            ));
+        }
+        api_key.to_string()
+    };
 
     // Check if user already has a token for this provider
     let existing = db
@@ -101,7 +166,7 @@ pub async fn store_api_key(
         .await?;
 
     let now = Utc::now();
-    let encrypted = encryption_keys.encrypt(api_key.as_bytes()).await?;
+    let encrypted = encryption_keys.encrypt(api_key_to_store.as_bytes()).await?;
 
     if let Some(existing_token) = existing {
         // Update existing token
@@ -199,31 +264,11 @@ pub async fn store_telegram_identity(
 
     let now = Utc::now();
 
-    let mut metadata = HashMap::new();
-    metadata.insert("telegram_user_id".to_string(), data.id.to_string());
-    metadata.insert("first_name".to_string(), data.first_name.clone());
-    if let Some(ref ln) = data.last_name {
-        metadata.insert("last_name".to_string(), ln.clone());
-    }
-    if let Some(ref un) = data.username {
-        metadata.insert("username".to_string(), un.clone());
-    }
-    if let Some(ref pu) = data.photo_url {
-        metadata.insert("photo_url".to_string(), pu.clone());
-    }
+    let metadata = build_telegram_identity_metadata(data);
 
     if let Some(existing_token) = existing {
-        // Update existing token metadata
-        let meta_doc = metadata
-            .iter()
-            .map(|(k, v)| (format!("metadata.{k}"), bson::Bson::String(v.clone())))
-            .collect::<bson::Document>();
-        let mut set_doc = doc! {
-            "status": "active",
-            "error_message": bson::Bson::Null,
-            "updated_at": bson::DateTime::from_chrono(now),
-        };
-        set_doc.extend(meta_doc);
+        // Replace the full metadata object so stale optional fields do not survive reconnects.
+        let set_doc = build_telegram_identity_update_doc(&metadata, now)?;
 
         db.collection::<UserProviderToken>(COLLECTION_NAME)
             .update_one(doc! { "_id": &existing_token.id }, doc! { "$set": set_doc })
@@ -1477,10 +1522,15 @@ pub async fn list_user_tokens(
 
 #[cfg(test)]
 mod tests {
-    use super::build_user_token_summary;
+    use super::{
+        build_telegram_identity_metadata, build_telegram_identity_update_doc,
+        build_user_token_summary, normalize_telegram_bot_api_key,
+    };
+    use crate::crypto::telegram::TelegramLoginData;
     use crate::models::provider_config::ProviderConfig;
     use crate::models::user_provider_token::UserProviderToken;
     use chrono::Utc;
+    use mongodb::bson::Bson;
     use std::collections::HashMap;
 
     fn make_provider(provider_type: &str) -> ProviderConfig {
@@ -1570,5 +1620,66 @@ mod tests {
         assert_eq!(summary.provider_type, "api_key");
         assert_eq!(summary.provider_name, "Unknown");
         assert_eq!(summary.provider_slug, "unknown");
+    }
+
+    #[test]
+    fn telegram_identity_metadata_omits_missing_optional_fields() {
+        let data = TelegramLoginData {
+            id: 12345,
+            first_name: "Nyx".to_string(),
+            last_name: None,
+            username: None,
+            photo_url: None,
+            auth_date: Utc::now().timestamp(),
+            hash: "hash".to_string(),
+        };
+
+        let metadata = build_telegram_identity_metadata(&data);
+
+        assert_eq!(metadata.get("telegram_user_id"), Some(&"12345".to_string()));
+        assert_eq!(metadata.get("first_name"), Some(&"Nyx".to_string()));
+        assert!(!metadata.contains_key("last_name"));
+        assert!(!metadata.contains_key("username"));
+        assert!(!metadata.contains_key("photo_url"));
+    }
+
+    #[test]
+    fn telegram_identity_update_replaces_metadata_document() {
+        let mut metadata = HashMap::new();
+        metadata.insert("telegram_user_id".to_string(), "12345".to_string());
+        metadata.insert("first_name".to_string(), "Nyx".to_string());
+
+        let update = build_telegram_identity_update_doc(&metadata, Utc::now()).expect("update doc");
+
+        assert_eq!(update.get_str("status").unwrap(), "active");
+        assert_eq!(update.get("error_message"), Some(&Bson::Null));
+        assert!(update.get("metadata.username").is_none());
+        assert_eq!(
+            update
+                .get_document("metadata")
+                .unwrap()
+                .get_str("first_name")
+                .unwrap(),
+            "Nyx"
+        );
+    }
+
+    #[test]
+    fn normalize_telegram_bot_api_key_trims_surrounding_whitespace() {
+        let normalized = normalize_telegram_bot_api_key(" 123456:ABC-DEF123 \n")
+            .expect("token should normalize");
+
+        assert_eq!(normalized, "123456:ABC-DEF123");
+    }
+
+    #[test]
+    fn normalize_telegram_bot_api_key_rejects_whitespace_and_path_breakers() {
+        let whitespace = normalize_telegram_bot_api_key("123456:ABC DEF")
+            .expect_err("whitespace should be rejected");
+        assert!(whitespace.to_string().contains("whitespace"));
+
+        let slash =
+            normalize_telegram_bot_api_key("123456:ABC/DEF").expect_err("slash should be rejected");
+        assert!(slash.to_string().contains("invalid characters"));
     }
 }

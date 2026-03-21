@@ -1307,8 +1307,8 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_slug: "api-telegram-bot",
         service_name: "Telegram Bot API",
         base_url: "https://api.telegram.org",
-        injection_method: "bearer",
-        injection_key: "Authorization",
+        injection_method: "path",
+        injection_key: "bot",
     },
     DefaultServiceSeed {
         provider_slug: "feishu",

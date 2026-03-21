@@ -648,11 +648,11 @@ pub async fn telegram_callback(
 
     let bot_token_bytes =
         zeroize::Zeroizing::new(state.encryption_keys.decrypt(&bot_token_enc).await?);
-    let bot_token = String::from_utf8((*bot_token_bytes).clone())
+    let bot_token = std::str::from_utf8(bot_token_bytes.as_slice())
         .map_err(|e| AppError::Internal(format!("Failed to decode bot token: {e}")))?;
 
     // Verify HMAC signature and auth_date freshness
-    crate::crypto::telegram::verify_telegram_login(&bot_token, &body)?;
+    crate::crypto::telegram::verify_telegram_login(bot_token, &body)?;
 
     // Store the verified identity
     user_token_service::store_telegram_identity(&state.db, &user_id_str, &provider_id, &body)

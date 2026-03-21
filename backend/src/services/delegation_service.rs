@@ -20,6 +20,27 @@ pub struct DelegatedCredential {
     pub credential: String,
 }
 
+fn normalize_delegated_injection(
+    provider_slug: &str,
+    injection_method: &str,
+    injection_key: Option<&str>,
+) -> (String, String) {
+    if provider_slug == "telegram-bot" {
+        return ("path".to_string(), "bot".to_string());
+    }
+
+    let key = injection_key
+        .map(String::from)
+        .unwrap_or_else(|| match injection_method {
+            "bearer" => "Authorization".to_string(),
+            "query" => "api_key".to_string(),
+            "path" => String::new(),
+            _ => "X-API-Key".to_string(),
+        });
+
+    (injection_method.to_string(), key)
+}
+
 /// Resolve all provider tokens needed for a downstream service.
 /// Returns credentials ready for injection. Returns an error if a required
 /// provider token is missing (CR-15).
@@ -114,22 +135,49 @@ pub async fn resolve_delegated_credentials(
             None => continue,
         };
 
-        let injection_key =
-            req.injection_key
-                .clone()
-                .unwrap_or_else(|| match req.injection_method.as_str() {
-                    "bearer" => "Authorization".to_string(),
-                    "query" => "api_key".to_string(),
-                    _ => "X-API-Key".to_string(),
-                });
+        let (injection_method, injection_key) = normalize_delegated_injection(
+            &provider.slug,
+            &req.injection_method,
+            req.injection_key.as_deref(),
+        );
 
         credentials.push(DelegatedCredential {
             provider_slug: provider.slug.clone(),
-            injection_method: req.injection_method.clone(),
+            injection_method,
             injection_key,
             credential,
         });
     }
 
     Ok(credentials)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_delegated_injection;
+
+    #[test]
+    fn telegram_bot_legacy_bearer_injection_is_mapped_to_path() {
+        let (method, key) =
+            normalize_delegated_injection("telegram-bot", "bearer", Some("Authorization"));
+
+        assert_eq!(method, "path");
+        assert_eq!(key, "bot");
+    }
+
+    #[test]
+    fn telegram_bot_custom_prefix_is_ignored_and_canonicalized() {
+        let (method, key) = normalize_delegated_injection("telegram-bot", "path", Some("custom"));
+
+        assert_eq!(method, "path");
+        assert_eq!(key, "bot");
+    }
+
+    #[test]
+    fn standard_bearer_injection_keeps_default_header() {
+        let (method, key) = normalize_delegated_injection("github", "bearer", None);
+
+        assert_eq!(method, "bearer");
+        assert_eq!(key, "Authorization");
+    }
 }

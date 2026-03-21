@@ -36,6 +36,55 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "x-correlation-id",
 ];
 
+fn validate_path_injection_part(value: &str) -> AppResult<()> {
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('\0')
+        || value.contains("..")
+    {
+        return Err(AppError::Internal(
+            "Invalid delegated credential for path injection".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn build_forward_path(
+    path: &str,
+    delegated_credentials: &[DelegatedCredential],
+) -> AppResult<String> {
+    if path.contains("..") || path.contains("//") {
+        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
+    }
+
+    let mut prefix_segments = Vec::new();
+    for cred in delegated_credentials {
+        if cred.injection_method == "path" {
+            validate_path_injection_part(&cred.injection_key)?;
+            validate_path_injection_part(&cred.credential)?;
+            prefix_segments.push(format!("{}{}", cred.injection_key, cred.credential));
+        }
+    }
+
+    let trimmed_path = path.trim_start_matches('/');
+    let final_path = if prefix_segments.is_empty() {
+        trimmed_path.to_string()
+    } else if trimmed_path.is_empty() {
+        prefix_segments.join("/")
+    } else {
+        format!("{}/{}", prefix_segments.join("/"), trimmed_path)
+    };
+
+    if final_path.contains("//") || final_path.contains("..") {
+        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
+    }
+
+    Ok(final_path)
+}
+
 /// Resolve a downstream service by its slug.
 /// Returns the service document or NotFound.
 pub async fn resolve_service_by_slug(
@@ -252,10 +301,7 @@ pub async fn forward_request(
     identity_headers: Vec<(String, String)>,
     delegated_credentials: Vec<DelegatedCredential>,
 ) -> AppResult<reqwest::Response> {
-    // SEC-H3: Reject paths containing traversal sequences
-    if path.contains("..") || path.contains("//") {
-        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
-    }
+    let forwarded_path = build_forward_path(path, &delegated_credentials)?;
 
     // TODO(SEC-H1): Re-validate the resolved IP at proxy time to prevent DNS rebinding.
     // Currently base_url is only validated at service creation/update time. An attacker
@@ -266,14 +312,14 @@ pub async fn forward_request(
         format!(
             "{}/{}?{}",
             target.base_url.trim_end_matches('/'),
-            path.trim_start_matches('/'),
+            forwarded_path,
             q
         )
     } else {
         format!(
             "{}/{}",
             target.base_url.trim_end_matches('/'),
-            path.trim_start_matches('/')
+            forwarded_path
         )
     };
 
@@ -340,6 +386,7 @@ pub async fn forward_request(
             "query" => {
                 request = request.query(&[(&cred.injection_key, &cred.credential)]);
             }
+            "path" => {}
             _ => {}
         }
     }
@@ -390,7 +437,7 @@ mod tests {
         Router,
         body::Bytes,
         extract::State,
-        http::{HeaderMap, StatusCode},
+        http::{HeaderMap, StatusCode, Uri},
         routing::post,
     };
     use chrono::Utc;
@@ -398,16 +445,19 @@ mod tests {
 
     #[derive(Debug)]
     struct CapturedRequest {
+        path: String,
         content_type: Option<String>,
         body: Vec<u8>,
     }
 
     async fn capture_request(
         State(sender): State<mpsc::UnboundedSender<CapturedRequest>>,
+        uri: Uri,
         headers: HeaderMap,
         body: Bytes,
     ) -> StatusCode {
         let _ = sender.send(CapturedRequest {
+            path: uri.path().to_string(),
             content_type: headers
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
@@ -492,9 +542,79 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(captured.path, "/upload");
         assert_eq!(captured.content_type.as_deref(), Some("application/zip"));
         assert_eq!(captured.body, b"PK\x03\x04");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_injects_delegated_path_credentials_into_url() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/{*path}", post(capture_request))
+            .with_state(sender);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let response = forward_request(
+            &Client::new(),
+            &make_proxy_target(format!("http://{addr}")),
+            reqwest::Method::POST,
+            "sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![DelegatedCredential {
+                provider_slug: "telegram-bot".to_string(),
+                injection_method: "path".to_string(),
+                injection_key: "bot".to_string(),
+                credential: "123456:ABC-DEF".to_string(),
+            }],
+        )
+        .await
+        .expect("proxy request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(captured.path, "/bot123456:ABC-DEF/sendMessage");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_rejects_invalid_delegated_path_credentials() {
+        let err = forward_request(
+            &Client::new(),
+            &make_proxy_target("http://127.0.0.1".to_string()),
+            reqwest::Method::POST,
+            "sendMessage",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            vec![],
+            vec![DelegatedCredential {
+                provider_slug: "telegram-bot".to_string(),
+                injection_method: "path".to_string(),
+                injection_key: "bot".to_string(),
+                credential: "bad/token".to_string(),
+            }],
+        )
+        .await
+        .expect_err("invalid path credential should be rejected");
+
+        assert!(
+            err.to_string().contains("path injection"),
+            "unexpected error: {err}"
+        );
     }
 }

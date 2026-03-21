@@ -67,6 +67,21 @@ pub struct DeleteRequirementResponse {
     pub message: String,
 }
 
+fn canonicalize_requirement_injection(
+    provider_slug: &str,
+    injection_method: &str,
+    injection_key: Option<&str>,
+) -> (String, Option<String>) {
+    if provider_slug == "telegram-bot" {
+        return ("path".to_string(), Some("bot".to_string()));
+    }
+
+    (
+        injection_method.to_string(),
+        injection_key.map(String::from),
+    )
+}
+
 // --- Handlers ---
 
 /// GET /api/v1/services/{service_id}/requirements
@@ -113,6 +128,11 @@ pub async fn list_requirements(
                     Some(p) => (p.name.clone(), p.slug.clone()),
                     None => ("Unknown".to_string(), "unknown".to_string()),
                 };
+            let (injection_method, injection_key) = canonicalize_requirement_injection(
+                &provider_slug,
+                &req.injection_method,
+                req.injection_key.as_deref(),
+            );
             RequirementResponse {
                 id: req.id,
                 service_id: req.service_id,
@@ -121,8 +141,8 @@ pub async fn list_requirements(
                 provider_slug,
                 required: req.required,
                 scopes: req.scopes,
-                injection_method: req.injection_method,
-                injection_key: req.injection_key,
+                injection_method,
+                injection_key,
                 created_at: req.created_at.to_rfc3339(),
                 updated_at: req.updated_at.to_rfc3339(),
             }
@@ -155,7 +175,7 @@ pub async fn add_requirement(
         .ok_or_else(|| AppError::NotFound("Provider not found or inactive".to_string()))?;
 
     // Validate injection_method
-    let valid_methods = ["bearer", "header", "query"];
+    let valid_methods = ["bearer", "header", "query", "path"];
     if !valid_methods.contains(&body.injection_method.as_str()) {
         return Err(AppError::ValidationError(format!(
             "injection_method must be one of: {}",
@@ -192,6 +212,11 @@ pub async fn add_requirement(
 
     let id = Uuid::new_v4().to_string();
     let now = Utc::now();
+    let (injection_method, injection_key) = canonicalize_requirement_injection(
+        &provider.slug,
+        &body.injection_method,
+        body.injection_key.as_deref(),
+    );
 
     let requirement = ServiceProviderRequirement {
         id: id.clone(),
@@ -199,8 +224,8 @@ pub async fn add_requirement(
         provider_config_id: body.provider_config_id.clone(),
         required: body.required,
         scopes: body.scopes,
-        injection_method: body.injection_method,
-        injection_key: body.injection_key,
+        injection_method,
+        injection_key,
         created_at: now,
         updated_at: now,
     };
@@ -284,4 +309,27 @@ pub async fn remove_requirement(
     Ok(Json(DeleteRequirementResponse {
         message: "Requirement removed".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonicalize_requirement_injection;
+
+    #[test]
+    fn telegram_bot_requirements_are_canonicalized_to_path_bot() {
+        let (method, key) =
+            canonicalize_requirement_injection("telegram-bot", "bearer", Some("Authorization"));
+
+        assert_eq!(method, "path");
+        assert_eq!(key.as_deref(), Some("bot"));
+    }
+
+    #[test]
+    fn non_telegram_requirements_keep_original_injection() {
+        let (method, key) =
+            canonicalize_requirement_injection("github", "header", Some("X-API-Key"));
+
+        assert_eq!(method, "header");
+        assert_eq!(key.as_deref(), Some("X-API-Key"));
+    }
 }
