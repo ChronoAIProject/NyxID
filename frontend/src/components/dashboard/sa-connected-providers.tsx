@@ -30,7 +30,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Plug, Unlink, KeyRound, Globe, Smartphone } from "lucide-react";
+import { Plug, Unlink, KeyRound, Globe, Smartphone, MessageCircle } from "lucide-react";
 import { toast } from "sonner";
 
 interface SaConnectedProvidersProps {
@@ -204,12 +204,14 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
 function ProviderTypeIcon({ type }: { readonly type: string }) {
   if (type === "api_key") return <KeyRound className="mr-2 h-4 w-4" />;
   if (type === "oauth2") return <Globe className="mr-2 h-4 w-4" />;
+  if (type === "telegram_widget") return <MessageCircle className="mr-2 h-4 w-4" />;
   return <Smartphone className="mr-2 h-4 w-4" />;
 }
 
 function providerTypeLabel(type: string): string {
   if (type === "api_key") return "API Key";
   if (type === "oauth2") return "OAuth";
+  if (type === "telegram_widget") return "Telegram";
   return "Device Code";
 }
 
