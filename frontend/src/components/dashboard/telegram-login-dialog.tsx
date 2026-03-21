@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useMemo } from "react";
 import type { ProviderConfig } from "@/types/api";
 import type { TelegramLoginData } from "@/types/api";
 import {
@@ -34,8 +34,6 @@ export function TelegramLoginDialog({
   provider,
   onClose,
 }: TelegramLoginDialogProps) {
-  const [step, setStep] = useState<FlowStep>("loading");
-  const [errorMessage, setErrorMessage] = useState("");
   const widgetContainerRef = useRef<HTMLDivElement>(null);
   const scriptRef = useRef<HTMLScriptElement | null>(null);
 
@@ -44,33 +42,38 @@ export function TelegramLoginDialog({
   );
   const connectMutation = useConnectTelegramWidget();
 
+  // Derive step from query/mutation state instead of useState
+  const step: FlowStep = useMemo(() => {
+    if (configError || connectMutation.isError) return "error";
+    if (connectMutation.isSuccess) return "success";
+    if (connectMutation.isPending) return "submitting";
+    if (config) return "ready";
+    return "loading";
+  }, [configError, connectMutation.isError, connectMutation.isSuccess, connectMutation.isPending, config]);
+
+  const errorMessage = useMemo(() => {
+    if (configError) {
+      return configError instanceof ApiError
+        ? configError.message
+        : "Failed to load Telegram login configuration";
+    }
+    if (connectMutation.error) {
+      return connectMutation.error instanceof ApiError
+        ? connectMutation.error.message
+        : "Failed to verify Telegram login";
+    }
+    return "";
+  }, [configError, connectMutation.error]);
+
   const handleTelegramAuth = useCallback(
     (user: TelegramLoginData) => {
-      setStep("submitting");
-      connectMutation.mutate(
-        { providerId: provider.id, data: user },
-        {
-          onSuccess: () => {
-            setStep("success");
-          },
-          onError: (error) => {
-            if (error instanceof ApiError) {
-              setErrorMessage(error.message);
-            } else {
-              setErrorMessage("Failed to verify Telegram login");
-            }
-            setStep("error");
-          },
-        },
-      );
+      connectMutation.mutate({ providerId: provider.id, data: user });
     },
     [connectMutation, provider.id],
   );
 
   useEffect(() => {
     if (!config || !widgetContainerRef.current) return;
-
-    setStep("ready");
 
     // Set up global callback for the Telegram widget
     window.onTelegramAuth = handleTelegramAuth;
@@ -98,17 +101,6 @@ export function TelegramLoginDialog({
       }
     };
   }, [config, handleTelegramAuth]);
-
-  useEffect(() => {
-    if (configError) {
-      if (configError instanceof ApiError) {
-        setErrorMessage(configError.message);
-      } else {
-        setErrorMessage("Failed to load Telegram login configuration");
-      }
-      setStep("error");
-    }
-  }, [configError]);
 
   return (
     <Dialog open onOpenChange={onClose}>
