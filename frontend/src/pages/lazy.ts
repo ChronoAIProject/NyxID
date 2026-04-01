@@ -1,5 +1,8 @@
 import { lazy } from "react";
 
+export const LandingPage = lazy(() =>
+  import("@/pages/landing").then((m) => ({ default: m.LandingPage })),
+);
 export const AiSetupPage = lazy(() =>
   import("@/pages/ai-setup").then((m) => ({ default: m.AiSetupPage })),
 );

@@ -62,6 +62,13 @@
   --font-display: "Space Grotesk", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
   --font-logo: "Playfair Display", Georgia, serif;
+  --font-serif: "DM Serif Display", serif;
+
+  /* ── Landing Page Surfaces ── */
+  --color-landing-bg: #0a0a0f;
+  --color-landing-surface: #111118;
+  --color-landing-surface-raised: #18181f;
+  --color-landing-border-subtle: rgba(139, 92, 246, 0.15);
 }
 
 * {

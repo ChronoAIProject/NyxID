@@ -66,7 +66,7 @@ export function CliAuthPage() {
             </code>{" "}
             from your terminal.
           </p>
-          <Button variant="outline" onClick={() => void navigate({ to: "/" })}>
+          <Button variant="outline" onClick={() => void navigate({ to: "/dashboard" })}>
             Go to Dashboard
           </Button>
         </div>

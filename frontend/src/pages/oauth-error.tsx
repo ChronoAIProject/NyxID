@@ -58,7 +58,7 @@ export function OAuthErrorPage() {
               <Button variant="outline" onClick={() => window.history.back()}>
                 Go Back
               </Button>
-              <Button onClick={() => void navigate({ to: "/" })}>Home</Button>
+              <Button onClick={() => void navigate({ to: "/dashboard" })}>Home</Button>
             </div>
           </CardContent>
         </Card>

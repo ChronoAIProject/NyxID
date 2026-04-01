@@ -42,6 +42,7 @@ function Root() {
     if (ready && !isAuthenticated) {
       const path = window.location.pathname;
       const isPublicRoute =
+        path === "/" ||
         path === "/login" ||
         path === "/register" ||
         path === "/privacy" ||

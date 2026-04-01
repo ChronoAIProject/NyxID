@@ -1,0 +1,202 @@
+/* Smooth scrolling for anchor links */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Scroll-triggered fade-up animation */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.6s ease-out forwards;
+}
+
+/* Radial glow for hero */
+@keyframes glow-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+.glow-pulse {
+  animation: glow-pulse 4s ease-in-out infinite;
+}
+
+/* Infinite scroll carousel — GPU-composited */
+@keyframes scroll {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+.animate-scroll {
+  animation: scroll 60s linear infinite;
+  width: max-content;
+  will-change: transform;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  transform: translate3d(0, 0, 0);
+  contain: layout style;
+}
+
+.animate-scroll:hover {
+  animation-play-state: paused;
+}
+
+/* Prevent cards inside carousel from triggering repaints */
+.carousel-card {
+  contain: content;
+  will-change: auto;
+}
+
+/* Navbar purple glow — animated wave light */
+@keyframes navbar-wave {
+  0% {
+    background-position: -100% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes navbar-glow-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 2px 30px rgba(139, 92, 246, 0.25),
+      0 6px 60px rgba(139, 92, 246, 0.12);
+  }
+  50% {
+    box-shadow:
+      0 2px 40px rgba(139, 92, 246, 0.4),
+      0 8px 80px rgba(139, 92, 246, 0.2);
+  }
+}
+
+.navbar-glow {
+  animation: navbar-glow-pulse 3s ease-in-out infinite;
+}
+
+/* Subtle sweeping light along bottom edge */
+.navbar-glow::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    transparent 35%,
+    rgba(167, 139, 250, 0.35) 48%,
+    rgba(167, 139, 250, 0.35) 52%,
+    transparent 65%,
+    transparent 100%
+  );
+  background-size: 50% 100%;
+  animation: navbar-wave 4s ease-in-out infinite;
+}
+
+/* Secondary softer glow underneath */
+.navbar-glow::before {
+  content: "";
+  position: absolute;
+  bottom: -4px;
+  left: 10%;
+  right: 10%;
+  height: 8px;
+  background: radial-gradient(
+    ellipse at 50% 0%,
+    rgba(139, 92, 246, 0.4) 0%,
+    transparent 70%
+  );
+  filter: blur(4px);
+  animation: navbar-glow-pulse 3s ease-in-out infinite;
+}
+
+/* FAB glow — hover */
+.hover\:fab-glow-hover:hover {
+  box-shadow:
+    0 2px 20px rgba(139, 92, 246, 0.3),
+    0 4px 40px rgba(139, 92, 246, 0.15);
+}
+
+/* FAB glow — full moon (scroll complete), pulsing */
+@keyframes fab-glow-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 2px 20px rgba(139, 92, 246, 0.35),
+      0 6px 50px rgba(139, 92, 246, 0.15);
+  }
+  50% {
+    box-shadow:
+      0 2px 30px rgba(139, 92, 246, 0.5),
+      0 8px 60px rgba(139, 92, 246, 0.25);
+  }
+}
+
+.fab-glow-full {
+  animation: fab-glow-pulse 3s ease-in-out infinite;
+}
+
+/* Star twinkle */
+@keyframes star-twinkle {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.animate-star-twinkle {
+  animation: star-twinkle 3s ease-in-out infinite;
+}
+
+/* Scroll indicator bounce */
+@keyframes scroll-down {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  30% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+}
+
+.animate-scroll-down {
+  animation: scroll-down 1.5s ease-in-out infinite;
+}
+
+/* Reduced motion support for parallax */
+@media (prefers-reduced-motion: reduce) {
+  .animate-star-twinkle {
+    animation: none;
+    opacity: 0.5;
+  }
+  .animate-scroll-down {
+    animation: none;
+  }
+}

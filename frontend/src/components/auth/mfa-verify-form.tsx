@@ -64,7 +64,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
         window.location.assign(returnTo);
         return;
       }
-      void navigate({ to: "/" as string });
+      void navigate({ to: "/dashboard" as string });
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
