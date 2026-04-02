@@ -1,8 +1,74 @@
 # NyxID
 
-**NyxID** is a self-hosted authentication and single sign-on (SSO) platform. Named after Nyx, the Greek goddess and protector of darkness, NyxID guards the boundary between your users and your services.
+**Turn your localhost into an MCP Server.**
 
-It provides a complete identity layer: user registration, session management, OpenID Connect, social login, multi-factor authentication, API key management, a reverse proxy that injects credentials into downstream service requests, a mobile approval app (iOS + Android), and a TypeScript OAuth SDK for client integration.
+NyxID is the open-source gateway between your APIs and your AI agents. It connects Claude Code, Cursor, n8n, or any MCP client to any API you have, including services running on localhost or behind a firewall.
+
+```
+Your AI agent (cloud)  ──>  NyxID  ──>  Your APIs (anywhere)
+                              │
+                              ├── NAT traversal (reach localhost, internal networks)
+                              ├── Credential injection (agents never see raw keys)
+                              ├── MCP auto-wrap (REST API → MCP tools, automatic)
+                              └── Per-agent isolation (scoped access, revocable)
+```
+
+## The Problem
+
+Your AI agent can call public APIs. But what about the database on your laptop? The internal API behind your company firewall? The HomeAssistant instance on your local network?
+
+Right now, you can't connect them. Your agent lives in the cloud. Your services live on your network. There's no bridge.
+
+1Password and WorkOS solve credential storage. That's table stakes. They can't tunnel into your network. They can't wrap your REST API as an MCP tool.
+
+## How NyxID Works
+
+**Bridge the gap.** Deploy NyxID. Point it at your APIs. Each one becomes an MCP tool that any agent can use. Credentials are injected automatically by the reverse proxy. Your agent never sees the raw API key.
+
+**Local services included.** Run `nyxid node start` to deploy a lightweight agent on your local network. It opens a WebSocket connection back to NyxID (outbound, no port forwarding needed). Your AI agent can now reach localhost services through the tunnel. Multi-node failover, HMAC-SHA256 request signing.
+
+**Per-agent isolation.** Each agent session gets a scoped token that can only access the APIs you authorize. Revoke any session without touching the underlying credentials.
+
+## Quick Start
+
+```bash
+# 1. Clone and start NyxID
+git clone https://github.com/ChronoAIProject/NyxID.git && cd NyxID
+cp .env.example .env
+# Edit .env: set ENCRYPTION_KEY=$(openssl rand -hex 32)
+docker compose up -d          # MongoDB + Mailpit
+cargo run --manifest-path backend/Cargo.toml &   # Backend on :3001
+cd frontend && npm install && npm run dev &       # Frontend on :3000
+
+# 2. Add API credentials in the console
+open http://localhost:3000
+
+# 3. Connect a local service via credential node
+cargo install --path cli
+nyxid login --base-url http://localhost:3001
+nyxid node register --token <your-reg-token> --url ws://localhost:3001/api/v1/nodes/ws
+nyxid node credentials add --service my-local-api --header Authorization
+nyxid node start
+
+# 4. Connect your AI agent
+nyxid mcp config --tool claude-code   # or: --tool cursor
+# Follow the output to add NyxID to your MCP config
+
+# 5. Done. Your agent can now call your local API through NyxID.
+```
+
+For production deployment, see [docker-compose.prod.yml](docker-compose.prod.yml).
+
+## Why NyxID
+
+| | NyxID | 1Password UA | CloudFlare Tunnel | Keycloak |
+|---|---|---|---|---|
+| Open source, self-hosted | Yes | No | No | Yes |
+| NAT traversal to localhost | Yes (`nyxid node`) | No | Yes (no credentials) | No |
+| Credential injection (reverse proxy) | Yes (any API) | Partner integrations only | No | No |
+| REST → MCP auto-wrap | Yes (from OpenAPI specs) | No | No | No |
+| Per-agent isolation | Yes | No | No | No |
+| OIDC / OAuth 2.0 | Yes | No | No | Yes |
 
 ---
 
@@ -11,7 +77,8 @@ It provides a complete identity layer: user registration, session management, Op
 - [Features](#features)
 - [Architecture Overview](#architecture-overview)
 - [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
+- [Developer Quick Start](#developer-quick-start)
+- [CLI Tools](#cli-tools)
 - [API Documentation](#api-documentation)
 - [Environment Variables](#environment-variables)
 - [Database Schema](#database-schema)
@@ -28,7 +95,14 @@ It provides a complete identity layer: user registration, session management, Op
 
 ## Features
 
-### Authentication and Session Management
+### Agent Connectivity (the core value)
+- **NAT Traversal via Credential Nodes:** Deploy `nyxid node` on your local network. WebSocket-based outbound tunnel to NyxID. No port forwarding, no VPN. Multi-node failover with priority-based routing, HMAC-SHA256 request signing.
+- **SSH Tunneling:** SSH-over-WebSocket at `GET /api/v1/ssh/{service_id}`. Short-lived OpenSSH certificates. `nyxid ssh proxy` for ProxyCommand tunneling.
+- **MCP Auto-Wrap:** REST APIs with OpenAPI specs automatically become MCP tools. `nyxid mcp config --tool cursor` generates config for Claude Code, Cursor, VSCode.
+- **Reverse Proxy + Credential Injection:** Requests pass through NyxID, credentials injected automatically (header, bearer, query, basic auth). Agents never see raw API keys.
+- **Per-Agent Isolation:** Each agent session gets a scoped token. Agent A accesses Slack and Gmail. Agent B only accesses your internal API. Revoke without touching underlying credentials.
+
+### Authentication and Identity
 - Email/password registration with Argon2id hashing (OWASP-recommended parameters)
 - Session-based authentication with HttpOnly, SameSite cookies
 - JWT access and refresh tokens signed with RS256 (4096-bit RSA keys)
@@ -342,7 +416,9 @@ The backend follows a layered architecture:
 
 ---
 
-## Quick Start
+## Developer Quick Start
+
+For a detailed step-by-step setup with all options:
 
 ### 1. Clone and configure
 
