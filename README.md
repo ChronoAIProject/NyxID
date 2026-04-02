@@ -4,130 +4,105 @@
 
 **Turn your localhost into an MCP Server.**
 
-Your AI agent lives in the cloud. Your APIs live on your network.
-NyxID bridges the gap. Open source. Self-hosted. Written in Rust.
-
-## Why we built this
-
-We run AI agents that need to call APIs. Some are public (OpenAI, Slack).
-Some are private (our database, our internal tools, HomeAssistant on our LAN).
-
-The public ones are easy. The private ones? No way to reach them from the cloud.
-And every agent needs credentials scattered across .env files on 3 machines.
-
-So we built a gateway. It tunnels into your network, injects credentials
-automatically, and wraps any REST API as an MCP tool. That's NyxID.
-
-## How it works
+NyxID is an open-source Agent Connectivity Gateway. It lets your AI agents
+(Claude Code, Cursor, n8n) reach any API you have, public or private,
+and handles all the credentials so your agent never sees a raw key.
 
 ```
-Claude Code / Cursor / n8n (cloud)
+Claude Code / Cursor / n8n
          |
          v
-      NyxID Gateway --- credentials injected automatically
+      NyxID (cloud gateway)
          |
     +----+----+
     v    v    v
  Public  Internal  localhost
   APIs    APIs     services
-         (NAT traversal)
 ```
 
-## Quick Start (with AI assistant)
+NyxID proxies requests, injects credentials automatically, punches through
+NAT to reach your local services, and wraps any REST API as MCP tools.
 
-Paste this into Claude Code, Cursor, or any AI coding assistant:
+## Quick Start
 
-> Set up NyxID on my machine. Clone github.com/ChronoAIProject/NyxID,
-> run docker compose up -d for MongoDB, build and start the backend
-> (cargo run --manifest-path backend/Cargo.toml), start the frontend
-> (cd frontend && npm install && npm run dev), then install the CLI
-> (cargo install --path cli), log in with nyxid login, and show me
-> how to add my first API credential and configure MCP for Claude Code.
+### 1. Sign up and add your APIs
 
-Your AI assistant will handle the setup. When it's done, run:
+Go to the [NyxID console](https://auth.nyxid.dev), create an account,
+and add the API credentials you want your agents to use.
+
+### 2. Install the CLI
 
 ```bash
-curl http://localhost:3001/health   # Should return {"status":"ok"}
-nyxid mcp config --tool claude-code # Generates your MCP config
+# macOS / Linux
+cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli
+
+# Then log in
+nyxid login
 ```
 
-<!-- AI quickstart maintenance: validate this prompt against actual repo setup on each release -->
-
-## Quick Start (manual)
-
-Prerequisites: Docker, Rust 1.85+, Node.js 20+
-
-```bash
-git clone https://github.com/ChronoAIProject/NyxID.git && cd NyxID
-cp .env.example .env
-# Edit .env: set ENCRYPTION_KEY=$(openssl rand -hex 32)
-
-# Start infrastructure + backend + frontend
-docker compose up -d                              # MongoDB + Mailpit
-cargo run --manifest-path backend/Cargo.toml &    # Backend on :3001
-(cd frontend && npm install && npm run dev) &     # Frontend on :3000
-
-# Install CLI and verify
-cargo install --path cli
-nyxid login --base-url http://localhost:3001
-nyxid status
-```
-
-Add API credentials at http://localhost:3000, then:
+### 3. Connect your AI agent
 
 ```bash
 nyxid mcp config --tool claude-code   # or: --tool cursor
 ```
 
-For production deployment, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+Follow the output to add NyxID to your MCP config. Done. Your agent
+can now call any API you added through NyxID's proxy. Credentials are
+injected automatically.
 
-## Connect a local service
+### 4. (Optional) Reach local services
 
-Run a credential node on your network. It tunnels back to NyxID
-so your AI agents can reach services on localhost or behind a firewall.
+Have services on localhost or behind a firewall? Deploy a credential node:
 
 ```bash
-nyxid node register --token <reg-token> --url ws://localhost:3001/api/v1/nodes/ws
+nyxid node register --token <reg-token> --url wss://nyx-api.chrono-ai.fun/api/v1/nodes/ws
 nyxid node credentials add --service my-local-api --header Authorization
 nyxid node start
 ```
 
-No port forwarding. No VPN. The node makes an outbound WebSocket connection.
-Multi-node failover, HMAC-SHA256 request signing.
+The node makes an outbound WebSocket connection to NyxID. No port forwarding.
+No VPN. Your AI agents can now reach localhost services through the tunnel.
 
-See [docs/NODE_PROXY.md](docs/NODE_PROXY.md) for full setup.
+## Quick Start (with AI assistant)
 
-## Features
+Paste this into Claude Code, Cursor, or any AI coding assistant:
 
-**Connectivity**
-- NAT traversal via credential nodes (`nyxid node`) ... reach localhost from the cloud
-- SSH-over-WebSocket tunneling (`nyxid ssh`) ... reach remote hosts
-- MCP auto-wrap ... REST APIs become MCP tools automatically (from OpenAPI specs)
+> Help me set up NyxID. Install the CLI (cargo install --git
+> https://github.com/ChronoAIProject/NyxID.git nyxid-cli), log in with
+> nyxid login, add my OpenAI API key, and configure MCP so I can use
+> NyxID-proxied tools from this session.
 
-**Security**
-- Reverse proxy with automatic credential injection ... agents never see raw keys
-- Per-agent session isolation ... scoped access, revocable
-- AES-256-GCM encrypted credential storage
-- Transaction approval via Telegram or mobile push
+<!-- AI quickstart maintenance: validate this prompt against actual CLI on each release -->
 
-**Identity**
-- Full OIDC/OAuth 2.0 provider with PKCE
-- RBAC with roles, groups, permissions
-- Service accounts for machine-to-machine auth
+## What NyxID does
 
-**Infrastructure**
-- LLM gateway ... unified endpoint for 7 AI providers (OpenAI, Anthropic, Google AI, Mistral, Cohere, DeepSeek, Codex)
-- API documentation discovery and catalog
-- Mobile app for approvals (iOS + Android)
+**Reach anything.** Public APIs, internal APIs, localhost services. NyxID's
+credential nodes (`nyxid node`) punch through NAT via outbound WebSocket.
+SSH tunneling (`nyxid ssh`) reaches remote hosts. No VPN, no port forwarding.
+
+**Never expose keys.** NyxID's reverse proxy injects credentials into every
+request automatically. Your AI agent talks to NyxID. NyxID talks to the API
+with the real key. The agent never sees it.
+
+**MCP auto-wrap.** REST APIs with OpenAPI specs become MCP tools automatically.
+`nyxid mcp config --tool cursor` generates the config. Works with Claude Code,
+Cursor, VSCode, and any MCP client.
+
+**Per-agent isolation.** Each agent session gets a scoped token. Agent A accesses
+Slack and Gmail. Agent B only accesses your internal API. Revoke any session
+without touching the underlying credentials.
+
+**Full identity layer.** OIDC/OAuth 2.0 with PKCE, RBAC, service accounts,
+transaction approval (Telegram + mobile push), LLM gateway for 7 providers.
 
 ## Why NyxID
 
 | | NyxID | 1Password UA | Cloudflare Tunnel | Keycloak |
 |---|---|---|---|---|
-| Open source, self-hosted | Yes | No | No | Yes |
+| Open source | Yes | No | No | Yes |
 | NAT traversal to localhost | Yes (`nyxid node`) | No | Yes (no credentials) | No |
-| Credential injection (reverse proxy) | Yes (any API) | Partner integrations only | No | No |
-| REST to MCP auto-wrap | Yes (from OpenAPI specs) | No | No | No |
+| Credential injection | Yes (any API) | Partner integrations | No | No |
+| REST to MCP auto-wrap | Yes | No | No | No |
 | Per-agent isolation | Yes | No | No | No |
 | OIDC / OAuth 2.0 | Yes | No | No | Yes |
 
@@ -137,19 +112,33 @@ See [docs/NODE_PROXY.md](docs/NODE_PROXY.md) for full setup.
 |-------|------|
 | API Reference | [docs/API.md](docs/API.md) |
 | Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| Environment Variables | [docs/ENV.md](docs/ENV.md) |
-| SSH Tunneling | [docs/SSH_TUNNELING.md](docs/SSH_TUNNELING.md) |
 | Credential Nodes | [docs/NODE_PROXY.md](docs/NODE_PROXY.md) |
 | MCP Integration | [docs/MCP_DELEGATION_FLOW.md](docs/MCP_DELEGATION_FLOW.md) |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) |
+| SSH Tunneling | [docs/SSH_TUNNELING.md](docs/SSH_TUNNELING.md) |
 | Security | [docs/SECURITY.md](docs/SECURITY.md) |
+| Environment Variables | [docs/ENV.md](docs/ENV.md) |
+| Deployment (self-host) | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | Developer Guide | [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) |
-| OpenClaw Integration | [docs/OPENCLAW_INTEGRATION.md](docs/OPENCLAW_INTEGRATION.md) |
+
+## Self-hosting
+
+NyxID is fully open source. If you prefer to run your own instance:
+
+```bash
+git clone https://github.com/ChronoAIProject/NyxID.git && cd NyxID
+cp .env.example .env
+# Edit .env: set ENCRYPTION_KEY=$(openssl rand -hex 32)
+docker compose up -d                              # MongoDB
+cargo run --manifest-path backend/Cargo.toml &    # Backend on :3001
+(cd frontend && npm install && npm run dev) &     # Frontend on :3000
+```
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for production setup.
 
 ## Contributing
 
-We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, coding conventions, and pull request process.
+We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
