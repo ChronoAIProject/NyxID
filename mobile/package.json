@@ -42,7 +42,7 @@
     "expo-blur": "~14.1.5",
     "expo-clipboard": "~7.1.5",
     "expo-dev-client": "~5.2.4",
-    "expo-font": "~13.3.2",
+    "expo-font": "~55.0.6",
     "expo-linear-gradient": "^55.0.9",
     "expo-notifications": "~0.31.0",
     "expo-secure-store": "~14.2.0",
