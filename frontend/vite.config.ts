@@ -21,7 +21,8 @@ function cookieRewrite(proxyRes: import("http").IncomingMessage) {
 const proxyTarget = {
   target: backendUrl,
   changeOrigin: true,
-  configure: (proxy: import("http-proxy").Server) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  configure: (proxy: any) => {
     proxy.on("proxyRes", cookieRewrite)
   },
 }
