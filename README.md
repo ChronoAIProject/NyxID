@@ -162,7 +162,7 @@ Add the output to your MCP config:
 
 ```bash
 # Verify from the CLI
-nyxid proxy openai /v1/models
+nyxid proxy request openai /v1/models
 ```
 
 If the proxy returns a response, the full chain works: credential stored, injected, downstream accepted. Ask your AI agent to list its tools — you should see the API you just connected.
@@ -188,7 +188,7 @@ nyxid node credentials add --service my-local-api --header Authorization --secre
 nyxid node start
 
 # Register the service and link it to the node
-nyxid node credentials setup --service my-local-api --url http://localhost:8080
+nyxid node credentials setup --service my-local-api --api-url http://localhost:8080
 
 # Import endpoints as MCP tools (if the service has an OpenAPI spec)
 nyxid catalog endpoints my-local-api
