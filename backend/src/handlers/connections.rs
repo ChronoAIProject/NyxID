@@ -7,7 +7,7 @@ use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::errors::{AppError, AppResult};
+use crate::errors::AppResult;
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
@@ -15,7 +15,7 @@ use crate::models::user_service_connection::{
     COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, connection_service, proxy_service};
+use crate::services::{audit_service, connection_service};
 
 // --- Request types ---
 
@@ -274,108 +274,4 @@ pub async fn disconnect_service(
     Ok(Json(DisconnectResponse {
         message: "Disconnected from service".to_string(),
     }))
-}
-
-// --- Test connection ---
-
-#[derive(Debug, Serialize)]
-pub struct TestConnectionResponse {
-    pub status: String,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_code: Option<u16>,
-}
-
-/// POST /api/v1/connections/{service_id}/test
-///
-/// Test a connection by resolving the proxy target (same path as real proxy
-/// requests) and making a lightweight GET to the downstream service. This
-/// verifies the full chain: credential storage, decryption, injection format,
-/// and downstream acceptance.
-pub async fn test_connection(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path(service_id): Path<String>,
-) -> AppResult<Json<TestConnectionResponse>> {
-    let user_id = auth_user.user_id.to_string();
-
-    // 1. Resolve proxy target — same credential resolution path as real proxy
-    let target = proxy_service::resolve_proxy_target(
-        &state.db,
-        &state.encryption_keys,
-        &user_id,
-        &service_id,
-    )
-    .await?;
-
-    // 2. Build the test URL
-    let test_path = target.service.test_endpoint.as_deref().unwrap_or("/");
-    let url = format!("{}{}", target.base_url.trim_end_matches('/'), test_path);
-
-    // 3. Build request with credential injection (same logic as proxy)
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| AppError::Internal(format!("HTTP client error: {e}")))?;
-
-    let mut req = client.get(&url);
-
-    match target.auth_method.as_str() {
-        "bearer" => {
-            req = req.header("Authorization", format!("Bearer {}", target.credential));
-        }
-        "bot_bearer" => {
-            req = req.header("Authorization", format!("Bot {}", target.credential));
-        }
-        "basic" => {
-            req = req.header("Authorization", format!("Basic {}", target.credential));
-        }
-        "header" => {
-            req = req.header(&target.auth_key_name, &target.credential);
-        }
-        "query" => {
-            req = req.query(&[(&target.auth_key_name, &target.credential)]);
-        }
-        "token" => {
-            req = req.header("Authorization", format!("token {}", target.credential));
-        }
-        "none" => {}
-        _ => {
-            // token_exchange, path, body — test reachability only
-        }
-    }
-
-    // 4. Execute and interpret
-    match req.send().await {
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            if status_code == 401 || status_code == 403 {
-                Ok(Json(TestConnectionResponse {
-                    status: "error".to_string(),
-                    message: "Invalid or expired credential".to_string(),
-                    response_code: Some(status_code),
-                }))
-            } else {
-                Ok(Json(TestConnectionResponse {
-                    status: "ok".to_string(),
-                    message: "Connection working".to_string(),
-                    response_code: Some(status_code),
-                }))
-            }
-        }
-        Err(e) => {
-            let message = if e.is_timeout() {
-                "Service unreachable (timeout)".to_string()
-            } else if e.is_connect() {
-                "Service unreachable (connection refused)".to_string()
-            } else {
-                format!("Request failed: {e}")
-            };
-            Ok(Json(TestConnectionResponse {
-                status: "error".to_string(),
-                message,
-                response_code: None,
-            }))
-        }
-    }
 }

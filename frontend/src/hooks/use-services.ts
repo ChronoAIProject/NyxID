@@ -200,23 +200,6 @@ export function useUpdateCredential() {
   });
 }
 
-interface TestConnectionResponse {
-  readonly status: string;
-  readonly message: string;
-  readonly response_code?: number;
-}
-
-export function useTestConnection() {
-  return useMutation({
-    mutationFn: async (serviceId: string): Promise<TestConnectionResponse> => {
-      return api.post<TestConnectionResponse>(
-        `/connections/${serviceId}/test`,
-        {},
-      );
-    },
-  });
-}
-
 export function useDisconnectService() {
   const queryClient = useQueryClient();
 

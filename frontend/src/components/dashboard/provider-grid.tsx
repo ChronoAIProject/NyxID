@@ -15,7 +15,6 @@ import { ApiKeyDialog } from "./api-key-dialog";
 import { DeviceCodeDialog } from "./device-code-dialog";
 import { TelegramLoginDialog } from "./telegram-login-dialog";
 import { UserCredentialsDialog } from "./user-credentials-dialog";
-import { McpSetupDialog } from "./mcp-setup-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   canConnectProvider,
@@ -43,9 +42,6 @@ export function ProviderGrid() {
     useState<ProviderConfig | null>(null);
   const [credentialsDialog, setCredentialsDialog] =
     useState<ProviderConfig | null>(null);
-  const [mcpDialogProvider, setMcpDialogProvider] = useState<string | null>(
-    null,
-  );
   // Track which provider is currently being acted upon for per-card disabled state
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
 
@@ -101,7 +97,7 @@ export function ProviderGrid() {
         label,
         gatewayUrl,
       });
-      setMcpDialogProvider(apiKeyDialog.name);
+      toast.success(`Connected to ${apiKeyDialog.name}`);
       setApiKeyDialog(null);
     } catch (error) {
       if (error instanceof ApiError) {
@@ -239,12 +235,6 @@ export function ProviderGrid() {
           onClose={() => setCredentialsDialog(null)}
         />
       )}
-
-      <McpSetupDialog
-        providerName={mcpDialogProvider ?? ""}
-        open={mcpDialogProvider !== null}
-        onClose={() => setMcpDialogProvider(null)}
-      />
     </>
   );
 }

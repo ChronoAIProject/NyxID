@@ -172,7 +172,7 @@ If the proxy returns a response, the full chain works: credential stored, inject
 Everything above can also be done through the web console at `http://localhost:3000`:
 
 - **Providers** — connect API keys (OpenAI, Anthropic, GitHub, etc.)
-- **Services > Connections** — view connected services, click **Test** to verify credentials work through the proxy
+- **Services > Connections** — view and manage connected services
 - **Settings > MCP** — copy MCP config snippets for Claude Code, Cursor, or Codex
 
 ---
