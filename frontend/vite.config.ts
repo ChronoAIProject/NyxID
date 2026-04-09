@@ -30,7 +30,7 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    port: 3000,
     proxy: {
       "/api": "http://localhost:3001",
       "^/oauth(?:/.*)?$": "http://localhost:3001",
@@ -40,7 +40,7 @@ export default defineConfig({
     },
   },
   preview: {
-    port: 5173,
+    port: 3000,
   },
   appType: "spa",
   test: {
