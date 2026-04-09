@@ -1,11 +1,11 @@
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/ChronoAIProject/NyxID)](https://github.com/ChronoAIProject/NyxID)
+
 <p align="center">
   <img src="assets/banner.png" alt="NyxID — Connect AI agents to any API, anywhere. Securely." width="100%">
 </p>
 
 **Connect AI agents to any API, anywhere. Securely.** Open-source Agent Connectivity Gateway.
-
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![GitHub Stars](https://img.shields.io/github/stars/ChronoAIProject/NyxID)](https://github.com/ChronoAIProject/NyxID)
 
 NyxID lets your AI agents (Claude Code, Cursor, n8n) reach any API you have,
 public or private, and handles all the credentials so your agent never sees
