@@ -120,7 +120,7 @@ docker compose -f docker-compose.prod.yml --env-file .env.production pull
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d
 ```
 
-> Default JWT signing keys are included for quickstart convenience. For production, generate your own — see `keys/README.md`.
+> JWT signing keys are auto-generated on first startup. For production, generate your own and set `ENVIRONMENT=production`.
 
 2. **Create your account** (~1 min): Open `http://localhost:3000` and register. The first account gets admin access.
 

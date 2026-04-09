@@ -39,10 +39,6 @@ pub struct PublicConfigResponse {
     pub node_ws_url: String,
     pub version: String,
     pub social_providers: Vec<String>,
-    /// True when the server is using the bundled quickstart JWT keys.
-    /// Frontend should show a security warning prompting the admin to
-    /// generate custom keys before exposing the instance publicly.
-    pub using_default_jwt_keys: bool,
 }
 
 /// GET /api/v1/public/config
@@ -66,15 +62,11 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
         .replace("https://", "wss://")
         .replace("http://", "ws://");
 
-    let using_default_jwt_keys = state.config.jwt_private_key_path.contains("default.")
-        || state.config.jwt_public_key_path.contains("default.");
-
     Json(PublicConfigResponse {
         frontend_url: state.config.frontend_url.trim_end_matches('/').to_string(),
         mcp_url: format!("{base}/mcp"),
         node_ws_url: format!("{ws_base}/api/v1/nodes/ws"),
         version: env!("CARGO_PKG_VERSION").to_string(),
         social_providers,
-        using_default_jwt_keys,
     })
 }

@@ -359,7 +359,6 @@ export interface PublicConfig {
   readonly node_ws_url: string;
   readonly version: string;
   readonly social_providers: readonly string[];
-  readonly using_default_jwt_keys: boolean;
 }
 
 export type CredentialMode = "admin" | "user" | "both";
