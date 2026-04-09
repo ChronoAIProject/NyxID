@@ -111,8 +111,7 @@ cp .env.production.example .env.production
 openssl rand -hex 32    # → ENCRYPTION_KEY (keep this safe)
 openssl rand -hex 24    # → MONGO_ROOT_PASSWORD
 
-docker compose -f docker-compose.quickstart.yml --env-file .env.production pull
-docker compose -f docker-compose.quickstart.yml --env-file .env.production up -d
+docker compose --env-file .env.production up -d
 
 # Wait for the server to be ready
 until curl -sf http://localhost:3001/health > /dev/null 2>&1; do sleep 2; done && echo "NyxID is running"
