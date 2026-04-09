@@ -4,6 +4,16 @@ import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import path from "path"
 
+const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
+
+const apiProxy = {
+  "/api": backendUrl,
+  "^/oauth(?:/.*)?$": backendUrl,
+  "/mcp": backendUrl,
+  "/.well-known": backendUrl,
+  "/health": backendUrl,
+}
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -14,33 +24,30 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
-        manualChunks: {
-          "vendor-react": ["react", "react-dom"],
-          "vendor-router": ["@tanstack/react-router"],
-          "vendor-query": ["@tanstack/react-query"],
-          "vendor-radix": [
-            "@radix-ui/react-dialog",
-            "@radix-ui/react-dropdown-menu",
-            "@radix-ui/react-select",
-            "@radix-ui/react-tabs",
-            "@radix-ui/react-tooltip",
-          ],
+        manualChunks(id) {
+          if (id.includes("node_modules/react-dom") || id.includes("node_modules/react/")) {
+            return "vendor-react"
+          }
+          if (id.includes("node_modules/@tanstack/react-router")) {
+            return "vendor-router"
+          }
+          if (id.includes("node_modules/@tanstack/react-query")) {
+            return "vendor-query"
+          }
+          if (id.includes("node_modules/@radix-ui/")) {
+            return "vendor-radix"
+          }
         },
       },
     },
   },
   server: {
     port: 5173,
-    proxy: {
-      "/api": "http://localhost:3001",
-      "^/oauth(?:/.*)?$": "http://localhost:3001",
-      "/mcp": "http://localhost:3001",
-      "/.well-known": "http://localhost:3001",
-      "/health": "http://localhost:3001",
-    },
+    proxy: apiProxy,
   },
   preview: {
     port: 5173,
+    proxy: apiProxy,
   },
   appType: "spa",
   test: {

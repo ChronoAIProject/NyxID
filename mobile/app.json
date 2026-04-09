@@ -17,7 +17,7 @@
     ],
     "ios": {
       "supportsTablet": false,
-      "buildNumber": "18",
+      "buildNumber": "29",
       "bundleIdentifier": "fun.chrono-ai.nyxid",
       "associatedDomains": [
         "applinks:nyx-api.chrono-ai.fun",
