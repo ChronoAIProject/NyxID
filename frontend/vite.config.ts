@@ -6,12 +6,32 @@ import path from "path"
 
 const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
 
+/** Strip Secure / Domain from Set-Cookie so cookies work on http://localhost */
+function cookieRewrite(proxyRes: import("http").IncomingMessage) {
+  const sc = proxyRes.headers["set-cookie"]
+  if (!sc) return
+  proxyRes.headers["set-cookie"] = sc.map((c) =>
+    c
+      .replace(/;\s*Secure/gi, "")
+      .replace(/;\s*Domain=[^;]*/gi, "")
+      .replace(/;\s*SameSite=None/gi, "; SameSite=Lax"),
+  )
+}
+
+const proxyTarget = {
+  target: backendUrl,
+  changeOrigin: true,
+  configure: (proxy: import("http-proxy").Server) => {
+    proxy.on("proxyRes", cookieRewrite)
+  },
+}
+
 const apiProxy = {
-  "/api": backendUrl,
-  "^/oauth(?:/.*)?$": backendUrl,
-  "/mcp": backendUrl,
-  "/.well-known": backendUrl,
-  "/health": backendUrl,
+  "/api": proxyTarget,
+  "^/oauth(?:/.*)?$": proxyTarget,
+  "/mcp": proxyTarget,
+  "/.well-known": proxyTarget,
+  "/health": proxyTarget,
 }
 
 export default defineConfig({
