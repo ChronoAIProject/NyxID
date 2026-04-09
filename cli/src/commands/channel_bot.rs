@@ -7,20 +7,7 @@ use serde_json::Value;
 use crate::api::ApiClient;
 use crate::cli::{ChannelBotCommands, ChannelRouteCommands, OutputFormat};
 
-/// Print a deprecation warning before any channel-bot subcommand runs.
-///
-/// Channel mode is being phased out per ChronoAIProject/NyxID#191. Bot
-/// integrations should be set up as standard service connections (e.g.
-/// `nyxid service add api-telegram-bot`) and inbound chat runtime should
-/// be handled by the calling agent (e.g. Aevatar).
-fn print_deprecation_notice() {
-    eprintln!(
-        "\x1b[33mwarning:\x1b[0m `nyxid channel-bot` is deprecated. Use `nyxid service add api-telegram-bot` (or api-lark-bot/api-feishu-bot/api-discord-bot) for bot credentials. Inbound chat runtime should be handled by your agent. See ChronoAIProject/NyxID#191."
-    );
-}
-
 pub async fn run(command: ChannelBotCommands) -> Result<()> {
-    print_deprecation_notice();
     match command {
         ChannelBotCommands::Register {
             platform,

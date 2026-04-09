@@ -1,16 +1,6 @@
 # Channel Bot Relay Design
 
-> ## DEPRECATED
->
-> Channel mode is deprecated as of 2026-04-07. See ChronoAIProject/NyxID#191 for the rationale.
->
-> The recommended path for bot integrations is now:
->
-> 1. **Bot credentials**: Use standard service connections (`api-telegram-bot`, `api-lark-bot`, `api-feishu-bot`, `api-discord-bot`). NyxID stores the bot token / app secret and injects it into outbound API calls -- the same model as any other proxied service.
->
-> 2. **Inbound chat runtime**: Handled by the calling agent (Aevatar, custom backend, etc.). NyxID does not own webhook lifecycle, conversation routing, or message storage.
->
-> The code in this design document still works but is no longer being iterated. New features (Lark `body` auth, Discord `bot_bearer` auth, etc.) ship under the standard service connection path. This document is preserved for reference.
+> **ADR-013 update (2026-04-09):** Channel Bot Relay is now a **pure passthrough gateway** per ADR-013. NyxID no longer stores message bodies, attachments, or raw webhook payloads in `channel_messages` — only routing metadata. Synchronous agent replies (HTTP 200 + body) are no longer supported; agents must return 202 and post replies via `POST /api/v1/channel-relay/reply`. See NyxID#221, ADR-013, and [`docs/CHANNEL_EVENT_GATEWAY.md`](./CHANNEL_EVENT_GATEWAY.md) for the full rationale. The earlier deprecation-in-favor-of-service-connections direction (NyxID#191) has been recalled: channel relay and the new HTTP Event Gateway are the first-class inbound paths.
 
 ## Overview
 

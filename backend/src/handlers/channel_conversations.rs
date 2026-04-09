@@ -307,6 +307,11 @@ fn default_per_page() -> u64 {
 }
 
 #[derive(Debug, Serialize)]
+/// Metadata-only message summary for the bot-owner message-history view.
+///
+/// **Breaking change (ADR-013):** `text` and `attachments` used to appear
+/// here. Per the NyxID pure-passthrough principle, message content is no
+/// longer persisted.
 pub struct ConversationMessageItem {
     pub id: String,
     pub direction: String,
@@ -315,21 +320,10 @@ pub struct ConversationMessageItem {
     pub sender_platform_id: Option<String>,
     pub sender_display_name: Option<String>,
     pub content_type: String,
-    pub text: Option<String>,
     pub agent_api_key_id: Option<String>,
     pub callback_status: Option<String>,
     pub reply_to_message_id: Option<String>,
-    pub attachments: Vec<MessageAttachmentItem>,
     pub created_at: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct MessageAttachmentItem {
-    pub content_type: String,
-    pub url: String,
-    pub filename: Option<String>,
-    pub mime_type: Option<String>,
-    pub size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -380,21 +374,9 @@ pub async fn list_conversation_messages(
             sender_platform_id: m.sender_platform_id,
             sender_display_name: m.sender_display_name,
             content_type: m.content_type,
-            text: m.text,
             agent_api_key_id: m.agent_api_key_id,
             callback_status: m.callback_status,
             reply_to_message_id: m.reply_to_message_id,
-            attachments: m
-                .attachments
-                .into_iter()
-                .map(|a| MessageAttachmentItem {
-                    content_type: a.content_type,
-                    url: a.url,
-                    filename: a.filename,
-                    mime_type: a.mime_type,
-                    size_bytes: a.size_bytes,
-                })
-                .collect(),
             created_at: m.created_at.to_rfc3339(),
         })
         .collect();

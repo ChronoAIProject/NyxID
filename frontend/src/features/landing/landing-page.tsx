@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+
 import "./landing.css";
 import "./i18n";
 
@@ -13,6 +15,15 @@ import { ScrollFab } from "./components/scroll-fab";
 import { LandingFooter } from "./components/landing-footer";
 
 export function LandingPage() {
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (window.location.hash === "#waitlist") {
+        document.getElementById("waitlist")?.scrollIntoView({ behavior: "smooth" });
+      }
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, []);
+
   return (
     <div className="min-h-screen overflow-x-hidden bg-landing-bg">
       <LandingNavbar />

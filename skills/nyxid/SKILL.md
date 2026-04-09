@@ -683,11 +683,11 @@ steps apply to `api-feishu-bot`.
 | `api-discord` | Discord API as a logged-in user (OAuth) |
 | `api-discord-bot` | Discord API as a bot (persistent bot token) |
 
-## Channel Bot Relay (DEPRECATED)
+## Channel Bot Relay
 
-> **Deprecated.** Channel mode is being phased out (see ChronoAIProject/NyxID#191). Use the bot-capable service connections above for credentials, and let your agent runtime handle inbound webhooks. This section is kept for users still on the old flow.
+NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and delivery to the agent.
 
-NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and reply delivery.
+NyxID is a **pure passthrough gateway** (ADR-013): it never stores message bodies or attachments. Only routing metadata lives in NyxID; the full conversation history belongs to the downstream agent.
 
 ### Register a bot
 
@@ -748,26 +748,90 @@ For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890`
 
 1. User sends message on Telegram/Discord/Lark/Feishu
 2. Platform webhook delivers to NyxID
-3. NyxID verifies signature, resolves route, stores inbound message
-4. NyxID POSTs normalized payload to agent's `callback_url` (with HMAC signature)
-5. Agent replies synchronously (200 + body) or asynchronously (202, then `POST /channel-relay/reply`)
-6. NyxID sends reply back to the platform chat
+3. NyxID verifies signature, resolves route, writes a metadata-only record (per ADR-013, no text or attachments are persisted)
+4. NyxID POSTs the normalized payload to the agent's `callback_url` with an HMAC signature
+5. **Agent must return 202.** Sync replies (200 + body) are no longer supported — any body on a 200 is silently discarded
+6. Agent processes asynchronously, then POSTs the reply to `/channel-relay/reply`
+7. NyxID delivers the reply to the platform chat
 
-The callback payload includes both normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark JSON). Most agents use the normalized fields; agents that need platform-specific features (inline keyboards, embeds, interactive cards) can read `raw_platform_data` directly.
+The callback payload includes normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark JSON). The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
 
 ### Agent-facing endpoints (API-key authenticated)
 
 ```bash
-# Async reply (agent sends response after processing)
+# Async reply — this is the only way for an agent to respond
 POST /api/v1/channel-relay/reply
 { "message_id": "<inbound-msg-id>", "reply": { "text": "..." } }
 
-# Message history
+# Message history (metadata only — `text` and `attachments` are NOT returned per ADR-013)
 GET /api/v1/channel-relay/messages/<conversation_id>?page=1&per_page=50
 
 # Resolve platform sender to NyxID user
 GET /api/v1/channel-relay/resolve-sender?platform=telegram&platform_id=12345
 ```
+
+> **ADR-013 note:** `GET /channel-relay/messages/...` returns only routing metadata (direction, platform, sender ids, delivery status, timestamps). Agents that need conversation bodies must retain their own history.
+
+## HTTP Event Gateway — device/analyzer events
+
+NyxID also accepts push-mode events from external devices and analyzers on the same channel infrastructure. The envelope is converted to a `CallbackPayload` with `platform = "device"` and forwarded through the agent's `callback_url` just like a chat message.
+
+**Endpoint:** `POST /api/v1/channel-events/{conversation_id}`
+**Auth:** Bearer API key (`nyxid_ag_...`) bound to the target conversation
+**Storage:** Metadata only. Event payloads are never persisted (ADR-013).
+**Retry:** None. NyxID is a pure passthrough — the client decides what to do on failure.
+**Rate limit:** 100 events/second per conversation (default, configurable).
+**Idempotency:** Best-effort — same `event_id` within 5 minutes is deduplicated.
+
+### Envelope
+
+```json
+{
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "source": "camera-analyzer",
+  "type": "person_detected",
+  "timestamp": "2026-04-08T12:00:00Z",
+  "payload": { "room": "living_room", "confidence": 0.95 },
+  "metadata": { "analyzer_version": "1.0" }
+}
+```
+
+### CLI
+
+```bash
+# Push a device event from a shell script
+nyxid channel-event push \
+  --conversation-id <CONVERSATION_ID> \
+  --source camera-analyzer \
+  --type person_detected \
+  --payload-json '{"room":"living_room","confidence":0.95}'
+```
+
+### curl
+
+```bash
+curl -X POST https://<your-nyxid>/api/v1/channel-events/<CONVERSATION_ID> \
+  -H "Authorization: Bearer nyxid_ag_..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_id": "550e8400-e29b-41d4-a716-446655440000",
+    "source": "camera-analyzer",
+    "type": "person_detected",
+    "timestamp": "2026-04-08T12:00:00Z",
+    "payload": {"room": "living_room", "confidence": 0.95}
+  }'
+```
+
+### Response codes
+
+| Status | Meaning |
+|---|---|
+| 200 | Accepted (delivered) or deduplicated |
+| 400 | Invalid envelope shape |
+| 401 | Missing/invalid bearer, or API key is not bound to the conversation |
+| 404 | Conversation not found |
+| 429 | Per-channel rate limit exceeded |
+| 502 | Downstream agent unreachable or returned non-2xx |
 
 ## OpenClaw Integration
 

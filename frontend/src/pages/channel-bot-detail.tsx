@@ -23,7 +23,6 @@ import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -604,7 +603,7 @@ export function ChannelBotDetailPage() {
     <div className="space-y-8">
       <PageHeader
         breadcrumbs={[
-          { label: "Channel Bots (Deprecated)", to: "/channel-bots" },
+          { label: "Channel Bots", to: "/channel-bots" },
           { label: bot.label },
         ]}
         title={bot.label}
@@ -631,31 +630,6 @@ export function ChannelBotDetailPage() {
           </div>
         }
       />
-
-      <Card className="border-yellow-500/40 bg-yellow-500/5">
-        <CardContent className="py-4 text-sm">
-          <p className="font-medium text-yellow-700 dark:text-yellow-400">
-            Channel Bots is deprecated.
-          </p>
-          <p className="mt-1 text-muted-foreground">
-            Use a standard service connection (e.g.{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-xs">
-              nyxid service add api-telegram-bot
-            </code>
-            ) for bot credentials, and let your agent handle inbound chat
-            runtime. See{" "}
-            <a
-              href="https://github.com/ChronoAIProject/NyxID/issues/191"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-primary underline"
-            >
-              issue #191
-            </a>
-            .
-          </p>
-        </CardContent>
-      </Card>
 
       {/* Bot Information */}
       <DetailSection title="Bot Information">

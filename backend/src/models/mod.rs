@@ -8,6 +8,7 @@ pub mod bson_bytes;
 pub mod bson_datetime;
 pub mod channel_bot;
 pub mod channel_conversation;
+pub mod channel_event_log;
 pub mod channel_message;
 pub mod consent;
 pub mod downstream_service;

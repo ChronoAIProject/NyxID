@@ -170,6 +170,16 @@ pub struct AppConfig {
     /// TTL in days for channel messages before automatic expiry (default: 30)
     pub channel_relay_message_ttl_days: u32,
 
+    // HTTP Event Gateway (NyxID#221 / ADR-013)
+    /// Per-channel event rate limit (events per second, default 100).
+    pub channel_event_rate_limit_per_second: u32,
+    /// Per-channel event rate limit burst capacity (default 200).
+    pub channel_event_rate_limit_burst: u32,
+    /// Event dedup LRU cache capacity (default 10_000).
+    pub channel_event_dedup_capacity: usize,
+    /// Event dedup TTL in seconds (default 300 = 5 minutes).
+    pub channel_event_dedup_ttl_secs: u64,
+
     // Registration gate
     /// When `true` (default), new-user registration requires a valid invite
     /// code and first-time social sign-ups are rejected. Set
@@ -319,6 +329,22 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "channel_relay_message_ttl_days",
                 &self.channel_relay_message_ttl_days,
+            )
+            .field(
+                "channel_event_rate_limit_per_second",
+                &self.channel_event_rate_limit_per_second,
+            )
+            .field(
+                "channel_event_rate_limit_burst",
+                &self.channel_event_rate_limit_burst,
+            )
+            .field(
+                "channel_event_dedup_capacity",
+                &self.channel_event_dedup_capacity,
+            )
+            .field(
+                "channel_event_dedup_ttl_secs",
+                &self.channel_event_dedup_ttl_secs,
             )
             .finish()
     }
@@ -535,6 +561,27 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            channel_event_rate_limit_per_second: env::var("CHANNEL_EVENT_RATE_LIMIT_PER_SECOND")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100),
+            channel_event_rate_limit_burst: env::var("CHANNEL_EVENT_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(200),
+            channel_event_dedup_capacity: env::var("CHANNEL_EVENT_DEDUP_CAPACITY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                // Default sized to honor the 5-min TTL window under the
+                // default rate limit: 100 events/s × 300s = 30,000 entries
+                // for a single saturated channel. 32_768 leaves headroom
+                // and is a power of two. Operators with many concurrent
+                // high-throughput channels should tune this up.
+                .unwrap_or(32_768),
+            channel_event_dedup_ttl_secs: env::var("CHANNEL_EVENT_DEDUP_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
 
             invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
         }
@@ -830,6 +877,10 @@ mod tests {
             channel_relay_callback_timeout_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            channel_event_rate_limit_per_second: 100,
+            channel_event_rate_limit_burst: 200,
+            channel_event_dedup_capacity: 32_768,
+            channel_event_dedup_ttl_secs: 300,
             invite_code_required: true,
         }
     }

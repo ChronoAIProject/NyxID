@@ -1,9 +1,10 @@
 {
   "nav.joinWaitlist": "加入候补名单",
+  "nav.login": "登录",
 
-  "hero.title": "守护",
-  "hero.titleAccent": "认证之门。",
-  "hero.subtitle": "NyxID 站在匿名与认证之间。一键批准或拒绝访问。Nyx 守护的，无人可见。",
+  "hero.eyebrow": "开源智能体连接网关",
+  "hero.title": "将 Claude、Cursor 或你自己的智能体连接到公共、内部和本地 API — 并具备安全访问控制。",
+  "hero.subtitle": "在手机上审批每一个连接。你的凭证永远不会离开 NyxID。",
   "hero.cta": "抢先体验",
   "hero.ctaSubtext": "Nyx 守护着大门 — 只有候补名单持有钥匙",
 

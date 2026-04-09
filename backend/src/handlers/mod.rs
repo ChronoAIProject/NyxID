@@ -13,6 +13,7 @@ pub mod auth;
 pub mod catalog;
 pub mod channel_bots;
 pub mod channel_conversations;
+pub mod channel_events;
 pub mod channel_relay;
 pub mod channel_webhooks;
 pub mod connections;

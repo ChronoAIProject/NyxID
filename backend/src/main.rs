@@ -30,6 +30,7 @@ use crypto::key_provider::KeyProvider;
 use crypto::local_key_provider::LocalKeyProvider;
 use models::mcp_session::McpSessionStore;
 
+use services::event_dedup_cache::EventDedupCache;
 use services::node_ws_manager::NodeWsManager;
 use services::provider_token_exchange_service::TokenExchangeCache;
 use services::push_service::{ApnsAuth, FcmAuth};
@@ -60,6 +61,11 @@ pub struct AppState {
     pub ssh_session_manager: Arc<SshSessionManager>,
     /// Per-agent rate limiter keyed by API key ID
     pub per_agent_limiter: mw::rate_limit::SharedPerAgentRateLimiter,
+    /// Per-channel rate limiter keyed by conversation_id, for the HTTP Event
+    /// Gateway (NyxID#221). Distinct from `per_agent_limiter`.
+    pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
+    /// Best-effort idempotency cache for inbound channel events.
+    pub event_dedup_cache: Arc<EventDedupCache>,
     /// Active WebSocket passthrough connection count (for resource limiting)
     pub ws_passthrough_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Generic downstream-provider token exchange cache with per-key
@@ -313,6 +319,16 @@ async fn main() {
     ));
     let ssh_session_manager = Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user));
 
+    // HTTP Event Gateway state (NyxID#221).
+    let per_channel_event_limiter = Arc::new(mw::rate_limit::PerChannelEventLimiter::new(
+        config.channel_event_rate_limit_per_second,
+        config.channel_event_rate_limit_burst,
+    ));
+    let event_dedup_cache = Arc::new(EventDedupCache::new(
+        config.channel_event_dedup_capacity,
+        std::time::Duration::from_secs(config.channel_event_dedup_ttl_secs),
+    ));
+
     // Create shared state
     let state = AppState {
         db,
@@ -328,6 +344,8 @@ async fn main() {
         node_ws_manager,
         ssh_session_manager,
         per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
+        per_channel_event_limiter,
+        event_dedup_cache,
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
     };
@@ -360,6 +378,25 @@ async fn main() {
         loop {
             interval.tick().await;
             cleanup_agent_limiter.cleanup();
+        }
+    });
+
+    // Spawn background cleanup for the per-channel event limiter and the
+    // event idempotency LRU. Same cadence as the per-agent limiter.
+    let cleanup_event_limiter = state.per_channel_event_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_event_limiter.cleanup();
+        }
+    });
+    let cleanup_event_dedup = state.event_dedup_cache.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_event_dedup.cleanup();
         }
     });
 

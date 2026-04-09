@@ -27,8 +27,14 @@ export function LandingNavbar() {
         <div className="flex items-center gap-3">
           <LanguageSwitcher />
           <a
+            href="/login"
+            className="rounded-lg border border-primary/40 px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary/10"
+          >
+            {t("nav.login")}
+          </a>
+          <a
             href="#waitlist"
-            className="rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-void-400"
+            className="hidden rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-void-400 md:inline-block"
           >
             {t("nav.joinWaitlist")}
           </a>

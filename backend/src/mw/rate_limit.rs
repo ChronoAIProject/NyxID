@@ -123,6 +123,69 @@ impl PerAgentRateLimiter {
 
 pub type SharedPerAgentRateLimiter = Arc<PerAgentRateLimiter>;
 
+/// Per-channel rate limiter keyed by conversation_id for the HTTP Event
+/// Gateway. Distinct from `PerAgentRateLimiter` because event-channel
+/// throttling is per-conversation, not per-API-key.
+///
+/// Token bucket with a fixed rate_per_second and burst capacity shared by
+/// every conversation. Rate parameters are set at construction time from
+/// env-driven config; per-conversation overrides are not supported in the
+/// initial implementation.
+#[derive(Clone)]
+pub struct PerChannelEventLimiter {
+    state: Arc<Mutex<HashMap<String, AgentBucket>>>,
+    rate_per_second: u32,
+    burst: u32,
+}
+
+impl PerChannelEventLimiter {
+    pub fn new(rate_per_second: u32, burst: u32) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+            rate_per_second,
+            burst,
+        }
+    }
+
+    /// Check if an event for the given conversation should be allowed.
+    /// Returns `true` if allowed, `false` if rate-limited.
+    pub fn check(&self, conversation_id: &str) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = state
+            .entry(conversation_id.to_string())
+            .or_insert(AgentBucket {
+                tokens: self.burst as f64,
+                last_refill: now,
+            });
+
+        let elapsed_secs = now.duration_since(entry.last_refill).as_secs_f64();
+        entry.tokens =
+            (entry.tokens + elapsed_secs * self.rate_per_second as f64).min(self.burst as f64);
+        entry.last_refill = now;
+
+        if entry.tokens < 1.0 {
+            return false;
+        }
+        entry.tokens -= 1.0;
+        true
+    }
+
+    /// Remove stale entries to prevent unbounded memory growth.
+    pub fn cleanup(&self) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.retain(|_, bucket| now.duration_since(bucket.last_refill).as_secs() < 120);
+    }
+
+    #[cfg(test)]
+    fn active_conversations(&self) -> usize {
+        self.state.lock().unwrap().len()
+    }
+}
+
+pub type SharedPerChannelEventLimiter = Arc<PerChannelEventLimiter>;
+
 /// Check per-agent rate limit. Call from proxy handlers after auth extraction.
 pub fn check_agent_rate_limit(
     limiter: &PerAgentRateLimiter,
@@ -380,5 +443,51 @@ mod tests {
         let limiter = PerAgentRateLimiter::new();
         limiter.check("agent-x", 10, 10);
         limiter.cleanup();
+    }
+
+    #[test]
+    fn per_channel_limiter_allows_up_to_burst() {
+        let limiter = PerChannelEventLimiter::new(100, 3);
+        assert!(limiter.check("conv-a"));
+        assert!(limiter.check("conv-a"));
+        assert!(limiter.check("conv-a"));
+        assert!(!limiter.check("conv-a"));
+    }
+
+    #[test]
+    fn per_channel_limiter_isolates_conversations() {
+        let limiter = PerChannelEventLimiter::new(100, 1);
+        assert!(limiter.check("conv-a"));
+        assert!(!limiter.check("conv-a"));
+        // Second conversation still has its own bucket.
+        assert!(limiter.check("conv-b"));
+    }
+
+    #[test]
+    fn per_channel_limiter_refills_over_time() {
+        // 100 req/s with burst 1 → roughly 10ms per token
+        let limiter = PerChannelEventLimiter::new(100, 1);
+        assert!(limiter.check("conv"));
+        assert!(!limiter.check("conv"));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(limiter.check("conv"));
+    }
+
+    #[test]
+    fn per_channel_limiter_cleanup_does_not_panic() {
+        let limiter = PerChannelEventLimiter::new(100, 100);
+        limiter.check("conv-clean");
+        limiter.cleanup();
+        // Still usable after cleanup.
+        assert!(limiter.check("conv-clean"));
+    }
+
+    #[test]
+    fn per_channel_limiter_tracks_active_conversations() {
+        let limiter = PerChannelEventLimiter::new(100, 10);
+        limiter.check("conv-1");
+        limiter.check("conv-2");
+        limiter.check("conv-3");
+        assert_eq!(limiter.active_conversations(), 3);
     }
 }

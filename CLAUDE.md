@@ -212,9 +212,9 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs (39 models, 37 collections, incl. agent_service_binding, node, node_service_binding, mcp_session, openclaw_channel_mapping, user_endpoint, user_api_key, user_service, channel_bot, channel_conversation, channel_message)
-|-- services/            # Business logic (50 services, incl. agent_binding_service, node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service, action_description, channel_bot_service, channel_routing_service, channel_relay_service, channel_platform, channel_adapters/{telegram,discord,lark,openclaw})
-|-- handlers/            # HTTP handlers (50 handler modules, incl. agent_bindings, node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel, keys, catalog, user_endpoints, user_api_keys_external, user_services_handler, channel_bots, channel_conversations, channel_webhooks, channel_relay)
+|-- models/              # MongoDB document structs (40 models, 38 collections, incl. agent_service_binding, node, node_service_binding, mcp_session, openclaw_channel_mapping, user_endpoint, user_api_key, user_service, channel_bot, channel_conversation, channel_event_log, channel_message)
+|-- services/            # Business logic (52 services, incl. agent_binding_service, node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service, action_description, channel_bot_service, channel_event_service, channel_routing_service, channel_relay_service, channel_platform, event_dedup_cache, channel_adapters/{telegram,discord,lark,openclaw})
+|-- handlers/            # HTTP handlers (51 handler modules, incl. agent_bindings, node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel, keys, catalog, user_endpoints, user_api_keys_external, user_services_handler, channel_bots, channel_conversations, channel_events, channel_webhooks, channel_relay)
 |-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers, JWKS
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
@@ -273,12 +273,13 @@ All API routes under `/api/v1`:
 - `/api-keys/external` -- user's external API keys / credentials (list, update, delete)
 - `/user-services` -- user's proxy routing config (list, update, delete)
 - `/catalog` -- read-only service catalog for users (list templates, get template by slug, `?include_all=true` for full discovery including system services). Supports `/{slug}/endpoints` for OpenAPI endpoint discovery via hardened spec fetch.
-- `/channel-bots` -- **[DEPRECATED, see #191]** channel bot registration CRUD. Use `nyxid service add api-{telegram,lark,feishu,discord}-bot` for bot credentials instead. Inbound chat runtime should be handled by the calling agent.
-- `/channel-conversations` -- **[DEPRECATED, see #191]** conversation-to-agent routing (CRUD). Maps platform conversations to agent API keys.
-- `/channel-relay/reply` -- **[DEPRECATED, see #191]** agent async reply to a platform conversation
-- `/channel-relay/messages/{conversation_id}` -- **[DEPRECATED, see #191]** message history for agents
-- `/channel-relay/resolve-sender` -- **[DEPRECATED, see #191]** resolve platform sender to NyxID user
-- `/webhooks/channel/{telegram,discord,lark,feishu}/{bot_id}` -- **[DEPRECATED, see #191]** platform webhook receivers
+- `/channel-bots` -- channel bot registration CRUD
+- `/channel-conversations` -- conversation-to-agent routing (CRUD). Maps platform conversations to agent API keys.
+- `/channel-relay/reply` -- agent async reply to a platform conversation. **Only async replies are supported** — sync 200+body replies from agent callbacks were removed per ADR-013 / NyxID#221. Agents must return 202 to the callback and post replies here.
+- `/channel-relay/messages/{conversation_id}` -- message history for agents
+- `/channel-relay/resolve-sender` -- resolve platform sender to NyxID user
+- `/channel-events/{conversation_id}` -- HTTP Event Gateway ingress (NyxID#221, ADR-013). Accepts device event envelopes `{event_id, source, type, timestamp, payload, metadata}`, converts to `CallbackPayload` with `platform="device"`, and forwards through the channel relay pipeline. Per-channel rate limited (default 100/s), idempotent via in-memory LRU dedup (5min TTL), metadata-only logging to `channel_event_logs` (no payload persistence).
+- `/webhooks/channel/{telegram,discord,lark,feishu}/{bot_id}` -- platform webhook receivers
 - `/ssh/{service_id}/certificate` -- issue short-lived SSH user certificate (POST)
 - `/ssh/{service_id}` -- SSH-over-WebSocket tunnel (GET, upgrade)
 - `/ssh/{service_id}/terminal` -- SSH web terminal (GET, upgrade)
@@ -346,6 +347,12 @@ NODE_MAX_WS_CONNECTIONS=100            # Maximum concurrent node WebSocket conne
 NODE_MAX_STREAM_DURATION_SECS=300      # Maximum duration for streaming proxy responses (default: 300)
 NODE_HMAC_SIGNING_ENABLED=true         # Enable HMAC request signing for node proxy (default: true)
 WS_PASSTHROUGH_MAX_CONNECTIONS=200     # Maximum concurrent WebSocket passthrough connections (default: 200)
+
+# HTTP Event Gateway (NyxID#221, ADR-013 pure passthrough)
+CHANNEL_EVENT_RATE_LIMIT_PER_SECOND=100  # Per-channel event rate limit (default: 100)
+CHANNEL_EVENT_RATE_LIMIT_BURST=200       # Per-channel burst capacity (default: 200)
+CHANNEL_EVENT_DEDUP_CAPACITY=32768       # LRU dedup cache size (default: 32768; sized to honor 5-min window at 100 events/s)
+CHANNEL_EVENT_DEDUP_TTL_SECS=300         # Dedup entry TTL (default: 300 = 5 min)
 
 # Registration gate (issue #179)
 INVITE_CODE_REQUIRED=true              # Gate new-user registration behind invite codes (default: true). Set to false for public launch.

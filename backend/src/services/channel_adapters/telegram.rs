@@ -330,6 +330,22 @@ impl PlatformAdapter for TelegramAdapter {
             body["reply_to_message_id"] = serde_json::json!(id);
         }
 
+        // Honor `message_thread_id` from reply metadata when the original
+        // inbound message came from a forum topic. Without this, replies
+        // would fall back to the root chat. Accepted as either an integer
+        // or a string that parses as i64 (handlers/channel_relay.rs
+        // forwards it as a JSON string).
+        if let Some(md) = reply.metadata.as_ref()
+            && let Some(thread_val) = md.get("message_thread_id")
+        {
+            let parsed = thread_val
+                .as_i64()
+                .or_else(|| thread_val.as_str().and_then(|s| s.parse::<i64>().ok()));
+            if let Some(thread_id) = parsed {
+                body["message_thread_id"] = serde_json::json!(thread_id);
+            }
+        }
+
         let url = format!("{TELEGRAM_API_BASE}{bot_token}/sendMessage");
         let resp: serde_json::Value = http
             .post(&url)

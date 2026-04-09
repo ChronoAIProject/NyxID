@@ -1,9 +1,10 @@
 {
   "nav.joinWaitlist": "Join the Waitlist",
+  "nav.login": "Login",
 
-  "hero.title": "The guardian at",
-  "hero.titleAccent": "the threshold.",
-  "hero.subtitle": "NyxID stands between anonymous and authenticated. Approve or deny access in one tap. What Nyx holds, no one sees.",
+  "hero.eyebrow": "Open-source Agent Connectivity Gateway",
+  "hero.title": "Connect Claude, Cursor, or your own agents to public, internal, and localhost APIs — with secure access control.",
+  "hero.subtitle": "Approve every connection from your phone. Your credentials never leave NyxID.",
   "hero.cta": "Get Early Access",
   "hero.ctaSubtext": "Nyx guards the gate — only the waitlist holds the key",
 

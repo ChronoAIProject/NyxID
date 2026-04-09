@@ -123,44 +123,15 @@ function MessageCard({
           <span>{directionLabel(message.direction)}</span>
         </div>
 
-        {/* Content */}
-        {message.content_type !== "text" && (
-          <div className="mb-1">
-            <Badge variant="outline" className="text-[9px]">
-              {contentTypeLabel(message.content_type)}
-            </Badge>
-          </div>
-        )}
-        {message.text ? (
-          <p className="whitespace-pre-wrap break-words text-sm">
-            {message.text}
-          </p>
-        ) : (
-          <p className="text-sm italic text-muted-foreground">
-            [{contentTypeLabel(message.content_type)}]
-          </p>
-        )}
-
-        {/* Attachments */}
-        {message.attachments.length > 0 && (
-          <div className="mt-2 space-y-1">
-            {message.attachments.map((att, idx) => (
-              <div
-                key={`${message.id}-att-${String(idx)}`}
-                className="flex items-center gap-1.5 text-xs text-muted-foreground"
-              >
-                <span className="truncate font-mono">
-                  {att.filename ?? att.url}
-                </span>
-                {att.size_bytes != null && (
-                  <span className="shrink-0">
-                    ({formatBytes(att.size_bytes)})
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+        {/* Content type only — message bodies are no longer stored per ADR-013 */}
+        <div className="mb-1">
+          <Badge variant="outline" className="text-[9px]">
+            {contentTypeLabel(message.content_type)}
+          </Badge>
+        </div>
+        <p className="text-sm italic text-muted-foreground">
+          Content is not stored in NyxID. Ask the agent for the message body.
+        </p>
 
         {/* Footer */}
         <div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
@@ -177,12 +148,6 @@ function MessageCard({
       </div>
     </div>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${String(bytes)} B`;
-  if (bytes < 1024 * 1024) return `${String(Math.round(bytes / 1024))} KB`;
-  return `${String(Math.round(bytes / (1024 * 1024)))} MB`;
 }
 
 // -- Page --

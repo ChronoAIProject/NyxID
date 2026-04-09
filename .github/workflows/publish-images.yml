@@ -8,8 +8,14 @@ name: Publish Images
 # Components: backend, frontend, node-agent.
 # mcp-proxy is intentionally excluded (source not yet in repo).
 #
-# Published images are public. A one-time visibility flip runs after the first
-# successful push of each component; subsequent runs are a no-op.
+# Build strategy: native runner matrix (no QEMU). The `build` job fans out
+# across (component x platform), with linux/arm64 jobs running on
+# ubuntu-24.04-arm for native speed. Each build pushes by digest only; the
+# `merge` job then creates the multi-arch manifest list with the real tags.
+# Reference: https://docs.docker.com/build/ci/github-actions/multi-platform/
+#
+# Published images are public. A one-time visibility flip runs after each
+# run; the flip is idempotent.
 
 on:
   push:
@@ -34,16 +40,25 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   # ---------------------------------------------------------------------------
-  # Build + push multi-arch images for each component.
+  # Build each component for each platform on its native runner. Each job
+  # pushes by digest only (no tags). Tags are applied by the `merge` job.
   # ---------------------------------------------------------------------------
-  publish:
-    name: Publish ${{ matrix.component }}
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.component }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
     needs: ci-gate
     strategy:
       fail-fast: false
       matrix:
+        component: [backend, frontend, node-agent]
+        platform: [linux/amd64, linux/arm64]
         include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            platform_pair: linux-amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            platform_pair: linux-arm64
           - component: backend
             context: .
             file: backend/Dockerfile
@@ -62,8 +77,79 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           echo "image=ghcr.io/${owner}/nyxid/${{ matrix.component }}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Labels only -- tags are applied by the merge job on the manifest list.
+      - name: Extract metadata (labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.repo.outputs.image }}
+          labels: |
+            org.opencontainers.image.title=nyxid-${{ matrix.component }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
+          provenance: false
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.component }}-${{ matrix.platform_pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Merge per-arch digests into a multi-arch manifest list per component and
+  # apply the real tags. One merge job per component.
+  # ---------------------------------------------------------------------------
+  merge:
+    name: Merge ${{ matrix.component }} manifest
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, frontend, node-agent]
+    steps:
+      - name: Compute lowercase image repo
+        id: repo
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "image=ghcr.io/${owner}/nyxid/${{ matrix.component }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.component }}-*
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -90,32 +176,27 @@ jobs:
             type=ref,event=branch,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,format=short,prefix=main-,enable=${{ github.ref == 'refs/heads/main' }}
-          labels: |
-            org.opencontainers.image.title=nyxid-${{ matrix.component }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.licenses=Apache-2.0
 
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.file }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.component }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
-          provenance: false
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ steps.repo.outputs.image }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect \
+            ${{ steps.repo.outputs.image }}:${{ steps.meta.outputs.version }}
 
   # ---------------------------------------------------------------------------
   # Flip new packages to public visibility. Idempotent: a no-op once public.
-  # Runs only on main / tag pushes (not manual dispatch) to avoid surprises.
+  # Runs only on push events (not workflow_dispatch) to avoid surprises.
   # ---------------------------------------------------------------------------
   make-public:
     name: Ensure public visibility
     runs-on: ubuntu-latest
-    needs: publish
+    needs: merge
     if: github.event_name == 'push'
     permissions:
       packages: write

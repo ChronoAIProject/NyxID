@@ -898,6 +898,56 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── channel_event_logs ──
+    // ADR-013 metadata-only event forwarding ledger. No payload content is
+    // stored; see models::channel_event_log::ChannelEventLog.
+    //
+    // Important: the (conversation_id, event_id) index is deliberately
+    // **non-unique**. The collection is an append-only audit trail, so we
+    // want one row per forward attempt — including dedup hits and retries
+    // following a transient callback failure. A unique constraint would
+    // silently swallow later outcome rows for the same event_id.
+    //
+    // The new non-unique index carries an explicit name so we can safely
+    // drop the legacy default-named unique index without colliding with
+    // the new one. After the first boot (which cleans up the legacy name)
+    // the drop becomes a cheap no-op returning `IndexNotFound`.
+    let channel_event_logs = db.collection::<mongodb::bson::Document>("channel_event_logs");
+    let _ = channel_event_logs
+        .drop_index("conversation_id_1_event_id_1")
+        .await;
+    channel_event_logs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "conversation_id": 1, "event_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("channel_event_logs_convid_eventid_lookup".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    channel_event_logs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "conversation_id": 1, "forwarded_at": -1 })
+                .build(),
+        )
+        .await?;
+    channel_event_logs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "forwarded_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(30 * 24 * 60 * 60))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── invite_codes ──
     let invite_codes = db.collection::<mongodb::bson::Document>("invite_codes");
     invite_codes
@@ -910,6 +960,80 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     backfill_downstream_service_types(db).await?;
+    purge_legacy_channel_message_content(db).await?;
+
+    Ok(())
+}
+
+/// Name of the `schema_migrations` collection used to track one-off
+/// data migrations that are too expensive to replay on every boot.
+const SCHEMA_MIGRATIONS: &str = "schema_migrations";
+
+/// Migration marker id for `purge_legacy_channel_message_content`.
+const PURGE_CHANNEL_MESSAGE_CONTENT_MIGRATION: &str = "purge_channel_message_content_v1";
+
+/// Enforce ADR-013 on any historical `channel_messages` documents that were
+/// written before the metadata-only refactor. Unsets `text`, `attachments`,
+/// and `raw_platform_data` from matching rows.
+///
+/// Gated behind a `schema_migrations` marker so the full-collection scan
+/// (the `$exists` filter cannot use an index) runs exactly once per
+/// deployment. Subsequent boots are a single indexed `find_one` against
+/// the marker document.
+async fn purge_legacy_channel_message_content(db: &Database) -> Result<(), mongodb::error::Error> {
+    let migrations = db.collection::<Document>(SCHEMA_MIGRATIONS);
+
+    // Skip the scan entirely if this migration has already been applied.
+    let already_applied = migrations
+        .find_one(doc! { "_id": PURGE_CHANNEL_MESSAGE_CONTENT_MIGRATION })
+        .await?;
+    if already_applied.is_some() {
+        return Ok(());
+    }
+
+    let messages = db.collection::<Document>("channel_messages");
+    let result = messages
+        .update_many(
+            doc! {
+                "$or": [
+                    { "text": { "$exists": true } },
+                    { "attachments": { "$exists": true } },
+                    { "raw_platform_data": { "$exists": true } },
+                ],
+            },
+            doc! {
+                "$unset": {
+                    "text": "",
+                    "attachments": "",
+                    "raw_platform_data": "",
+                },
+            },
+        )
+        .await?;
+
+    if result.modified_count > 0 {
+        tracing::info!(
+            count = result.modified_count,
+            "Purged legacy content fields from channel_messages (ADR-013)"
+        );
+    } else {
+        tracing::debug!("Legacy channel_messages content purge found no matching rows");
+    }
+
+    // Record the marker so future boots skip the scan. If this insert
+    // fails (e.g. transient write error), the next boot will re-run the
+    // purge — which is idempotent and cheap when no rows match.
+    let marker = doc! {
+        "_id": PURGE_CHANNEL_MESSAGE_CONTENT_MIGRATION,
+        "applied_at": bson::DateTime::now(),
+        "modified_count": result.modified_count as i64,
+    };
+    if let Err(err) = migrations.insert_one(&marker).await {
+        tracing::warn!(
+            error = %err,
+            "Failed to write schema_migrations marker; purge will re-run on next boot"
+        );
+    }
 
     Ok(())
 }

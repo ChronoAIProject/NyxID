@@ -8,6 +8,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
+use chrono::{Duration, Utc};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +74,13 @@ pub struct AsyncReplyResponse {
     pub platform_message_id: Option<String>,
 }
 
+/// Metadata-only message summary returned from
+/// `GET /api/v1/channel-relay/messages/{conversation_id}`.
+///
+/// **Breaking change (ADR-013):** this response used to include `text` and
+/// `attachments`. Per the NyxID pure-passthrough principle, message content
+/// is no longer stored or returned. Agents that need historical bodies must
+/// keep their own conversation state.
 #[derive(Debug, Serialize)]
 pub struct MessageItem {
     pub id: String,
@@ -85,8 +93,6 @@ pub struct MessageItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender_display_name: Option<String>,
     pub content_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callback_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -124,7 +130,6 @@ fn message_to_item(msg: &crate::models::channel_message::ChannelMessage) -> Mess
         sender_platform_id: msg.sender_platform_id.clone(),
         sender_display_name: msg.sender_display_name.clone(),
         content_type: msg.content_type.clone(),
-        text: msg.text.clone(),
         callback_status: msg.callback_status.clone(),
         reply_to_message_id: msg.reply_to_message_id.clone(),
         created_at: msg.created_at.to_rfc3339(),
@@ -195,10 +200,80 @@ pub async fn async_reply(
         .as_deref()
         .unwrap_or(&conversation.platform_conversation_id);
 
+    // Translate the original inbound message's `thread_id` into the
+    // platform-specific metadata key that the outbound adapter
+    // understands. Two kinds of thread context need to flow forward:
+    //
+    // 1. **Discord deferred-interaction follow-up token**
+    //    (`thread_id = "interaction:{app}:{token}"`). Injected as
+    //    `interaction_thread_id` so `discord::send_reply()` posts to the
+    //    follow-up webhook endpoint instead of `/channels/{id}/messages`.
+    //
+    //    **TTL guard:** Discord interaction tokens are valid for ~15 min
+    //    with up to 5 follow-ups. Two different reply windows apply:
+    //
+    //    - **Webhook-driven original** (the usual case):
+    //      `original.created_at` IS the real interaction timestamp,
+    //      so 14 minutes leaves a 1-minute safety margin.
+    //    - **Device-event original** (`original.platform == "device"`):
+    //      the token was inherited from an older webhook inbound by
+    //      `channel_event_service::lookup_recent_inbound_thread_id`,
+    //      which caps source age at 2 min. The device event row's
+    //      `created_at` is NOT the real interaction timestamp — use
+    //      a 12-minute reply window so combined `source_age + reply_delay`
+    //      stays at 14 min < 15 min TTL.
+    //
+    // 2. **Telegram forum-topic id** (numeric `message_thread_id`).
+    //    Injected as `message_thread_id` so `telegram::send_reply()`
+    //    passes it to Telegram's `sendMessage` and the reply stays
+    //    scoped to the originating topic rather than the root chat.
+    //    Topic ids do not expire, so no TTL guard is applied.
+    //
+    //    Dispatch uses **`conversation.platform`**, not
+    //    `original.platform`. For webhook-driven Telegram messages they
+    //    agree, but device events store `original.platform = "device"`
+    //    even when the underlying bot is Telegram, so checking the
+    //    conversation's platform catches both cases.
+    //
+    // Other platforms currently have no thread-context routing, so we
+    // leave their metadata untouched.
+    let mut metadata = body.reply.metadata;
+    if let Some(ref tid) = original.thread_id {
+        if tid.starts_with("interaction:") {
+            let interaction_window = if original.platform == "device" {
+                Duration::minutes(12)
+            } else {
+                Duration::minutes(14)
+            };
+            let age = Utc::now() - original.created_at;
+            if age < interaction_window {
+                let md = metadata.get_or_insert_with(|| serde_json::json!({}));
+                if let Some(obj) = md.as_object_mut() {
+                    obj.entry("interaction_thread_id")
+                        .or_insert_with(|| serde_json::json!(tid));
+                }
+            } else {
+                tracing::info!(
+                    message_id = %original.id,
+                    platform = %original.platform,
+                    age_secs = age.num_seconds(),
+                    "Skipping Discord interaction follow-up webhook: token past TTL, \
+                     falling through to regular channel message API"
+                );
+            }
+        } else if conversation.platform == "telegram" {
+            let md = metadata.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(obj) = md.as_object_mut() {
+                obj.entry("message_thread_id")
+                    .or_insert_with(|| serde_json::json!(tid));
+            }
+        }
+    }
+
     let outbound = OutboundReply {
         text: Some(reply_text.to_string()),
         reply_to_platform_message_id: original.platform_message_id.clone(),
-        metadata: body.reply.metadata,
+        metadata,
     };
 
     // Send reply to platform
@@ -211,14 +286,14 @@ pub async fn async_reply(
         )
         .await?;
 
-    // Store the outbound message
+    // Store outbound-message metadata only (per ADR-013). The reply text
+    // is already on the wire to the platform; we do not persist it.
     let stored = channel_relay_service::store_outbound_message(
         &state.db,
         &bot.id,
         &conversation.id,
         &bot.user_id,
         &bot.platform,
-        reply_text,
         caller_api_key_id,
         Some(&original.id),
         platform_msg_id.as_deref(),

@@ -423,7 +423,7 @@ export function ChannelBotsPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Channel Bots (Deprecated)"
+        title="Channel Bots"
         description="Manage messaging platform bots for agent relay."
         actions={
           <Button size="sm" onClick={() => setCreateOpen(true)}>
@@ -432,33 +432,6 @@ export function ChannelBotsPage() {
           </Button>
         }
       />
-
-      <Card className="border-yellow-500/40 bg-yellow-500/5">
-        <CardContent className="py-4 text-sm">
-          <p className="font-medium text-yellow-700 dark:text-yellow-400">
-            Channel Bots is deprecated.
-          </p>
-          <p className="mt-1 text-muted-foreground">
-            For bot credentials, use standard service connections instead:{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-xs">
-              nyxid service add api-telegram-bot
-            </code>{" "}
-            (or <code className="text-xs">api-lark-bot</code>,{" "}
-            <code className="text-xs">api-feishu-bot</code>,{" "}
-            <code className="text-xs">api-discord-bot</code>). Inbound chat
-            runtime should be handled by your agent (e.g. Aevatar). See{" "}
-            <a
-              href="https://github.com/ChronoAIProject/NyxID/issues/191"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-primary underline"
-            >
-              issue #191
-            </a>
-            .
-          </p>
-        </CardContent>
-      </Card>
 
       {isLoading ? (
         <LoadingSkeleton />

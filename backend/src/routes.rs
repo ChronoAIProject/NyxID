@@ -1,5 +1,7 @@
 use axum::{
-    Router, middleware,
+    Router,
+    extract::DefaultBodyLimit,
+    middleware,
     routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
@@ -596,6 +598,21 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             get(handlers::channel_relay::resolve_sender),
         );
 
+    // HTTP Event Gateway — device event ingress (NyxID#221, ADR-013).
+    // Authenticated via API key; rate-limited per conversation.
+    //
+    // `DefaultBodyLimit::disable()` opts this router out of the app-wide
+    // 1 MiB body cap set in `main.rs`. Per the plan §8.1 and the gateway
+    // design doc §NOT in Scope, NyxID deliberately does not enforce an
+    // application-level payload size limit on device events — analyzers
+    // that ship larger JSON blobs or embedded metadata must be accepted.
+    let channel_event_routes = Router::new()
+        .route(
+            "/{conversation_id}",
+            post(handlers::channel_events::post_event),
+        )
+        .layer(DefaultBodyLimit::disable());
+
     let developer_routes = Router::new()
         .route(
             "/oauth-clients",
@@ -660,6 +677,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         )
         .route("/proxy/services", get(handlers::proxy::list_proxy_services))
         .nest("/channel-relay", channel_relay_routes)
+        .nest("/channel-events", channel_event_routes)
         .merge(proxy_passthrough_routes);
 
     // Routes accessible by both users and service accounts (block delegated tokens)

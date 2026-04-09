@@ -30,7 +30,7 @@ const NAV_ITEMS = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/keys", icon: Cable, label: "AI Services" },
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
-  { to: "/channel-bots", icon: Radio, label: "Channel Bots (deprecated)" },
+  { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
   { to: "/settings", icon: Settings, label: "Settings" },
   { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
   { to: "/guide", icon: BookOpen, label: "Guide" },

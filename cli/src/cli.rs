@@ -110,10 +110,15 @@ pub enum Commands {
     },
     /// Update the CLI and installed skills
     Update(UpdateArgs),
-    /// [DEPRECATED] Manage channel bot relay. Use `nyxid service add api-telegram-bot` (or api-lark-bot/api-feishu-bot/api-discord-bot) instead. See #191.
+    /// Manage channel bot relay (Telegram/Discord/Lark/Feishu bridge to agents)
     ChannelBot {
         #[command(subcommand)]
         command: ChannelBotCommands,
+    },
+    /// Push device/analyzer events through the HTTP Event Gateway
+    ChannelEvent {
+        #[command(subcommand)]
+        command: ChannelEventCommands,
     },
     /// Administrative commands (admin role required)
     Admin {
@@ -1603,5 +1608,53 @@ pub enum ChannelRouteCommands {
         yes: bool,
         #[command(flatten)]
         auth: AuthArgs,
+    },
+}
+
+// ---- HTTP Event Gateway ----
+
+#[derive(Subcommand)]
+pub enum ChannelEventCommands {
+    /// Push a device/analyzer event to an agent via the HTTP Event Gateway
+    ///
+    /// Requires a NyxID API key (`nyxid_ag_...`) that is bound to the target
+    /// conversation as the agent key. Session tokens from `nyxid login` are
+    /// rejected by the endpoint — the CLI does not fall back to them.
+    Push {
+        /// Target conversation ID (path parameter)
+        #[arg(long)]
+        conversation_id: String,
+        /// Logical source of the event (e.g. "camera-analyzer")
+        #[arg(long)]
+        source: String,
+        /// Event type (e.g. "person_detected")
+        #[arg(long = "type")]
+        event_type: String,
+        /// Event ID — UUID; auto-generated if omitted
+        #[arg(long)]
+        event_id: Option<String>,
+        /// Event timestamp (RFC 3339); defaults to now
+        #[arg(long)]
+        timestamp: Option<String>,
+        /// Inline payload JSON (e.g. '{"room":"living_room"}')
+        #[arg(long, conflicts_with = "payload_file")]
+        payload_json: Option<String>,
+        /// Read payload JSON from file (`-` for stdin)
+        #[arg(long, conflicts_with = "payload_json")]
+        payload_file: Option<String>,
+        /// Inline metadata JSON (e.g. '{"analyzer_version":"1.0"}')
+        #[arg(long)]
+        metadata_json: Option<String>,
+        /// API key (`nyxid_ag_...`); prompts if neither flag is provided
+        #[arg(long, hide = true)]
+        api_key: Option<String>,
+        /// Read API key from this environment variable
+        #[arg(long)]
+        api_key_env: Option<String>,
+        #[command(flatten)]
+        base: BaseUrlArgs,
+        /// Output format: table or json
+        #[arg(long, default_value = "table")]
+        output: OutputFormat,
     },
 }

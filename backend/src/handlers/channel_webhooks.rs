@@ -2,9 +2,11 @@
 //!
 //! Each channel bot has a unique webhook URL. The platform (e.g. Telegram,
 //! Discord, Lark, Feishu) posts updates to this endpoint. The handler
-//! verifies the signature, routes the message to the correct agent, forwards
-//! via callback, and optionally sends a synchronous reply back to the
-//! platform.
+//! verifies the signature, routes the message to the correct agent, and
+//! forwards it via the agent's callback URL.
+//!
+//! Agent replies flow back asynchronously via POST /api/v1/channel-relay/reply
+//! (synchronous 200+body replies are not supported per ADR-013 / NyxID#221).
 
 use axum::{
     Json,
@@ -18,10 +20,7 @@ use mongodb::bson::doc;
 use crate::AppState;
 use crate::handlers::channel_bots::resolve_adapter;
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
-use crate::services::{
-    channel_bot_service, channel_platform::OutboundReply, channel_relay_service,
-    channel_routing_service,
-};
+use crate::services::{channel_bot_service, channel_relay_service, channel_routing_service};
 
 // ---------------------------------------------------------------------------
 // Platform-specific webhook handlers
@@ -292,13 +291,6 @@ async fn handle_webhook_inner(
         return Ok(());
     }
 
-    // Decrypt the bot token once for sending replies
-    let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            format!("failed to decrypt bot token: {e}").into()
-        })?;
-
     // Parse bot owner UUID once (used for relay token generation per-message)
     let bot_owner_uuid = bot.user_id.parse::<uuid::Uuid>().map_err(
         |e| -> Box<dyn std::error::Error + Send + Sync> {
@@ -418,7 +410,7 @@ async fn handle_webhook_inner(
         );
 
         // Forward to the agent's callback URL
-        let reply_result = channel_relay_service::forward_to_agent(
+        let delivery = channel_relay_service::forward_to_agent(
             &state.http_client,
             &state.config,
             &route.callback_url,
@@ -428,80 +420,12 @@ async fn handle_webhook_inner(
         )
         .await;
 
-        match reply_result {
-            Ok(Some(reply_payload)) => {
-                // Agent returned a synchronous reply -- send it to the platform
-                let _ = channel_relay_service::update_callback_status(
-                    &state.db,
-                    &stored_message.id,
-                    "delivered",
-                )
-                .await;
-
-                if let Some(reply) = reply_payload.reply
-                    && let Some(ref text) = reply.text
-                {
-                    // For Discord deferred interactions, inject the interaction
-                    // token into reply metadata so send_reply uses the follow-up API.
-                    let mut metadata = reply.metadata.clone();
-                    if let Some(ref tid) = inbound.thread_id
-                        && tid.starts_with("interaction:")
-                    {
-                        let md = metadata.get_or_insert_with(|| serde_json::json!({}));
-                        md["interaction_thread_id"] = serde_json::json!(tid);
-                    }
-
-                    let outbound = OutboundReply {
-                        text: Some(text.clone()),
-                        reply_to_platform_message_id: reply.reply_to_platform_message_id.clone(),
-                        metadata,
-                    };
-
-                    let send_result = adapter
-                        .send_reply(
-                            &state.http_client,
-                            &bot_token,
-                            &inbound.conversation_id,
-                            &outbound,
-                        )
-                        .await;
-
-                    let platform_msg_id = match send_result {
-                        Ok(msg_id) => msg_id,
-                        Err(e) => {
-                            tracing::warn!(
-                                bot_id = %bot.id,
-                                message_id = %stored_message.id,
-                                error = %e,
-                                "platform send_reply failed for sync reply"
-                            );
-                            let _ = channel_relay_service::update_callback_status(
-                                &state.db,
-                                &stored_message.id,
-                                "failed",
-                            )
-                            .await;
-                            None
-                        }
-                    };
-
-                    // Store the outbound reply message
-                    let _ = channel_relay_service::store_outbound_message(
-                        &state.db,
-                        &bot.id,
-                        &route.conversation.id,
-                        &bot.user_id,
-                        &bot.platform,
-                        text,
-                        &route.api_key_id,
-                        Some(&stored_message.id),
-                        platform_msg_id.as_deref(),
-                    )
-                    .await;
-                }
-            }
-            Ok(None) => {
-                // 202 accepted or empty response -- agent will reply asynchronously
+        // Sync 200+body replies are no longer supported (per ADR-013 / NyxID#221
+        // comment 2). Agents must return 202 and post replies asynchronously
+        // via POST /api/v1/channel-relay/reply. The callback status only
+        // reflects delivery of the webhook to the agent's callback URL.
+        match delivery.result {
+            Ok(()) => {
                 let _ = channel_relay_service::update_callback_status(
                     &state.db,
                     &stored_message.id,
@@ -512,6 +436,7 @@ async fn handle_webhook_inner(
             Err(e) => {
                 tracing::warn!(
                     message_id = %stored_message.id,
+                    upstream_status = ?delivery.http_status,
                     error = %e,
                     "callback delivery failed"
                 );

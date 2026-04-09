@@ -170,6 +170,27 @@ pub async fn create_api_key_from_provider_token(
         ));
     }
 
+    let collection = db.collection::<UserApiKey>(COLLECTION_NAME);
+
+    // Reuse an existing UserApiKey that already points at this provider token.
+    // The `{source, source_id}` unique partial index enforces the invariant
+    // "one UserApiKey per UserProviderToken per user", so a second call would
+    // otherwise hit a duplicate-key error and surface as HTTP 500. Multiple
+    // UserService rows can share the returned api_key, which is the desired
+    // behaviour when a user registers several services backed by the same
+    // provider credential (e.g. two `llm-openai` services with different
+    // endpoint URLs).
+    if let Some(existing) = collection
+        .find_one(doc! {
+            "user_id": user_id,
+            "source": "user_created",
+            "source_id": &provider_token.id,
+        })
+        .await?
+    {
+        return Ok(existing);
+    }
+
     let credential_type = provider_token_type_to_api_key_type(&provider_token.token_type)?;
     let now = Utc::now();
 
@@ -195,9 +216,7 @@ pub async fn create_api_key_from_provider_token(
         updated_at: now,
     };
 
-    db.collection::<UserApiKey>(COLLECTION_NAME)
-        .insert_one(&api_key)
-        .await?;
+    collection.insert_one(&api_key).await?;
 
     Ok(api_key)
 }

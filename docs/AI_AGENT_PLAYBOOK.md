@@ -37,7 +37,7 @@ This document is a reference for AI agents (Claude, Codex, ChatGPT, Gemini, etc.
 22. [Common Pitfalls](#22-common-pitfalls)
 23. [NyxID CLI](#23-nyxid-cli)
 24. [Using NyxID in OpenClaw](#24-using-nyxid-in-openclaw)
-25. [Channel Bot Relay](#25-channel-bot-relay-deprecated) (DEPRECATED)
+25. [Channel Bot Relay](#25-channel-bot-relay)
 
 ---
 
@@ -2984,11 +2984,11 @@ See [`docs/OPENCLAW_INTEGRATION.md`](OPENCLAW_INTEGRATION.md) for the full integ
 
 ---
 
-## 25. Channel Bot Relay (DEPRECATED)
+## 25. Channel Bot Relay
 
-> **Deprecated.** Channel mode is being phased out -- see ChronoAIProject/NyxID#191. The recommended path is to register bots as standard service connections (`api-telegram-bot`, `api-lark-bot`, `api-feishu-bot`, `api-discord-bot`) and let your agent runtime handle inbound webhooks. NyxID's job is credential brokering, not chat runtime. This section documents the legacy flow for users still on it.
+> **ADR-013 update (2026-04-09):** Per ADR-013, NyxID is a **pure passthrough gateway**. It never stores message bodies, attachments, or raw webhook payloads — only routing metadata. Synchronous agent replies (HTTP 200 + body) are no longer supported; agents **must** return 202 to the callback and post replies via `POST /api/v1/channel-relay/reply`. The earlier NyxID#191 deprecation of channel relay has been recalled.
 
-NyxID acts as a multi-platform messaging gateway. Users register their own bots (Telegram, Discord, Lark, Feishu), and NyxID receives messages via platform webhooks, routes each message to the correct AI agent's callback URL, and relays the agent's response back to the chat.
+NyxID acts as a multi-platform messaging gateway. Users register their own bots (Telegram, Discord, Lark, Feishu), and NyxID receives messages via platform webhooks, routes each message to the correct AI agent's callback URL, and relays the agent's asynchronous reply back to the chat.
 
 ### Architecture
 
@@ -3005,7 +3005,7 @@ Routing Service (conversation -> agent)
 Agent Callback URL (POST with HMAC signature)
     |
     v
-Agent Reply (sync 200 or async POST /channel-relay/reply)
+Agent Reply (async only: 202 + POST /channel-relay/reply)
     |
     v
 NyxID sends reply back to platform

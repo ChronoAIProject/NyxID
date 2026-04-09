@@ -19,6 +19,11 @@ pub struct ApiClient {
     base_url: String,
     access_token: String,
     profile: Option<String>,
+    /// When true, 401 responses are never retried with a session-refreshed
+    /// token. Used by flows like `channel-event push` that authenticate with
+    /// a specific API key and must not silently fall back to the user's
+    /// saved session access token on the `profile`.
+    refresh_disabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -44,6 +49,7 @@ impl ApiClient {
             base_url: format!("{}/api/v1", base_url.trim_end_matches('/')),
             access_token,
             profile,
+            refresh_disabled: false,
         })
     }
 
@@ -51,6 +57,18 @@ impl ApiClient {
         let base_url = auth.resolved_base_url()?;
         let token = crate::auth::resolve_access_token(auth)?;
         Self::new_with_profile(&base_url, token, auth.profile.clone())
+    }
+
+    /// Disable the automatic 401 → session-refresh retry path.
+    ///
+    /// Returns `self` as a fluent builder. Use this when the caller is
+    /// authenticating with a specific API key (e.g. an agent `nyxid_ag_...`
+    /// key for `POST /channel-events/{id}`) and a 401 should surface the
+    /// real error instead of silently retrying with the saved session
+    /// access token for the profile.
+    pub fn without_token_refresh(mut self) -> Self {
+        self.refresh_disabled = true;
+        self
     }
 
     pub fn base_url_root(&self) -> &str {
@@ -62,6 +80,9 @@ impl ApiClient {
     /// Attempt to refresh the access token using the saved refresh token.
     /// Returns `true` if the token was refreshed successfully.
     async fn try_refresh_token(&mut self) -> bool {
+        if self.refresh_disabled {
+            return false;
+        }
         let profile = self.profile.as_deref();
         let refresh_token = match crate::auth::read_saved_refresh_token_for(profile) {
             Some(rt) => rt,

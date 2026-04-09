@@ -17,7 +17,7 @@
     ],
     "ios": {
       "supportsTablet": false,
-      "buildNumber": "18",
+      "buildNumber": "29",
       "bundleIdentifier": "fun.chrono-ai.nyxid",
       "associatedDomains": [
         "applinks:nyx-api.chrono-ai.fun",
@@ -41,7 +41,10 @@
               "pathPrefix": "/REzJ"
             }
           ],
-          "category": ["BROWSABLE", "DEFAULT"]
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
         },
         {
           "action": "VIEW",
@@ -50,7 +53,10 @@
               "scheme": "nyxid"
             }
           ],
-          "category": ["BROWSABLE", "DEFAULT"]
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
         }
       ],
       "blockedPermissions": [
@@ -63,22 +69,20 @@
         "backgroundColor": "#10101A"
       }
     },
-    "notification": {
-      "icon": "./assets/notification-icon.png",
-      "androidMode": "default",
-      "androidCollapsed": "NyxID",
-      "color": "#8B5CF6"
-    },
     "plugins": [
       "expo-secure-store",
       [
         "expo-notifications",
         {
           "enableBackgroundRemoteNotifications": true,
+          "icon": "./assets/notification-icon.png",
+          "color": "#8B5CF6",
           "androidMode": "default",
           "defaultChannel": "approvals"
         }
-      ]
+      ],
+      "expo-font",
+      "expo-web-browser"
     ],
     "extra": {
       "eas": {

@@ -3,22 +3,18 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "channel_messages";
 
-/// An attachment on an inbound or outbound channel message.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MessageAttachment {
-    /// Attachment content category: "image", "file", "audio", "video"
-    pub content_type: String,
-    /// Download URL (may be platform-specific or pre-signed)
-    pub url: String,
-    #[serde(default)]
-    pub filename: Option<String>,
-    #[serde(default)]
-    pub mime_type: Option<String>,
-    #[serde(default)]
-    pub size_bytes: Option<u64>,
-}
-
-/// A single message flowing through the channel bot relay pipeline.
+/// A metadata-only record of a message flowing through the channel bot
+/// relay pipeline.
+///
+/// **Per ADR-013 (NyxID Pure Passthrough) this record does not store message
+/// content.** Historical deployments may still have `text`, `attachments`, or
+/// `raw_platform_data` fields on existing documents; a startup migration in
+/// `db::ensure_indexes` unsets them on first run. Serde's default behavior of
+/// ignoring unknown fields keeps old documents readable during the rollout
+/// window.
+///
+/// Message *content* now lives exclusively in the downstream agent (Aevatar
+/// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelMessage {
     #[serde(rename = "_id")]
@@ -46,15 +42,15 @@ pub struct ChannelMessage {
     pub sender_display_name: Option<String>,
     /// Content type: "text", "image", "file", "audio", "video", "unknown"
     pub content_type: String,
-    /// Text body of the message (if content_type is "text" or message has a caption)
+    /// Platform-specific routing metadata: Telegram `message_thread_id`,
+    /// Discord deferred-interaction token (`interaction:{app}:{token}`),
+    /// Lark `thread_id`, etc. **This is routing metadata, not message
+    /// content** — it is required to dispatch async replies back to the
+    /// correct platform surface (e.g. Discord follow-up webhook for deferred
+    /// interactions). Keeping it here is consistent with ADR-013: we only
+    /// avoid storing *content*.
     #[serde(default)]
-    pub text: Option<String>,
-    /// File/media attachments
-    #[serde(default)]
-    pub attachments: Vec<MessageAttachment>,
-    /// Raw platform-specific webhook payload (for debugging / replay)
-    #[serde(default)]
-    pub raw_platform_data: Option<serde_json::Value>,
+    pub thread_id: Option<String>,
     /// The agent API key that handled this message (set for inbound after routing)
     #[serde(default)]
     pub agent_api_key_id: Option<String>,
@@ -93,9 +89,7 @@ mod tests {
             sender_platform_id: Some("user_456".to_string()),
             sender_display_name: Some("Alice".to_string()),
             content_type: "text".to_string(),
-            text: Some("Hello world".to_string()),
-            attachments: vec![],
-            raw_platform_data: None,
+            thread_id: None,
             agent_api_key_id: None,
             callback_status: None,
             reply_to_message_id: None,
@@ -112,24 +106,19 @@ mod tests {
         assert_eq!(msg.id, restored.id);
         assert_eq!(msg.direction, restored.direction);
         assert_eq!(msg.content_type, restored.content_type);
-        assert_eq!(msg.text, restored.text);
+        assert_eq!(msg.platform_message_id, restored.platform_message_id);
     }
 
     #[test]
-    fn bson_roundtrip_with_attachment() {
-        let mut msg = make_message();
-        msg.attachments = vec![MessageAttachment {
-            content_type: "image".to_string(),
-            url: "https://example.com/photo.jpg".to_string(),
-            filename: Some("photo.jpg".to_string()),
-            mime_type: Some("image/jpeg".to_string()),
-            size_bytes: Some(102400),
-        }];
+    fn bson_no_content_fields() {
+        // ADR-013 compliance: content must never be persisted.
+        let msg = make_message();
         let doc = bson::to_document(&msg).expect("serialize");
-        let restored: ChannelMessage = bson::from_document(doc).expect("deserialize");
-        assert_eq!(restored.attachments.len(), 1);
-        assert_eq!(restored.attachments[0].content_type, "image");
-        assert_eq!(restored.attachments[0].size_bytes, Some(102400));
+        assert!(!doc.contains_key("text"));
+        assert!(!doc.contains_key("attachments"));
+        assert!(!doc.contains_key("raw_platform_data"));
+        assert!(!doc.contains_key("body"));
+        assert!(!doc.contains_key("content"));
     }
 
     #[test]
@@ -151,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn bson_all_fields_serialized() {
+    fn bson_required_fields_present() {
         let msg = make_message();
         let doc = bson::to_document(&msg).expect("serialize");
         assert!(doc.contains_key("_id"));
@@ -171,27 +160,33 @@ mod tests {
         doc.remove("platform_message_id");
         doc.remove("sender_platform_id");
         doc.remove("sender_display_name");
-        doc.remove("text");
-        doc.remove("attachments");
-        doc.remove("raw_platform_data");
         doc.remove("agent_api_key_id");
         doc.remove("callback_status");
         doc.remove("reply_to_message_id");
         doc.remove("platform_reply_message_id");
         let restored: ChannelMessage = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.platform_message_id, None);
-        assert_eq!(restored.text, None);
-        assert!(restored.attachments.is_empty());
         assert_eq!(restored.callback_status, None);
     }
 
     #[test]
-    fn bson_roundtrip_with_raw_platform_data() {
-        let mut msg = make_message();
-        msg.raw_platform_data =
-            Some(serde_json::json!({"update_id": 12345, "message": {"text": "hi"}}));
-        let doc = bson::to_document(&msg).expect("serialize");
-        let restored: ChannelMessage = bson::from_document(doc).expect("deserialize");
-        assert!(restored.raw_platform_data.is_some());
+    fn legacy_documents_with_content_fields_still_deserialize() {
+        // Pre-ADR-013 documents stored text/attachments/raw_platform_data.
+        // Removing those fields from the struct must not break deserialization
+        // of existing rows — serde drops unknown fields by default.
+        let msg = make_message();
+        let mut doc = bson::to_document(&msg).expect("serialize");
+        doc.insert("text", "legacy message body");
+        doc.insert(
+            "attachments",
+            bson::to_bson(&vec![bson::doc! {
+                "content_type": "image",
+                "url": "https://example.com/legacy.jpg",
+            }])
+            .unwrap(),
+        );
+        doc.insert("raw_platform_data", bson::doc! { "update_id": 42 });
+        let restored: ChannelMessage = bson::from_document(doc).expect("deserialize legacy doc");
+        assert_eq!(restored.id, msg.id);
     }
 }

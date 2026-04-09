@@ -94,14 +94,16 @@ export interface UpdateChannelConversationRequest {
   readonly is_active?: boolean;
 }
 
-export interface MessageAttachment {
-  readonly content_type: string;
-  readonly url: string;
-  readonly filename: string | null;
-  readonly mime_type: string | null;
-  readonly size_bytes: number | null;
-}
-
+/**
+ * Metadata-only message summary returned by the backend's
+ * `GET /channel-conversations/{id}/messages` and `/channel-relay/messages/{id}`
+ * endpoints.
+ *
+ * **Per ADR-013 (NyxID Pure Passthrough), message content is not stored.**
+ * The `text` and `attachments` fields that used to live here were removed —
+ * the message body lives with the downstream agent (e.g. Aevatar grain state)
+ * and NyxID retains only routing metadata.
+ */
 export interface ChannelMessageItem {
   readonly id: string;
   readonly channel_bot_id: string;
@@ -112,8 +114,6 @@ export interface ChannelMessageItem {
   readonly sender_platform_id: string | null;
   readonly sender_display_name: string | null;
   readonly content_type: ContentType;
-  readonly text: string | null;
-  readonly attachments: readonly MessageAttachment[];
   readonly agent_api_key_id: string | null;
   readonly callback_status: CallbackStatus | null;
   readonly reply_to_message_id: string | null;

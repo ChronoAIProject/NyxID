@@ -80,14 +80,37 @@ pub async fn llm_proxy_request(
 
     let service_id = service.id.clone();
 
-    // Use existing proxy_service to resolve the proxy target
-    let target = proxy_service::resolve_proxy_target(
-        &state.db,
-        &state.encryption_keys,
-        &user_id_str,
-        &service_id,
-    )
-    .await?;
+    // Two-tier credential resolution:
+    //   1. Prefer the new UserService / UserApiKey model (created via
+    //      `nyxid service add` / POST /api/v1/keys). Its target has the
+    //      credential baked into `auth_method` + `credential`, so no legacy
+    //      delegation lookup is needed.
+    //   2. Fall back to the legacy `DownstreamService` + `UserProviderToken`
+    //      path (`resolve_proxy_target` + `resolve_delegated_credentials`)
+    //      for users who still have legacy provider tokens.
+    let (target, resolved_via_user_service) =
+        match proxy_service::resolve_proxy_target_from_user_service(
+            &state.db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &user_id_str,
+            Some(&provider_slug),
+            Some(&service_id),
+        )
+        .await?
+        {
+            Some(resolution) => (resolution.target, true),
+            None => {
+                let legacy = proxy_service::resolve_proxy_target(
+                    &state.db,
+                    &state.encryption_keys,
+                    &user_id_str,
+                    &service_id,
+                )
+                .await?;
+                (legacy, false)
+            }
+        };
 
     // Read request parts before approval check so we can build action descriptions
     let request_method_str = request.method().as_str().to_string();
@@ -116,19 +139,39 @@ pub async fn llm_proxy_request(
     )
     .await?;
 
-    // Resolve delegated credentials (provider tokens)
-    let delegated = delegation_service::resolve_delegated_credentials(
-        &state.db,
-        &state.encryption_keys,
-        &user_id_str,
-        &service_id,
-    )
-    .await
-    .map_err(|e| {
-        AppError::BadRequest(format!(
-            "Provider credentials not available: {e}. Please connect the provider first."
-        ))
-    })?;
+    // Resolve credentials for injection. The new UserService path bakes the
+    // credential into `target` (via auth_method / credential), so we only need
+    // to synthesize a bearer DelegatedCredential for the openai-codex HTTP
+    // transport branch. The legacy path still goes through
+    // `resolve_delegated_credentials` to fetch `UserProviderToken` records.
+    let delegated = if resolved_via_user_service {
+        // New path: target already carries the credential. For openai-codex,
+        // which reads the token via `extract_bearer_token`, synthesize a
+        // bearer DelegatedCredential from the resolved target when possible.
+        if provider_slug == "openai-codex" && target.auth_method == "bearer" {
+            vec![delegation_service::DelegatedCredential {
+                provider_slug: provider_slug.clone(),
+                injection_method: "bearer".to_string(),
+                injection_key: "Authorization".to_string(),
+                credential: target.credential.clone(),
+            }]
+        } else {
+            Vec::new()
+        }
+    } else {
+        delegation_service::resolve_delegated_credentials(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            &service_id,
+        )
+        .await
+        .map_err(|e| {
+            AppError::BadRequest(format!(
+                "Provider credentials not available: {e}. Please connect the provider first."
+            ))
+        })?
+    };
 
     // OpenAI Codex: use the specialized HTTP SSE transport with Responses API
     // translation and Codex-specific headers.
@@ -303,28 +346,34 @@ pub async fn gateway_request(
     // Get the translator
     let translator = llm_gateway_service::get_translator(&provider_slug);
 
-    // Resolve proxy target: try the new UserService path first (unified keys),
-    // then fall back to the old DownstreamService + UserServiceConnection path.
-    let target = if let Some(resolved) = proxy_service::resolve_proxy_target_from_user_service(
-        &state.db,
-        &state.encryption_keys,
-        &state.node_ws_manager,
-        &user_id_str,
-        Some(&provider_slug),
-        Some(&service_id),
-    )
-    .await?
-    {
-        resolved.target
-    } else {
-        proxy_service::resolve_proxy_target(
+    // Two-tier proxy target resolution (mirrors `llm_proxy_request`):
+    //   1. Prefer the new UserService / UserApiKey model, which bakes the
+    //      credential into `target` (via auth_method + credential).
+    //   2. Fall back to the legacy `DownstreamService` path for users who
+    //      still have `UserProviderToken` records.
+    let (target, resolved_via_user_service) =
+        match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
             &state.encryption_keys,
+            &state.node_ws_manager,
             &user_id_str,
-            &service_id,
+            Some(&provider_slug),
+            Some(&service_id),
         )
         .await?
-    };
+        {
+            Some(resolution) => (resolution.target, true),
+            None => {
+                let legacy = proxy_service::resolve_proxy_target(
+                    &state.db,
+                    &state.encryption_keys,
+                    &user_id_str,
+                    &service_id,
+                )
+                .await?;
+                (legacy, false)
+            }
+        };
 
     // Check approval if user has it enabled
     check_llm_approval(
@@ -342,20 +391,37 @@ pub async fn gateway_request(
     )
     .await?;
 
-    // Resolve delegated credentials
-    let delegated = delegation_service::resolve_delegated_credentials(
-        &state.db,
-        &state.encryption_keys,
-        &user_id_str,
-        &service_id,
-    )
-    .await
-    .map_err(|e| {
-        AppError::BadRequest(format!(
-            "Provider '{}' not connected. Connect at /providers. ({})",
-            provider_slug, e
-        ))
-    })?;
+    // Resolve delegated credentials. When the target came from the new
+    // UserService path, the credential is already baked into `target`; we only
+    // synthesize a bearer DelegatedCredential for the openai-codex branch,
+    // which reads the token via `extract_bearer_token`. The legacy path still
+    // fetches `UserProviderToken` records via `resolve_delegated_credentials`.
+    let delegated = if resolved_via_user_service {
+        if provider_slug == "openai-codex" && target.auth_method == "bearer" {
+            vec![delegation_service::DelegatedCredential {
+                provider_slug: provider_slug.clone(),
+                injection_method: "bearer".to_string(),
+                injection_key: "Authorization".to_string(),
+                credential: target.credential.clone(),
+            }]
+        } else {
+            Vec::new()
+        }
+    } else {
+        delegation_service::resolve_delegated_credentials(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            &service_id,
+        )
+        .await
+        .map_err(|e| {
+            AppError::BadRequest(format!(
+                "Provider '{}' not connected. Connect at /providers. ({})",
+                provider_slug, e
+            ))
+        })?
+    };
 
     // Apply translation if needed
     let (final_path, final_body_bytes, extra_headers) = if translator.needs_translation() {

@@ -36,7 +36,10 @@ keys/
 logs/
 
 # ─── Docker ───
-docker-compose.override.yml
+# docker-compose.override.yml is intentionally tracked: it is the project's
+# shared dev override (auto-loaded by `docker compose up`). Personal overrides
+# go in docker-compose.local.yml and must be passed explicitly with -f.
+docker-compose.local.yml
 
 # ─── Deployment ───
 k8s/
