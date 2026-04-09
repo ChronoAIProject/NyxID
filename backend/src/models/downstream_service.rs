@@ -265,6 +265,13 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
 
+    /// Lightweight endpoint path for connection testing (e.g. `/v1/models`
+    /// for OpenAI, `/user` for GitHub). The proxy makes a GET request to
+    /// `{base_url}{test_endpoint}` with injected credentials to verify they
+    /// work. Falls back to `GET {base_url}/` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_endpoint: Option<String>,
+
     /// Declarative token exchange config. Required when `auth_method` is
     /// `token_exchange`, ignored otherwise. See [`TokenExchangeConfig`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +368,7 @@ pub mod test_helpers {
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
+            test_endpoint: None,
             token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -456,6 +464,7 @@ mod tests {
             required_permissions: Some(vec!["read:api".to_string()]),
             examples_url: Some("https://github.com/example/repo/tree/main/examples".to_string()),
             recommended_skills: Some(vec!["example/skill".to_string()]),
+            test_endpoint: Some("/v1/models".to_string()),
             token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -470,6 +479,7 @@ mod tests {
         assert_eq!(svc.repository_url, restored.repository_url);
         assert!(restored.capabilities.unwrap().supports_proxy_read);
         assert_eq!(svc.required_permissions, restored.required_permissions);
+        assert_eq!(restored.test_endpoint, Some("/v1/models".to_string()));
     }
 
     #[test]
@@ -515,6 +525,7 @@ mod tests {
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
+            test_endpoint: None,
             token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),

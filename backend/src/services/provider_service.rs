@@ -1884,6 +1884,7 @@ pub async fn seed_default_services(
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
+            test_endpoint: None,
             token_exchange_config,
             created_at: now,
             updated_at: now,

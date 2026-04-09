@@ -6,6 +6,7 @@ import {
   useConnectService,
   useDisconnectService,
   useUpdateCredential,
+  useTestConnection,
 } from "@/hooks/use-services";
 import { useMyNodeBindings } from "@/hooks/use-nodes";
 import {
@@ -25,7 +26,16 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Link2, Unlink, Server, KeyRound, Cable } from "lucide-react";
+import {
+  Link2,
+  Unlink,
+  Server,
+  KeyRound,
+  Cable,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import { CredentialDialog } from "./credential-dialog";
@@ -37,8 +47,32 @@ export function ConnectionGrid() {
   const connectMutation = useConnectService();
   const disconnectMutation = useDisconnectService();
   const updateCredentialMutation = useUpdateCredential();
+  const testConnectionMutation = useTestConnection();
 
   const nodeRouteSet = new Set(nodeRoutableServiceIds ?? []);
+
+  const [testResults, setTestResults] = useState<
+    Record<string, { status: string; message: string }>
+  >({});
+
+  async function handleTestConnection(serviceId: string) {
+    setTestResults((prev) => ({
+      ...prev,
+      [serviceId]: { status: "testing", message: "Testing..." },
+    }));
+    try {
+      const result = await testConnectionMutation.mutateAsync(serviceId);
+      setTestResults((prev) => ({
+        ...prev,
+        [serviceId]: { status: result.status, message: result.message },
+      }));
+    } catch {
+      setTestResults((prev) => ({
+        ...prev,
+        [serviceId]: { status: "error", message: "Test request failed" },
+      }));
+    }
+  }
 
   const [credentialDialog, setCredentialDialog] = useState<{
     readonly service: DownstreamService;
@@ -233,32 +267,71 @@ export function ConnectionGrid() {
                             </span>
                           ))}
                       </div>
-                      <div className="flex gap-1.5">
-                        {canRepairCredential && (
+                      <div className="flex flex-col items-end gap-1.5">
+                        <div className="flex gap-1.5">
                           <Button
                             variant="outline"
                             size="sm"
                             onClick={() =>
-                              setCredentialDialog({
-                                service,
-                                mode: "update",
-                              })
+                              void handleTestConnection(service.id)
                             }
-                            disabled={updateCredentialMutation.isPending}
+                            disabled={
+                              testResults[service.id]?.status === "testing"
+                            }
                           >
-                            <KeyRound className="mr-1.5 h-3 w-3" />
-                            Update Key
+                            {testResults[service.id]?.status === "testing" ? (
+                              <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
+                            ) : testResults[service.id]?.status === "ok" ? (
+                              <CheckCircle2 className="mr-1.5 h-3 w-3 text-green-500" />
+                            ) : testResults[service.id]?.status === "error" ? (
+                              <XCircle className="mr-1.5 h-3 w-3 text-destructive" />
+                            ) : (
+                              <CheckCircle2 className="mr-1.5 h-3 w-3" />
+                            )}
+                            Test
                           </Button>
-                        )}
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => void handleDisconnect(service.id)}
-                          disabled={disconnectMutation.isPending}
-                        >
-                          <Unlink className="mr-1.5 h-3 w-3" />
-                          Disconnect
-                        </Button>
+                          {canRepairCredential && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                setCredentialDialog({
+                                  service,
+                                  mode: "update",
+                                })
+                              }
+                              disabled={updateCredentialMutation.isPending}
+                            >
+                              <KeyRound className="mr-1.5 h-3 w-3" />
+                              Update Key
+                            </Button>
+                          )}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void handleDisconnect(service.id)}
+                            disabled={disconnectMutation.isPending}
+                          >
+                            <Unlink className="mr-1.5 h-3 w-3" />
+                            Disconnect
+                          </Button>
+                        </div>
+                        {(() => {
+                          const result = testResults[service.id];
+                          if (!result || result.status === "testing")
+                            return null;
+                          return (
+                            <span
+                              className={`text-xs ${
+                                result.status === "ok"
+                                  ? "text-green-600"
+                                  : "text-destructive"
+                              }`}
+                            >
+                              {result.message}
+                            </span>
+                          );
+                        })()}
                       </div>
                     </>
                   ) : (

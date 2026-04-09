@@ -2,6 +2,7 @@ import { Suspense, useState, useCallback } from "react";
 import { Outlet } from "@tanstack/react-router";
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { Header } from "@/components/dashboard/header";
+import { DefaultJwtKeysBanner } from "@/components/dashboard/default-jwt-keys-banner";
 
 export function DashboardLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -47,6 +48,7 @@ export function DashboardLayout() {
 
       <div className="flex flex-1 flex-col overflow-hidden">
         <Header onMenuClick={openSidebar} />
+        <DefaultJwtKeysBanner />
         <main
           className="flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 py-6 md:px-14 md:py-12"
           style={{ paddingBottom: "max(1.5rem, var(--sab))" }}

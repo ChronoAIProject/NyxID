@@ -160,6 +160,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .route(
             "/{service_id}/credential",
             put(handlers::connections::update_connection_credential),
+        )
+        .route(
+            "/{service_id}/test",
+            post(handlers::connections::test_connection),
         );
 
     let provider_routes = Router::new()

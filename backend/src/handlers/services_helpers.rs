@@ -110,6 +110,7 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
         required_permissions: s.required_permissions,
         examples_url: s.examples_url,
         recommended_skills: s.recommended_skills,
+        test_endpoint: s.test_endpoint,
         created_by: s.created_by,
         created_at: s.created_at.to_rfc3339(),
         updated_at: s.updated_at.to_rfc3339(),

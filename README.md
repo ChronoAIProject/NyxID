@@ -21,6 +21,9 @@ flowchart TD
     %% Gateway
     G[NyxID<br/>Cloud Gateway]
 
+    %% Node
+    N[Node]
+
     %% Destinations
     P[Public APIs]
     I[Internal APIs]
@@ -33,17 +36,19 @@ flowchart TD
 
     G --> P
     G --> I
-    G --> L
+    G --> N --> L
 
     %% Styling
     classDef client fill:#eef2ff,stroke:#6366f1,color:#111827,stroke-width:1.5px;
     classDef gateway fill:#0f172a,stroke:#38bdf8,color:#ffffff,stroke-width:2px;
+    classDef node fill:#fef3c7,stroke:#f59e0b,color:#111827,stroke-width:1.5px;
     classDef public fill:#eff6ff,stroke:#3b82f6,color:#111827,stroke-width:1.5px;
     classDef internal fill:#ecfdf5,stroke:#10b981,color:#111827,stroke-width:1.5px;
     classDef local fill:#fff7ed,stroke:#f97316,color:#111827,stroke-width:1.5px;
 
     class A,B,C client;
     class G gateway;
+    class N node;
     class P public;
     class I internal;
     class L local;
@@ -99,16 +104,31 @@ cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli
 nyxid login --base-url https://nyx.chrono-ai.fun
 ```
 
-### Self-host
+### Self-host (~7 min)
+
+1. **Start the stack** (~1 min):
 
 ```bash
 git clone https://github.com/ChronoAIProject/NyxID.git && cd NyxID
-cp .env.example .env          # edit: set ENCRYPTION_KEY=$(openssl rand -hex 32)
-                              #        set INVITE_CODE_REQUIRED=false
-docker compose up -d                  # MongoDB + Mailpit
-cargo run -p nyxid &                  # Backend on :3001
-cd frontend && npm i && npm run dev   # Frontend on :5173
+cp .env.production.example .env.production
+
+# Generate secrets (keep ENCRYPTION_KEY safe — you need it if you restart)
+sed -i '' "s/ENCRYPTION_KEY=.*/ENCRYPTION_KEY=$(openssl rand -hex 32)/" .env.production
+sed -i '' "s/MONGO_ROOT_PASSWORD=.*/MONGO_ROOT_PASSWORD=$(openssl rand -hex 24)/" .env.production
+
+docker compose -f docker-compose.prod.yml --env-file .env.production pull
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d
 ```
+
+> Default JWT signing keys are included for quickstart convenience. For production, generate your own — see `keys/README.md`.
+
+2. **Create your account** (~1 min): Open `http://localhost:3000` and register. The first account gets admin access.
+
+3. **Connect a provider** (~1 min): Go to **Providers** and connect an API key (e.g., OpenAI, Anthropic). A dialog will appear with your MCP config — copy it.
+
+4. **Test the connection** (~1 min): Go to **Services > Connections** and click **Test** on the connected service to verify your credential works through the proxy.
+
+5. **Add to Claude Code and verify** (~2 min): Paste the MCP config into `~/.claude/settings.json`. Ask Claude Code to list available tools — you should see tools from the API you connected.
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for production setup.
 
