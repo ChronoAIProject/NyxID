@@ -68,13 +68,15 @@ NAT to reach your local services, and wraps any REST API as MCP tools.
 
 - **Reach anything** — public APIs, internal APIs, localhost services via credential nodes (`nyxid node`). SSH tunneling (`nyxid ssh`) reaches remote hosts. No VPN, no port forwarding.
 - **Never expose keys** — the reverse proxy injects credentials automatically. Your agent talks to NyxID; NyxID talks to the API with the real key.
-- **MCP auto-wrap** — REST APIs with OpenAPI specs become MCP tools. `nyxid mcp config --tool cursor` generates the config. Works with Claude Code, Cursor, VS Code, and any MCP client.
+- **MCP auto-wrap** — REST APIs with OpenAPI specs become [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) tools. `nyxid mcp config --tool cursor` generates the config. Works with Claude Code, Cursor, VS Code, and any MCP client.
 - **Per-agent isolation** — each agent gets a scoped token. Agent A accesses Slack and Gmail. Agent B only accesses your internal API. Revoke any session without touching the underlying credentials.
 - **Full identity layer** — OIDC/OAuth 2.0 with PKCE, RBAC, service accounts, transaction approval (Telegram + mobile push), LLM gateway for 7 providers.
 
 ## Why NyxID
 
-| | NyxID | 1Password UA | Cloudflare Tunnel | Keycloak |
+Other tools solve parts of this — NyxID combines credential injection, NAT traversal, and MCP tooling in one open-source gateway:
+
+| | NyxID | 1Password Universal Autofill | Cloudflare Tunnel | Keycloak |
 |---|---|---|---|---|
 | Open source | Yes | No | No | Yes |
 | NAT traversal to localhost | Yes (`nyxid node`) | No | Yes (no credentials) | No |
@@ -93,87 +95,72 @@ NAT to reach your local services, and wraps any REST API as MCP tools.
 
 ## Quick Start
 
-Pick the path that fits:
-
-| Path | Time | What you need |
-|------|------|---------------|
-| [Hosted](#hosted-closed-beta) | 2 min | Browser |
-| [AI-assisted setup](#ai-assisted-setup) | 3 min | Claude Code, Cursor, or any AI coding assistant |
-| [Manual CLI setup](#manual-cli-setup) | 5 min | Terminal + Docker (self-host) or hosted account |
-
 ### Hosted (closed beta)
 
 Sign up at the [NyxID console](https://nyx.chrono-ai.fun), add your API credentials through the dashboard, and copy the MCP config from **Settings > MCP** into your AI tool. Currently invitation-only — [join the waitlist](https://nyx.chrono-ai.fun/#waitlist).
 
-### AI-assisted setup
+### Self-host
 
-Paste this into Claude Code, Cursor, or any AI coding assistant:
-
-> Help me set up NyxID. Install the CLI (`cargo install --git
-> https://github.com/ChronoAIProject/NyxID.git nyxid-cli`), log in with
-> `nyxid login`, add my OpenAI API key with `nyxid service add openai`,
-> and run `nyxid mcp config --tool claude-code` to configure MCP so I can
-> use NyxID-proxied tools from this session.
-
-Your AI agent will walk you through each step interactively.
-
-<!-- AI quickstart maintenance: validate this prompt against actual CLI on each release -->
-
-### Manual CLI setup
-
-#### 1. Start the server (self-host)
+**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) installed.
 
 ```bash
 git clone https://github.com/ChronoAIProject/NyxID.git && cd NyxID
 cp .env.production.example .env.production
 
-# Generate secrets (keep ENCRYPTION_KEY safe — you need it if you restart)
-sed -i '' "s/ENCRYPTION_KEY=.*/ENCRYPTION_KEY=$(openssl rand -hex 32)/" .env.production
-sed -i '' "s/MONGO_ROOT_PASSWORD=.*/MONGO_ROOT_PASSWORD=$(openssl rand -hex 24)/" .env.production
+# Generate and paste these values into .env.production:
+openssl rand -hex 32    # → ENCRYPTION_KEY (keep this safe)
+openssl rand -hex 24    # → MONGO_ROOT_PASSWORD
 
 docker compose -f docker-compose.prod.yml --env-file .env.production pull
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+
+# Wait for the server to be ready
+until curl -sf http://localhost:3001/health > /dev/null 2>&1; do sleep 2; done && echo "NyxID is running"
 ```
 
-Open `http://localhost:3000` and register your account. JWT signing keys are auto-generated on first startup.
+**Open `http://localhost:3000` and register your account.** JWT signing keys are auto-generated on first startup. For production hardening (custom JWT keys, TLS, domain), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-> For production hardening (custom JWT keys, TLS, domain), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+Now connect your AI agent — pick one approach:
 
-#### 2. Install CLI, add credential, configure MCP
+#### AI-assisted
+
+Paste this into Claude Code, Cursor, or any AI coding assistant:
+
+> I have NyxID self-hosted. The web console is at http://localhost:3000 and the backend API is at http://localhost:3001. Help me install the NyxID CLI (install script: https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh), then run source ~/.cargo/env to load it, log in with nyxid login --base-url http://localhost:3001, add my OpenAI API key with nyxid service add llm-openai, and verify with nyxid proxy request llm-openai models. Then help me copy the MCP config from Settings > MCP in the web console.
+
+Your AI agent will install the CLI (including Rust if needed), walk you through login and credential setup, and verify your connection — all interactively.
+
+<!-- AI quickstart maintenance: validate this prompt against actual CLI on each release -->
+
+#### Manual CLI
 
 ```bash
-# Install the CLI
-cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli
+# Install the CLI (installs Rust automatically if needed, takes a few minutes on first run)
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
+source ~/.cargo/env                               # make nyxid available in current shell
 
-# Log in (opens browser)
-nyxid login                                       # hosted: add --base-url https://nyx.chrono-ai.fun
+# Log in (opens browser for authentication)
+nyxid login --base-url http://localhost:3001
 
-# Add your first API credential (e.g. OpenAI)
-nyxid service add openai --credential-env OPENAI_API_KEY
+# Add your first API credential (e.g. OpenAI — make sure OPENAI_API_KEY is set in your shell)
+nyxid service add llm-openai --credential-env OPENAI_API_KEY
 
-# Generate MCP config for your AI tool
-nyxid mcp config --tool claude-code               # or: --tool cursor, --tool codex
+# Verify — you should see a JSON response listing models
+nyxid proxy request llm-openai models
 ```
 
-Add the output to your MCP config:
-**Claude Code** `~/.claude/settings.json` · **Cursor** `.cursor/mcp.json` · **Codex** `~/.codex/config.toml`
+If the proxy returns data, the full chain works: credential stored, injected, downstream accepted.
 
-#### 3. Verify
+For MCP setup, open **Settings > MCP** in the web console (`http://localhost:3000`) to copy the correct config for Claude Code, Cursor, or VS Code.
 
-```bash
-# Verify from the CLI
-nyxid proxy request openai /v1/models
-```
-
-If the proxy returns a response, the full chain works: credential stored, injected, downstream accepted. Ask your AI agent to list its tools — you should see the API you just connected.
+> Already have Rust? You can also install with: `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli`
 
 #### Web console
 
-Everything above can also be done through the web console at `http://localhost:3000`:
+Prefer a GUI? Everything above can also be done through the web console at `http://localhost:3000`:
 
-- **Providers** — connect API keys (OpenAI, Anthropic, GitHub, etc.)
-- **Services > Connections** — view and manage connected services
-- **Settings > MCP** — copy MCP config snippets for Claude Code, Cursor, or Codex
+- **AI Services** — add API credentials (OpenAI, Anthropic, GitHub, etc.)
+- **Settings > MCP** — copy MCP config snippets for Claude Code, Cursor, or VS Code
 
 ---
 
@@ -202,18 +189,18 @@ nyxid catalog endpoints my-local-api
 
 ## Resources
 
-| Topic | Link |
-|-------|------|
-| API Reference | [docs/API.md](docs/API.md) |
-| Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) |
-| Credential Nodes | [docs/NODE_PROXY.md](docs/NODE_PROXY.md) |
-| MCP Integration | [docs/MCP_DELEGATION_FLOW.md](docs/MCP_DELEGATION_FLOW.md) |
-| SSH Tunneling | [docs/SSH_TUNNELING.md](docs/SSH_TUNNELING.md) |
-| Security | [docs/SECURITY.md](docs/SECURITY.md) |
-| Environment Variables | [docs/ENV.md](docs/ENV.md) |
-| Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| Developer Guide | [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) |
+| Topic | Link | |
+|-------|------|---|
+| Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
+| AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
+| Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |
+| API Reference | [docs/API.md](docs/API.md) | Full endpoint documentation |
+| Credential Nodes | [docs/NODE_PROXY.md](docs/NODE_PROXY.md) | NAT traversal setup |
+| MCP Integration | [docs/MCP_DELEGATION_FLOW.md](docs/MCP_DELEGATION_FLOW.md) | MCP protocol details |
+| SSH Tunneling | [docs/SSH_TUNNELING.md](docs/SSH_TUNNELING.md) | |
+| Security | [docs/SECURITY.md](docs/SECURITY.md) | |
+| Environment Variables | [docs/ENV.md](docs/ENV.md) | |
+| Developer Guide | [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | |
 
 ## Contributing
 

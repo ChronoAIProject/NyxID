@@ -30,7 +30,7 @@ services:
       # ${...} expansion), so DATABASE_URL must live in this block.
       DATABASE_URL: mongodb://${MONGO_ROOT_USER:-nyxid}:${MONGO_ROOT_PASSWORD}@mongodb:27017/nyxid?authSource=admin
     volumes:
-      - ./keys:/app/keys:ro
+      - ./keys:/app/keys
     depends_on:
       mongodb:
         condition: service_healthy
