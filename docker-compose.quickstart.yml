@@ -1,36 +1,31 @@
-# Production Docker Compose for NyxID.
+# Quick Start Docker Compose for NyxID.
 #
-# Quickstart (3 required env vars — see .env.production.example):
+# Usage:
 #     cp .env.production.example .env.production
-#     $EDITOR .env.production
-#     docker compose -f docker-compose.prod.yml --env-file .env.production pull
-#     docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#     # edit ENCRYPTION_KEY and MONGO_ROOT_PASSWORD
+#     docker compose -f docker-compose.quickstart.yml --env-file .env.production pull
+#     docker compose -f docker-compose.quickstart.yml --env-file .env.production up -d
 #
-# Multi-arch images are published to GitHub Container Registry by the
-# `Publish Images` workflow on every merge to main and on every `v*` tag.
-# Override the version by exporting NYXID_VERSION (defaults to `latest`).
+# Differences from docker-compose.prod.yml:
+#   - Keys volume is read-write (allows JWT auto-generation in dev mode)
+#   - Ports bind to 0.0.0.0 instead of 127.0.0.1 (easier local access)
 #
-# To build locally instead of pulling, uncomment the `build:` blocks below.
+# For production, use docker-compose.prod.yml with pre-generated JWT keys
+# and ENVIRONMENT=production. See docs/DEPLOYMENT.md.
 
 services:
   backend:
     image: ghcr.io/chronoaiproject/nyxid/backend:${NYXID_VERSION:-latest}
-    # build:
-    #   context: .
-    #   dockerfile: backend/Dockerfile
     container_name: nyxid-backend
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3001:3001"
+      - "3001:3001"
     env_file:
       - .env.production
     environment:
-      # Constructed here so ${MONGO_ROOT_PASSWORD} is interpolated by compose.
-      # env_file entries are passed through to the container verbatim (no
-      # ${...} expansion), so DATABASE_URL must live in this block.
       DATABASE_URL: mongodb://${MONGO_ROOT_USER:-nyxid}:${MONGO_ROOT_PASSWORD}@mongodb:27017/nyxid?authSource=admin
     volumes:
-      - ./keys:/app/keys:ro
+      - ./keys:/app/keys
     depends_on:
       mongodb:
         condition: service_healthy
@@ -43,13 +38,10 @@ services:
 
   frontend:
     image: ghcr.io/chronoaiproject/nyxid/frontend:${NYXID_VERSION:-latest}
-    # build:
-    #   context: frontend
-    #   dockerfile: Dockerfile
     container_name: nyxid-frontend
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3000:8080"
+      - "3000:8080"
     environment:
       BACKEND_URL: http://backend:3001
     depends_on:
