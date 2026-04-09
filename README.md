@@ -93,20 +93,11 @@ NAT to reach your local services, and wraps any REST API as MCP tools.
 
 ## Quick Start
 
-### Hosted (closed beta, invitation only)
+### 1. Start the server
 
-1. Sign up at the [NyxID console](https://nyx.chrono-ai.fun) and add the API credentials you want your agents to use. The hosted service is currently in closed beta. [Join the waitlist](https://nyx.chrono-ai.fun/#waitlist).
+**Hosted (closed beta)** — [sign up](https://nyx.chrono-ai.fun) or [join the waitlist](https://nyx.chrono-ai.fun/#waitlist), then skip to step 2.
 
-2. Install the CLI and log in:
-
-```bash
-cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli
-nyxid login --base-url https://nyx.chrono-ai.fun
-```
-
-### Self-host (~7 min)
-
-1. **Start the stack** (~1 min):
+**Self-host** — run the stack locally with Docker:
 
 ```bash
 git clone https://github.com/ChronoAIProject/NyxID.git && cd NyxID
@@ -120,60 +111,71 @@ docker compose -f docker-compose.prod.yml --env-file .env.production pull
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d
 ```
 
-> JWT signing keys are auto-generated on first startup. For production, generate your own and set `ENVIRONMENT=production`.
+JWT signing keys are auto-generated on first startup. Open `http://localhost:3000` and register your account.
 
-2. **Create your account** (~1 min): Open `http://localhost:3000` and register. The first account gets admin access.
+> For production hardening (custom JWT keys, TLS, domain), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-3. **Connect a provider** (~1 min): Go to **Providers** and connect an API key (e.g., OpenAI, Anthropic). A dialog will appear with your MCP config — copy it.
+### 2. Connect your AI agent
 
-4. **Test the connection** (~1 min): Go to **Services > Connections** and click **Test** on the connected service to verify your credential works through the proxy.
-
-5. **Add to Claude Code and verify** (~2 min): Paste the MCP config into `~/.claude/settings.json`. Ask Claude Code to list available tools — you should see tools from the API you connected.
-
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for production setup.
-
-## Connect Your AI Agent
+Install the CLI, log in, add an API credential, and configure MCP — all from the terminal:
 
 ```bash
-nyxid api-key create --name my-agent    # creates an API key for MCP auth
-nyxid mcp config --tool claude-code     # or: --tool cursor, --tool vscode
+# Install the CLI
+cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli
+
+# Log in (opens browser)
+nyxid login                                       # hosted: add --base-url https://nyx.chrono-ai.fun
+
+# Add your first API credential (e.g. OpenAI)
+nyxid service add openai --credential-env OPENAI_API_KEY
+
+# Generate MCP config for your AI tool
+nyxid mcp config --tool claude-code               # or: --tool cursor, --tool codex
 ```
 
-Follow the output to add NyxID to your MCP config. Your agent can now call any API you added through NyxID's authenticated proxy — credentials are injected automatically.
+The last command prints a JSON snippet. Add it to your MCP config:
 
-NyxID's MCP transport (`/mcp`) exposes your connected services as tools automatically. Service endpoints are loaded on-demand and mapped to MCP tools you can call from any MCP client.
+- **Claude Code**: `~/.claude/settings.json`
+- **Cursor**: `.cursor/mcp.json`
+- **Codex**: `~/.codex/config.toml`
 
-### Reach local services — turn localhost into MCP tools (optional)
+### 3. Verify
 
-Have services behind a firewall? Deploy a credential node to punch through NAT, then expose them as MCP tools your agents can call.
+Ask your AI agent to list its available tools. You should see the API you just connected. Try a call:
 
 ```bash
-# 1. Connect a node to NyxID (outbound WebSocket, no port forwarding)
+# Or verify from the CLI directly:
+nyxid proxy openai /v1/models
+```
+
+If the proxy returns a response, the full chain works: credential stored, injected, downstream accepted.
+
+---
+
+### Reach local services (optional)
+
+Have services behind a firewall? Deploy a credential node to punch through NAT and expose localhost services as MCP tools:
+
+```bash
+# Register and start a node (outbound WebSocket — no port forwarding, no VPN)
 nyxid node register --token <reg-token> --url wss://<your-server>/api/v1/nodes/ws
 nyxid node credentials add --service my-local-api --header Authorization --secret-format bearer
 nyxid node start
 
-# 2. Register the service with NyxID and link it to the node
+# Register the service and link it to the node
 nyxid node credentials setup --service my-local-api --url http://localhost:8080
 
-# 3. If the service has an OpenAPI spec, import endpoints as MCP tools
+# Import endpoints as MCP tools (if the service has an OpenAPI spec)
 nyxid catalog endpoints my-local-api
 ```
 
-The node makes an outbound WebSocket connection to NyxID. No port forwarding.
-No VPN. Once the service is registered and endpoints are imported, your AI
-agents can call it as MCP tools through `nyxid mcp config`.
+### Web console
 
-## Quick Start (with AI assistant)
+Everything above can also be done through the web console at `http://localhost:3000`:
 
-Paste this into Claude Code, Cursor, or any AI coding assistant:
-
-> Help me set up NyxID. Install the CLI (cargo install --git
-> https://github.com/ChronoAIProject/NyxID.git nyxid-cli), log in with
-> nyxid login, add my OpenAI API key, and configure MCP so I can use
-> NyxID-proxied tools from this session.
-
-<!-- AI quickstart maintenance: validate this prompt against actual CLI on each release -->
+1. **Providers** — connect API keys (OpenAI, Anthropic, GitHub, etc.)
+2. **Services > Connections** — view connected services, click **Test** to verify credentials work through the proxy
+3. **Settings > MCP** — copy MCP config snippets for Claude Code, Cursor, or Codex
 
 ## Use Cases
 
