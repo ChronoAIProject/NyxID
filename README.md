@@ -93,11 +93,35 @@ NAT to reach your local services, and wraps any REST API as MCP tools.
 
 ## Quick Start
 
-### 1. Start the server
+Pick the path that fits:
 
-**Hosted (closed beta)** — [sign up](https://nyx.chrono-ai.fun) or [join the waitlist](https://nyx.chrono-ai.fun/#waitlist), then skip to step 2.
+| Path | Time | What you need |
+|------|------|---------------|
+| [Hosted](#hosted-closed-beta) | 2 min | Browser |
+| [AI-assisted setup](#ai-assisted-setup) | 3 min | Claude Code, Cursor, or any AI coding assistant |
+| [Manual CLI setup](#manual-cli-setup) | 5 min | Terminal + Docker (self-host) or hosted account |
 
-**Self-host** — run the stack locally with Docker:
+### Hosted (closed beta)
+
+Sign up at the [NyxID console](https://nyx.chrono-ai.fun), add your API credentials through the dashboard, and copy the MCP config from **Settings > MCP** into your AI tool. Currently invitation-only — [join the waitlist](https://nyx.chrono-ai.fun/#waitlist).
+
+### AI-assisted setup
+
+Paste this into Claude Code, Cursor, or any AI coding assistant:
+
+> Help me set up NyxID. Install the CLI (`cargo install --git
+> https://github.com/ChronoAIProject/NyxID.git nyxid-cli`), log in with
+> `nyxid login`, add my OpenAI API key with `nyxid service add openai`,
+> and run `nyxid mcp config --tool claude-code` to configure MCP so I can
+> use NyxID-proxied tools from this session.
+
+Your AI agent will walk you through each step interactively.
+
+<!-- AI quickstart maintenance: validate this prompt against actual CLI on each release -->
+
+### Manual CLI setup
+
+#### 1. Start the server (self-host)
 
 ```bash
 git clone https://github.com/ChronoAIProject/NyxID.git && cd NyxID
@@ -111,13 +135,11 @@ docker compose -f docker-compose.prod.yml --env-file .env.production pull
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d
 ```
 
-JWT signing keys are auto-generated on first startup. Open `http://localhost:3000` and register your account.
+Open `http://localhost:3000` and register your account. JWT signing keys are auto-generated on first startup.
 
 > For production hardening (custom JWT keys, TLS, domain), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-### 2. Connect your AI agent
-
-Install the CLI, log in, add an API credential, and configure MCP — all from the terminal:
+#### 2. Install CLI, add credential, configure MCP
 
 ```bash
 # Install the CLI
@@ -133,28 +155,31 @@ nyxid service add openai --credential-env OPENAI_API_KEY
 nyxid mcp config --tool claude-code               # or: --tool cursor, --tool codex
 ```
 
-The last command prints a JSON snippet. Add it to your MCP config:
+Add the output to your MCP config:
+**Claude Code** `~/.claude/settings.json` · **Cursor** `.cursor/mcp.json` · **Codex** `~/.codex/config.toml`
 
-- **Claude Code**: `~/.claude/settings.json`
-- **Cursor**: `.cursor/mcp.json`
-- **Codex**: `~/.codex/config.toml`
-
-### 3. Verify
-
-Ask your AI agent to list its available tools. You should see the API you just connected. Try a call:
+#### 3. Verify
 
 ```bash
-# Or verify from the CLI directly:
+# Verify from the CLI
 nyxid proxy openai /v1/models
 ```
 
-If the proxy returns a response, the full chain works: credential stored, injected, downstream accepted.
+If the proxy returns a response, the full chain works: credential stored, injected, downstream accepted. Ask your AI agent to list its tools — you should see the API you just connected.
+
+#### Web console
+
+Everything above can also be done through the web console at `http://localhost:3000`:
+
+- **Providers** — connect API keys (OpenAI, Anthropic, GitHub, etc.)
+- **Services > Connections** — view connected services, click **Test** to verify credentials work through the proxy
+- **Settings > MCP** — copy MCP config snippets for Claude Code, Cursor, or Codex
 
 ---
 
 ### Reach local services (optional)
 
-Have services behind a firewall? Deploy a credential node to punch through NAT and expose localhost services as MCP tools:
+Services behind a firewall? Deploy a credential node to punch through NAT and expose them as MCP tools:
 
 ```bash
 # Register and start a node (outbound WebSocket — no port forwarding, no VPN)
@@ -168,14 +193,6 @@ nyxid node credentials setup --service my-local-api --url http://localhost:8080
 # Import endpoints as MCP tools (if the service has an OpenAPI spec)
 nyxid catalog endpoints my-local-api
 ```
-
-### Web console
-
-Everything above can also be done through the web console at `http://localhost:3000`:
-
-1. **Providers** — connect API keys (OpenAI, Anthropic, GitHub, etc.)
-2. **Services > Connections** — view connected services, click **Test** to verify credentials work through the proxy
-3. **Settings > MCP** — copy MCP config snippets for Claude Code, Cursor, or Codex
 
 ## Use Cases
 
