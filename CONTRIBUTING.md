@@ -50,7 +50,7 @@ cp .env.example .env
 openssl rand -hex 32  # Paste output as ENCRYPTION_KEY in .env
 
 # Start infrastructure (MongoDB on 27018, Mailpit on 8025)
-docker compose -f docker-compose.dev.yml up -d
+docker compose up -d
 
 # Start the backend (auto-generates RSA keys in dev mode)
 cargo run

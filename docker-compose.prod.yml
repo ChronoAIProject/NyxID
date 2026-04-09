@@ -1,23 +1,30 @@
-# Production Docker Compose for NyxID.
+# Production overrides for NyxID. Loaded explicitly with `-f`; the dev
+# `docker-compose.override.yml` is intentionally NOT auto-loaded when -f is
+# passed.
 #
-# Quickstart (3 required env vars — see .env.production.example):
+# Quickstart (3 required env vars in .env.production -- see
+# .env.production.example):
 #     cp .env.production.example .env.production
 #     $EDITOR .env.production
-#     docker compose -f docker-compose.prod.yml --env-file .env.production pull
-#     docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#                    --env-file .env.production pull
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#                    --env-file .env.production up -d
 #
 # Multi-arch images are published to GitHub Container Registry by the
 # `Publish Images` workflow on every merge to main and on every `v*` tag.
 # Override the version by exporting NYXID_VERSION (defaults to `latest`).
-#
-# To build locally instead of pulling, uncomment the `build:` blocks below.
 
 services:
+  # Lock the Mongo password down: require it to be supplied via the env file,
+  # rather than the dev override's hardcoded value.
+  mongodb:
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-nyxid}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD is required}
+
   backend:
     image: ghcr.io/chronoaiproject/nyxid/backend:${NYXID_VERSION:-latest}
-    # build:
-    #   context: .
-    #   dockerfile: backend/Dockerfile
     container_name: nyxid-backend
     restart: unless-stopped
     ports:
@@ -43,9 +50,6 @@ services:
 
   frontend:
     image: ghcr.io/chronoaiproject/nyxid/frontend:${NYXID_VERSION:-latest}
-    # build:
-    #   context: frontend
-    #   dockerfile: Dockerfile
     container_name: nyxid-frontend
     restart: unless-stopped
     ports:
@@ -54,23 +58,3 @@ services:
       BACKEND_URL: http://backend:3001
     depends_on:
       - backend
-
-  mongodb:
-    image: mongo:8.0
-    container_name: nyxid-mongodb
-    restart: unless-stopped
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-nyxid}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD is required}
-      MONGO_INITDB_DATABASE: nyxid
-    volumes:
-      - mongodb_data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-volumes:
-  mongodb_data:

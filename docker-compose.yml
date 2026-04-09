@@ -1,57 +1,33 @@
-# Docker Compose for NyxID.
+# Base Docker Compose for NyxID.
 #
-# Usage:
-#     cp .env.production.example .env.production
-#     # edit ENCRYPTION_KEY and MONGO_ROOT_PASSWORD
+# This file contains only services shared between local development and
+# production deployments. Environment-specific bits live in:
+#
+#   docker-compose.override.yml  -- auto-loaded for local development
+#                                   (adds Mailpit, exposes Mongo on 27018,
+#                                   sets a hardcoded dev password)
+#   docker-compose.prod.yml      -- explicitly loaded for production deploy
+#                                   (adds backend + frontend, enforces an
+#                                   env-driven Mongo password)
+#
+# Local dev (auto-loads override.yml):
 #     docker compose up -d
 #
-# JWT signing keys are auto-generated on first startup (ENVIRONMENT=development).
-# For production, generate your own keys, set ENVIRONMENT=production, and use
-# docker-compose.prod.yml (read-only keys mount, localhost-only ports).
-# See docs/DEPLOYMENT.md.
+# Production deploy (override.yml is NOT auto-loaded with explicit -f):
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#                    --env-file .env.production up -d
 
 services:
-  backend:
-    image: ghcr.io/chronoaiproject/nyxid/backend:${NYXID_VERSION:-latest}
-    container_name: nyxid-backend
-    restart: unless-stopped
-    ports:
-      - "3001:3001"
-    env_file:
-      - .env.production
-    environment:
-      DATABASE_URL: mongodb://${MONGO_ROOT_USER:-nyxid}:${MONGO_ROOT_PASSWORD}@mongodb:27017/nyxid?authSource=admin
-    volumes:
-      - ./keys:/app/keys
-    depends_on:
-      mongodb:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-
-  frontend:
-    image: ghcr.io/chronoaiproject/nyxid/frontend:${NYXID_VERSION:-latest}
-    container_name: nyxid-frontend
-    restart: unless-stopped
-    ports:
-      - "3000:8080"
-    environment:
-      BACKEND_URL: http://backend:3001
-    depends_on:
-      - backend
-
   mongodb:
     image: mongo:8.0
     container_name: nyxid-mongodb
     restart: unless-stopped
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-nyxid}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?MONGO_ROOT_PASSWORD is required}
+      MONGO_INITDB_ROOT_USERNAME: nyxid
       MONGO_INITDB_DATABASE: nyxid
+      # MONGO_INITDB_ROOT_PASSWORD is intentionally NOT set here. The dev
+      # override sets a hardcoded dev password; the prod override requires
+      # MONGO_ROOT_PASSWORD to be provided via .env.production.
     volumes:
       - mongodb_data:/data/db
     healthcheck:
