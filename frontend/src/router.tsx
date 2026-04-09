@@ -111,6 +111,13 @@ const loginRoute = createRoute({
 const registerRoute = createRoute({
   path: "/register",
   getParentRoute: () => authLayout,
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { return_to?: string } => ({
+    ...(typeof search.return_to === "string"
+      ? { return_to: search.return_to }
+      : {}),
+  }),
   component: RegisterPage,
 });
 

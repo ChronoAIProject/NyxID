@@ -188,6 +188,63 @@ pub struct KeyView {
     pub ssh_certificate_ttl_minutes: Option<u32>,
 }
 
+/// Validate that a catalog `token_exchange` service gets a properly
+/// shaped credential from the caller. Older CLIs (pre-#220) and raw
+/// HTTP clients that haven't learned the new credential format will
+/// POST `{"credential": "<single_secret_string>"}` to `/api/v1/keys`.
+/// Under the new `token_exchange` auth method, that single string can't
+/// be parsed into the declared `{app_id, app_secret}` fields and every
+/// subsequent proxy call would fail at request time with a misleading
+/// error.
+///
+/// Fail loudly at registration time instead. The error message tells
+/// the caller exactly how to fix it -- run `nyxid update` for a newer
+/// CLI, or send the credential as a JSON object matching the declared
+/// fields.
+///
+/// Returns `Ok(())` for auth methods other than `token_exchange` (the
+/// helper short-circuits so it's cheap to call unconditionally).
+pub(crate) fn validate_token_exchange_catalog_credential(
+    svc: &DownstreamService,
+    credential: &str,
+) -> AppResult<()> {
+    if svc.auth_method != "token_exchange" {
+        return Ok(());
+    }
+    let exchange_config = svc.token_exchange_config.as_ref().ok_or_else(|| {
+        AppError::Internal(format!(
+            "Catalog service '{}' has auth_method=token_exchange but no \
+             token_exchange_config. Contact an admin to fix the catalog entry.",
+            svc.slug
+        ))
+    })?;
+    if let Err(err) = crate::services::provider_token_exchange_service::parse_credential(
+        credential,
+        &exchange_config.credential_fields,
+    ) {
+        let field_list = exchange_config
+            .credential_fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let first_field = exchange_config
+            .credential_fields
+            .first()
+            .map(|f| f.name.as_str())
+            .unwrap_or("field");
+        return Err(AppError::BadRequest(format!(
+            "'{}' requires the credential to be a JSON object with fields [{}]. \
+             Older CLIs may only prompt for a single secret -- run `nyxid update` \
+             to get the multi-field prompt. If you're calling /api/v1/keys directly, \
+             send `credential` as a JSON string like '{{\"{}\":\"...\"}}'. \
+             Underlying error: {err}",
+            svc.slug, field_list, first_field
+        )));
+    }
+    Ok(())
+}
+
 fn normalized_provider_credential_type(provider_type: &str) -> &'static str {
     match provider_type {
         "oauth2" | "device_code" => "oauth2",
@@ -343,6 +400,14 @@ pub async fn create_key(
             return Err(AppError::BadRequest(
                 "Credential is required for direct routing (or select a node)".to_string(),
             ));
+        }
+
+        // Validate: `token_exchange` services require the credential to be
+        // a JSON object matching the catalog's declared credential fields.
+        // See `validate_token_exchange_catalog_credential` for the full
+        // rationale and the upgrade message old clients get.
+        if !credential.is_empty() && !node_managed_credential {
+            validate_token_exchange_catalog_credential(&svc, credential)?;
         }
 
         // Determine provider_config_id for the api key
@@ -570,6 +635,7 @@ pub async fn create_key(
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
+            token_exchange_config: None,
             created_at: now,
             updated_at: now,
         };
@@ -1171,9 +1237,12 @@ mod tests {
     use super::{
         AUTO_PROVISION_SOURCE, auto_provision_source_id, build_key_view,
         direct_credential_type_for_service, direct_credential_type_from_auth_method,
-        identity_config_from_downstream_service,
+        identity_config_from_downstream_service, validate_token_exchange_catalog_credential,
     };
-    use crate::models::downstream_service::DownstreamService;
+    use crate::errors::AppError;
+    use crate::models::downstream_service::{
+        CredentialFieldSpec, DownstreamService, TokenExchangeConfig,
+    };
     use crate::models::user_api_key::UserApiKey;
     use crate::models::user_endpoint::UserEndpoint;
     use crate::models::user_service::UserService;
@@ -1271,6 +1340,7 @@ mod tests {
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
+            token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1411,5 +1481,114 @@ mod tests {
         assert!(!identity.identity_include_user_id);
         assert!(!identity.identity_include_email);
         assert!(!identity.identity_include_name);
+    }
+
+    // ─── validate_token_exchange_catalog_credential ──────────────────
+
+    fn lark_bot_catalog_service() -> DownstreamService {
+        let mut svc = sample_catalog_service();
+        svc.slug = "api-lark-bot".to_string();
+        svc.auth_method = "token_exchange".to_string();
+        svc.auth_key_name = String::new();
+        svc.token_exchange_config = Some(TokenExchangeConfig {
+            endpoint: "{base_url}/open-apis/auth/v3/tenant_access_token/internal".to_string(),
+            request_encoding: "json".to_string(),
+            request_template: serde_json::json!({
+                "app_id": "$app_id",
+                "app_secret": "$app_secret",
+            }),
+            token_response_path: "tenant_access_token".to_string(),
+            ttl_response_path: Some("expire".to_string()),
+            default_ttl_secs: 7200,
+            injection: "bearer".to_string(),
+            error_code_path: Some("code".to_string()),
+            error_message_path: Some("msg".to_string()),
+            credential_fields: vec![
+                CredentialFieldSpec {
+                    name: "app_id".to_string(),
+                    label: "App ID".to_string(),
+                    placeholder: None,
+                    secret: false,
+                },
+                CredentialFieldSpec {
+                    name: "app_secret".to_string(),
+                    label: "App Secret".to_string(),
+                    placeholder: None,
+                    secret: true,
+                },
+            ],
+        });
+        svc
+    }
+
+    #[test]
+    fn validate_token_exchange_credential_accepts_well_formed_json() {
+        let svc = lark_bot_catalog_service();
+        validate_token_exchange_catalog_credential(
+            &svc,
+            r#"{"app_id":"cli_xxx","app_secret":"yyy"}"#,
+        )
+        .expect("well-formed credential must be accepted");
+    }
+
+    #[test]
+    fn validate_token_exchange_credential_rejects_raw_string_from_old_cli() {
+        // Regression: an older CLI running `nyxid service add api-lark-bot`
+        // against a new-server catalog would POST /api/v1/keys with
+        // `credential: "<just the app_secret>"`. Under the new
+        // token_exchange auth method that's unusable -- the proxy's
+        // parse_credential needs {app_id, app_secret}. We fail at
+        // registration time with a message that tells the caller how
+        // to recover instead of silently creating a broken binding.
+        let svc = lark_bot_catalog_service();
+        let err = validate_token_exchange_catalog_credential(&svc, "just-the-app-secret")
+            .expect_err("raw-string credential must be rejected");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, AppError::BadRequest(_)),
+            "expected BadRequest, got: {msg}"
+        );
+        // The error must tell the user which fields are required and
+        // point them at the update path.
+        assert!(msg.contains("api-lark-bot"), "msg: {msg}");
+        assert!(msg.contains("app_id"), "msg: {msg}");
+        assert!(msg.contains("app_secret"), "msg: {msg}");
+        assert!(msg.contains("nyxid update"), "msg: {msg}");
+    }
+
+    #[test]
+    fn validate_token_exchange_credential_rejects_missing_field() {
+        let svc = lark_bot_catalog_service();
+        let err = validate_token_exchange_catalog_credential(&svc, r#"{"app_id":"cli_xxx"}"#)
+            .expect_err("credential missing app_secret must be rejected");
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn validate_token_exchange_credential_is_noop_for_body_auth_service() {
+        // Existing users on the old body-auth path still POST just the
+        // app_secret string. The helper must short-circuit for any
+        // auth_method other than token_exchange so it doesn't reject
+        // perfectly valid pre-#220 bindings.
+        let mut svc = lark_bot_catalog_service();
+        svc.auth_method = "body".to_string();
+        svc.auth_key_name = "app_secret".to_string();
+        validate_token_exchange_catalog_credential(&svc, "raw-app-secret")
+            .expect("body auth credentials must pass through without validation");
+    }
+
+    #[test]
+    fn validate_token_exchange_credential_errors_cleanly_if_catalog_missing_config() {
+        // Data integrity guard: if the catalog row somehow has
+        // auth_method=token_exchange but no token_exchange_config, we
+        // surface a clear Internal error pointing at the catalog slug
+        // so admins know where to look.
+        let mut svc = lark_bot_catalog_service();
+        svc.token_exchange_config = None;
+        let err =
+            validate_token_exchange_catalog_credential(&svc, r#"{"app_id":"x","app_secret":"y"}"#)
+                .expect_err("missing config must fail with an Internal error");
+        assert!(matches!(err, AppError::Internal(_)));
+        assert!(err.to_string().contains("api-lark-bot"));
     }
 }

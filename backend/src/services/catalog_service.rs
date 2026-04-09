@@ -63,6 +63,14 @@ pub struct CatalogEntry {
     pub required_permissions: Option<Vec<String>>,
     pub examples_url: Option<String>,
     pub recommended_skills: Option<Vec<String>>,
+    /// Declared credential fields for `token_exchange` services. When set,
+    /// clients should render one input per field (text vs password per the
+    /// `secret` flag) and compose a JSON object from the values before
+    /// submitting. The full `TokenExchangeConfig` stays server-side --
+    /// clients never see the endpoint URL, request template, or injection
+    /// format, only what to collect from the user.
+    pub token_exchange_credential_fields:
+        Option<Vec<crate::models::downstream_service::CredentialFieldSpec>>,
 }
 
 fn build_catalog_entry(
@@ -141,6 +149,7 @@ fn build_catalog_entry(
         required_permissions: svc.required_permissions,
         examples_url: svc.examples_url,
         recommended_skills: svc.recommended_skills,
+        token_exchange_credential_fields: svc.token_exchange_config.map(|c| c.credential_fields),
     }
 }
 

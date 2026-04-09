@@ -1,8 +1,16 @@
-import { RegisterForm } from "@/components/auth/register-form";
+import { AuthFlow } from "@/components/auth/auth-flow";
+import { MfaVerifyForm } from "@/components/auth/mfa-verify-form";
+import { useAuthStore } from "@/stores/auth-store";
 
 export function RegisterPage() {
-  const returnTo =
-    new URLSearchParams(window.location.search).get("return_to") ?? undefined;
+  const mfaRequired = useAuthStore((s) => s.mfaRequired);
 
-  return <RegisterForm returnTo={returnTo} />;
+  const params = new URLSearchParams(window.location.search);
+  const returnTo = params.get("return_to") ?? undefined;
+
+  if (mfaRequired) {
+    return <MfaVerifyForm returnTo={returnTo} />;
+  }
+
+  return <AuthFlow initialPanel={1} returnTo={returnTo} />;
 }

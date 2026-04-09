@@ -694,6 +694,7 @@ async fn handle_tools_call(
         &arguments,
         &state.jwt_keys,
         &state.config,
+        &state.token_exchange_cache,
     )
     .await
     {
@@ -842,6 +843,7 @@ async fn handle_meta_call_tool(
         &inner_args,
         &state.jwt_keys,
         &state.config,
+        &state.token_exchange_cache,
     )
     .await
     {

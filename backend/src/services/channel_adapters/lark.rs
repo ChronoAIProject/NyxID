@@ -10,6 +10,13 @@
 //!
 //! Message parsing handles the standard `im.message.receive_v1` event schema
 //! and the `url_verification` challenge flow.
+//!
+//! Tenant token acquisition goes through the generic
+//! [`provider_token_exchange_service`] helpers so the channel adapter and
+//! the proxy's `token_exchange` auth method share one in-memory cache with
+//! per-key single-flight.
+
+use std::sync::Arc;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -17,11 +24,47 @@ use subtle::ConstantTimeEq;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
+use crate::models::downstream_service::{CredentialFieldSpec, TokenExchangeConfig};
 use crate::services::channel_platform::{
     BotIdentity, InboundMessage, OutboundReply, PlatformAdapter,
 };
+use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Build the `TokenExchangeConfig` that matches Lark / Feishu's tenant
+/// token endpoint. Shared with the proxy catalog seeds so there is exactly
+/// one definition in the tree.
+pub fn lark_family_token_exchange_config() -> TokenExchangeConfig {
+    TokenExchangeConfig {
+        endpoint: "{base_url}/open-apis/auth/v3/tenant_access_token/internal".to_string(),
+        request_encoding: "json".to_string(),
+        request_template: serde_json::json!({
+            "app_id": "$app_id",
+            "app_secret": "$app_secret",
+        }),
+        token_response_path: "tenant_access_token".to_string(),
+        ttl_response_path: Some("expire".to_string()),
+        default_ttl_secs: 7200,
+        injection: "bearer".to_string(),
+        error_code_path: Some("code".to_string()),
+        error_message_path: Some("msg".to_string()),
+        credential_fields: vec![
+            CredentialFieldSpec {
+                name: "app_id".to_string(),
+                label: "App ID".to_string(),
+                placeholder: Some("cli_a940e30bf3b89eea".to_string()),
+                secret: false,
+            },
+            CredentialFieldSpec {
+                name: "app_secret".to_string(),
+                label: "App Secret".to_string(),
+                placeholder: None,
+                secret: true,
+            },
+        ],
+    }
+}
 
 /// Lark / Feishu platform adapter.
 ///
@@ -29,69 +72,56 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct LarkFamilyAdapter {
     base_url: String,
     platform: String,
+    token_exchange_cache: Arc<TokenExchangeCache>,
 }
 
 impl LarkFamilyAdapter {
     /// Create an adapter for the international Lark platform.
-    pub fn lark() -> Self {
+    pub fn lark(token_exchange_cache: Arc<TokenExchangeCache>) -> Self {
         Self {
             base_url: "https://open.larksuite.com".to_string(),
             platform: "lark".to_string(),
+            token_exchange_cache,
         }
     }
 
     /// Create an adapter for the China mainland Feishu platform.
-    pub fn feishu() -> Self {
+    pub fn feishu(token_exchange_cache: Arc<TokenExchangeCache>) -> Self {
         Self {
             base_url: "https://open.feishu.cn".to_string(),
             platform: "feishu".to_string(),
+            token_exchange_cache,
         }
     }
 
-    /// Exchange app credentials for a tenant access token.
+    /// Exchange app credentials for a tenant access token via the shared
+    /// process-wide cache. Multiple concurrent callers for the same app
+    /// coalesce into a single HTTP round-trip (see `TokenExchangeCache`).
     async fn get_tenant_access_token(
         &self,
         http: &reqwest::Client,
         app_id: &str,
         app_secret: &str,
     ) -> AppResult<String> {
-        let url = format!(
-            "{}/open-apis/auth/v3/tenant_access_token/internal",
-            self.base_url
-        );
-        let body = serde_json::json!({
+        let config = lark_family_token_exchange_config();
+        let credential_json = serde_json::json!({
             "app_id": app_id,
             "app_secret": app_secret,
-        });
-        let resp: serde_json::Value = http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "{} tenant token request failed: {e}",
-                    self.platform
-                ))
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "{} tenant token response parse failed: {e}",
-                    self.platform
-                ))
-            })?;
+        })
+        .to_string();
+        let mut credential_map = serde_json::Map::new();
+        credential_map.insert("app_id".to_string(), serde_json::json!(app_id));
+        credential_map.insert("app_secret".to_string(), serde_json::json!(app_secret));
 
-        resp.get("tenant_access_token")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .ok_or_else(|| {
-                AppError::ChannelPlatformError(format!(
-                    "{} failed to obtain tenant access token",
-                    self.platform
-                ))
-            })
+        provider_token_exchange_service::get_cached_exchange_token(
+            &self.token_exchange_cache,
+            http,
+            &self.base_url,
+            &credential_json,
+            &config,
+            &credential_map,
+        )
+        .await
     }
 }
 
@@ -444,17 +474,24 @@ impl PlatformAdapter for LarkFamilyAdapter {
 mod tests {
     use super::*;
 
+    /// Tests only exercise parsing/signature verification paths, so they
+    /// never actually hit the cache. We still need a concrete instance to
+    /// pass to the adapter constructors.
+    fn test_cache() -> Arc<TokenExchangeCache> {
+        Arc::new(TokenExchangeCache::new())
+    }
+
     // -- platform_id ---------------------------------------------------------
 
     #[test]
     fn platform_id_lark() {
-        let adapter = LarkFamilyAdapter::lark();
+        let adapter = LarkFamilyAdapter::lark(test_cache());
         assert_eq!(adapter.platform_id(), "lark");
     }
 
     #[test]
     fn platform_id_feishu() {
-        let adapter = LarkFamilyAdapter::feishu();
+        let adapter = LarkFamilyAdapter::feishu(test_cache());
         assert_eq!(adapter.platform_id(), "feishu");
     }
 
@@ -462,7 +499,7 @@ mod tests {
 
     #[test]
     fn handle_challenge_url_verification() {
-        let adapter = LarkFamilyAdapter::lark();
+        let adapter = LarkFamilyAdapter::lark(test_cache());
         let body = serde_json::json!({
             "type": "url_verification",
             "challenge": "abc123def456",
@@ -476,7 +513,7 @@ mod tests {
 
     #[test]
     fn handle_challenge_non_verification_returns_none() {
-        let adapter = LarkFamilyAdapter::feishu();
+        let adapter = LarkFamilyAdapter::feishu(test_cache());
         let body = serde_json::json!({
             "schema": "2.0",
             "header": { "event_type": "im.message.receive_v1" },
@@ -488,7 +525,7 @@ mod tests {
 
     #[test]
     fn handle_challenge_invalid_json_returns_none() {
-        let adapter = LarkFamilyAdapter::lark();
+        let adapter = LarkFamilyAdapter::lark(test_cache());
         assert!(adapter.handle_challenge(b"not json").is_none());
     }
 
@@ -496,7 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_text_message() {
-        let adapter = LarkFamilyAdapter::lark();
+        let adapter = LarkFamilyAdapter::lark(test_cache());
         let body = serde_json::json!({
             "schema": "2.0",
             "header": {
@@ -537,7 +574,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_group_message() {
-        let adapter = LarkFamilyAdapter::feishu();
+        let adapter = LarkFamilyAdapter::feishu(test_cache());
         let body = serde_json::json!({
             "schema": "2.0",
             "header": {
@@ -569,7 +606,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_url_verification_returns_empty() {
-        let adapter = LarkFamilyAdapter::lark();
+        let adapter = LarkFamilyAdapter::lark(test_cache());
         let body = serde_json::json!({
             "type": "url_verification",
             "challenge": "test_challenge",
@@ -582,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_non_message_event_returns_empty() {
-        let adapter = LarkFamilyAdapter::lark();
+        let adapter = LarkFamilyAdapter::lark(test_cache());
         let body = serde_json::json!({
             "schema": "2.0",
             "header": {
@@ -599,7 +636,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_no_event_field_returns_empty() {
-        let adapter = LarkFamilyAdapter::lark();
+        let adapter = LarkFamilyAdapter::lark(test_cache());
         let body = serde_json::json!({ "schema": "2.0" });
         let raw = serde_json::to_vec(&body).unwrap();
         let msgs = adapter.parse_inbound(&raw).await.unwrap();
@@ -608,7 +645,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_invalid_json_returns_error() {
-        let adapter = LarkFamilyAdapter::lark();
+        let adapter = LarkFamilyAdapter::lark(test_cache());
         let result = adapter.parse_inbound(b"not json").await;
         assert!(result.is_err());
     }
@@ -659,13 +696,13 @@ mod tests {
 
     #[test]
     fn lark_base_url() {
-        let adapter = LarkFamilyAdapter::lark();
+        let adapter = LarkFamilyAdapter::lark(test_cache());
         assert_eq!(adapter.base_url, "https://open.larksuite.com");
     }
 
     #[test]
     fn feishu_base_url() {
-        let adapter = LarkFamilyAdapter::feishu();
+        let adapter = LarkFamilyAdapter::feishu(test_cache());
         assert_eq!(adapter.base_url, "https://open.feishu.cn");
     }
 
@@ -673,7 +710,7 @@ mod tests {
 
     #[tokio::test]
     async fn parse_message_with_reply_and_thread() {
-        let adapter = LarkFamilyAdapter::lark();
+        let adapter = LarkFamilyAdapter::lark(test_cache());
         let body = serde_json::json!({
             "schema": "2.0",
             "header": {

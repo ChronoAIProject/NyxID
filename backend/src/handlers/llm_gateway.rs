@@ -192,6 +192,7 @@ pub async fn llm_proxy_request(
             vec![], // no identity headers for LLM proxy
             delegated,
             None,
+            &state.token_exchange_cache,
         )
         .await?;
 
@@ -460,6 +461,7 @@ pub async fn gateway_request(
             vec![],
             delegated,
             None,
+            &state.token_exchange_cache,
         )
         .await?;
 

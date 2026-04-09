@@ -9,7 +9,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::AppState;
 use crate::errors::AppResult;
-use crate::models::downstream_service::ServiceCapabilities;
+use crate::models::downstream_service::{CredentialFieldSpec, ServiceCapabilities};
 use crate::mw::auth::AuthUser;
 use crate::services::{api_docs_service, catalog_service, openapi_parser};
 
@@ -99,6 +99,10 @@ pub struct CatalogEntryResponse {
     pub examples_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
+    /// Declared credential fields for `token_exchange` services. Clients
+    /// read this to render the correct multi-field credential form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_exchange_credential_fields: Option<Vec<CredentialFieldSpec>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -240,6 +244,7 @@ fn catalog_entry_response(entry: catalog_service::CatalogEntry) -> CatalogEntryR
         required_permissions: entry.required_permissions,
         examples_url: entry.examples_url,
         recommended_skills: entry.recommended_skills,
+        token_exchange_credential_fields: entry.token_exchange_credential_fields,
     }
 }
 

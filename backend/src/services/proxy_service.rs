@@ -21,6 +21,7 @@ use crate::models::user_service_connection::{
 };
 use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
+use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
 use crate::services::{
     agent_binding_service, user_api_key_service, user_service_service, user_token_service,
 };
@@ -518,7 +519,10 @@ pub async fn resolve_proxy_target_from_user_service(
     // Handle no-auth services (may have no api_key_id)
     if user_service.auth_method == "none" {
         let now = chrono::Utc::now();
-        let minimal_service = build_minimal_downstream_service(&user_service, &endpoint, now);
+        let token_exchange_config =
+            load_token_exchange_config_for_user_service(db, &user_service).await?;
+        let minimal_service =
+            build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
 
         return Ok(Some(UserServiceResolution {
             target: ProxyTarget {
@@ -575,7 +579,10 @@ pub async fn resolve_proxy_target_from_user_service(
         let has_server_credential = credential.is_some();
 
         let now = chrono::Utc::now();
-        let minimal_service = build_minimal_downstream_service(&user_service, &endpoint, now);
+        let token_exchange_config =
+            load_token_exchange_config_for_user_service(db, &user_service).await?;
+        let minimal_service =
+            build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
 
         return Ok(Some(UserServiceResolution {
             target: ProxyTarget {
@@ -611,7 +618,10 @@ pub async fn resolve_proxy_target_from_user_service(
     });
 
     let now = chrono::Utc::now();
-    let minimal_service = build_minimal_downstream_service(&user_service, &endpoint, now);
+    let token_exchange_config =
+        load_token_exchange_config_for_user_service(db, &user_service).await?;
+    let minimal_service =
+        build_minimal_downstream_service(&user_service, &endpoint, now, token_exchange_config);
 
     Ok(Some(UserServiceResolution {
         target: ProxyTarget {
@@ -766,12 +776,65 @@ fn missing_user_api_key_credential_error(api_key: &UserApiKey) -> AppError {
     }
 }
 
-/// Build a minimal DownstreamService struct for backward compatibility with
-/// existing proxy pipeline code that expects a `ProxyTarget.service`.
+/// Load the catalog `token_exchange_config` for a user service, if one is
+/// required. Returns `Ok(None)` for auth methods that don't use a token
+/// exchange config. Fails loudly if the user service is configured for
+/// `token_exchange` but the catalog link is missing or the catalog row
+/// lacks the config.
+///
+/// Extracted as its own function so the DB fetch has a single home and
+/// the pure struct-assembly logic in `build_minimal_downstream_service`
+/// stays unit-testable.
+async fn load_token_exchange_config_for_user_service(
+    db: &mongodb::Database,
+    user_service: &crate::models::user_service::UserService,
+) -> AppResult<Option<crate::models::downstream_service::TokenExchangeConfig>> {
+    if user_service.auth_method != "token_exchange" {
+        return Ok(None);
+    }
+    let catalog_id = user_service.catalog_service_id.as_deref().ok_or_else(|| {
+        AppError::BadRequest(
+            "token_exchange services must be linked to a catalog entry".to_string(),
+        )
+    })?;
+    let svc = db
+        .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .find_one(doc! { "_id": catalog_id })
+        .await?
+        .ok_or_else(|| {
+            tracing::error!(
+                user_service_id = %user_service.id,
+                catalog_service_id = %catalog_id,
+                "UserService references missing catalog DownstreamService"
+            );
+            AppError::Internal(
+                "Data integrity error: catalog service not found for token_exchange".to_string(),
+            )
+        })?;
+    // A catalog entry with auth_method=token_exchange MUST have a config.
+    // If it doesn't, surface the integrity error here rather than 500ing
+    // in the proxy's forward_request.
+    if svc.token_exchange_config.is_none() {
+        return Err(AppError::Internal(format!(
+            "Catalog service '{}' is missing token_exchange_config",
+            svc.slug
+        )));
+    }
+    Ok(svc.token_exchange_config)
+}
+
+/// Build a minimal DownstreamService struct for backward compatibility
+/// with existing proxy pipeline code that expects a `ProxyTarget.service`.
+///
+/// Pure function - the caller is responsible for fetching any catalog
+/// `token_exchange_config` via `load_token_exchange_config_for_user_service`
+/// and passing it in. This keeps the function unit-testable without a
+/// live MongoDB connection.
 fn build_minimal_downstream_service(
     user_service: &crate::models::user_service::UserService,
     endpoint: &UserEndpoint,
     now: chrono::DateTime<chrono::Utc>,
+    token_exchange_config: Option<crate::models::downstream_service::TokenExchangeConfig>,
 ) -> DownstreamService {
     DownstreamService {
         id: user_service
@@ -815,6 +878,7 @@ fn build_minimal_downstream_service(
         required_permissions: None,
         examples_url: None,
         recommended_skills: None,
+        token_exchange_config,
         created_at: now,
         updated_at: now,
     }
@@ -882,6 +946,8 @@ pub async fn forward_request(
     delegated_credentials: Vec<DelegatedCredential>,
     // The caller's raw NyxID access token, used when auth_method is "nyxid_token".
     caller_token: Option<&str>,
+    // Shared generic token exchange cache (used by `token_exchange`).
+    token_exchange_cache: &TokenExchangeCache,
 ) -> AppResult<reqwest::Response> {
     let prepared = prepare_delegated_request(path, query, &delegated_credentials)?;
 
@@ -923,7 +989,13 @@ pub async fn forward_request(
     // Body injection for `body` auth method must happen before the body is
     // attached to the request. We mutate `body` in place; the actual attach
     // happens further down in the existing `match body { ... }` block.
-    let body = if target.auth_method == "body" {
+    //
+    // Injection is skipped for methods that cannot carry a request body
+    // (GET/HEAD/DELETE/OPTIONS). Injecting into those would produce malformed
+    // requests that stricter downstreams (e.g. Cloudflare-fronted APIs) reject
+    // with 400 Bad Request. Callers misusing body auth on such methods will
+    // simply see the downstream's own auth-missing error.
+    let body = if target.auth_method == "body" && method_can_have_body(&method) {
         if target.auth_key_name.is_empty() {
             return Err(AppError::Internal(
                 "Body auth method requires a non-empty auth_key_name".to_string(),
@@ -977,6 +1049,43 @@ pub async fn forward_request(
         }
         "body" => {
             // Body injection already happened above; nothing to add to headers.
+        }
+        "token_exchange" => {
+            // Declarative server-side token exchange. The service's
+            // `TokenExchangeConfig` describes how to POST the stored
+            // credential JSON, extract a token from the response, cache
+            // it, and inject it on outbound requests. Covers Lark/Feishu
+            // tenant tokens, OAuth 2.0 client_credentials, and similar
+            // provider flows without per-provider code.
+            let exchange_config =
+                target
+                    .service
+                    .token_exchange_config
+                    .as_ref()
+                    .ok_or_else(|| {
+                        AppError::Internal(
+                        "token_exchange auth method requires token_exchange_config on the service"
+                            .to_string(),
+                    )
+                    })?;
+            let credential_map = provider_token_exchange_service::parse_credential(
+                &target.credential,
+                &exchange_config.credential_fields,
+            )?;
+            let token = provider_token_exchange_service::get_cached_exchange_token(
+                token_exchange_cache,
+                client,
+                &target.base_url,
+                &target.credential,
+                exchange_config,
+                &credential_map,
+            )
+            .await?;
+            request = provider_token_exchange_service::apply_injection(
+                request,
+                &exchange_config.injection,
+                &token,
+            )?;
         }
         _ => {
             return Err(AppError::Internal(format!(
@@ -1038,6 +1147,19 @@ pub async fn forward_request(
     })?;
 
     Ok(response)
+}
+
+/// Whether an HTTP method semantically supports a request body.
+///
+/// Used to guard body-auth credential injection: injecting a JSON body on
+/// GET/HEAD/DELETE produces malformed requests that Cloudflare-fronted APIs
+/// (notably Lark) reject at the edge with 400 Bad Request before reaching
+/// the origin server.
+fn method_can_have_body(method: &reqwest::Method) -> bool {
+    matches!(
+        *method,
+        reqwest::Method::POST | reqwest::Method::PUT | reqwest::Method::PATCH
+    )
 }
 
 /// Merge a credential into the top level of a JSON request body.
@@ -1123,6 +1245,13 @@ mod tests {
         StatusCode::OK
     }
 
+    /// Fresh empty token exchange cache for tests that don't exercise
+    /// `token_exchange`. Dedicated tests for the cache itself live in
+    /// `provider_token_exchange_service::tests`.
+    fn empty_token_cache() -> TokenExchangeCache {
+        TokenExchangeCache::new()
+    }
+
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
@@ -1169,6 +1298,7 @@ mod tests {
                 required_permissions: None,
                 examples_url: None,
                 recommended_skills: None,
+                token_exchange_config: None,
                 created_at: now,
                 updated_at: now,
             },
@@ -1206,6 +1336,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -1251,6 +1382,7 @@ mod tests {
                 credential: "123456:ABC-DEF".to_string(),
             }],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect("proxy request should succeed");
@@ -1319,6 +1451,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect_err("backslash in requested path should be rejected");
@@ -1372,6 +1505,7 @@ mod tests {
                 vec![],
                 vec![],
                 None,
+                &empty_token_cache(),
             )
             .await
             .expect_err("percent-encoded requested path breaker should be rejected");
@@ -1409,6 +1543,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect("non-segment dot sequences should be allowed");
@@ -1439,6 +1574,7 @@ mod tests {
                 credential: "bad/token".to_string(),
             }],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect_err("invalid path credential should be rejected");
@@ -1468,6 +1604,7 @@ mod tests {
                     credential: credential.to_string(),
                 }],
                 None,
+                &empty_token_cache(),
             )
             .await
             .expect_err("blank or whitespace path credential should be rejected");
@@ -1497,6 +1634,7 @@ mod tests {
                 credential: "123456:ABC-DEF".to_string(),
             }],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect_err("invalid path prefix should be rejected");
@@ -1526,6 +1664,7 @@ mod tests {
                     credential: "123456:ABC-DEF".to_string(),
                 }],
                 None,
+                &empty_token_cache(),
             )
             .await
             .expect_err("blank or whitespace path prefix should be rejected");
@@ -1555,6 +1694,7 @@ mod tests {
                 credential: "123%2f456".to_string(),
             }],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect_err("percent-encoded path credential should be rejected");
@@ -1609,6 +1749,7 @@ mod tests {
                 credential: "123456:ABC-DEF".to_string(),
             }],
             None,
+            &empty_token_cache(),
         )
         .await
         .expect_err("percent-encoded path prefix should be rejected");
@@ -1669,5 +1810,567 @@ mod tests {
         let err = inject_credential_into_json_body(Some(&body), "app_secret", "secret_value")
             .unwrap_err();
         assert!(err.to_string().contains("JSON object"));
+    }
+
+    // ─── method_can_have_body tests ─────────────────────────────────────
+
+    #[test]
+    fn method_can_have_body_accepts_post_put_patch() {
+        assert!(method_can_have_body(&reqwest::Method::POST));
+        assert!(method_can_have_body(&reqwest::Method::PUT));
+        assert!(method_can_have_body(&reqwest::Method::PATCH));
+    }
+
+    #[test]
+    fn method_can_have_body_rejects_get_head_delete_options() {
+        assert!(!method_can_have_body(&reqwest::Method::GET));
+        assert!(!method_can_have_body(&reqwest::Method::HEAD));
+        assert!(!method_can_have_body(&reqwest::Method::DELETE));
+        assert!(!method_can_have_body(&reqwest::Method::OPTIONS));
+    }
+
+    // ─── token_exchange integration tests (Lark as example) ──────────
+
+    use axum::{Json, routing::get};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone)]
+    struct LarkMockState {
+        captured_authorization: Arc<std::sync::Mutex<Option<String>>>,
+        token_exchange_count: Arc<AtomicUsize>,
+    }
+
+    async fn mock_lark_token_endpoint_handler(
+        State(state): State<LarkMockState>,
+        body: Bytes,
+    ) -> Json<serde_json::Value> {
+        // Sanity-check the request body carries both credentials.
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json body");
+        assert!(parsed["app_id"].as_str().is_some());
+        assert!(parsed["app_secret"].as_str().is_some());
+        state.token_exchange_count.fetch_add(1, Ordering::SeqCst);
+        Json(serde_json::json!({
+            "code": 0,
+            "msg": "ok",
+            "tenant_access_token": "t-test-token",
+            "expire": 7200,
+        }))
+    }
+
+    async fn lark_api_handler(
+        State(state): State<LarkMockState>,
+        headers: HeaderMap,
+    ) -> Json<serde_json::Value> {
+        let auth = headers
+            .get(reqwest::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(ToString::to_string);
+        *state.captured_authorization.lock().unwrap() = auth;
+        Json(serde_json::json!({"code": 0, "data": {"items": []}}))
+    }
+
+    fn make_lark_token_exchange_config() -> crate::models::downstream_service::TokenExchangeConfig {
+        use crate::models::downstream_service::{CredentialFieldSpec, TokenExchangeConfig};
+        TokenExchangeConfig {
+            endpoint: "{base_url}/open-apis/auth/v3/tenant_access_token/internal".to_string(),
+            request_encoding: "json".to_string(),
+            request_template: serde_json::json!({
+                "app_id": "$app_id",
+                "app_secret": "$app_secret",
+            }),
+            token_response_path: "tenant_access_token".to_string(),
+            ttl_response_path: Some("expire".to_string()),
+            default_ttl_secs: 7200,
+            injection: "bearer".to_string(),
+            error_code_path: Some("code".to_string()),
+            error_message_path: Some("msg".to_string()),
+            credential_fields: vec![
+                CredentialFieldSpec {
+                    name: "app_id".to_string(),
+                    label: "App ID".to_string(),
+                    placeholder: None,
+                    secret: false,
+                },
+                CredentialFieldSpec {
+                    name: "app_secret".to_string(),
+                    label: "App Secret".to_string(),
+                    placeholder: None,
+                    secret: true,
+                },
+            ],
+        }
+    }
+
+    fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
+        let now = Utc::now();
+        ProxyTarget {
+            base_url: base_url.clone(),
+            auth_method: "token_exchange".to_string(),
+            auth_key_name: String::new(),
+            credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
+            service: DownstreamService {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Lark Bot".to_string(),
+                slug: "api-lark-bot".to_string(),
+                description: None,
+                base_url,
+                auth_method: "token_exchange".to_string(),
+                auth_key_name: String::new(),
+                credential_encrypted: vec![],
+                auth_type: None,
+                openapi_spec_url: None,
+                asyncapi_spec_url: None,
+                streaming_supported: false,
+                ssh_config: None,
+                service_type: "http".to_string(),
+                visibility: "public".to_string(),
+                oauth_client_id: None,
+                service_category: "external".to_string(),
+                requires_user_credential: true,
+                is_active: true,
+                created_by: "test".to_string(),
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                forward_access_token: false,
+                inject_delegation_token: false,
+                delegation_token_scope: "llm:proxy".to_string(),
+                provider_config_id: None,
+                homepage_url: None,
+                repository_url: None,
+                issues_url: None,
+                capabilities: None,
+                auth_notes: None,
+                known_limitations: None,
+                required_permissions: None,
+                recommended_skills: None,
+                examples_url: None,
+                token_exchange_config: Some(make_lark_token_exchange_config()),
+                created_at: now,
+                updated_at: now,
+            },
+        }
+    }
+
+    async fn start_lark_mock() -> (String, LarkMockState, tokio::task::JoinHandle<()>) {
+        let state = LarkMockState {
+            captured_authorization: Arc::new(std::sync::Mutex::new(None)),
+            token_exchange_count: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route(
+                "/open-apis/auth/v3/tenant_access_token/internal",
+                post(mock_lark_token_endpoint_handler),
+            )
+            .route("/open-apis/im/v1/chats", get(lark_api_handler))
+            .with_state(state.clone());
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+        (format!("http://{addr}"), state, server)
+    }
+
+    #[tokio::test]
+    async fn token_exchange_injects_bearer_on_downstream_request() {
+        let (base_url, mock, server) = start_lark_mock().await;
+        let cache = TokenExchangeCache::new();
+
+        let response = forward_request(
+            &Client::new(),
+            &make_lark_proxy_target(base_url),
+            reqwest::Method::GET,
+            "open-apis/im/v1/chats",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &cache,
+        )
+        .await
+        .expect("lark proxy request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(mock.token_exchange_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            mock.captured_authorization.lock().unwrap().as_deref(),
+            Some("Bearer t-test-token")
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn token_exchange_caches_across_calls() {
+        let (base_url, mock, server) = start_lark_mock().await;
+        let cache = TokenExchangeCache::new();
+        let target = make_lark_proxy_target(base_url);
+
+        // First call triggers a token exchange.
+        forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::GET,
+            "open-apis/im/v1/chats",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &cache,
+        )
+        .await
+        .expect("first call");
+
+        // Second call reuses the cached token.
+        forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::GET,
+            "open-apis/im/v1/chats",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &cache,
+        )
+        .await
+        .expect("second call");
+
+        assert_eq!(
+            mock.token_exchange_count.load(Ordering::SeqCst),
+            1,
+            "token exchange should happen exactly once across two proxy calls"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn token_exchange_rejects_malformed_credential() {
+        let (base_url, _mock, server) = start_lark_mock().await;
+        let mut target = make_lark_proxy_target(base_url);
+        target.credential = "not valid json".to_string();
+
+        let err = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::GET,
+            "open-apis/im/v1/chats",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &TokenExchangeCache::new(),
+        )
+        .await
+        .expect_err("malformed credential should error");
+
+        assert!(
+            err.to_string().contains("token_exchange"),
+            "unexpected error: {err}"
+        );
+        server.abort();
+    }
+
+    // ─── build_minimal_downstream_service regression test ────────────
+
+    fn make_user_service_token_exchange() -> crate::models::user_service::UserService {
+        crate::models::user_service::UserService {
+            id: "us-1".to_string(),
+            user_id: "user-1".to_string(),
+            slug: "api-lark-bot".to_string(),
+            endpoint_id: "ep-1".to_string(),
+            api_key_id: Some("ak-1".to_string()),
+            auth_method: "token_exchange".to_string(),
+            auth_key_name: String::new(),
+            catalog_service_id: Some("cat-1".to_string()),
+            node_id: None,
+            node_priority: 0,
+            service_type: "http".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
+            is_active: true,
+            source: None,
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn make_endpoint() -> UserEndpoint {
+        UserEndpoint {
+            id: "ep-1".to_string(),
+            user_id: "user-1".to_string(),
+            label: "Lark Bot".to_string(),
+            url: "https://open.larksuite.com".to_string(),
+            catalog_service_id: Some("cat-1".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn build_minimal_downstream_service_carries_token_exchange_config_through() {
+        // Regression: before this was wired, the synthetic DownstreamService
+        // built by the user-service resolver hard-coded
+        // `token_exchange_config: None`, so every proxy request to a
+        // token_exchange service 500'd with
+        // "token_exchange auth method requires token_exchange_config on
+        // the service" -- even though the catalog row had a perfectly
+        // valid config.
+        let user_service = make_user_service_token_exchange();
+        let endpoint = make_endpoint();
+        let config = make_lark_token_exchange_config();
+
+        let svc = build_minimal_downstream_service(
+            &user_service,
+            &endpoint,
+            Utc::now(),
+            Some(config.clone()),
+        );
+
+        let carried = svc.token_exchange_config.expect("config must be carried");
+        assert_eq!(carried.endpoint, config.endpoint);
+        assert_eq!(carried.token_response_path, config.token_response_path);
+        assert_eq!(carried.credential_fields.len(), 2);
+    }
+
+    #[test]
+    fn build_minimal_downstream_service_omits_config_for_non_token_exchange() {
+        let mut user_service = make_user_service_token_exchange();
+        user_service.auth_method = "bearer".to_string();
+        let endpoint = make_endpoint();
+
+        let svc = build_minimal_downstream_service(&user_service, &endpoint, Utc::now(), None);
+
+        assert!(svc.token_exchange_config.is_none());
+        assert_eq!(svc.auth_method, "bearer");
+    }
+
+    // ─── body auth method guard regression tests ─────────────────────
+
+    #[derive(Clone, Default)]
+    struct BodyAuthCaptureState {
+        captured_body: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    async fn body_capture_get(
+        State(state): State<BodyAuthCaptureState>,
+        body: Bytes,
+    ) -> StatusCode {
+        *state.captured_body.lock().unwrap() = Some(body.to_vec());
+        StatusCode::OK
+    }
+
+    fn make_body_auth_target(base_url: String) -> ProxyTarget {
+        let now = Utc::now();
+        ProxyTarget {
+            base_url: base_url.clone(),
+            auth_method: "body".to_string(),
+            auth_key_name: "app_secret".to_string(),
+            credential: "super-secret".to_string(),
+            service: DownstreamService {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Body Auth Service".to_string(),
+                slug: "body-auth-service".to_string(),
+                description: None,
+                base_url,
+                auth_method: "body".to_string(),
+                auth_key_name: "app_secret".to_string(),
+                credential_encrypted: vec![],
+                auth_type: None,
+                openapi_spec_url: None,
+                asyncapi_spec_url: None,
+                streaming_supported: false,
+                ssh_config: None,
+                service_type: "http".to_string(),
+                visibility: "public".to_string(),
+                oauth_client_id: None,
+                service_category: "external".to_string(),
+                requires_user_credential: true,
+                is_active: true,
+                created_by: "test".to_string(),
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                forward_access_token: false,
+                inject_delegation_token: false,
+                delegation_token_scope: "llm:proxy".to_string(),
+                provider_config_id: None,
+                homepage_url: None,
+                repository_url: None,
+                issues_url: None,
+                capabilities: None,
+                auth_notes: None,
+                known_limitations: None,
+                required_permissions: None,
+                recommended_skills: None,
+                examples_url: None,
+                token_exchange_config: None,
+                created_at: now,
+                updated_at: now,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn body_auth_skips_injection_on_get_request() {
+        let state = BodyAuthCaptureState::default();
+        let app = Router::new()
+            .route("/chats", get(body_capture_get))
+            .with_state(state.clone());
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let response = forward_request(
+            &Client::new(),
+            &make_body_auth_target(format!("http://{addr}")),
+            reqwest::Method::GET,
+            "chats",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+        )
+        .await
+        .expect("GET with body auth should forward without body injection");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // The downstream must receive an empty body -- the secret must NOT
+        // leak into a GET request via the body injection code path.
+        let captured = state.captured_body.lock().unwrap().clone();
+        assert_eq!(captured.as_deref(), Some(&b""[..]));
+
+        server.abort();
+    }
+
+    // ─── old HTTP flow regression test (PR #220 backward-compat) ─────
+
+    async fn body_capture_post(
+        State(state): State<BodyAuthCaptureState>,
+        body: Bytes,
+    ) -> StatusCode {
+        *state.captured_body.lock().unwrap() = Some(body.to_vec());
+        StatusCode::OK
+    }
+
+    #[tokio::test]
+    async fn body_auth_still_merges_secret_into_post_body_after_refactor() {
+        // Regression: the #220 refactor introduced the generic
+        // `token_exchange` auth method and migrated the `api-lark-bot`
+        // catalog row. Users who had already run `nyxid service add
+        // api-lark-bot` under #205 still have UserService rows with
+        // `auth_method: "body"` and UserApiKey rows with a raw
+        // `app_secret` string. Their existing integration hits the
+        // proxy POSTing `{"app_id": "cli_xxx"}` to the Lark token
+        // exchange endpoint and expects NyxID to merge `app_secret`
+        // into the body server-side -- that's the whole contract of
+        // the #205 body-injection flow.
+        //
+        // This test replays that exact request shape end-to-end
+        // through `forward_request` and asserts the downstream sees
+        // the merged body. If someone later rips out the body-auth
+        // arm thinking it's obsolete, this test fails.
+        let state = BodyAuthCaptureState::default();
+        let app = Router::new()
+            .route(
+                "/open-apis/auth/v3/tenant_access_token/internal",
+                post(body_capture_post),
+            )
+            .with_state(state.clone());
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        );
+
+        let response = forward_request(
+            &Client::new(),
+            &make_body_auth_target(format!("http://{addr}")),
+            reqwest::Method::POST,
+            "open-apis/auth/v3/tenant_access_token/internal",
+            None,
+            headers,
+            ProxyBody::Buffered(Some(bytes::Bytes::from_static(br#"{"app_id":"cli_xxx"}"#))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+        )
+        .await
+        .expect("POST with body auth should merge credential into JSON body");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The downstream must see the merged body. `app_secret` comes
+        // from `make_body_auth_target` which uses "super-secret".
+        let captured_raw = state.captured_body.lock().unwrap().clone();
+        let captured_bytes = captured_raw.expect("downstream captured a body");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&captured_bytes).expect("downstream body is valid JSON");
+        assert_eq!(parsed["app_id"], "cli_xxx");
+        assert_eq!(parsed["app_secret"], "super-secret");
+
+        server.abort();
+    }
+
+    #[test]
+    fn build_minimal_downstream_service_preserves_body_auth_method() {
+        // Regression: existing UserService rows with auth_method=body
+        // (from the #205 api-lark-bot seed) must keep their auth_method
+        // when the proxy builds the synthetic DownstreamService at
+        // request time. If the resolver accidentally promoted them to
+        // token_exchange based on the catalog row, their existing
+        // credential (raw app_secret string, not JSON) would fail to
+        // parse and the proxy would 500.
+        let mut user_service = make_user_service_token_exchange();
+        user_service.auth_method = "body".to_string();
+        user_service.auth_key_name = "app_secret".to_string();
+        let endpoint = make_endpoint();
+
+        let svc = build_minimal_downstream_service(&user_service, &endpoint, Utc::now(), None);
+
+        assert_eq!(svc.auth_method, "body");
+        assert_eq!(svc.auth_key_name, "app_secret");
+        assert!(svc.token_exchange_config.is_none());
     }
 }

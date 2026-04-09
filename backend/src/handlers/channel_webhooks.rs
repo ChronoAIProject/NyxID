@@ -62,7 +62,7 @@ pub async fn discord_webhook(
 ) -> impl IntoResponse {
     // Discord PING challenge must be answered before any bot lookup / verification.
     // The adapter can parse the body without needing bot state.
-    let adapter = match resolve_adapter("discord") {
+    let adapter = match resolve_adapter("discord", &state.token_exchange_cache) {
         Ok(a) => a,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".to_string()).into_response(),
     };
@@ -123,7 +123,7 @@ pub async fn lark_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let adapter = match resolve_adapter("lark") {
+    let adapter = match resolve_adapter("lark", &state.token_exchange_cache) {
         Ok(a) => a,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".to_string()).into_response(),
     };
@@ -153,7 +153,7 @@ pub async fn feishu_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let adapter = match resolve_adapter("feishu") {
+    let adapter = match resolve_adapter("feishu", &state.token_exchange_cache) {
         Ok(a) => a,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".to_string()).into_response(),
     };
@@ -226,7 +226,7 @@ async fn handle_webhook_inner(
         return Ok(());
     }
 
-    let adapter = resolve_adapter(&bot.platform).map_err(
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache).map_err(
         |e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("unsupported platform {}: {e}", bot.platform).into()
         },

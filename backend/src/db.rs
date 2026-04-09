@@ -1895,6 +1895,7 @@ mod tests {
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
+            token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

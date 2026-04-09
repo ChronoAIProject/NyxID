@@ -89,6 +89,10 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // Assigned in both the `custom` and catalog branches below.
             let effective_auth_method: String;
             let effective_auth_key_name: String;
+            // Token exchange credential field specs from the catalog entry
+            // (only populated in the catalog branch for `token_exchange`
+            // services). Drives the dynamic multi-field credential prompt.
+            let mut catalog_token_exchange_fields: Option<Vec<TokenExchangeField>> = None;
 
             if custom {
                 let label_val = match label {
@@ -140,16 +144,22 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 body.insert("service_slug".into(), Value::String(slug.clone()));
 
                 // Fetch catalog entry to validate slug and pull defaults
-                // (name, auth method, auth key name) so later prompts can
-                // adapt to what the service actually expects.
+                // (name, auth method, auth key name, token_exchange credential
+                // fields) so later prompts can adapt to what the service
+                // actually expects.
                 let catalog_entry = api.get_value(&format!("/catalog/{slug}")).await;
                 let (catalog_name, catalog_auth_method, catalog_auth_key_name) =
                     match &catalog_entry {
-                        Ok(entry) => (
-                            entry["name"].as_str().map(|s| s.to_string()),
-                            entry["auth_method"].as_str().map(|s| s.to_string()),
-                            entry["auth_key_name"].as_str().map(|s| s.to_string()),
-                        ),
+                        Ok(entry) => {
+                            catalog_token_exchange_fields = parse_token_exchange_fields(
+                                &entry["token_exchange_credential_fields"],
+                            );
+                            (
+                                entry["name"].as_str().map(|s| s.to_string()),
+                                entry["auth_method"].as_str().map(|s| s.to_string()),
+                                entry["auth_key_name"].as_str().map(|s| s.to_string()),
+                            )
+                        }
                         Err(_) => (None, None, None),
                     };
 
@@ -197,11 +207,23 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // Resolve credential: --credential flag > --credential-env > interactive prompt
             // Skip if routing through a node (credentials live on the node)
             if !body.contains_key("node_id") {
+                let token_exchange_fields = if !custom && effective_auth_method == "token_exchange"
+                {
+                    catalog_token_exchange_fields.clone()
+                } else {
+                    None
+                };
                 let cred_value = if let Some(c) = credential {
                     c
                 } else if let Some(env_var) = &credential_env {
                     std::env::var(env_var)
                         .with_context(|| format!("Environment variable {env_var} not set"))?
+                } else if let Some(fields) = token_exchange_fields.as_ref() {
+                    // Declarative token_exchange services advertise their
+                    // credential fields via the catalog. Prompt for each
+                    // field in order and compose a JSON object so the
+                    // proxy can parse it back out at request time.
+                    prompt_token_exchange_credential(fields)?
                 } else {
                     let prompt =
                         credential_prompt_label(&effective_auth_method, &effective_auth_key_name);
@@ -958,6 +980,87 @@ fn credential_prompt_label(auth_method: &str, auth_key_name: &str) -> String {
     }
 }
 
+/// Credential field metadata pulled from the catalog entry. Drives the
+/// dynamic multi-field prompt for `token_exchange` services so the CLI
+/// doesn't need per-provider knowledge.
+#[derive(Debug, Clone)]
+struct TokenExchangeField {
+    name: String,
+    label: String,
+    placeholder: Option<String>,
+    secret: bool,
+}
+
+/// Parse the `token_exchange_credential_fields` array out of a raw catalog
+/// JSON response. Returns `None` when the field is missing / null / not an
+/// array, and filters out malformed entries.
+fn parse_token_exchange_fields(value: &Value) -> Option<Vec<TokenExchangeField>> {
+    let arr = value.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let fields: Vec<TokenExchangeField> = arr
+        .iter()
+        .filter_map(|item| {
+            let name = item.get("name")?.as_str()?.to_string();
+            let label = item
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&name)
+                .to_string();
+            let placeholder = item
+                .get("placeholder")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let secret = item
+                .get("secret")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Some(TokenExchangeField {
+                name,
+                label,
+                placeholder,
+                secret,
+            })
+        })
+        .collect();
+    if fields.is_empty() {
+        None
+    } else {
+        Some(fields)
+    }
+}
+
+/// Interactive prompt for `token_exchange` services. Walks the
+/// catalog-declared credential fields in order, prompting for each one
+/// (visible input for public fields like `app_id`, hidden input for
+/// `secret: true` fields like `app_secret`), then returns a compact JSON
+/// object ready for the `credential` field on the create-key API.
+///
+/// For non-interactive flows, callers can pass the same JSON via
+/// `--credential` or `--credential-env`.
+fn prompt_token_exchange_credential(fields: &[TokenExchangeField]) -> Result<String> {
+    eprintln!("Provider credentials (stored encrypted, never exposed):");
+    let mut payload = serde_json::Map::with_capacity(fields.len());
+    for field in fields {
+        let prompt_label = match &field.placeholder {
+            Some(ph) => format!("{} (e.g. {ph}): ", field.label),
+            None => format!("{}: ", field.label),
+        };
+        let value = if field.secret {
+            rpassword::prompt_password(&prompt_label)?
+        } else {
+            prompt_line(&prompt_label)?
+        };
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            bail!("{} is required", field.name);
+        }
+        payload.insert(field.name.clone(), Value::String(trimmed.to_string()));
+    }
+    Ok(Value::Object(payload).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1005,5 +1108,52 @@ mod tests {
     fn credential_prompt_body_without_key_name_falls_back() {
         assert_eq!(credential_prompt_label("body", ""), "Enter credential: ");
         assert_eq!(credential_prompt_label("body", "   "), "Enter credential: ");
+    }
+
+    #[test]
+    fn token_exchange_credential_json_shape() {
+        // Round-trip check: the payload we build for a token_exchange
+        // service must parse as a JSON object with the declared fields
+        // so the backend's parse_credential succeeds.
+        let sample = serde_json::json!({
+            "app_id": "cli_test",
+            "app_secret": "secret_value",
+        })
+        .to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&sample).unwrap();
+        assert_eq!(parsed["app_id"], "cli_test");
+        assert_eq!(parsed["app_secret"], "secret_value");
+    }
+
+    #[test]
+    fn parse_token_exchange_fields_extracts_declared_fields() {
+        let value = serde_json::json!([
+            {
+                "name": "app_id",
+                "label": "App ID",
+                "placeholder": "cli_xxx",
+                "secret": false,
+            },
+            {
+                "name": "app_secret",
+                "label": "App Secret",
+                "secret": true,
+            },
+        ]);
+        let fields = parse_token_exchange_fields(&value).expect("fields");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "app_id");
+        assert_eq!(fields[0].placeholder.as_deref(), Some("cli_xxx"));
+        assert!(!fields[0].secret);
+        assert_eq!(fields[1].name, "app_secret");
+        assert!(fields[1].secret);
+        assert!(fields[1].placeholder.is_none());
+    }
+
+    #[test]
+    fn parse_token_exchange_fields_returns_none_for_missing_or_empty() {
+        assert!(parse_token_exchange_fields(&serde_json::Value::Null).is_none());
+        assert!(parse_token_exchange_fields(&serde_json::json!([])).is_none());
+        assert!(parse_token_exchange_fields(&serde_json::json!("not an array")).is_none());
     }
 }

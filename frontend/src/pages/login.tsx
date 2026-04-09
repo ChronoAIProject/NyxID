@@ -1,11 +1,10 @@
-import { LoginForm } from "@/components/auth/login-form";
+import { AuthFlow } from "@/components/auth/auth-flow";
 import { MfaVerifyForm } from "@/components/auth/mfa-verify-form";
 import { useAuthStore } from "@/stores/auth-store";
 
 export function LoginPage() {
   const mfaRequired = useAuthStore((s) => s.mfaRequired);
 
-  // Read return_to and error from the URL (set by the backend OAuth flows)
   const params = new URLSearchParams(window.location.search);
   const returnTo = params.get("return_to") ?? undefined;
   const socialError = params.get("error") ?? undefined;
@@ -14,5 +13,7 @@ export function LoginPage() {
     return <MfaVerifyForm returnTo={returnTo} />;
   }
 
-  return <LoginForm returnTo={returnTo} socialError={socialError} />;
+  return (
+    <AuthFlow initialPanel={0} returnTo={returnTo} socialError={socialError} />
+  );
 }

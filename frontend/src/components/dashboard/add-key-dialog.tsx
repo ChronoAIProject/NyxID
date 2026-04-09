@@ -81,6 +81,7 @@ const AUTH_METHOD_DEFAULTS: Record<string, string> = {
   oauth2: "Authorization",
   body: "app_secret",
   bot_bearer: "Authorization",
+  token_exchange: "",
   none: "",
 };
 
@@ -112,15 +113,57 @@ function getCredentialFieldMeta(
   return { label: "API Key / Credential", placeholder: "sk-..." };
 }
 
+// Parse a stored `token_exchange` credential (JSON object) back into a
+// plain key-value map. Returns an empty object on any parse error so the
+// form stays usable even if the underlying JSON is mangled.
+function parseTokenExchangeCredential(
+  credential: string,
+): Readonly<Record<string, string>> {
+  if (!credential) return {};
+  try {
+    const parsed = JSON.parse(credential);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const result: Record<string, string> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (typeof v === "string") result[k] = v;
+      }
+      return result;
+    }
+  } catch {
+    // Fall through -- treat malformed JSON as empty.
+  }
+  return {};
+}
+
+// Compose a map of field values back into the JSON blob the backend
+// expects in `credential_encrypted`. Returns an empty string when all
+// fields are blank so the surrounding "required credential" check still
+// fires.
+function composeTokenExchangeCredential(
+  values: Readonly<Record<string, string>>,
+): string {
+  const trimmed: Record<string, string> = {};
+  let anyPresent = false;
+  for (const [k, v] of Object.entries(values)) {
+    const t = v.trim();
+    if (t) anyPresent = true;
+    trimmed[k] = t;
+  }
+  if (!anyPresent) return "";
+  return JSON.stringify(trimmed);
+}
+
 // Auth key name input should only be shown when the user needs to pick a
-// header/query/body field name. `bot_bearer` is a fixed Authorization format
-// and OAuth flows handle their own token storage.
+// header/query/body field name. `bot_bearer` is a fixed Authorization format,
+// OAuth flows handle their own token storage, and `token_exchange` ignores
+// auth_key_name entirely (the credential is a structured JSON blob).
 function shouldShowAuthKeyName(authMethod: string): boolean {
   return (
     authMethod !== "none" &&
     authMethod !== "oidc" &&
     authMethod !== "oauth2" &&
-    authMethod !== "bot_bearer"
+    authMethod !== "bot_bearer" &&
+    authMethod !== "token_exchange"
   );
 }
 
@@ -500,41 +543,86 @@ function KeyForm({
           </p>
         </div>
 
-        <div className="space-y-1.5">
-          <Label htmlFor="add-key-credential">
-            {credentialMeta.label}
-            {requiresCredential && <span className="text-destructive"> *</span>}
-          </Label>
-          <Input
-            id="add-key-credential"
-            type={requiresCredential ? "password" : "text"}
-            placeholder={
-              requiresCredential
-                ? credentialMeta.placeholder
-                : "No credential required for this service"
-            }
-            value={requiresCredential ? form.credential : ""}
-            onChange={(e) => onChange({ credential: e.target.value })}
-            disabled={!requiresCredential}
-            className={!requiresCredential ? "bg-muted text-muted-foreground" : ""}
-          />
-          {!requiresCredential && (
-            <p className="text-[11px] text-muted-foreground">
-              This service can be used without storing a user credential in NyxID.
-            </p>
-          )}
-          {requiresCredential && form.authMethod === "body" && (
-            <p className="text-[11px] text-muted-foreground">
-              NyxID injects this value into the request JSON body under the
-              field name below.
-            </p>
-          )}
-          {requiresCredential && form.authMethod === "bot_bearer" && (
-            <p className="text-[11px] text-muted-foreground">
-              Sent as <code className="font-mono">Authorization: Bot &lt;token&gt;</code>.
-            </p>
-          )}
-        </div>
+        {form.authMethod === "token_exchange" &&
+        (catalogEntry?.token_exchange_credential_fields?.length ?? 0) > 0 ? (
+          (() => {
+            const fields = catalogEntry?.token_exchange_credential_fields ?? [];
+            const values = parseTokenExchangeCredential(form.credential);
+            return (
+              <>
+                {fields.map((field) => (
+                  <div key={field.name} className="space-y-1.5">
+                    <Label htmlFor={`add-key-te-${field.name}`}>
+                      {field.label}
+                      {requiresCredential && (
+                        <span className="text-destructive"> *</span>
+                      )}
+                    </Label>
+                    <Input
+                      id={`add-key-te-${field.name}`}
+                      type={field.secret ? "password" : "text"}
+                      placeholder={
+                        field.placeholder ?? `Enter ${field.label.toLowerCase()}`
+                      }
+                      value={values[field.name] ?? ""}
+                      onChange={(e) =>
+                        onChange({
+                          credential: composeTokenExchangeCredential({
+                            ...values,
+                            [field.name]: e.target.value,
+                          }),
+                        })
+                      }
+                    />
+                    {field.secret && (
+                      <p className="text-[11px] text-muted-foreground">
+                        Stored encrypted. NyxID exchanges this server-side
+                        for an access token and caches it -- you never have
+                        to refresh tokens, and the secret never leaves NyxID.
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </>
+            );
+          })()
+        ) : (
+          <div className="space-y-1.5">
+            <Label htmlFor="add-key-credential">
+              {credentialMeta.label}
+              {requiresCredential && <span className="text-destructive"> *</span>}
+            </Label>
+            <Input
+              id="add-key-credential"
+              type={requiresCredential ? "password" : "text"}
+              placeholder={
+                requiresCredential
+                  ? credentialMeta.placeholder
+                  : "No credential required for this service"
+              }
+              value={requiresCredential ? form.credential : ""}
+              onChange={(e) => onChange({ credential: e.target.value })}
+              disabled={!requiresCredential}
+              className={!requiresCredential ? "bg-muted text-muted-foreground" : ""}
+            />
+            {!requiresCredential && (
+              <p className="text-[11px] text-muted-foreground">
+                This service can be used without storing a user credential in NyxID.
+              </p>
+            )}
+            {requiresCredential && form.authMethod === "body" && (
+              <p className="text-[11px] text-muted-foreground">
+                NyxID injects this value into the request JSON body under the
+                field name below.
+              </p>
+            )}
+            {requiresCredential && form.authMethod === "bot_bearer" && (
+              <p className="text-[11px] text-muted-foreground">
+                Sent as <code className="font-mono">Authorization: Bot &lt;token&gt;</code>.
+              </p>
+            )}
+          </div>
+        )}
 
         <div className="space-y-1.5">
           <Label htmlFor="add-key-endpoint">
@@ -581,6 +669,9 @@ function KeyForm({
                   <SelectItem value="basic">Basic Auth</SelectItem>
                   <SelectItem value="body">JSON Body Injection</SelectItem>
                   <SelectItem value="bot_bearer">Bot Token (Discord)</SelectItem>
+                  <SelectItem value="token_exchange">
+                    Token Exchange (Lark / OAuth client_credentials)
+                  </SelectItem>
                   <SelectItem value="oauth2">OAuth 2.0</SelectItem>
                   <SelectItem value="oidc">OIDC</SelectItem>
                   <SelectItem value="none">None</SelectItem>

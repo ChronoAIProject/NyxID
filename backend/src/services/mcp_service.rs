@@ -1270,6 +1270,7 @@ pub async fn execute_tool(
     arguments: &serde_json::Value,
     jwt_keys: &crate::crypto::jwt::JwtKeys,
     config: &crate::config::AppConfig,
+    token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
 ) -> AppResult<(u16, String)> {
     use crate::models::user::{COLLECTION_NAME as USERS, User};
     use crate::services::{delegation_service, identity_service};
@@ -1380,6 +1381,7 @@ pub async fn execute_tool(
         identity_headers,
         delegated,
         None, // MCP tool calls don't use nyxid_token passthrough
+        token_exchange_cache,
     )
     .await?;
 

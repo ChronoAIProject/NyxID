@@ -31,6 +31,7 @@ use crypto::local_key_provider::LocalKeyProvider;
 use models::mcp_session::McpSessionStore;
 
 use services::node_ws_manager::NodeWsManager;
+use services::provider_token_exchange_service::TokenExchangeCache;
 use services::push_service::{ApnsAuth, FcmAuth};
 use services::ssh_service::SshSessionManager;
 
@@ -61,6 +62,11 @@ pub struct AppState {
     pub per_agent_limiter: mw::rate_limit::SharedPerAgentRateLimiter,
     /// Active WebSocket passthrough connection count (for resource limiting)
     pub ws_passthrough_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Generic downstream-provider token exchange cache with per-key
+    /// single-flight. Backs the `token_exchange` auth method (Lark/Feishu
+    /// tenant tokens, OAuth 2.0 client_credentials, etc.) and the channel
+    /// bot adapter's outbound replies.
+    pub token_exchange_cache: Arc<TokenExchangeCache>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -323,6 +329,7 @@ async fn main() {
         ssh_session_manager,
         per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        token_exchange_cache: Arc::new(TokenExchangeCache::new()),
     };
 
     // Create rate limiters

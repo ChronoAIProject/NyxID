@@ -48,6 +48,15 @@ export interface ExternalApiKeyListResponse {
   readonly api_keys: readonly ExternalApiKeyInfo[];
 }
 
+/** Credential field declared by a `token_exchange` catalog service.
+ *  Drives the dynamic multi-field credential form. */
+export interface CredentialFieldSpec {
+  readonly name: string;
+  readonly label: string;
+  readonly placeholder?: string | null;
+  readonly secret: boolean;
+}
+
 export interface CatalogEntry {
   readonly slug: string;
   readonly name: string;
@@ -80,6 +89,12 @@ export interface CatalogEntry {
   readonly oauth_client_id: string | null;
   readonly client_id_param_name: string | null;
   readonly requires_credential: boolean;
+  /** Declared credential fields for `token_exchange` services. When set,
+   *  the dialog renders one input per field (text vs password depending on
+   *  `secret`) and composes a JSON object from the values before submit. */
+  readonly token_exchange_credential_fields?:
+    | readonly CredentialFieldSpec[]
+    | null;
 }
 
 export interface CatalogListResponse {

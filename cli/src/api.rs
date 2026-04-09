@@ -326,7 +326,28 @@ impl ApiClient {
         let method_parsed = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
             .with_context(|| format!("Invalid HTTP method: {method}"))?;
 
-        let has_content_type = headers
+        // Strip any client-supplied Authorization header. The NyxID access
+        // token must be the sole Authorization header on the wire -- letting a
+        // second one through creates duplicate headers that Cloudflare rejects
+        // at the edge with 400 Bad Request. Downstream service credentials
+        // come from the service configuration, not from client headers.
+        let filtered_headers: Vec<(String, String)> = headers
+            .iter()
+            .filter(|(k, _)| {
+                if k.eq_ignore_ascii_case("authorization") {
+                    eprintln!(
+                        "warning: -H 'Authorization: ...' is reserved for NyxID auth and has been dropped. \
+                         Downstream credentials come from the service configuration."
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+
+        let has_content_type = filtered_headers
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
 
@@ -336,7 +357,7 @@ impl ApiClient {
             let mut req = client
                 .request(method_parsed.clone(), &url)
                 .bearer_auth(token);
-            for (k, v) in headers {
+            for (k, v) in &filtered_headers {
                 req = req.header(k.as_str(), v.as_str());
             }
             if let Some(ref b) = body_vec {
@@ -543,6 +564,64 @@ mod tests {
         Ok(format!("http://{addr}"))
     }
 
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional: serialises HOME mutations across tests
+    async fn proxy_request_strips_client_authorization_header() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _home = HomeGuard::set(temp.path());
+
+        crate::auth::save_tokens("nyxid-access-token", Some("nyxid-refresh-token"))
+            .expect("save initial tokens");
+
+        let base_url = start_auth_capture_server().await.expect("test server");
+        let mut api =
+            ApiClient::new(&base_url, "nyxid-access-token".to_string()).expect("api client");
+
+        // User attempts to pass a downstream bearer token via -H. The CLI
+        // must strip it so only the NyxID access token reaches the server;
+        // otherwise Cloudflare 400s on duplicate Authorization headers.
+        let user_headers = vec![(
+            "Authorization".to_string(),
+            "Bearer user-provided-token".to_string(),
+        )];
+
+        let resp = api
+            .proxy_request("GET", "/proxy/s/api-lark-bot/ping", &user_headers, None)
+            .await
+            .expect("proxy response");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    }
+
+    async fn start_auth_capture_server() -> io::Result<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+
+            let req = read_request(&mut socket).await.expect("read proxy request");
+
+            // The server must see exactly one Authorization header, and it
+            // must be the NyxID access token -- not the user-supplied one.
+            assert_eq!(req.authorization_count, 1, "duplicate Authorization");
+            assert_eq!(
+                req.headers.get("authorization").map(String::as_str),
+                Some("Bearer nyxid-access-token"),
+                "wrong Authorization header forwarded"
+            );
+
+            write_response(&mut socket, 200, "OK", r#"{"ok":true}"#)
+                .await
+                .expect("write response");
+        });
+
+        Ok(format!("http://{addr}"))
+    }
+
     async fn handle_proxy_refresh_sequence(socket: &mut TcpStream) -> io::Result<()> {
         let first = read_request(socket).await?;
         assert_eq!(first.method, "GET");
@@ -591,6 +670,7 @@ mod tests {
         method: String,
         path: String,
         headers: HashMap<String, String>,
+        authorization_count: usize,
         body: String,
     }
 
@@ -628,6 +708,7 @@ mod tests {
 
         let mut headers = HashMap::new();
         let mut content_length = 0usize;
+        let mut authorization_count = 0usize;
         for line in lines {
             if line.is_empty() {
                 continue;
@@ -639,6 +720,9 @@ mod tests {
             let value = value.trim().to_string();
             if name == "content-length" {
                 content_length = value.parse().unwrap_or(0);
+            }
+            if name == "authorization" {
+                authorization_count += 1;
             }
             headers.insert(name, value);
         }
@@ -662,6 +746,7 @@ mod tests {
             method,
             path,
             headers,
+            authorization_count,
             body,
         })
     }

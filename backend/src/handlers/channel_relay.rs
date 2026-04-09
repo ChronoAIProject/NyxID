@@ -185,7 +185,7 @@ pub async fn async_reply(
             "Bot has been deactivated".to_string(),
         ));
     }
-    let adapter = resolve_adapter(&bot.platform)?;
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
     let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
 
     // Use the actual platform conversation ID from the original inbound message

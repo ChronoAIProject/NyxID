@@ -261,6 +261,53 @@ nyxid proxy request <slug> <path> -m POST -d @request.json
 echo '{"prompt":"hello"}' | nyxid proxy request <slug> <path> -m POST -d -
 ```
 
+### Calling NyxID from raw HTTP (no CLI)
+
+The CLI is a thin wrapper over the NyxID HTTP API. If you're integrating
+from a service where installing the CLI isn't practical -- an automation
+runtime, a webhook handler, another language -- call the proxy endpoint
+directly. The only Authorization header the client sends is its own
+**NyxID** bearer token; NyxID handles every downstream credential
+(Lark `tenant_access_token`, OpenAI API key, GitHub PAT, etc.) entirely
+server-side.
+
+**Proxy endpoint shapes:**
+
+| Path | When to use |
+|---|---|
+| `POST/GET/... /api/v1/proxy/s/{slug}/{path}` | Slug-based, most common |
+| `POST/GET/... /api/v1/proxy/{user_service_id}/{path}` | UUID-based, when you already have the id from `GET /api/v1/keys` |
+
+**Example -- send a Lark message as a bot (no Lark token management):**
+
+```bash
+curl -X POST "https://nyx-api.chrono-ai.fun/api/v1/proxy/s/api-lark-bot/open-apis/im/v1/messages?receive_id_type=chat_id" \
+  -H "Authorization: Bearer <nyxid_access_token>" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d '{"receive_id":"oc_xxx","msg_type":"text","content":"{\"text\":\"hello\"}"}'
+```
+
+What happens server-side on that single request:
+
+1. NyxID auth middleware validates `<nyxid_access_token>` and resolves the user.
+2. Proxy handler looks up the user's `api-lark-bot` binding and loads the catalog `token_exchange_config`.
+3. NyxID checks its in-process cache for this user's Lark `tenant_access_token`. Hit: jump to step 5.
+4. Cache miss: NyxID decrypts `{app_id, app_secret}`, POSTs to Lark's `/auth/v3/tenant_access_token/internal` server-to-server (single-flight per app, so concurrent misses coalesce), caches the result (~2h TTL with 10-min safety margin).
+5. NyxID strips the client's Authorization header, injects `Authorization: Bearer <tenant_access_token>` on the outbound request, and forwards to Lark.
+6. Lark's response is returned to the client unchanged.
+
+**Same pattern for any other service** -- OpenAI, GitHub, Twitter, etc. The client only ever sends its NyxID bearer; NyxID injects the downstream credential for each service according to the service's `auth_method` (bearer, header, body, token_exchange, ...).
+
+**Obtaining the NyxID bearer token:**
+
+- **Interactive user:** `POST /api/v1/auth/login` returns a short-lived access token (~15 min) and a refresh token (~7 days). Refresh via `POST /api/v1/auth/refresh`.
+- **Service / agent:** provision a NyxID API key via `nyxid api-key create --platform <your-platform>` and use it directly as `Authorization: Bearer nyxid_ag_...`. API keys don't expire unless rotated.
+
+**Things the client must NOT send:**
+
+- A second `Authorization` header intended for the downstream (e.g. a Lark `tenant_access_token`). The allowlist strips any forwarded Authorization header by design, and raw HTTP clients that append instead of replace (reqwest's `RequestBuilder::header`, some JVM clients) would put duplicate Authorization lines on the wire and hit Cloudflare 400 at the edge. Let NyxID inject the downstream Authorization header.
+- Downstream credentials (API keys, app secrets, tokens) in the request body or query string. NyxID already has them encrypted at rest and injects them according to the service's `auth_method`.
+
 ### Common service examples
 
 Paths below are relative to each service's base URL. Check `nyxid service show <id> --output json`
@@ -548,16 +595,23 @@ nyxid proxy request api-telegram-bot getWebhookInfo -m POST -d '{}'
 # NyxID adds it for you. `setWebhook` is correct; `bot/setWebhook` would
 # forward as `bot<token>/bot/setWebhook` and Telegram returns 404.
 
-# Lark bot (tenant token exchange via body injection)
+# Lark bot (tenant token exchange is fully automatic)
 nyxid service add api-lark-bot
-# CLI prompts for app_secret. Then to get a tenant_access_token:
-nyxid proxy request api-lark-bot /open-apis/auth/v3/tenant_access_token/internal \
-  -m POST -d '{"app_id":"cli_xxx"}'
-# NyxID merges {app_secret: "..."} into the body server-side. Returns a
-# 2-hour tenant_access_token which the caller caches and uses as a Bearer
-# token for subsequent Lark API calls. Your app_secret never leaves NyxID.
+# CLI prompts for app_id AND app_secret. NyxID stores both encrypted and
+# handles the tenant_access_token exchange transparently on every call.
+# Just hit the Lark API path directly -- no manual token management:
+nyxid proxy request api-lark-bot /open-apis/im/v1/chats -m GET
 
-# Feishu bot (China region — same as Lark Bot)
+nyxid proxy request api-lark-bot /open-apis/im/v1/messages \
+  -m POST \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d '{"receive_id":"oc_xxx","msg_type":"text","content":"{\"text\":\"hello\"}"}'
+
+# NyxID caches the tenant_access_token in-process (~2h TTL) and single-
+# flights refreshes per app, so concurrent requests never produce
+# duplicate exchanges. Your app_secret never leaves NyxID.
+
+# Feishu bot (China region — same flow, same automatic token exchange)
 nyxid service add api-feishu-bot
 
 # Discord bot (Bot prefix in Authorization header, persistent token)
@@ -568,14 +622,63 @@ nyxid proxy request api-discord-bot /channels/{channel_id}/messages \
 # NyxID adds `Authorization: Bot <your_token>` automatically.
 ```
 
+### If Lark/Feishu bot calls fail, recreate the binding
+
+If `nyxid proxy request api-lark-bot ...` (or `api-feishu-bot`) returns
+errors like **"Missing access token for authorization"**, **"token_exchange
+auth method requires token_exchange_config"**, or any `99991xxx` Lark
+error that shouldn't happen given your setup, your binding is probably
+stuck on the **old body-injection shape** from an earlier NyxID version.
+
+**In both the old and new flows, your `app_secret` is stored encrypted
+on NyxID and never leaves the server after registration.** The only
+thing that changed is how NyxID uses it:
+
+- **Old flow:** NyxID stored only `app_secret`. The *caller* had to
+  explicitly hit `/open-apis/auth/v3/tenant_access_token/internal`; the
+  proxy merged `app_secret` into that request body server-side, handed
+  back a `tenant_access_token`, and the caller was then responsible for
+  caching it and attaching `Authorization: Bearer ...` to every
+  subsequent Lark call.
+- **New flow:** NyxID stores `app_id` **and** `app_secret` together
+  (JSON blob, same AES-256 encryption). NyxID calls the exchange
+  endpoint itself server-to-server, caches the `tenant_access_token`
+  in-process with single-flight dedup, and injects the Bearer header on
+  every outbound Lark request. Callers just hit the real API path.
+
+Older bindings only contain `app_secret` without `app_id`, so the new
+transparent-exchange path can't use them. Fix by deleting the binding
+and re-adding -- this prompts for both fields and stores them in the
+new shape:
+
+```bash
+# List your bindings and find the stale one (grab its id)
+nyxid service list --output json | jq '.keys[] | select(.slug == "api-lark-bot") | {id, label}'
+
+# Delete it (replace <id> with the id from the previous command; --yes
+# skips the confirmation prompt so this works in agent contexts)
+nyxid service delete <id> --yes
+
+# Re-add -- the new prompt asks for BOTH app_id and app_secret
+nyxid service add api-lark-bot
+
+# Verify the new binding works (should return chats, not a missing-token error)
+nyxid proxy request api-lark-bot /open-apis/im/v1/chats -m GET
+```
+
+You're just re-registering the same secret you already gave NyxID the
+first time -- it travels once from your terminal to NyxID over HTTPS,
+gets re-encrypted at rest, and then stays there. The same recreation
+steps apply to `api-feishu-bot`.
+
 ### Picking the right service for the job
 
 | Slug | Purpose |
 |---|---|
 | `api-lark` | Lark API as a logged-in user (OAuth) |
-| `api-lark-bot` | Lark API as a bot (tenant token exchange) |
+| `api-lark-bot` | Lark API as a bot (automatic tenant token exchange) |
 | `api-feishu` | Feishu API as a logged-in user (OAuth) |
-| `api-feishu-bot` | Feishu API as a bot (tenant token exchange) |
+| `api-feishu-bot` | Feishu API as a bot (automatic tenant token exchange) |
 | `api-telegram-bot` | Telegram Bot API |
 | `api-discord` | Discord API as a logged-in user (OAuth) |
 | `api-discord-bot` | Discord API as a bot (persistent bot token) |

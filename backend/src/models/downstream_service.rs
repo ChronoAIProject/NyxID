@@ -25,6 +25,87 @@ pub struct ServiceCapabilities {
     pub supports_streaming: bool,
 }
 
+/// Declarative configuration for a server-side token exchange flow.
+///
+/// When a service has `auth_method == "token_exchange"`, the proxy uses this
+/// config to perform a one-time POST to obtain a short-lived access token,
+/// caches the result, and injects it on every outbound request.
+///
+/// Covers Lark / Feishu tenant tokens, OAuth 2.0 client_credentials, and
+/// similar "POST secrets, get a token back" flows without a new auth method
+/// per provider. Rare cases that need custom logic (GitHub App JWT signing,
+/// AWS SigV4, etc.) still use their own auth methods.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct TokenExchangeConfig {
+    /// URL to POST credentials to. Supports `{base_url}` placeholder which
+    /// the proxy substitutes with the service's `base_url` at request time.
+    /// Example for Lark:
+    /// `"{base_url}/open-apis/auth/v3/tenant_access_token/internal"`
+    pub endpoint: String,
+    /// Wire format for the request body: `"json"` or `"form"`
+    /// (application/x-www-form-urlencoded).
+    pub request_encoding: String,
+    /// Request body template. Any string value starting with `$` is a
+    /// placeholder: `"$app_id"` is substituted with the `app_id` field from
+    /// the user's credential JSON blob. Literal values pass through as-is.
+    ///
+    /// Lark example:
+    /// `{"app_id": "$app_id", "app_secret": "$app_secret"}`
+    ///
+    /// OAuth client_credentials example:
+    /// `{"grant_type": "client_credentials", "client_id": "$client_id", "client_secret": "$client_secret"}`
+    pub request_template: serde_json::Value,
+    /// Dot-separated path into the response JSON where the access token lives.
+    /// Lark: `"tenant_access_token"`.
+    /// OAuth: `"access_token"`.
+    /// Nested: `"data.token"`.
+    pub token_response_path: String,
+    /// Optional dot path to a TTL-in-seconds field in the response. Missing
+    /// or absent at runtime falls back to `default_ttl_secs`.
+    /// Lark: `"expire"`. OAuth: `"expires_in"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_response_path: Option<String>,
+    /// Fallback TTL used when `ttl_response_path` is None or missing.
+    pub default_ttl_secs: i64,
+    /// How to inject the obtained token on outbound requests:
+    /// - `"bearer"` -> `Authorization: Bearer <token>`
+    /// - `"bot_bearer"` -> `Authorization: Bot <token>`
+    /// - `"token"` -> `Authorization: token <token>` (GitHub style)
+    /// - `"header:X-Api-Key"` -> `X-Api-Key: <token>` (custom header)
+    pub injection: String,
+    /// Optional dot path to an error-code field. Some providers (Lark) return
+    /// HTTP 200 with a `{code: N, msg: "..."}` payload where non-zero code
+    /// means failure. If the configured field contains a non-zero number or
+    /// a non-empty string (other than `"0"`/`"ok"`), the response is rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code_path: Option<String>,
+    /// Optional dot path to an error-message field, extracted for logging
+    /// when `error_code_path` fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message_path: Option<String>,
+    /// Declared credential fields. Populated so CLI/frontend can render the
+    /// correct input form without hard-coding per-provider logic, and so
+    /// the backend can validate the user's JSON at create time.
+    pub credential_fields: Vec<CredentialFieldSpec>,
+}
+
+/// UI/CLI hint for rendering one field of a token-exchange credential form.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct CredentialFieldSpec {
+    /// JSON field name in the stored credential (e.g. `"app_id"`,
+    /// `"client_secret"`). Must match a `$name` placeholder in
+    /// `TokenExchangeConfig::request_template`.
+    pub name: String,
+    /// Human-readable label for the form input.
+    pub label: String,
+    /// Optional placeholder hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    /// Render as a password input when true. Also masks the value in logs.
+    #[serde(default)]
+    pub secret: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SshServiceConfig {
     pub host: String,
@@ -68,6 +149,12 @@ pub struct DownstreamService {
     /// - `query`: URL query parameter named by `auth_key_name`
     /// - `basic`: HTTP Basic auth, credential is `username:password`
     /// - `body`: merge `{<auth_key_name>: <credential>}` into JSON request body
+    ///   (only applies to methods that carry a body: POST/PUT/PATCH)
+    /// - `token_exchange`: credential is a JSON blob; the proxy posts it to
+    ///   the configured endpoint in `token_exchange_config`, caches the
+    ///   resulting token, and injects it per the configured injection format.
+    ///   Covers Lark/Feishu tenant tokens, OAuth 2.0 client_credentials, and
+    ///   similar exchange flows -- all declarative, no per-provider code.
     /// - `path`: inject credential into URL path (Telegram bot token style)
     /// - `none`: no credential injection
     pub auth_method: String,
@@ -178,6 +265,11 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_skills: Option<Vec<String>>,
 
+    /// Declarative token exchange config. Required when `auth_method` is
+    /// `token_exchange`, ignored otherwise. See [`TokenExchangeConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_exchange_config: Option<TokenExchangeConfig>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -269,6 +361,7 @@ pub mod test_helpers {
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
+            token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -363,6 +456,7 @@ mod tests {
             required_permissions: Some(vec!["read:api".to_string()]),
             examples_url: Some("https://github.com/example/repo/tree/main/examples".to_string()),
             recommended_skills: Some(vec!["example/skill".to_string()]),
+            token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -421,6 +515,7 @@ mod tests {
             required_permissions: None,
             examples_url: None,
             recommended_skills: None,
+            token_exchange_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

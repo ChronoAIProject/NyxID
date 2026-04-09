@@ -13,7 +13,7 @@ use crate::handlers::auth::{
     apply_browser_session_cookies, build_cookie, build_cookie_with_same_site, clear_cookie,
     clear_cookie_with_same_site, extract_ip, extract_user_agent,
 };
-use crate::services::{audit_service, social_auth_service, token_service};
+use crate::services::{audit_service, invite_code_service, social_auth_service, token_service};
 use social_auth_service::SocialProfile;
 
 const SOCIAL_STATE_COOKIE: &str = "nyx_social_state";
@@ -22,6 +22,7 @@ const SOCIAL_REDIRECT_COOKIE: &str = "nyx_social_redirect";
 const SOCIAL_RETURN_TO_COOKIE: &str = "nyx_social_return_to";
 const SOCIAL_CLIENT_MOBILE: &str = "mobile";
 const SOCIAL_NONCE_COOKIE: &str = "nyx_social_nonce";
+const SOCIAL_INVITE_COOKIE: &str = "nyx_social_invite";
 const SOCIAL_STATE_MAX_AGE: i64 = 600; // 10 minutes
 const COOKIE_SAMESITE_LAX: &str = "Lax";
 const COOKIE_SAMESITE_NONE: &str = "None";
@@ -33,6 +34,9 @@ pub struct AuthorizeQuery {
     /// OAuth flow return_to URL. After social login, the user is redirected here
     /// instead of the frontend root so the OAuth authorize flow can resume.
     pub return_to: Option<String>,
+    /// Invite code from the registration form, carried through the OAuth
+    /// round-trip so that SSO sign-ups can satisfy the invite-code gate.
+    pub invite_code: Option<String>,
 }
 
 /// GET /api/v1/auth/social/{provider}
@@ -198,6 +202,44 @@ pub async fn authorize(
         same_site,
     )?;
 
+    // Persist invite code in a short-lived cookie so the callback can
+    // validate it when creating a new user via SSO.
+    let trimmed_invite = query
+        .invite_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_uppercase());
+    if let Some(ref code) = trimmed_invite {
+        headers.append(
+            header::SET_COOKIE,
+            build_cookie_with_same_site(
+                SOCIAL_INVITE_COOKIE,
+                &urlencoding::encode(code),
+                SOCIAL_STATE_MAX_AGE,
+                "/api/v1/auth/social",
+                secure,
+                domain,
+                same_site,
+            )
+            .parse()
+            .map_err(|_| AppError::Internal("Cookie error".to_string()))?,
+        );
+    } else {
+        // Clear any stale invite cookie from a previous attempt.
+        if let Ok(cookie) = clear_cookie_with_same_site(
+            SOCIAL_INVITE_COOKIE,
+            "/api/v1/auth/social",
+            secure,
+            domain,
+            same_site,
+        )
+        .parse()
+        {
+            headers.append(header::SET_COOKIE, cookie);
+        }
+    }
+
     headers.insert(
         header::LOCATION,
         authorization_url
@@ -341,13 +383,40 @@ pub async fn callback(
                 redirect_with_error(&redirect_target, "social_auth_profile", secure, domain)
             })?;
 
-    // Find or create user. Gate first-time social sign-ups behind the same
-    // invite-code flag that controls email/password registration.
-    let allow_new_users = !state.config.invite_code_required;
+    // Read invite code from the cookie set at SSO initiation. When
+    // INVITE_CODE_REQUIRED is true and a valid code is present, reserve it
+    // so the new user slot cannot be taken by a concurrent request.
+    let invite_code_raw = extract_cookie_value(&headers, SOCIAL_INVITE_COOKIE);
+    let invite_code = invite_code_raw
+        .as_deref()
+        .and_then(|c| urlencoding::decode(c).ok())
+        .map(|c| c.into_owned())
+        .filter(|c| !c.is_empty());
+
+    let (allow_new_users, reserved_invite_id) = if state.config.invite_code_required {
+        match invite_code.as_deref() {
+            Some(code) => match invite_code_service::reserve_invite_code(&state.db, code).await {
+                Ok(invite_id) => (true, Some(invite_id)),
+                Err(_) => (false, None),
+            },
+            None => (false, None),
+        }
+    } else {
+        (true, None)
+    };
+
     let user = social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, "Social auth find_or_create_user failed");
+            // Release the reserved invite code on failure so it is not stuck.
+            if let Some(ref iid) = reserved_invite_id {
+                let db = state.db.clone();
+                let iid = iid.clone();
+                tokio::spawn(async move {
+                    let _ = invite_code_service::release_reservation(&db, &iid).await;
+                });
+            }
             let error_key = match &e {
                 AppError::SocialAuthConflict => "social_auth_conflict",
                 AppError::SocialAuthNoEmail => "social_auth_no_email",
@@ -357,6 +426,11 @@ pub async fn callback(
             };
             redirect_with_error(&redirect_target, error_key, secure, domain)
         })?;
+
+    // Record invite code usage after successful user creation / lookup.
+    if let Some(ref iid) = reserved_invite_id {
+        let _ = invite_code_service::record_usage(&state.db, iid, &user.id).await;
+    }
 
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
@@ -368,6 +442,13 @@ pub async fn callback(
                     .await
                     .map_err(|e| {
                         tracing::error!(error = %e, "Social auth session creation failed");
+                        if let Some(ref iid) = reserved_invite_id {
+                            let db = state.db.clone();
+                            let iid = iid.clone();
+                            tokio::spawn(async move {
+                                let _ = invite_code_service::release_reservation(&db, &iid).await;
+                            });
+                        }
                         redirect_with_error(
                             &redirect_target,
                             "social_auth_exchange",
@@ -411,6 +492,13 @@ pub async fn callback(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Social auth session creation failed");
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
                 redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
             })?;
 
@@ -618,12 +706,38 @@ pub async fn apple_callback(
         };
     }
 
-    // Find or create user (same as Google/GitHub flow). Honor the
-    // invite-code gate for first-time social sign-ups.
-    let allow_new_users = !state.config.invite_code_required;
+    // Read invite code from the cookie set at SSO initiation (same as
+    // Google/GitHub callback). Reserve it so the slot cannot be stolen.
+    let invite_code_raw = extract_cookie_value(&headers, SOCIAL_INVITE_COOKIE);
+    let invite_code = invite_code_raw
+        .as_deref()
+        .and_then(|c| urlencoding::decode(c).ok())
+        .map(|c| c.into_owned())
+        .filter(|c| !c.is_empty());
+
+    let (allow_new_users, reserved_invite_id) = if state.config.invite_code_required {
+        match invite_code.as_deref() {
+            Some(code) => match invite_code_service::reserve_invite_code(&state.db, code).await {
+                Ok(invite_id) => (true, Some(invite_id)),
+                Err(_) => (false, None),
+            },
+            None => (false, None),
+        }
+    } else {
+        (true, None)
+    };
+
     let user = social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
         .await
         .map_err(|e| {
+            // Release the reserved invite code on failure.
+            if let Some(ref iid) = reserved_invite_id {
+                let db = state.db.clone();
+                let iid = iid.clone();
+                tokio::spawn(async move {
+                    let _ = invite_code_service::release_reservation(&db, &iid).await;
+                });
+            }
             let error_key = match &e {
                 AppError::SocialAuthConflict => "social_auth_conflict",
                 AppError::SocialAuthNoEmail => "social_auth_no_email",
@@ -633,6 +747,11 @@ pub async fn apple_callback(
             };
             redirect_with_error(&redirect_target, error_key, secure, domain)
         })?;
+
+    // Record invite code usage after successful user creation / lookup.
+    if let Some(ref iid) = reserved_invite_id {
+        let _ = invite_code_service::record_usage(&state.db, iid, &user.id).await;
+    }
 
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
@@ -644,6 +763,13 @@ pub async fn apple_callback(
                     .await
                     .map_err(|e| {
                         tracing::error!(error = %e, "Apple auth session creation failed");
+                        if let Some(ref iid) = reserved_invite_id {
+                            let db = state.db.clone();
+                            let iid = iid.clone();
+                            tokio::spawn(async move {
+                                let _ = invite_code_service::release_reservation(&db, &iid).await;
+                            });
+                        }
                         redirect_with_error(
                             &redirect_target,
                             "social_auth_exchange",
@@ -687,6 +813,13 @@ pub async fn apple_callback(
             .await
             .map_err(|e| {
                 tracing::error!(error = %e, "Apple auth session creation failed");
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
                 redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
             })?;
 
@@ -961,7 +1094,7 @@ fn nonce_matches_cookie_hash(nonce_claim: Option<&str>, cookie_hash: Option<&str
     constant_time_eq(hash.as_bytes(), computed_hash.as_bytes())
 }
 
-fn social_clear_cookie_values(secure: bool, domain: Option<&str>) -> [String; 4] {
+fn social_clear_cookie_values(secure: bool, domain: Option<&str>) -> [String; 6] {
     [
         clear_cookie_with_same_site(
             SOCIAL_STATE_COOKIE,
@@ -986,6 +1119,20 @@ fn social_clear_cookie_values(secure: bool, domain: Option<&str>) -> [String; 4]
         ),
         clear_cookie_with_same_site(
             SOCIAL_NONCE_COOKIE,
+            "/api/v1/auth/social",
+            secure,
+            domain,
+            COOKIE_SAMESITE_NONE,
+        ),
+        clear_cookie_with_same_site(
+            SOCIAL_INVITE_COOKIE,
+            "/api/v1/auth/social",
+            secure,
+            domain,
+            COOKIE_SAMESITE_LAX,
+        ),
+        clear_cookie_with_same_site(
+            SOCIAL_INVITE_COOKIE,
             "/api/v1/auth/social",
             secure,
             domain,
@@ -1139,11 +1286,12 @@ mod tests {
     }
 
     #[test]
-    fn social_clear_cookie_values_include_state_and_nonce_variants() {
+    fn social_clear_cookie_values_include_state_nonce_and_invite_variants() {
         let cookies = social_clear_cookie_values(true, Some(".example.com"));
-        assert_eq!(cookies.len(), 4);
+        assert_eq!(cookies.len(), 6);
         assert!(cookies.iter().any(|c| c.contains("nyx_social_state=")));
         assert!(cookies.iter().any(|c| c.contains("nyx_social_nonce=")));
+        assert!(cookies.iter().any(|c| c.contains("nyx_social_invite=")));
         assert!(cookies.iter().any(|c| c.contains("SameSite=Lax")));
         assert!(cookies.iter().any(|c| c.contains("SameSite=None")));
     }

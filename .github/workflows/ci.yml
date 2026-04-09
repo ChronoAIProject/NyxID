@@ -4,7 +4,13 @@ on:
   pull_request:
     branches: [main, dev]
   push:
-    branches: [main, dev]
+    # `main` is intentionally not listed here -- pushes to main are gated
+    # through publish-images.yml, which calls this workflow via workflow_call.
+    # Listing main twice would cause CI to run on every merge commit twice.
+    branches: [dev]
+  # Allow other workflows (publish-images, release) to reuse this one as a
+  # gate via `uses: ./.github/workflows/ci.yml`.
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,7 +28,7 @@ jobs:
     name: Rust Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -35,7 +41,7 @@ jobs:
     name: Rust Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
@@ -71,7 +77,7 @@ jobs:
       FRONTEND_URL: http://localhost:3000
       JWT_ISSUER: nyxid-test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
@@ -97,7 +103,7 @@ jobs:
           - gcp-kms
           - aws-kms,gcp-kms
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
@@ -117,7 +123,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
@@ -138,7 +144,7 @@ jobs:
       run:
         working-directory: sdk
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version
