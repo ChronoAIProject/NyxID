@@ -103,6 +103,8 @@ Sign up at the [NyxID console](https://nyx.chrono-ai.fun), add your API credenti
 
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash-compatible terminal (macOS Terminal, Linux shell, or [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows).
 
+Copy and paste this entire block into your terminal:
+
 ```bash
 git clone https://github.com/ChronoAIProject/NyxID.git && cd NyxID
 
