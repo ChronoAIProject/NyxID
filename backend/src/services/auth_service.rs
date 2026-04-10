@@ -89,7 +89,11 @@ pub async fn register_user(
         display_name: display_name.map(String::from),
         avatar_url: None,
         email_verified: auto_verify_email,
-        email_verification_token: if auto_verify_email { None } else { Some(verification_token_hash) },
+        email_verification_token: if auto_verify_email {
+            None
+        } else {
+            Some(verification_token_hash)
+        },
         password_reset_token: None,
         password_reset_expires_at: None,
         is_active: true,

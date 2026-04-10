@@ -357,12 +357,14 @@ impl std::fmt::Debug for AppConfig {
 
 /// Parse a boolean env var with a default value.
 fn parse_bool_env(name: &str, default: bool) -> bool {
-    match env::var(name).ok().as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    match env::var(name)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         None => default,
-        Some(v) => matches!(
-            v.to_ascii_lowercase().as_str(),
-            "true" | "1" | "yes" | "on"
-        ),
+        Some(v) => matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on"),
     }
 }
 
@@ -899,6 +901,7 @@ mod tests {
             channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
             invite_code_required: true,
+            auto_verify_email: false,
         }
     }
 

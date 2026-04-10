@@ -115,9 +115,9 @@ describe("registerSchema", () => {
     expect(result.success).toBe(false);
   });
 
-  it("rejects empty invite code", () => {
+  it("accepts empty invite code (backend enforces when required)", () => {
     const result = registerSchema.safeParse({ ...validData, inviteCode: "" });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
   });
 
   it("normalizes invite code to trimmed uppercase", () => {
@@ -131,12 +131,12 @@ describe("registerSchema", () => {
     }
   });
 
-  it("rejects invite code that is only whitespace", () => {
+  it("accepts invite code that is only whitespace (trimmed to empty, backend enforces)", () => {
     const result = registerSchema.safeParse({
       ...validData,
       inviteCode: "   ",
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
   });
 });
 
