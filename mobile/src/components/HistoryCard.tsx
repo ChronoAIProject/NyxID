@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { BlurView } from "expo-blur";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { radius, spacing } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
@@ -62,15 +63,22 @@ export function HistoryCard({ item, onPress }: HistoryCardProps) {
 }
 
 export function HistorySectionHeader({ title }: { title: string }) {
-  const { colors } = useTheme();
+  const { colors, mode } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+
+  const inner = <Text style={styles.sectionHeader}>{title}</Text>;
 
   return (
     <View style={styles.sectionHeaderRow}>
-      {/* BlurView removed — its tint overrides the opaque bg in light mode */}
-      <View style={styles.sectionHeaderBlur}>
-        <Text style={styles.sectionHeader}>{title}</Text>
-      </View>
+      {mode === "dark" ? (
+        <BlurView intensity={60} tint="dark" style={styles.sectionHeaderBlur}>
+          {inner}
+        </BlurView>
+      ) : (
+        <View style={styles.sectionHeaderBlur}>
+          {inner}
+        </View>
+      )}
     </View>
   );
 }
