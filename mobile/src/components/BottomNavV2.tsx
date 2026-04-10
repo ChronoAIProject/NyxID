@@ -44,10 +44,12 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
 
   const activeIndex = active === "activity" ? 0 : 1;
 
+  const showFab = Boolean(onFabPress);
+
   const computeOffset = (index: number) => {
     if (index === 0) return 0;
-    // second tab starts after: tabWidth + GAP + FAB_WIDTH + GAP
-    return tabWidth.current + GAP + FAB_WIDTH + GAP;
+    if (showFab) return tabWidth.current + GAP + FAB_WIDTH + GAP;
+    return tabWidth.current + GAP;
   };
 
   useEffect(() => {
@@ -62,11 +64,12 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
   const onLayout = (e: LayoutChangeEvent) => {
     const w = e.nativeEvent.layout.width;
     containerWidth.current = w;
-    // inner width = total - 2*padding
     const inner = w - 2 * PADDING;
-    // inner = tabWidth + GAP + FAB_WIDTH + GAP + tabWidth
-    // tabWidth = (inner - FAB_WIDTH - 2*GAP) / 2
-    tabWidth.current = (inner - FAB_WIDTH - 2 * GAP) / 2;
+    if (showFab) {
+      tabWidth.current = (inner - FAB_WIDTH - 2 * GAP) / 2;
+    } else {
+      tabWidth.current = (inner - GAP) / 2;
+    }
     translateX.setValue(computeOffset(activeIndex));
   };
 
@@ -89,9 +92,11 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
         <Text style={[styles.text, active === "activity" && styles.textActive]}>Activity</Text>
       </Pressable>
 
-      <Pressable style={styles.fabSpacer} onPress={onFabPress}>
-        <Text style={styles.fabLabel}>Ask Nyx</Text>
-      </Pressable>
+      {showFab && (
+        <Pressable style={styles.fabSpacer} onPress={onFabPress}>
+          <Text style={styles.fabLabel}>Ask Nyx</Text>
+        </Pressable>
+      )}
 
       <Pressable
         style={styles.item}

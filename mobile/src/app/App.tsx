@@ -35,7 +35,7 @@ import { startPushPolling } from "../lib/notifications/pushPollingSignal";
 import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import type { BottomNavV2Tab } from "../components/BottomNavV2";
-import { NyxSheet } from "../features/nyx/NyxSheet";
+// import { NyxSheet } from "../features/nyx/NyxSheet"; // TODO: re-enable when chat is ready
 import { ThemeProvider, useTheme } from "../theme/ThemeContext";
 
 // Wire TanStack Query's online state to NetInfo so queries pause when offline
@@ -269,10 +269,10 @@ function ThemedAppShell({
             if (tab === "activity") navigationRef.navigate("Activity");
             if (tab === "account") navigationRef.navigate("AccountSettings");
           }}
-          onNyxPress={() => setIsNyxOpen(true)}
+          // onNyxPress={() => setIsNyxOpen(true)} // TODO: re-enable when chat is ready
         />
       </NavigationContainer>
-      <NyxSheet isOpen={isNyxOpen} onClose={() => setIsNyxOpen(false)} />
+      {/* <NyxSheet isOpen={isNyxOpen} onClose={() => setIsNyxOpen(false)} /> */}{/* TODO: re-enable when chat is ready */}
     </>
   );
 }

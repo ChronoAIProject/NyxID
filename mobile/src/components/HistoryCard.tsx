@@ -68,7 +68,7 @@ export function HistorySectionHeader({ title }: { title: string }) {
 
   return (
     <View style={styles.sectionHeaderRow}>
-      <BlurView intensity={60} tint="dark" style={styles.sectionHeaderBlur}>
+      <BlurView intensity={60} tint="prominent" style={styles.sectionHeaderBlur}>
         <Text style={styles.sectionHeader}>{title}</Text>
       </BlurView>
     </View>
@@ -114,7 +114,7 @@ const createStyles = (c: ThemeColors) =>
       paddingVertical: spacing.xs,
       borderRadius: 6,
       overflow: "hidden",
-      backgroundColor: "rgba(15,10,30,0.5)",
+      backgroundColor: c.ghostBg,
     },
     sectionHeader: {
       fontSize: 11,

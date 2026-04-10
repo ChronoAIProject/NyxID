@@ -71,3 +71,6 @@ export const typeScale = {
     letterSpacing: 0.4,
   },
 } as const;
+
+/** Extra bottom padding so content clears the absolutely-positioned bottom nav bar. */
+export const BOTTOM_NAV_CLEARANCE = 120;

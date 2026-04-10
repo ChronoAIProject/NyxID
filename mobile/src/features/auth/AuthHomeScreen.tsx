@@ -111,7 +111,7 @@ function SocialAuthButton({
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const iconName = provider === "google" ? "google" : provider === "github" ? "github" : "apple";
-  const iconColor = "#F9FAFB";
+  const iconColor = colors.textPrimary;
 
   return (
     <Pressable onPress={onPress} disabled={disabled} style={[styles.socialAuthButton, disabled && !loading && styles.socialAuthButtonDisabled]}>
@@ -358,7 +358,7 @@ export function AuthHomeScreen({ navigation }: Props) {
               >
                 <View style={styles.socialAuthContent}>
                   {isEmailAuthPending ? (
-                    <ActivityIndicator size="small" color="#F9FAFB" />
+                    <ActivityIndicator size="small" color={colors.textPrimary} />
                   ) : null}
                   <Text style={styles.socialAuthText}>{isEmailAuthPending ? "Signing in..." : "Sign In"}</Text>
                 </View>
@@ -392,19 +392,19 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     paddingBottom: spacing.xxxl,
   },
   legal: {
-    color: "#6A6480",
+    color: c.textMuted,
     ...typeScale.caption,
     fontSize: 11,
     marginTop: spacing.sm,
   },
   legalNote: {
-    color: "#5A5468",
+    color: c.textMuted,
     ...typeScale.caption,
     fontSize: 10,
     marginTop: spacing.xs,
   },
   legalLink: {
-    color: "#B9B4CC",
+    color: c.textSecondary,
     ...typeScale.caption,
     fontSize: 11,
     textDecorationLine: "underline",
@@ -445,8 +445,8 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     justifyContent: "center",
   },
   socialAuthButton: {
-    backgroundColor: "#0F1422",
-    borderColor: "#263042",
+    backgroundColor: c.cardSoft,
+    borderColor: c.border,
     borderWidth: 1,
     borderRadius: radius.md,
     paddingVertical: spacing.md,
@@ -464,7 +464,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     gap: spacing.sm,
   },
   socialAuthText: {
-    color: "#F8FAFC",
+    color: c.textPrimary,
     ...typeScale.caption,
     fontWeight: "600",
     fontSize: 12,

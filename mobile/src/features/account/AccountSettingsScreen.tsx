@@ -17,7 +17,7 @@ import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { createFlowStyles } from "../../theme/flowStyles";
-import { radius, spacing, typeScale } from "../../theme/designTokens";
+import { BOTTOM_NAV_CLEARANCE, radius, spacing, typeScale } from "../../theme/designTokens";
 import { useEffect, useMemo, useState } from "react";
 
 type Props = NativeStackScreenProps<RootStackParamList, "AccountSettings">;
@@ -283,7 +283,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
     <ScreenContainer>
       <ScrollView
         style={flowStyles.content}
-        contentContainerStyle={[flowStyles.scrollContent, { paddingHorizontal: spacing.xxl }]}
+        contentContainerStyle={[flowStyles.scrollContent, { paddingHorizontal: spacing.xxl, paddingBottom: BOTTOM_NAV_CLEARANCE }]}
         showsVerticalScrollIndicator={false}
       >
         {isOffline && <OfflineBanner subtitle="Some features unavailable" onRetry={async () => {

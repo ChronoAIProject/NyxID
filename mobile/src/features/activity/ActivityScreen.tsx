@@ -712,9 +712,9 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
   },
   stateNotice: {
     borderRadius: radius.sm,
-    backgroundColor: "rgba(245,158,11,0.1)",
+    backgroundColor: c.warningSoft,
     borderWidth: 1,
-    borderColor: "rgba(245,158,11,0.25)",
+    borderColor: c.warningSoft,
     padding: spacing.lg,
   },
   stateNoticeText: {

@@ -16,8 +16,8 @@ type ThemeContextValue = {
 const STORAGE_KEY = "nyxid_theme_preference";
 
 const ThemeContext = createContext<ThemeContextValue>({
-  colors: darkColors,
-  mode: "dark",
+  colors: lightColors,
+  mode: "light",
   preference: "system",
   setPreference: () => {},
 });
@@ -44,7 +44,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const mode: ThemeMode = useMemo(() => {
-    if (preference === "system") return systemScheme === "light" ? "light" : "dark";
+    if (preference === "system") return systemScheme === "dark" ? "dark" : "light";
     return preference;
   }, [preference, systemScheme]);
 
