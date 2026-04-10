@@ -111,6 +111,17 @@ Sign up at the [NyxID console](https://nyx.chrono-ai.fun), add your API credenti
 
 Run NyxID on your own machine. This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
 
+```mermaid
+flowchart LR
+    A["1. Check prerequisites"] --> B["2. Clone & configure"]
+    B --> C["Start Docker stack"]
+    C --> D["3. Register account"]
+    D --> E{Connect AI agent}
+    E --> F[AI-assisted]
+    E --> G[Manual CLI]
+    E --> H[Web console]
+```
+
 **What you need installed before starting:**
 - [Docker Desktop](https://docs.docker.com/get-docker/) (includes Docker Compose)
 - A terminal — macOS Terminal, Linux shell, or [WSL (Windows Subsystem for Linux)](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows
