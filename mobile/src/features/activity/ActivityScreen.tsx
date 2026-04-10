@@ -16,7 +16,6 @@ import {
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
-  withSpring,
   withTiming,
   runOnJS,
 } from "react-native-reanimated";
@@ -134,7 +133,7 @@ function ChallengeDetailSheet({
       translateY.value = SHEET_HEIGHT;
       setModalVisible(true);
       requestAnimationFrame(() => {
-        translateY.value = withSpring(0, { damping: 28, stiffness: 300 });
+        translateY.value = withTiming(0, { duration: 300 });
       });
     } else if (modalVisible) {
       // Animate out, then hide the modal
@@ -177,7 +176,7 @@ function ChallengeDetailSheet({
               }
             });
           } else {
-            translateY.value = withSpring(0, { damping: 28, stiffness: 300 });
+            translateY.value = withTiming(0, { duration: 250 });
           }
         }),
     [onClose, translateY]
