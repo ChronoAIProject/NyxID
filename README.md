@@ -122,6 +122,14 @@ flowchart LR
     E --> H[Web console]
 ```
 
+#### Let AI do it
+
+Paste this into Claude Code, Cursor, or any AI coding assistant and it will handle the entire setup:
+
+> Read the self-host section of https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/README.md and execute all three steps — check prerequisites, install and start the Docker stack, then register an account and connect me. Walk me through anything that needs my input (like credentials).
+
+If you prefer to run each step yourself, follow the manual instructions below.
+
 **What you need installed before starting:**
 - [Docker Desktop](https://docs.docker.com/get-docker/) (includes Docker Compose)
 - A terminal — macOS Terminal, Linux shell, or [WSL (Windows Subsystem for Linux)](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows
