@@ -103,19 +103,26 @@ Sign up at the [NyxID console](https://nyx.chrono-ai.fun), add your API credenti
 
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash-compatible terminal (macOS Terminal, Linux shell, or [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows).
 
-This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes. Copy-paste the entire block:
+This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
+
+**Step 1 — Check prerequisites** (paste this first):
 
 ```bash
-bash << 'SETUP'
-# ── Preflight checks ──
+bash << 'CHECK'
 err=0
 for cmd in git docker openssl curl; do
   if ! command -v "$cmd" >/dev/null 2>&1; then echo "Missing: $cmd"; err=1; fi
 done
 if ! docker compose version >/dev/null 2>&1; then echo "Missing: docker compose (v2 plugin)"; err=1; fi
 if ! docker info >/dev/null 2>&1; then echo "Docker is not running. Start Docker Desktop and re-run."; err=1; fi
-if [ "$err" -eq 1 ]; then echo "Fix the above and re-run."; exit 1; fi
+if [ "$err" -eq 1 ]; then exit 1; fi
+echo "All good — proceed to Step 2."
+CHECK
+```
 
+**Step 2 — Install and start** (paste after Step 1 passes):
+
+```bash
 git clone https://github.com/ChronoAIProject/NyxID.git && cd NyxID
 
 # ── Generate .env.dev (dev config) and link for Docker ──
@@ -143,7 +150,7 @@ openssl rsa -in keys/private.pem -RSAPublicKey_out -out keys/public.pem 2>/dev/n
 # ── Pull images and start the stack ──
 echo "Downloading NyxID (this may take a few minutes on first run)..."
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-  --env-file .env.production pull
+  --env-file .env.production pull &&
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
   --env-file .env.production up -d
 
@@ -152,13 +159,10 @@ echo "Waiting for NyxID to start..."
 n=0
 until curl -sf http://localhost:3001/health >/dev/null 2>&1; do
   n=$((n+1))
-  if [ "$n" -ge 45 ]; then echo "Timed out. Run: docker compose logs backend"; exit 1; fi
+  if [ "$n" -ge 45 ]; then echo "Timed out. Run: docker compose logs backend"; break; fi
   sleep 2
-done
-echo ""
-echo "NyxID is running at http://localhost:3000"
+done && echo "NyxID is running at http://localhost:3000" &&
 echo "Save your encryption key (needed if you reset the database): $EK"
-SETUP
 ```
 
 **Open `http://localhost:3000` and register your account.** No email verification needed — accounts are auto-verified in dev mode.
