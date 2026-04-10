@@ -351,47 +351,7 @@ export function AuthHomeScreen({ navigation }: Props) {
           <Text style={styles.heroTagline}>Your companion for approvals and notifications</Text>
         </View>
 
-        {/* Email login */}
         <View style={flowStyles.card}>
-          <TextInput
-            style={styles.input}
-            placeholder="Email"
-            placeholderTextColor={colors.textMuted}
-            value={email}
-            onChangeText={(v) => { setEmail(v); setLoginError(null); }}
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoComplete="email"
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Password"
-            placeholderTextColor={colors.textMuted}
-            value={password}
-            onChangeText={(v) => { setPassword(v); setLoginError(null); }}
-            secureTextEntry
-            autoComplete="current-password"
-          />
-          <Pressable
-            onPress={() => void handleEmailLogin()}
-            disabled={isEmailAuthPending || !email.trim() || !password}
-            style={[styles.signInButton, (isEmailAuthPending || !email.trim() || !password) && styles.buttonDisabled]}
-          >
-            <View style={styles.socialAuthContent}>
-              {isEmailAuthPending ? (
-                <ActivityIndicator size="small" color={colors.onPrimary} />
-              ) : null}
-              <Text style={styles.signInButtonText}>{isEmailAuthPending ? "Signing in..." : "Sign In"}</Text>
-            </View>
-          </Pressable>
-
-          {/* Divider */}
-          <View style={styles.dividerRow}>
-            <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>or</Text>
-            <View style={styles.dividerLine} />
-          </View>
-
           {/* Social login */}
           <SocialAuthButton
             label="Continue with Google"
