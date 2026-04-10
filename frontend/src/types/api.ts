@@ -359,6 +359,7 @@ export interface PublicConfig {
   readonly node_ws_url: string;
   readonly version: string;
   readonly social_providers: readonly string[];
+  readonly invite_code_required: boolean;
 }
 
 export type CredentialMode = "admin" | "user" | "both";

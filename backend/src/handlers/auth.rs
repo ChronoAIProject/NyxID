@@ -337,6 +337,7 @@ pub async fn register(
         &body.password,
         body.display_name.as_deref(),
         invite_code_id.as_deref(),
+        state.config.auto_verify_email,
     )
     .await;
 
@@ -384,9 +385,15 @@ pub async fn register(
         "Email verification token (dev only)"
     );
 
+    let message = if state.config.auto_verify_email {
+        "Registration successful. Email auto-verified (dev mode). You can now sign in.".to_string()
+    } else {
+        "Registration successful. Please verify your email.".to_string()
+    };
+
     Ok(Json(RegisterResponse {
         user_id: result.user_id,
-        message: "Registration successful. Please verify your email.".to_string(),
+        message,
     }))
 }
 
@@ -784,6 +791,7 @@ pub async fn setup(
         &body.password,
         body.display_name.as_deref(),
         None,
+        true, // Admin setup always auto-verifies
     )
     .await?;
 

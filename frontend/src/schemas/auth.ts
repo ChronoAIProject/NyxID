@@ -14,8 +14,7 @@ export const registerSchema = z
     inviteCode: z
       .string()
       .trim()
-      .transform((s) => s.toUpperCase())
-      .pipe(z.string().min(1, "Invite code is required")),
+      .transform((s) => s.toUpperCase()),
     name: z
       .string()
       .min(1, "Name is required")

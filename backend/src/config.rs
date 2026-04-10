@@ -186,6 +186,11 @@ pub struct AppConfig {
     /// `INVITE_CODE_REQUIRED=false` to open public registration — used once
     /// the product launches publicly. See issue #179.
     pub invite_code_required: bool,
+
+    // Dev convenience
+    /// When `true`, newly registered users are marked as email-verified
+    /// immediately. Only intended for local development — defaults to `false`.
+    pub auto_verify_email: bool,
 }
 
 impl std::fmt::Debug for AppConfig {
@@ -347,6 +352,17 @@ impl std::fmt::Debug for AppConfig {
                 &self.channel_event_dedup_ttl_secs,
             )
             .finish()
+    }
+}
+
+/// Parse a boolean env var with a default value.
+fn parse_bool_env(name: &str, default: bool) -> bool {
+    match env::var(name).ok().as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => default,
+        Some(v) => matches!(
+            v.to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        ),
     }
 }
 
@@ -584,6 +600,7 @@ impl AppConfig {
                 .unwrap_or(300),
 
             invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
+            auto_verify_email: parse_bool_env("AUTO_VERIFY_EMAIL", false),
         }
     }
 
