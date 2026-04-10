@@ -163,6 +163,9 @@ dev `docker-compose.override.yml` is intentionally NOT auto-loaded when
 `-f` is used explicitly.
 
 ```bash
+# If you previously ran the quickstart, remove the dev symlink first
+[ -L .env.production ] && rm .env.production
+
 # Create a production env file from the template
 cp .env.production.example .env.production
 $EDITOR .env.production

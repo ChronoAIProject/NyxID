@@ -39,6 +39,7 @@ pub struct PublicConfigResponse {
     pub node_ws_url: String,
     pub version: String,
     pub social_providers: Vec<String>,
+    pub invite_code_required: bool,
 }
 
 /// GET /api/v1/public/config
@@ -68,5 +69,6 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
         node_ws_url: format!("{ws_base}/api/v1/nodes/ws"),
         version: env!("CARGO_PKG_VERSION").to_string(),
         social_providers,
+        invite_code_required: state.config.invite_code_required,
     })
 }

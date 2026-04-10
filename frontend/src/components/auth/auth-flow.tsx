@@ -22,6 +22,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import { usePublicConfig } from "@/hooks/use-public-config";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -134,6 +135,9 @@ export function AuthFlow({
   returnTo,
   socialError,
 }: AuthFlowProps) {
+  const { data: publicConfig } = usePublicConfig();
+  const inviteRequired = publicConfig?.invite_code_required ?? true;
+
   const [panel, setPanel] = useState<AuthPanel>(initialPanel);
   const [inviteError, setInviteError] = useState(false);
   const [fadeOpacity, setFadeOpacity] = useState(1);
@@ -263,6 +267,7 @@ export function AuthFlow({
 
   // -- Invite code gate for Step 2 --
   function requireInviteCode(): boolean {
+    if (!inviteRequired) return true;
     const code = inviteCode.trim();
     if (!code) {
       setInviteError(true);
@@ -474,7 +479,8 @@ export function AuthFlow({
             </p>
           </div>
 
-          {/* Step 1: Invite Code */}
+          {/* Step 1: Invite Code (only when invite gate is enabled) */}
+          {inviteRequired && (
           <Form {...registerForm}>
             <div className="relative mb-6 pl-9">
               <div className="absolute left-[11px] top-7 bottom-[-12px] w-px bg-gradient-to-b from-violet-500/10 to-transparent" />
@@ -558,12 +564,15 @@ export function AuthFlow({
               </p>
             </div>
           </Form>
+          )}
 
-          {/* Step 2: Choose Method */}
-          <div className="relative pl-9">
+          {/* Step 2: Choose Method (becomes Step 1 when invite not required) */}
+          <div className={`relative ${inviteRequired ? "pl-9" : ""}`}>
+            {inviteRequired && (
             <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-violet-500/15 bg-violet-500/10 text-[11px] font-semibold text-violet-400">
               2
             </div>
+            )}
             <p className="mb-3 text-[13px] font-medium leading-6 text-muted-foreground">
               Choose how to sign up
             </p>
@@ -663,7 +672,8 @@ export function AuthFlow({
             </div>
           </div>
 
-          {/* Invite code mirror */}
+          {/* Invite code mirror (only when invite gate is enabled) */}
+          {inviteRequired && (
           <div className="mb-5 flex items-center gap-2.5 rounded-lg border border-violet-500/10 bg-violet-500/10 px-3.5 py-2.5">
             <svg
               className="h-3.5 w-3.5 shrink-0 text-violet-400"
@@ -688,6 +698,7 @@ export function AuthFlow({
               Edit
             </button>
           </div>
+          )}
 
           {/* Email registration form */}
           <Form {...registerForm}>

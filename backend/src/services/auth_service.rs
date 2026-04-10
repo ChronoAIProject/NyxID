@@ -38,6 +38,7 @@ pub async fn register_user(
     password_raw: &str,
     display_name: Option<&str>,
     invite_code_id: Option<&str>,
+    auto_verify_email: bool,
 ) -> AppResult<RegisterResult> {
     // Validate password length
     if password_raw.len() < 8 {
@@ -87,8 +88,8 @@ pub async fn register_user(
         password_hash: Some(password_hash),
         display_name: display_name.map(String::from),
         avatar_url: None,
-        email_verified: false,
-        email_verification_token: Some(verification_token_hash),
+        email_verified: auto_verify_email,
+        email_verification_token: if auto_verify_email { None } else { Some(verification_token_hash) },
         password_reset_token: None,
         password_reset_expires_at: None,
         is_active: true,

@@ -357,6 +357,9 @@ CHANNEL_EVENT_DEDUP_TTL_SECS=300         # Dedup entry TTL (default: 300 = 5 min
 # Registration gate (issue #179)
 INVITE_CODE_REQUIRED=true              # Gate new-user registration behind invite codes (default: true). Set to false for public launch.
 
+# Dev convenience
+AUTO_VERIFY_EMAIL=false                # When true, skip email verification on registration (default: false). Dev only.
+
 # Optional
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
 GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET
