@@ -50,7 +50,7 @@ function resolveSocialAuthError(error: string | undefined): string {
     case "social_auth_profile":
       return "Unable to complete social sign-in.";
     case "social_auth_registration_closed":
-      return "Registration is currently invite-only. Please use an existing account or request an invite.";
+      return "WAITLIST";
     default:
       return error || "Social sign-in failed. Please try again.";
   }
@@ -431,7 +431,22 @@ export function AuthHomeScreen({ navigation }: Props) {
 
         {loginError && (
           <View style={styles.errorBanner}>
-            <Text style={styles.errorText}>{loginError}</Text>
+            {loginError === "WAITLIST" ? (
+              <>
+                <Text style={styles.errorText}>
+                  Registration is invite-only.{" "}
+                  <Text
+                    style={styles.errorLink}
+                    onPress={() => void Linking.openURL("https://nyx.chrono-ai.fun/#waitlist")}
+                  >
+                    Join the waitlist
+                  </Text>
+                  {" "}to get access.
+                </Text>
+              </>
+            ) : (
+              <Text style={styles.errorText}>{loginError}</Text>
+            )}
           </View>
         )}
       </ScrollView>
@@ -498,6 +513,10 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     color: c.danger,
     ...typeScale.caption,
     lineHeight: 18,
+  },
+  errorLink: {
+    color: c.primary,
+    textDecorationLine: "underline" as const,
   },
   dividerRow: {
     flexDirection: "row",
