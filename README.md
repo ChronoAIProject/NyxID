@@ -105,23 +105,34 @@ Sign up at the [NyxID console](https://nyx.chrono-ai.fun), add your API credenti
 
 ```bash
 git clone https://github.com/ChronoAIProject/NyxID.git && cd NyxID
-cp .env.production.example .env.production
 
-# Generate and paste these values into .env.production:
-openssl rand -hex 32    # → ENCRYPTION_KEY (keep this safe)
-openssl rand -hex 24    # → MONGO_ROOT_PASSWORD
+# Generate .env.production with fresh secrets
+EK=$(openssl rand -hex 32)
+cat > .env.production << EOF
+MONGO_ROOT_PASSWORD=$(openssl rand -hex 24)
+ENCRYPTION_KEY=$EK
+BASE_URL=http://localhost:3001
+FRONTEND_URL=http://localhost:3000
+ENVIRONMENT=production
+JWT_PRIVATE_KEY_PATH=/app/keys/private.pem
+JWT_PUBLIC_KEY_PATH=/app/keys/public.pem
+INVITE_CODE_REQUIRED=false
+RUST_LOG=nyxid=info,tower_http=info
+EOF
 
-# Generate JWT signing keys
+# Generate JWT signing keys (PKCS#1 format)
 mkdir -p keys
 openssl genrsa -out keys/private.pem 4096 2>/dev/null
-openssl rsa -in keys/private.pem -pubout -out keys/public.pem 2>/dev/null
+openssl rsa -in keys/private.pem -RSAPublicKey_out -out keys/public.pem 2>/dev/null
 
 # Start the stack
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
   --env-file .env.production up -d
 
 # Wait for the server to be ready
-until curl -sf http://localhost:3001/health > /dev/null 2>&1; do sleep 2; done && echo "NyxID is running"
+until curl -sf http://localhost:3001/health > /dev/null 2>&1; do sleep 2; done
+echo "NyxID is running at http://localhost:3000"
+echo "ENCRYPTION_KEY=$EK  ← save this somewhere safe"
 ```
 
 **Open `http://localhost:3000` and register your account.** For production hardening (TLS, domain), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
