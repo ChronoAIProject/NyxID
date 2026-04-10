@@ -55,7 +55,7 @@ flowchart TD
 ```
 
 NyxID proxies requests, injects credentials automatically, punches through
-NAT (Network Address Translation) to reach your local services, and wraps any REST (Representational State Transfer) API (Application Programming Interface) as MCP (Model Context Protocol) tools.
+NAT to reach your local services, and wraps any REST API as MCP tools.
 
 <!-- TODO: Product screenshot
      Replace the ASCII diagram above with a polished architecture diagram or dashboard screenshot.
@@ -66,11 +66,11 @@ NAT (Network Address Translation) to reach your local services, and wraps any RE
 
 ## What NyxID Does
 
-- **Reach anything** — public APIs, internal APIs, localhost services via credential nodes (`nyxid node`). SSH (Secure Shell) tunneling (`nyxid ssh`) reaches remote hosts. No VPN (Virtual Private Network), no port forwarding.
+- **Reach anything** — public APIs, internal APIs, localhost services via credential nodes (`nyxid node`). SSH tunneling (`nyxid ssh`) reaches remote hosts. No VPN, no port forwarding.
 - **Never expose keys** — the reverse proxy injects credentials automatically. Your agent talks to NyxID; NyxID talks to the API with the real key.
-- **MCP auto-wrap** — REST APIs with OpenAPI specs become [MCP](https://modelcontextprotocol.io/) tools. `nyxid mcp config --tool cursor` generates the config. Works with Claude Code, Cursor, VS Code, and any MCP client.
+- **MCP auto-wrap** — REST APIs with OpenAPI specs become [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) tools. `nyxid mcp config --tool cursor` generates the config. Works with Claude Code, Cursor, VS Code, and any MCP client.
 - **Per-agent isolation** — each agent gets a scoped token. Agent A accesses Slack and Gmail. Agent B only accesses your internal API. Revoke any session without touching the underlying credentials.
-- **Full identity layer** — OIDC (OpenID Connect) / OAuth 2.0 (Open Authorization) with PKCE (Proof Key for Code Exchange), RBAC (Role-Based Access Control), service accounts, transaction approval (Telegram + mobile push), LLM (Large Language Model) gateway for 7 providers.
+- **Full identity layer** — OIDC/OAuth 2.0 with PKCE, RBAC, service accounts, transaction approval (Telegram + mobile push), LLM gateway for 7 providers.
 
 ## Why NyxID
 
@@ -95,116 +95,51 @@ Other tools solve parts of this — NyxID combines credential injection, NAT tra
 
 ## Quick Start
 
-There are two ways to use NyxID — pick the one that fits your situation:
-
-| | Hosted | Self-host |
-|---|---|---|
-| **What it is** | We run NyxID for you in the cloud | You run NyxID on your own machine |
-| **Best for** | Getting started quickly, no setup | Full control, private networks, offline use |
-| **Status** | Closed beta (invitation only) | Open — anyone can run it |
-
-### Option A: Hosted (closed beta)
+### Hosted (closed beta)
 
 Sign up at the [NyxID console](https://nyx.chrono-ai.fun), add your API credentials through the dashboard, and copy the MCP config from **Settings > MCP** into your AI tool. Currently invitation-only — [join the waitlist](https://nyx.chrono-ai.fun/#waitlist).
 
-### Option B: Self-host
+### Self-host
 
-Run NyxID on your own machine. This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
-
-```mermaid
-flowchart LR
-    A["1. Check prerequisites"] --> B["2. Clone & configure"]
-    B --> C["Start Docker stack"]
-    C --> D["3. Register account"]
-    D --> E{Connect AI agent}
-    E --> F[AI-assisted]
-    E --> G[Manual CLI]
-    E --> H[Web console]
-```
-
-#### Let AI do it
-
-Paste this into Claude Code, Cursor, or any AI coding assistant and it will handle the entire setup:
-
-> Read https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/README.md — go to "Option B: Self-host" and execute Step 1 (check prerequisites), Step 2 (clone the repo, generate .env.dev and RSA keys, pull Docker images, start the stack, wait for health check), and Step 3 (open the web console, register an account, install the NyxID CLI, log in, add my API credentials, and verify the proxy). Walk me through anything that needs my input (like email, password, or API keys).
-
-If you prefer to run each step yourself, follow the manual instructions below.
-
-**What you need installed before starting:**
-- [Docker Desktop](https://docs.docker.com/get-docker/) (includes Docker Compose)
-- A terminal — macOS Terminal, Linux shell, or [WSL (Windows Subsystem for Linux)](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows
-
-**Step 1 of 3 — Check your system** (paste this into your terminal):
-
-```bash
-bash << 'CHECK'
-err=0
-for cmd in git docker openssl curl; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then echo "Missing: $cmd"; err=1; fi
-done
-if ! docker compose version >/dev/null 2>&1; then echo "Missing: docker compose (v2 plugin)"; err=1; fi
-if ! docker info >/dev/null 2>&1; then echo "Docker is not running. Start Docker Desktop and re-run."; err=1; fi
-if [ "$err" -eq 1 ]; then exit 1; fi
-echo "All good — proceed to Step 2."
-CHECK
-```
-
-**Step 2 of 3 — Install and start** (paste after Step 1 passes):
+**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) installed.
 
 ```bash
 git clone https://github.com/ChronoAIProject/NyxID.git && cd NyxID
 
-# ── Generate .env.dev (dev config) and link for Docker ──
+# Generate .env.production with fresh secrets
 EK=$(openssl rand -hex 32)
-cat > .env.dev << EOF
+cat > .env.production << EOF
 MONGO_ROOT_PASSWORD=$(openssl rand -hex 24)
 ENCRYPTION_KEY=$EK
 BASE_URL=http://localhost:3001
 FRONTEND_URL=http://localhost:3000
-ENVIRONMENT=development
+ENVIRONMENT=production
 JWT_PRIVATE_KEY_PATH=/app/keys/private.pem
 JWT_PUBLIC_KEY_PATH=/app/keys/public.pem
 INVITE_CODE_REQUIRED=false
-AUTO_VERIFY_EMAIL=true
 RUST_LOG=nyxid=info,tower_http=info
 EOF
-ln -sf .env.dev .env.production
 
-# ── Generate signing keys ──
+# Generate JWT signing keys (PKCS#1 format)
 mkdir -p keys
 openssl genrsa -out keys/private.pem 4096 2>/dev/null
-openssl rsa -in keys/private.pem -RSAPublicKey_out -out keys/public.pem 2>/dev/null \
-  || openssl rsa -in keys/private.pem -pubout -out keys/public.pem 2>/dev/null
+openssl rsa -in keys/private.pem -RSAPublicKey_out -out keys/public.pem 2>/dev/null
 
-# ── Pull images and start the stack ──
-echo "Downloading NyxID (this may take a few minutes on first run)..."
-docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-  --env-file .env.production pull &&
+# Start the stack
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
   --env-file .env.production up -d
 
-# ── Wait for the server (up to 90s) ──
-echo "Waiting for NyxID to start..."
-n=0
-until curl -sf http://localhost:3001/health >/dev/null 2>&1; do
-  n=$((n+1))
-  if [ "$n" -ge 45 ]; then echo "Timed out. Run: docker compose logs backend"; break; fi
-  sleep 2
-done && echo "NyxID is running at http://localhost:3000" &&
-echo "Save your encryption key (needed if you reset the database): $EK"
+# Wait for the server to be ready
+until curl -sf http://localhost:3001/health > /dev/null 2>&1; do sleep 2; done
+echo "NyxID is running at http://localhost:3000"
+echo "ENCRYPTION_KEY=$EK  ← save this somewhere safe"
 ```
 
-**Step 3 of 3 — Register and connect**
+**Open `http://localhost:3000` and register your account.** For production hardening (TLS, domain), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-1. Open `http://localhost:3000` in your browser
-2. Register with your name, email, and a password — no email verification needed (accounts are auto-verified in dev mode)
-3. Log in and connect your AI agent using one of the methods below
+Now connect your AI agent — pick one approach:
 
-To stop NyxID: `docker compose -f docker-compose.yml -f docker-compose.prod.yml down`
-
-For production deployment (TLS (Transport Layer Security), custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
-
-#### Connect your AI agent — AI-assisted
+#### AI-assisted
 
 Paste this into Claude Code, Cursor, or any AI coding assistant:
 
@@ -214,7 +149,7 @@ Your AI agent will install the CLI (including Rust if needed), walk you through 
 
 <!-- AI quickstart maintenance: validate this prompt against actual CLI on each release -->
 
-#### Connect your AI agent — Manual CLI (Command Line Interface)
+#### Manual CLI
 
 ```bash
 # Install the CLI (installs Rust automatically if needed, takes a few minutes on first run)
@@ -233,13 +168,13 @@ nyxid proxy request llm-openai models
 
 If the proxy returns data, the full chain works: credential stored, injected, downstream accepted.
 
-For MCP setup, open **Settings > MCP** in the web console at `http://localhost:3000` to copy the correct config for Claude Code, Cursor, or VS Code.
+For MCP setup, open **Settings > MCP** in the web console (`http://localhost:3000`) to copy the correct config for Claude Code, Cursor, or VS Code.
 
 > Already have Rust? You can also install with: `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli`
 
-#### Connect your AI agent — Web console
+#### Web console
 
-Prefer a GUI (Graphical User Interface)? Everything above can also be done through the web console at `http://localhost:3000`:
+Prefer a GUI? Everything above can also be done through the web console at `http://localhost:3000`:
 
 - **AI Services** — add API credentials (OpenAI, Anthropic, GitHub, etc.)
 - **Settings > MCP** — copy MCP config snippets for Claude Code, Cursor, or VS Code
