@@ -77,6 +77,13 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
+    #[cfg(test)]
+    pub(crate) fn from_test_credentials(credentials: HashMap<String, ServiceCredential>) -> Self {
+        Self {
+            credentials: Arc::new(credentials),
+        }
+    }
+
     /// Load credentials from config, decrypting each encrypted value (file backend only).
     #[cfg(test)]
     pub fn from_config(config: &NodeConfig, enc: &LocalEncryption) -> Result<Self> {

@@ -176,6 +176,9 @@ pub async fn execute_proxy_request(
     // 4. Forward headers from the proxy_request
     if let Some(headers) = request["headers"].as_object() {
         for (name, value) in headers {
+            if name.eq_ignore_ascii_case("user-agent") {
+                continue;
+            }
             if let Some(v) = value.as_str() {
                 req_builder = req_builder.header(name.as_str(), v);
             }

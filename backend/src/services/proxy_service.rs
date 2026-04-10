@@ -1617,6 +1617,7 @@ mod tests {
         path: String,
         query: Option<String>,
         content_type: Option<String>,
+        user_agent: Option<String>,
         body: Vec<u8>,
     }
 
@@ -1631,6 +1632,10 @@ mod tests {
             query: uri.query().map(ToString::to_string),
             content_type: headers
                 .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            user_agent: headers
+                .get(reqwest::header::USER_AGENT)
                 .and_then(|value| value.to_str().ok())
                 .map(ToString::to_string),
             body: body.to_vec(),
@@ -1741,6 +1746,51 @@ mod tests {
         assert_eq!(captured.path, "/upload");
         assert_eq!(captured.content_type.as_deref(), Some("application/zip"));
         assert_eq!(captured.body, b"PK\x03\x04");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_overrides_forwarded_user_agent() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/chat/completions", post(capture_request))
+            .with_state(sender);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            "OpenAI/Python 2.30.0".parse().unwrap(),
+        );
+        let response = forward_request(
+            &Client::new(),
+            &make_proxy_target(format!("http://{addr}")),
+            reqwest::Method::POST,
+            "chat/completions",
+            None,
+            headers,
+            ProxyBody::Buffered(Some(bytes::Bytes::from_static(br#"{"model":"gpt-5.4"}"#))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+        )
+        .await
+        .expect("proxy request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(captured.path, "/chat/completions");
+        assert_eq!(captured.user_agent.as_deref(), Some("NyxID-Proxy/1.0"));
 
         server.abort();
     }

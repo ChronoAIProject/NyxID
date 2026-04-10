@@ -176,11 +176,18 @@ pub async fn execute_proxy_request(
     // 4. Forward headers from the proxy_request
     if let Some(headers) = request["headers"].as_object() {
         for (name, value) in headers {
+            if name.eq_ignore_ascii_case("user-agent") {
+                continue;
+            }
             if let Some(v) = value.as_str() {
                 req_builder = req_builder.header(name.as_str(), v);
             }
         }
     }
+
+    // Override User-Agent so downstream WAFs don't block SDK-specific strings
+    // like "OpenAI/Python 2.30.0" (NyxID#184).
+    req_builder = req_builder.header("user-agent", "NyxID-Node/1.0");
 
     // 5. Inject header credentials
     if let Some((hdr_name, hdr_value)) = cred.header() {
@@ -427,7 +434,74 @@ pub fn append_query_param(url: &str, param_name: &str, param_value: &str) -> Str
 
 #[cfg(test)]
 mod tests {
-    use super::append_query_param;
+    use std::collections::HashMap;
+
+    use super::{append_query_param, execute_proxy_request};
+    use crate::node::{
+        credential_store::{CredentialInjection, CredentialStore, ServiceCredential},
+        metrics::NodeMetrics,
+        signing::ReplayGuard,
+        ws_client::NodeWsMessage,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::{mpsc, oneshot},
+    };
+    use zeroize::Zeroizing;
+
+    async fn start_capture_server() -> (
+        String,
+        oneshot::Receiver<String>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (request_tx, request_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept connection");
+            let mut buffer = vec![0_u8; 4096];
+            let bytes_read = stream.read(&mut buffer).await.expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..bytes_read]).into_owned();
+            let _ = request_tx.send(request);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .await
+                .expect("write response");
+        });
+
+        (format!("http://{addr}"), request_rx, server)
+    }
+
+    fn extract_header(request: &str, header_name: &str) -> Option<String> {
+        request.split("\r\n").find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case(header_name) {
+                Some(value.trim().to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn make_credential_store(base_url: String) -> CredentialStore {
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "openai-compatible".to_string(),
+            ServiceCredential {
+                injection: CredentialInjection::Header {
+                    name: "authorization".to_string(),
+                    value: Zeroizing::new("Bearer downstream-secret".to_string()),
+                },
+                target_url: Some(base_url),
+            },
+        );
+
+        CredentialStore::from_test_credentials(credentials)
+    }
 
     #[test]
     fn append_query_param_url_encodes_name_and_value() {
@@ -443,5 +517,53 @@ mod tests {
     fn append_query_param_preserves_existing_query_string() {
         let url = append_query_param("https://example.com/api?x=1", "token", "abc");
         assert_eq!(url, "https://example.com/api?x=1&token=abc");
+    }
+
+    #[tokio::test]
+    async fn execute_proxy_request_overrides_forwarded_user_agent() {
+        let (base_url, request_rx, server) = start_capture_server().await;
+        let credentials = make_credential_store(base_url.clone());
+        let replay_guard = tokio::sync::Mutex::new(ReplayGuard::new());
+        let metrics = NodeMetrics::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        let request = serde_json::json!({
+            "request_id": "req-1",
+            "service_slug": "openai-compatible",
+            "method": "GET",
+            "path": "/chat/completions",
+            "base_url": base_url,
+            "headers": {
+                "user-agent": "OpenAI/Python 2.30.0"
+            }
+        });
+
+        execute_proxy_request(
+            &request,
+            &credentials,
+            None,
+            &replay_guard,
+            &metrics,
+            &tx,
+            false,
+            &reqwest::Client::new(),
+        )
+        .await;
+
+        let captured = request_rx.await.expect("captured request");
+        assert!(captured.starts_with("GET /chat/completions HTTP/1.1\r\n"));
+        assert_eq!(
+            extract_header(&captured, "user-agent").as_deref(),
+            Some("NyxID-Node/1.0")
+        );
+        assert!(!captured.contains("OpenAI/Python 2.30.0"));
+
+        let response = rx.recv().await.expect("proxy response");
+        let NodeWsMessage::Text(text) = response else {
+            panic!("expected text proxy response");
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid proxy response");
+        assert_eq!(parsed["status"], 200);
+
+        server.abort();
     }
 }
