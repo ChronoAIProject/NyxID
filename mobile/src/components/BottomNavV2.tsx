@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Animated, LayoutChangeEvent, Pressable, StyleSheet, Text, View } from "react-native";
 import Svg, { Path, Circle } from "react-native-svg";
 import { useTheme } from "../theme/ThemeContext";
@@ -39,7 +39,7 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const translateX = useRef(new Animated.Value(0)).current;
-  const tabWidth = useRef(0);
+  const [tabWidth, setTabWidth] = useState(0);
   const containerWidth = useRef(0);
 
   const activeIndex = active === "activity" ? 0 : 1;
@@ -48,8 +48,8 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
 
   const computeOffset = (index: number) => {
     if (index === 0) return 0;
-    if (showFab) return tabWidth.current + GAP + FAB_WIDTH + GAP;
-    return tabWidth.current + GAP;
+    if (showFab) return tabWidth + GAP + FAB_WIDTH + GAP;
+    return tabWidth + GAP;
   };
 
   useEffect(() => {
@@ -66,9 +66,9 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
     containerWidth.current = w;
     const inner = w - 2 * PADDING;
     if (showFab) {
-      tabWidth.current = (inner - FAB_WIDTH - 2 * GAP) / 2;
+      setTabWidth((inner - FAB_WIDTH - 2 * GAP) / 2);
     } else {
-      tabWidth.current = (inner - GAP) / 2;
+      setTabWidth((inner - GAP) / 2);
     }
     translateX.setValue(computeOffset(activeIndex));
   };
@@ -79,7 +79,7 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
         style={[
           styles.activeHighlight,
           {
-            width: tabWidth.current || "35%",
+            width: tabWidth || "35%",
             transform: [{ translateX }],
           },
         ]}
