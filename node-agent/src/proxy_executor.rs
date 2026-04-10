@@ -182,6 +182,10 @@ pub async fn execute_proxy_request(
         }
     }
 
+    // Override User-Agent so downstream WAFs don't block SDK-specific strings
+    // like "OpenAI/Python 2.30.0" (NyxID#184).
+    req_builder = req_builder.header("user-agent", "NyxID-Node/1.0");
+
     // 5. Inject header credentials
     if let Some((hdr_name, hdr_value)) = cred.header() {
         req_builder = req_builder.header(hdr_name, hdr_value);

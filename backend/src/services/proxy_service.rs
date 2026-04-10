@@ -57,7 +57,9 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     // content-length intentionally excluded: reqwest recalculates it from the
     // actual body, and forwarding the original value causes mismatches when
     // middleware or translators modify the request body.
-    "user-agent",
+    // user-agent intentionally excluded: client-specific User-Agent strings
+    // (e.g. "OpenAI/Python 2.30.0") trigger WAF blocks on downstream endpoints.
+    // The proxy sets its own User-Agent instead (see forward_request).
     "x-request-id",
     "x-correlation-id",
     "range",
@@ -1368,6 +1370,10 @@ pub async fn forward_request(
             request = request.header(name, value);
         }
     }
+
+    // Set a neutral User-Agent so downstream WAFs don't block SDK-specific
+    // strings like "OpenAI/Python 2.30.0" (issue #184).
+    request = request.header("user-agent", "NyxID-Proxy/1.0");
 
     // Inject identity propagation headers
     for (name, value) in &identity_headers {

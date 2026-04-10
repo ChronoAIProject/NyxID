@@ -55,7 +55,7 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "accept",
     "accept-encoding",
     "accept-language",
-    "user-agent",
+    // user-agent excluded: see proxy_service::ALLOWED_FORWARD_HEADERS
     "x-request-id",
     "x-correlation-id",
     "range",
@@ -79,7 +79,7 @@ const ALLOWED_WS_FORWARD_HEADERS: &[&str] = &[
     "accept-language",
     "origin",
     "sec-websocket-protocol",
-    "user-agent",
+    // user-agent excluded: see proxy_service::ALLOWED_FORWARD_HEADERS
     "x-request-id",
     "x-correlation-id",
 ];
