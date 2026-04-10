@@ -114,7 +114,7 @@ const createStyles = (c: ThemeColors) =>
       paddingVertical: spacing.xs,
       borderRadius: 6,
       overflow: "hidden",
-      backgroundColor: c.ghostBg,
+      backgroundColor: c.cardSoft,
       borderWidth: 1,
       borderColor: c.borderSoft,
     },

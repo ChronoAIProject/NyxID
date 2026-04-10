@@ -36,6 +36,8 @@ function resolveActiveMainTab(routeName?: string): BottomNavV2Tab {
   if (routeName === "Activity") return "activity";
   if (routeName === "ActivityDetail") return "activity";
   if (routeName === "AccountSettings") return "account";
+  if (routeName === "TermsOfService") return "account";
+  if (routeName === "PrivacyPolicy") return "account";
   return "activity";
 }
 
