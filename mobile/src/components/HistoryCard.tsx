@@ -1,5 +1,4 @@
 import { useMemo } from "react";
-import { BlurView } from "expo-blur";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { radius, spacing } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
@@ -68,9 +67,10 @@ export function HistorySectionHeader({ title }: { title: string }) {
 
   return (
     <View style={styles.sectionHeaderRow}>
-      <BlurView intensity={60} tint="prominent" style={styles.sectionHeaderBlur}>
+      {/* BlurView removed — its tint overrides the opaque bg in light mode */}
+      <View style={styles.sectionHeaderBlur}>
         <Text style={styles.sectionHeader}>{title}</Text>
-      </BlurView>
+      </View>
     </View>
   );
 }
