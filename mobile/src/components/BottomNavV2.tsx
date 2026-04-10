@@ -59,18 +59,21 @@ export function BottomNavV2({ active, onTabPress, onFabPress }: BottomNavV2Props
       tension: 300,
       friction: 30,
     }).start();
-  }, [activeIndex, translateX]);
+  }, [activeIndex, tabWidth, translateX]);
 
   const onLayout = (e: LayoutChangeEvent) => {
     const w = e.nativeEvent.layout.width;
     containerWidth.current = w;
     const inner = w - 2 * PADDING;
-    if (showFab) {
-      setTabWidth((inner - FAB_WIDTH - 2 * GAP) / 2);
-    } else {
-      setTabWidth((inner - GAP) / 2);
-    }
-    translateX.setValue(computeOffset(activeIndex));
+    const newTabWidth = showFab
+      ? (inner - FAB_WIDTH - 2 * GAP) / 2
+      : (inner - GAP) / 2;
+    setTabWidth(newTabWidth);
+    // Use newTabWidth directly since setState is async
+    const offset = activeIndex === 0 ? 0
+      : showFab ? newTabWidth + GAP + FAB_WIDTH + GAP
+      : newTabWidth + GAP;
+    translateX.setValue(offset);
   };
 
   return (
