@@ -126,7 +126,7 @@ flowchart LR
 
 Paste this into Claude Code, Cursor, or any AI coding assistant and it will handle the entire setup:
 
-> Read the self-host section of https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/README.md and execute all three steps — check prerequisites, install and start the Docker stack, then register an account and connect me. Walk me through anything that needs my input (like credentials).
+> Read https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/README.md — go to "Option B: Self-host" and execute Step 1 (check prerequisites), Step 2 (clone the repo, generate .env.dev and RSA keys, pull Docker images, start the stack, wait for health check), and Step 3 (open the web console, register an account, install the NyxID CLI, log in, add my API credentials, and verify the proxy). Walk me through anything that needs my input (like email, password, or API keys).
 
 If you prefer to run each step yourself, follow the manual instructions below.
 
