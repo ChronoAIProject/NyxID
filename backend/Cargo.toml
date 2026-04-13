@@ -22,7 +22,7 @@ tracing-subscriber = { workspace = true }
 jsonwebtoken = "9.3"
 argon2 = "0.5.3"
 aes-gcm = "0.10.3"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 rand = "0.8.5"
 hex = "0.4.3"
 base64 = "0.22.1"
@@ -37,7 +37,7 @@ bytes = "1.11"
 anyhow = "1.0.101"
 thiserror = "2.0.18"
 dotenvy = "0.15.7"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 dirs = "6"
 open = "5"
 rpassword = "7"
@@ -64,7 +64,7 @@ russh = "0.58.0"
 tempfile = "3.27.0"
 pty-process = { version = "0.5.3", features = ["async"] }
 nix = { version = "0.31.2", features = ["term"] }
-libc = "0.2.183"
+libc = "0.2.184"
 
 [features]
 default = []
