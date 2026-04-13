@@ -137,8 +137,11 @@ export function AuthFlow({
 }: AuthFlowProps) {
   const { data: publicConfig } = usePublicConfig();
   const inviteRequired = publicConfig?.invite_code_required ?? true;
+  const emailAuthEnabled = publicConfig?.email_auth_enabled ?? false;
 
-  const [panel, setPanel] = useState<AuthPanel>(initialPanel);
+  const [panel, setPanel] = useState<AuthPanel>(
+    initialPanel === 2 && !emailAuthEnabled ? 1 : initialPanel,
+  );
   const [inviteError, setInviteError] = useState(false);
   const [fadeOpacity, setFadeOpacity] = useState(1);
   const fadingRef = useRef(false);
@@ -331,88 +334,92 @@ export function AuthFlow({
             </div>
           )}
 
-          <Form {...loginForm}>
-            <form
-              onSubmit={loginForm.handleSubmit(onLoginSubmit)}
-              className="flex flex-col gap-4"
-            >
-              {loginForm.formState.errors.root && (
-                <div
-                  role="alert"
-                  className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+          {emailAuthEnabled && (
+            <>
+              <Form {...loginForm}>
+                <form
+                  onSubmit={loginForm.handleSubmit(onLoginSubmit)}
+                  className="flex flex-col gap-4"
                 >
-                  {loginForm.formState.errors.root.message}
-                </div>
-              )}
-
-              <FormField
-                control={loginForm.control}
-                name="email"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Email</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="email"
-                        placeholder="you@example.com"
-                        autoComplete="email"
-                        {...field}
-                        ref={(el) => {
-                          field.ref(el);
-                          (
-                            loginEmailRef as React.MutableRefObject<HTMLInputElement | null>
-                          ).current = el;
-                        }}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <FormField
-                control={loginForm.control}
-                name="password"
-                render={({ field }) => (
-                  <FormItem>
-                    <div className="flex items-center justify-between">
-                      <FormLabel>Password</FormLabel>
-                      <Link
-                        to={"/forgot-password" as string}
-                        className="text-xs font-medium text-violet-400 hover:text-violet-300"
-                      >
-                        Forgot password?
-                      </Link>
+                  {loginForm.formState.errors.root && (
+                    <div
+                      role="alert"
+                      className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+                    >
+                      {loginForm.formState.errors.root.message}
                     </div>
-                    <FormControl>
-                      <Input
-                        type="password"
-                        placeholder="Enter your password"
-                        autoComplete="current-password"
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+                  )}
 
-              <Button
-                type="submit"
-                className="h-11 w-full bg-gradient-to-br from-violet-400 via-violet-500 to-violet-600 text-sm font-medium shadow-[0_2px_12px_rgba(139,92,246,0.2)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(139,92,246,0.3)]"
-                isLoading={loginMutation.isPending}
-              >
-                Sign In
-              </Button>
-            </form>
-          </Form>
+                  <FormField
+                    control={loginForm.control}
+                    name="email"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Email</FormLabel>
+                        <FormControl>
+                          <Input
+                            type="email"
+                            placeholder="you@example.com"
+                            autoComplete="email"
+                            {...field}
+                            ref={(el) => {
+                              field.ref(el);
+                              (
+                                loginEmailRef as React.MutableRefObject<HTMLInputElement | null>
+                              ).current = el;
+                            }}
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
 
-          {/* Divider */}
-          <div className="my-6 flex items-center gap-4">
-            <div className="h-px flex-1 bg-border" />
-            <span className="text-xs text-text-tertiary">or</span>
-            <div className="h-px flex-1 bg-border" />
-          </div>
+                  <FormField
+                    control={loginForm.control}
+                    name="password"
+                    render={({ field }) => (
+                      <FormItem>
+                        <div className="flex items-center justify-between">
+                          <FormLabel>Password</FormLabel>
+                          <Link
+                            to={"/forgot-password" as string}
+                            className="text-xs font-medium text-violet-400 hover:text-violet-300"
+                          >
+                            Forgot password?
+                          </Link>
+                        </div>
+                        <FormControl>
+                          <Input
+                            type="password"
+                            placeholder="Enter your password"
+                            autoComplete="current-password"
+                            {...field}
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <Button
+                    type="submit"
+                    className="h-11 w-full bg-gradient-to-br from-violet-400 via-violet-500 to-violet-600 text-sm font-medium shadow-[0_2px_12px_rgba(139,92,246,0.2)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(139,92,246,0.3)]"
+                    isLoading={loginMutation.isPending}
+                  >
+                    Sign In
+                  </Button>
+                </form>
+              </Form>
+
+              {/* Divider */}
+              <div className="my-6 flex items-center gap-4">
+                <div className="h-px flex-1 bg-border" />
+                <span className="text-xs text-text-tertiary">or</span>
+                <div className="h-px flex-1 bg-border" />
+              </div>
+            </>
+          )}
 
           <div className="flex flex-col gap-2">
             {REGISTER_PROVIDERS.map((provider) => (
@@ -595,30 +602,32 @@ export function AuthFlow({
                 </button>
               ))}
 
-              <button
-                type="button"
-                onClick={() => { if (requireInviteCode()) slideToPanel(2); }}
-                className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
-              >
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-violet-500/10">
-                  <svg
-                    className="h-4 w-4 text-violet-400"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <rect x="2" y="4" width="20" height="16" rx="2" />
-                    <path d="M22 7l-10 6L2 7" />
-                  </svg>
-                </span>
-                Continue with Email
-                <span className="ml-auto text-sm text-muted-foreground">
-                  &rsaquo;
-                </span>
-              </button>
+              {emailAuthEnabled && (
+                <button
+                  type="button"
+                  onClick={() => { if (requireInviteCode()) slideToPanel(2); }}
+                  className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
+                >
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-violet-500/10">
+                    <svg
+                      className="h-4 w-4 text-violet-400"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <rect x="2" y="4" width="20" height="16" rx="2" />
+                      <path d="M22 7l-10 6L2 7" />
+                    </svg>
+                  </span>
+                  Continue with Email
+                  <span className="ml-auto text-sm text-muted-foreground">
+                    &rsaquo;
+                  </span>
+                </button>
+              )}
             </div>
           </div>
 

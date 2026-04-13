@@ -193,6 +193,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
             invite_code_required: true,
+            email_auth_enabled: false,
             auto_verify_email: false,
         }
     }

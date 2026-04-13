@@ -40,6 +40,7 @@ pub struct PublicConfigResponse {
     pub version: String,
     pub social_providers: Vec<String>,
     pub invite_code_required: bool,
+    pub email_auth_enabled: bool,
 }
 
 /// GET /api/v1/public/config
@@ -70,5 +71,6 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
         version: env!("CARGO_PKG_VERSION").to_string(),
         social_providers,
         invite_code_required: state.config.invite_code_required,
+        email_auth_enabled: state.config.email_auth_enabled,
     })
 }

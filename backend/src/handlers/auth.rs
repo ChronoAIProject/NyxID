@@ -312,6 +312,10 @@ pub async fn register(
     headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> AppResult<Json<RegisterResponse>> {
+    if !state.config.email_auth_enabled {
+        return Err(AppError::EmailSignupDisabled);
+    }
+
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 

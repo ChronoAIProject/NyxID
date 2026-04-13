@@ -120,6 +120,9 @@ pub enum AppError {
     #[error("Social auth: registration closed — invite code required")]
     SocialAuthRegistrationClosed,
 
+    #[error("Email signup is disabled on this instance")]
+    EmailSignupDisabled,
+
     #[error("Consent required")]
     ConsentRequired { consent_url: String },
 
@@ -234,6 +237,7 @@ impl AppError {
             Self::SocialAuthConflict => StatusCode::CONFLICT,
             Self::SocialAuthDeactivated => StatusCode::FORBIDDEN,
             Self::SocialAuthRegistrationClosed => StatusCode::FORBIDDEN,
+            Self::EmailSignupDisabled => StatusCode::FORBIDDEN,
             Self::ConsentRequired { .. } => StatusCode::FORBIDDEN,
             Self::UnsupportedGrantType(_) => StatusCode::BAD_REQUEST,
             Self::ApprovalRequired { .. } => StatusCode::FORBIDDEN,
@@ -277,6 +281,7 @@ impl AppError {
             Self::Internal(_) => 1006,
             Self::DatabaseError(_) => 1007,
             Self::ValidationError(_) => 1008,
+            Self::EmailSignupDisabled => 1009,
             Self::AuthenticationFailed(_) => 2000,
             Self::TokenExpired => 2001,
             Self::MfaRequired { .. } => 2002,
@@ -370,6 +375,7 @@ impl AppError {
             Self::Internal(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
             Self::ValidationError(_) => "validation_error",
+            Self::EmailSignupDisabled => "email_signup_disabled",
             Self::AuthenticationFailed(_) => "authentication_failed",
             Self::TokenExpired => "token_expired",
             Self::MfaRequired { .. } => "mfa_required",
@@ -708,6 +714,7 @@ mod tests {
             AppError::RateLimited.error_code(),
             AppError::Internal("".into()).error_code(),
             AppError::ValidationError("".into()).error_code(),
+            AppError::EmailSignupDisabled.error_code(),
             AppError::AuthenticationFailed("".into()).error_code(),
             AppError::TokenExpired.error_code(),
             AppError::MfaRequired {
@@ -782,6 +789,15 @@ mod tests {
         assert_eq!(
             AppError::ValidationError("".into()).error_key(),
             "validation_error"
+        );
+        assert_eq!(
+            AppError::EmailSignupDisabled.error_key(),
+            "email_signup_disabled"
+        );
+        assert_eq!(AppError::EmailSignupDisabled.error_code(), 1009);
+        assert_eq!(
+            AppError::EmailSignupDisabled.status_code(),
+            StatusCode::FORBIDDEN
         );
         assert_eq!(
             AppError::AuthenticationFailed("".into()).error_key(),

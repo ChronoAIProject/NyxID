@@ -187,6 +187,16 @@ pub struct AppConfig {
     /// the product launches publicly. See issue #179.
     pub invite_code_required: bool,
 
+    /// When `true`, email/password auth UI is shown on `/login` and
+    /// `/register`, and `POST /api/v1/auth/register` accepts new accounts.
+    /// Defaults to `false` — the self-host quickstart in `README.md` is the
+    /// only path that opts in by writing `EMAIL_AUTH_ENABLED=true` to
+    /// `.env.dev`. Production, stock local `cargo run`, and any other
+    /// environment without the flag get SSO-only signup. The login endpoint
+    /// is NOT gated — existing users can still authenticate via direct API
+    /// call even when the UI is hidden.
+    pub email_auth_enabled: bool,
+
     // Dev convenience
     /// When `true`, newly registered users are marked as email-verified
     /// immediately. Only intended for local development — defaults to `false`.
@@ -602,6 +612,7 @@ impl AppConfig {
                 .unwrap_or(300),
 
             invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
+            email_auth_enabled: parse_bool_env("EMAIL_AUTH_ENABLED", false),
             auto_verify_email: parse_bool_env("AUTO_VERIFY_EMAIL", false),
         }
     }
@@ -901,6 +912,7 @@ mod tests {
             channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
             invite_code_required: true,
+            email_auth_enabled: false,
             auto_verify_email: false,
         }
     }

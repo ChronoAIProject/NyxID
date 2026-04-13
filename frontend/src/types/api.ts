@@ -368,6 +368,7 @@ export interface PublicConfig {
   readonly version: string;
   readonly social_providers: readonly string[];
   readonly invite_code_required: boolean;
+  readonly email_auth_enabled: boolean;
 }
 
 export type CredentialMode = "admin" | "user" | "both";
