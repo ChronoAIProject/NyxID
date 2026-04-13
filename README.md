@@ -12,57 +12,55 @@ public or private, and handles all the credentials so your agent never sees
 a raw key.
 
 ```mermaid
-flowchart TD
-    %% Top clients
-    A[Claude Code]
-    B[Cursor]
-    C[n8n]
+flowchart LR
+    subgraph Agents["AI Agents"]
+        CC[Claude Code]
+        CU[Cursor]
+        N8[n8n]
+    end
 
-    %% Gateway
-    G[NyxID<br/>Cloud Gateway]
+    subgraph NyxID["NyxID Gateway"]
+        AUTH[OIDC and API Key Auth]
+        PROXY[Credential Injection Proxy]
+        MCP[MCP Tool Wrapping]
+    end
 
-    %% Node
-    N[Node]
+    subgraph Connectivity["Private Reach"]
+        NODE[Credential Node]
+    end
 
-    %% Destinations
-    P[Public APIs]
-    I[Internal APIs]
-    L[Localhost Services]
+    subgraph Targets["Connected Services"]
+        PUB[Public APIs]
+        INT[Internal APIs]
+        LOC[Localhost Services]
+    end
 
-    %% Flows
-    A --> G
-    B --> G
-    C --> G
+    CC --> AUTH
+    CU --> AUTH
+    N8 --> AUTH
 
-    G --> P
-    G --> I
-    G --> N --> L
+    AUTH --> PROXY
+    PROXY --> MCP
+    PROXY -->|Direct proxy| PUB
+    PROXY -->|Private network| INT
+    PROXY -->|NAT traversal| NODE
+    NODE --> LOC
 
-    %% Styling
-    classDef client fill:#eef2ff,stroke:#6366f1,color:#111827,stroke-width:1.5px;
-    classDef gateway fill:#0f172a,stroke:#38bdf8,color:#ffffff,stroke-width:2px;
+    classDef agents fill:#eef2ff,stroke:#4f46e5,color:#111827,stroke-width:1.5px;
+    classDef gateway fill:#111827,stroke:#22d3ee,color:#ffffff,stroke-width:2px;
+    classDef tooling fill:#e0f2fe,stroke:#0284c7,color:#0f172a,stroke-width:1.5px;
     classDef node fill:#fef3c7,stroke:#f59e0b,color:#111827,stroke-width:1.5px;
-    classDef public fill:#eff6ff,stroke:#3b82f6,color:#111827,stroke-width:1.5px;
-    classDef internal fill:#ecfdf5,stroke:#10b981,color:#111827,stroke-width:1.5px;
-    classDef local fill:#fff7ed,stroke:#f97316,color:#111827,stroke-width:1.5px;
+    classDef targets fill:#ecfeff,stroke:#14b8a6,color:#0f172a,stroke-width:1.5px;
 
-    class A,B,C client;
-    class G gateway;
-    class N node;
-    class P public;
-    class I internal;
-    class L local;
+    class CC,CU,N8 agents;
+    class AUTH,PROXY gateway;
+    class MCP tooling;
+    class NODE node;
+    class PUB,INT,LOC targets;
 ```
 
 NyxID proxies requests, injects credentials automatically, punches through
 NAT to reach your local services, and wraps any REST API as MCP tools.
-
-<!-- TODO: Product screenshot
-     Replace the ASCII diagram above with a polished architecture diagram or dashboard screenshot.
-     <p align="center">
-       <img src="assets/screenshot.png" alt="NyxID Dashboard" width="80%">
-     </p>
--->
 
 ## What NyxID Does
 
@@ -101,7 +99,13 @@ Sign up at the [NyxID console](https://nyx.chrono-ai.fun), add your API credenti
 
 ### Self-host
 
-**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash-compatible terminal (macOS Terminal, Linux shell, or [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows).
+**Prerequisites:**
+
+- [Docker](https://docs.docker.com/get-docker/) — required for the server stack (backend, frontend, MongoDB). ~2 GB disk for images on first pull.
+- A bash-compatible terminal — macOS Terminal, Linux shell, or [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows.
+- [Rust / Cargo](https://www.rust-lang.org/tools/install) — **optional**, only needed if you install the `nyxid` CLI (see [Manual CLI](#manual-cli) below). The installer will set this up automatically if missing. Budget ~1.5 GB disk (~300 MB for the toolchain plus ~1 GB for the build cache) and 3–10 minutes for the first compile.
+
+Total disk footprint: ~2 GB for the server only, ~3.5 GB if you also install the CLI from source.
 
 Copy and paste this entire block into your terminal:
 
@@ -139,15 +143,31 @@ echo "ENCRYPTION_KEY=$EK  ← save this somewhere safe"
 
 **Open `http://localhost:3000` and register your account.** For production hardening (TLS, domain), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
+#### Optional: Install the `nyxid` CLI
+
+The server stack above is fully usable from the web console — the CLI is only needed if you want to script credential setup, manage credential nodes, or drive NyxID from your terminal. Skip this section if you'd rather stay in the browser.
+
+> **Heads-up:** the installer builds from source via Cargo. It will install Rust automatically if you don't already have it (~300 MB) and then compile the CLI (~1 GB build cache, 3–10 minutes on first run). Make sure you have ~1.5 GB free.
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
+source ~/.cargo/env                               # make nyxid available in current shell
+nyxid --version                                   # verify
+```
+
+Once installed, jump to [Manual CLI](#manual-cli) below for login and first-credential setup.
+
+---
+
 Now connect your AI agent — pick one approach:
 
 #### AI-assisted
 
 Paste this into Claude Code, Cursor, or any AI coding assistant:
 
-> I have NyxID self-hosted. The web console is at http://localhost:3000 and the backend API is at http://localhost:3001. Help me install the NyxID CLI (install script: https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh), then run source ~/.cargo/env to load it, log in with nyxid login --base-url http://localhost:3001, add my OpenAI API key with nyxid service add llm-openai, and verify with nyxid proxy request llm-openai models. Then help me copy the MCP config from Settings > MCP in the web console.
+> I have NyxID self-hosted and the Docker stack is up and healthy. The web console is at http://localhost:3000 and the backend API is at http://localhost:3001. Before doing anything, **ask me whether I want to install the `nyxid` CLI** — explain that it's optional, that the installer will pull the Rust toolchain (~300 MB) if I don't already have it, and that the first build takes 3–10 minutes and ~1.5 GB of disk. If I say yes, install it using this script: https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh, then run `source ~/.cargo/env`, log in with `nyxid login --base-url http://localhost:3001`, add my OpenAI API key with `nyxid service add llm-openai --credential-env OPENAI_API_KEY`, and verify with `nyxid proxy request llm-openai models`. If I say no, walk me through doing the same thing in the web console at http://localhost:3000 instead. Either way, finish by helping me copy the MCP config from **Settings > MCP** in the web console.
 
-Your AI agent will install the CLI (including Rust if needed), walk you through login and credential setup, and verify your connection — all interactively.
+Your AI agent will confirm the CLI install with you first, then walk you through login and credential setup (or the web-console equivalent), and verify your connection — all interactively.
 
 <!-- AI quickstart maintenance: validate this prompt against actual CLI on each release -->
 
