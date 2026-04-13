@@ -72,7 +72,7 @@ The node sends a `register` message with the one-time registration token:
   "type": "register",
   "token": "nyx_nreg_<64_hex_chars>",
   "metadata": {
-    "agent_version": "0.1.0",
+    "agent_version": "0.2.0",
     "os": "linux",
     "arch": "x86_64"
   }

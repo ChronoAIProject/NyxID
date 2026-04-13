@@ -75,7 +75,7 @@ The hook runs `cargo fmt --check`, `cargo clippy`, and `eslint` on staged files.
 
 ```bash
 curl http://localhost:3001/health
-# {"status":"ok","version":"0.1.0"}
+# {"status":"ok","version":"0.2.0"}
 ```
 
 ---
