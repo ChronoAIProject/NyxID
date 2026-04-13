@@ -104,7 +104,7 @@ There are two ways to use NyxID — pick the one that fits your situation:
 
 ### Option A: Hosted (closed beta)
 
-Sign up at the [NyxID console](https://nyx.chrono-ai.fun), add your API credentials through the dashboard, and copy the MCP config from **Settings > MCP** into your AI tool. Currently invitation-only — [join the waitlist](https://nyx.chrono-ai.fun/#waitlist).
+Sign up at the [NyxID console](https://nyx.chrono-ai.fun), then use the `nyxid` CLI — or point your AI agent at it — to connect your services. Currently invitation-only — [join the waitlist](https://nyx.chrono-ai.fun/#waitlist).
 
 ### Option B: Self-host
 
@@ -138,7 +138,7 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste this pro
 > 2. Clone the repo into the current directory, generate `.env.dev` with a fresh `ENCRYPTION_KEY` and `MONGO_ROOT_PASSWORD` (set `ENVIRONMENT=development`, `INVITE_CODE_REQUIRED=false`, and `AUTO_VERIFY_EMAIL=true` so I don't get stuck on email verification), symlink it to `.env.production`, create the PKCS#1 JWT signing keys under `keys/` (with a LibreSSL fallback using `-pubout` if `-RSAPublicKey_out` isn't supported), then pull images and start the stack with `docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d`. Wait up to 90 seconds for `http://localhost:3001/health` to return 200 — if it times out, tell me to run `docker compose logs backend`. Show me the generated `ENCRYPTION_KEY` so I can back it up.
 > 3. Tell me to open http://localhost:3000 and register my account (no email verification needed — accounts are auto-verified in dev mode), and wait until I confirm I've done that.
 > 4. **Ask me whether I want to install the `nyxid` CLI.** Explain that it's optional, that the installer will pull the Rust toolchain (~300 MB) if I don't have it, and that the first build takes 3–10 minutes and ~1.5 GB of disk. If I say yes, install it using https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh, then `source ~/.cargo/env`, log me in with `nyxid login --base-url http://localhost:3001`, add my OpenAI key with `nyxid service add llm-openai --credential-env OPENAI_API_KEY`, and verify with `nyxid proxy request llm-openai models`. If I say no, walk me through adding the same OpenAI credential in the web console instead.
-> 5. Finish by helping me copy the MCP config from **Settings > MCP** in the web console into my AI tool.
+> 5. Finish by connecting my AI tool to NyxID's MCP endpoint at `http://localhost:3001/mcp`. For Claude Code: `claude mcp add --transport http nyxid http://localhost:3001/mcp`. For Codex: `codex mcp add nyxid --url http://localhost:3001/mcp`. For Cursor: open **Settings > MCP** in the web console and click **Install to Cursor**.
 
 <!-- AI quickstart maintenance: validate this prompt against actual CLI + web console on each release -->
 
@@ -253,7 +253,11 @@ nyxid proxy request llm-openai models
 
 If the proxy returns data, the full chain works: credential stored, injected, downstream accepted.
 
-For MCP setup, open **Settings > MCP** in the web console (`http://localhost:3000`) to copy the correct config for Claude Code, Cursor, or VS Code.
+To connect your AI tool to NyxID's MCP endpoint (`http://localhost:3001/mcp`):
+
+- **Claude Code** — `claude mcp add --transport http nyxid http://localhost:3001/mcp`
+- **Codex** — `codex mcp add nyxid --url http://localhost:3001/mcp`
+- **Cursor** — open **Settings > MCP** in the web console (`http://localhost:3000`) and click **Install to Cursor** for a one-click deeplink install
 
 > Already have Rust? You can also install with: `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli`
 
@@ -262,7 +266,7 @@ For MCP setup, open **Settings > MCP** in the web console (`http://localhost:300
 Prefer a GUI (Graphical User Interface)? Everything above can also be done through the web console at `http://localhost:3000`:
 
 - **AI Services** — add API credentials (OpenAI, Anthropic, GitHub, etc.)
-- **Settings > MCP** — copy MCP config snippets for Claude Code, Cursor, or VS Code
+- **Settings > MCP** — one-click install for Cursor, or grab the `claude mcp add` / `codex mcp add` command for Claude Code and Codex
 
 ---
 
