@@ -107,6 +107,23 @@ Sign up at the [NyxID console](https://nyx.chrono-ai.fun), add your API credenti
 
 Total disk footprint: ~2 GB for the server only, ~3.5 GB if you also install the CLI from source.
 
+#### Option A: AI-assisted (recommended)
+
+If you have Claude Code, Cursor, or any AI coding assistant open, paste this prompt and it will drive the entire self-host flow for you — clone, env generation, Docker stack, health check, optional CLI install, login, first credential, and MCP config:
+
+> I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full quickstart interactively:
+> 1. Confirm Docker is installed and running before touching anything.
+> 2. Clone the repo into the current directory, generate `.env.production` with a fresh `ENCRYPTION_KEY` and `MONGO_ROOT_PASSWORD`, create the PKCS#1 JWT signing keys under `keys/`, then start the stack with `docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d` and wait until `http://localhost:3001/health` returns 200. Show me the generated `ENCRYPTION_KEY` so I can back it up.
+> 3. Tell me to open http://localhost:3000 and register my account, and wait until I confirm I've done that.
+> 4. **Ask me whether I want to install the `nyxid` CLI.** Explain that it's optional, that the installer will pull the Rust toolchain (~300 MB) if I don't have it, and that the first build takes 3–10 minutes and ~1.5 GB of disk. If I say yes, install it using https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh, then `source ~/.cargo/env`, log me in with `nyxid login --base-url http://localhost:3001`, add my OpenAI key with `nyxid service add llm-openai --credential-env OPENAI_API_KEY`, and verify with `nyxid proxy request llm-openai models`. If I say no, walk me through adding the same OpenAI credential in the web console instead.
+> 5. Finish by helping me copy the MCP config from **Settings > MCP** in the web console into my AI tool.
+
+<!-- AI quickstart maintenance: validate this prompt against actual CLI + web console on each release -->
+
+Prefer to do it yourself? Use Option B below.
+
+#### Option B: Manual
+
 Copy and paste this entire block into your terminal:
 
 ```bash
@@ -159,17 +176,7 @@ Once installed, jump to [Manual CLI](#manual-cli) below for login and first-cred
 
 ---
 
-Now connect your AI agent — pick one approach:
-
-#### AI-assisted
-
-Paste this into Claude Code, Cursor, or any AI coding assistant:
-
-> I have NyxID self-hosted and the Docker stack is up and healthy. The web console is at http://localhost:3000 and the backend API is at http://localhost:3001. Before doing anything, **ask me whether I want to install the `nyxid` CLI** — explain that it's optional, that the installer will pull the Rust toolchain (~300 MB) if I don't already have it, and that the first build takes 3–10 minutes and ~1.5 GB of disk. If I say yes, install it using this script: https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh, then run `source ~/.cargo/env`, log in with `nyxid login --base-url http://localhost:3001`, add my OpenAI API key with `nyxid service add llm-openai --credential-env OPENAI_API_KEY`, and verify with `nyxid proxy request llm-openai models`. If I say no, walk me through doing the same thing in the web console at http://localhost:3000 instead. Either way, finish by helping me copy the MCP config from **Settings > MCP** in the web console.
-
-Your AI agent will confirm the CLI install with you first, then walk you through login and credential setup (or the web-console equivalent), and verify your connection — all interactively.
-
-<!-- AI quickstart maintenance: validate this prompt against actual CLI on each release -->
+If you went the manual route above, finish the connection by picking one of these:
 
 #### Manual CLI
 
