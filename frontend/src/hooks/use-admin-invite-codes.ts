@@ -5,6 +5,7 @@ import type {
   DeactivateInviteCodeResponse,
   InviteCode,
   InviteCodeListResponse,
+  UpdateInviteCodeRequest,
 } from "@/types/admin";
 
 const QUERY_KEY = ["admin", "invite-codes"] as const;
@@ -30,6 +31,39 @@ export function useCreateInviteCode() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
+    },
+  });
+}
+
+/// Update mutable fields on an invite code. Today only `note` is mutable.
+///
+/// The PATCH response is the canonical, enriched record (same shape as a list
+/// item), so we splice it directly into the cached list rather than firing a
+/// background refetch. This means the drawer reflects the saved value the
+/// instant the request resolves — even on flaky networks where a follow-up
+/// refetch might fail or be delayed.
+export function useUpdateInviteCode() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      id,
+      body,
+    }: {
+      id: string;
+      body: UpdateInviteCodeRequest;
+    }): Promise<InviteCode> => {
+      return api.patch<InviteCode>(`/admin/invite-codes/${id}`, body);
+    },
+    onSuccess: (updated) => {
+      queryClient.setQueryData<InviteCodeListResponse>(QUERY_KEY, (prev) => {
+        if (!prev) return prev;
+        return {
+          invite_codes: prev.invite_codes.map((ic) =>
+            ic.id === updated.id ? updated : ic,
+          ),
+        };
+      });
     },
   });
 }

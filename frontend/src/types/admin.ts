@@ -118,6 +118,10 @@ export interface AdminAuditLogListResponse {
 export interface InviteCodeUsage {
   readonly user_id: string;
   readonly used_at: string;
+  /** Email of the redeeming user, or null if the user has been deleted. */
+  readonly user_email: string | null;
+  /** Display name of the redeeming user, or null if not set / deleted. */
+  readonly user_display_name: string | null;
 }
 
 export interface InviteCode {
@@ -140,6 +144,16 @@ export interface InviteCodeListResponse {
 export interface CreateInviteCodeRequest {
   readonly max_uses?: number;
   readonly note?: string;
+}
+
+export interface UpdateInviteCodeRequest {
+  /**
+   * The new note value. The PATCH endpoint is authoritative — whatever you
+   * send (or omit) becomes the stored value. A non-empty string sets the
+   * note; `""`, `null`, or omitting the field all clear it. There is no
+   * "leave unchanged" mode today, so always send the full intended value.
+   */
+  readonly note?: string | null;
 }
 
 export interface DeactivateInviteCodeResponse {
