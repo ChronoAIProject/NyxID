@@ -180,8 +180,13 @@ export function AuthFlow({
   const strength = getPasswordStrength(regPassword);
   const isInviteValid = INVITE_PATTERN.test(inviteCode.trim().toUpperCase());
 
-  // Always show all social providers — backend errors if not configured
-  const enabledRegisterProviders = REGISTER_PROVIDERS;
+  // Hide social providers whose backend credentials are not configured.
+  // While publicConfig is loading, render none rather than flashing buttons
+  // that may immediately disappear once the config arrives.
+  const enabledProviders = REGISTER_PROVIDERS.filter(
+    (p) => publicConfig?.social_providers.includes(p.id) ?? false,
+  );
+  const hasSocialProviders = enabledProviders.length > 0;
 
   // -- Slide helpers --
   const FADE_MS = 200;
@@ -412,17 +417,18 @@ export function AuthFlow({
                 </form>
               </Form>
 
-              {/* Divider */}
-              <div className="my-6 flex items-center gap-4">
-                <div className="h-px flex-1 bg-border" />
-                <span className="text-xs text-text-tertiary">or</span>
-                <div className="h-px flex-1 bg-border" />
-              </div>
+              {hasSocialProviders && (
+                <div className="my-6 flex items-center gap-4">
+                  <div className="h-px flex-1 bg-border" />
+                  <span className="text-xs text-text-tertiary">or</span>
+                  <div className="h-px flex-1 bg-border" />
+                </div>
+              )}
             </>
           )}
 
           <div className="flex flex-col gap-2">
-            {REGISTER_PROVIDERS.map((provider) => (
+            {enabledProviders.map((provider) => (
               <button
                 key={provider.id}
                 type="button"
@@ -585,7 +591,7 @@ export function AuthFlow({
             </p>
 
             <div className="flex flex-col gap-2">
-              {enabledRegisterProviders.map((provider) => (
+              {enabledProviders.map((provider) => (
                 <button
                   key={provider.id}
                   type="button"
