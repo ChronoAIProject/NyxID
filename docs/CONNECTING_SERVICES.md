@@ -80,7 +80,7 @@ After this, your AI agent will see NyxID's `nyx__discover_services`, `nyx__conne
 
 ## Step 3 — Connect your first service
 
-This is the headline. Four paths, in order of how friction-free they are. Pick whichever you like — they all do the same thing and any of them satisfies issue #298's "verify before MCP" gate.
+This is the headline. Four paths, in order of how friction-free they are. Pick whichever you like — they all complete the three substeps from the mental model above and avoid the issue #298 trap (where MCP is wired but no real service is connected, so the agent only sees `nyx__...` meta-tools).
 
 ### Path A — AI-driven (recommended)
 
