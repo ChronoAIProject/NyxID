@@ -166,11 +166,9 @@ CHECK
 
 > **This is a first-time install.** If you already have NyxID set up locally, run `./scripts/uninstall.sh --yes` from inside `NyxID/` first (see [Uninstall & reinstall](#uninstall--reinstall) below), then come back here.
 
+The block below is wrapped in `bash << 'INSTALL' ... INSTALL` so it runs under bash regardless of your outer shell — no `zsh: command not found: #` errors on macOS. The trailing `cd NyxID` runs in your interactive shell after the bash subshell exits, so you land inside the checkout for later commands (stop, uninstall, CLI install).
+
 ```bash
-# Wrapped in `bash << 'INSTALL'` so the whole block runs under bash regardless
-# of your outer shell (zsh on macOS, fish, etc.). Fixes shell-parsing errors
-# reported in #281. Trailing `cd NyxID` outside the subshell keeps your
-# interactive cwd inside the checkout after the block finishes.
 bash << 'INSTALL'
 set -e
 
@@ -256,9 +254,6 @@ else
 fi
 INSTALL
 
-# The bash subshell above exits back to your interactive shell. cd into the
-# checkout so later commands (docker compose down, ./scripts/uninstall.sh,
-# nyxid CLI install) work without re-navigating.
 cd NyxID 2>/dev/null || true
 ```
 
