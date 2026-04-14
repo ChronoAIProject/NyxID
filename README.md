@@ -135,8 +135,8 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste this pro
 
 > I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full quickstart interactively:
 > 1. Confirm Docker is installed and running before touching anything (check `git`, `docker`, `openssl`, `curl`, `docker compose` v2, and `docker info`).
-> 2. **Before cloning or generating anything, check whether NyxID install STATE is present** — look for a `./NyxID/.env.dev` file or a Docker volume named `nyxid_mongodb_data` (try `docker volume inspect nyxid_mongodb_data`). A bare `./NyxID` directory alone does NOT count as "installed" — `uninstall.sh` leaves the source tree in place, so the directory can exist with no state. **If install state is present, stop and tell me the quickstart is a first-time-only install.** Ask whether I want to (a) uninstall first — if `./NyxID` exists, run `cd NyxID && ./scripts/uninstall.sh --yes && cd ..`; if only the stale Docker volume is orphaned (checkout was manually deleted earlier), run `docker volume rm nyxid_mongodb_data` directly. Either path wipes the volume, containers, and (for the script path) `.env.dev`/keys — destroys all NyxID accounts and encrypted credentials. Or (b) keep my existing install and stop here — I can verify it's still running with `curl -sf http://localhost:3001/health`. Do not proceed to step 3 until I answer.
-> 3. If `./NyxID` already exists (post-uninstall reinstall), `cd` into it; otherwise clone the repo into the current directory and `cd` in. Generate `.env.dev` with a fresh `ENCRYPTION_KEY` and `MONGO_ROOT_PASSWORD` (set `ENVIRONMENT=development`, `INVITE_CODE_REQUIRED=false`, `AUTO_VERIFY_EMAIL=true`, and `EMAIL_AUTH_ENABLED=true` so I don't get stuck on email verification or a locked-down signup page), symlink it to `.env.production`, create the PKCS#1 JWT signing keys under `keys/` (with a LibreSSL fallback using `-pubout` if `-RSAPublicKey_out` isn't supported), then pull images and start the stack with `docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d`. Wait up to 90 seconds for `http://localhost:3001/health` to return 200 — if it times out, tell me to run `docker logs nyxid-backend`. If the logs show `SCRAM failure: Authentication failed`, that means the MongoDB volume has a stale password from a previous install — tell me to run `./scripts/uninstall.sh --yes` (or `docker volume rm nyxid_mongodb_data` if the checkout is gone) and retry. Show me the generated `ENCRYPTION_KEY` so I can back it up.
+> 2. **Before cloning or generating anything, check whether NyxID install STATE is present** — look for a `./NyxID/.env.dev` file OR any Docker volume matching `nyx*_mongodb_data` (run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$'` — this catches the default `nyxid_mongodb_data` plus any variant from a renamed checkout). A bare `./NyxID` directory alone does NOT count as "installed" — `uninstall.sh` leaves the source tree in place, so the directory can exist with no state. **If install state is present, stop and tell me the quickstart is a first-time-only install.** Ask whether I want to (a) uninstall first — if `./NyxID` exists, run `cd NyxID && ./scripts/uninstall.sh --yes && cd ..`; if only the stale Docker volume is orphaned (checkout was manually deleted earlier), run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` directly. Either path wipes the volume, containers, and (for the script path) `.env.dev`/keys — destroys all NyxID accounts and encrypted credentials. Or (b) keep my existing install and stop here — I can verify it's still running with `curl -sf http://localhost:3001/health`. Do not proceed to step 3 until I answer.
+> 3. If `./NyxID` already exists (post-uninstall reinstall), `cd` into it; otherwise clone the repo into the current directory and `cd` in. Generate `.env.dev` with a fresh `ENCRYPTION_KEY` and `MONGO_ROOT_PASSWORD` (set `ENVIRONMENT=development`, `INVITE_CODE_REQUIRED=false`, `AUTO_VERIFY_EMAIL=true`, and `EMAIL_AUTH_ENABLED=true` so I don't get stuck on email verification or a locked-down signup page), symlink it to `.env.production`, create the PKCS#1 JWT signing keys under `keys/` (with a LibreSSL fallback using `-pubout` if `-RSAPublicKey_out` isn't supported), then pull images and start the stack with `docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d`. Wait up to 90 seconds for `http://localhost:3001/health` to return 200 — if it times out, tell me to run `docker logs nyxid-backend`. If the logs show `SCRAM failure: Authentication failed`, that means the MongoDB volume has a stale password from a previous install — tell me to run `./scripts/uninstall.sh --yes` (or, if the checkout is gone, `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` to remove any nyx-flavored orphan volume) and retry. Show me the generated `ENCRYPTION_KEY` so I can back it up.
 > 4. Tell me to open http://localhost:3000 and register my account (no email verification needed — accounts are auto-verified in dev mode), and wait until I confirm I've done that.
 > 5. **Ask me whether I want to install the `nyxid` CLI.** Explain that it's optional, that the installer will pull the Rust toolchain (~300 MB) if I don't have it, and that the first build takes 3–10 minutes and ~1.5 GB of disk. If I say yes, install it using https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh, then `source ~/.cargo/env`, log me in with `nyxid login --base-url http://localhost:3001`, add my OpenAI key with `nyxid service add llm-openai --credential-env OPENAI_API_KEY`, and verify with `nyxid proxy request llm-openai models`. If I say no, walk me through adding the same OpenAI credential in the web console instead.
 > 6. Finish by connecting my AI tool to NyxID's MCP endpoint at `http://localhost:3001/mcp`. For Claude Code: `claude mcp add --transport http nyxid http://localhost:3001/mcp`. For Codex: `codex mcp add nyxid --url http://localhost:3001/mcp`. For Cursor: open **Settings > MCP** in the web console and click **Install to Cursor**.
@@ -172,18 +172,23 @@ CHECK
 # reported in #281. Trailing `cd NyxID` outside the subshell keeps your
 # interactive cwd inside the checkout after the block finishes.
 bash << 'INSTALL'
+set -e
+
 # ── Pre-flight: refuse to run on an existing install ──
-# Checks for install STATE (.env.dev or the Mongo volume), NOT the NyxID/
-# source tree — so re-running this block after ./scripts/uninstall.sh works
-# cleanly. uninstall.sh removes state but leaves the cloned source in place.
-if [ -f NyxID/.env.dev ] || docker volume inspect nyxid_mongodb_data >/dev/null 2>&1; then
+# Checks for install STATE (.env.dev or any nyx-flavored Mongo volume), NOT
+# the NyxID/ source tree — so re-running this block after ./scripts/uninstall.sh
+# works cleanly. The volume grep matches nyxid_mongodb_data (default compose
+# project), nyx_mongodb_data, or any other nyx*_mongodb_data variant from a
+# renamed checkout, without false-positing on unrelated MongoDB projects.
+if [ -f NyxID/.env.dev ] \
+  || docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qE 'nyx.*_mongodb_data$'; then
   echo "Existing NyxID install state detected."
   if [ -d NyxID ]; then
     echo "Uninstall first, then re-paste this block:"
     echo "    cd NyxID && ./scripts/uninstall.sh --yes && cd .."
   else
     echo "NyxID/ is gone but a stale MongoDB volume remains. Remove it, then re-paste:"
-    echo "    docker volume rm nyxid_mongodb_data"
+    echo "    docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data\$' | xargs -r docker volume rm"
   fi
   exit 0
 fi
@@ -286,10 +291,10 @@ Docker images are preserved (no re-download). Pass `--keep-config` if you want t
 
 After uninstall, `cd ..` out of `NyxID/` and re-paste **Step 2** above. The pre-flight now checks for install *state* (`.env.dev` or the Mongo volume), not the source tree — so the existing `NyxID/` checkout is reused and only regeneration runs.
 
-**Recovering an orphan volume:** If you hit issue #280 on an older quickstart and manually deleted your `NyxID/` checkout, but a stale MongoDB volume survived, you don't need to re-clone just to run `uninstall.sh`. Remove the volume directly:
+**Recovering an orphan volume:** If you hit issue #280 on an older quickstart and manually deleted your `NyxID/` checkout, but a stale MongoDB volume survived, you don't need to re-clone just to run `uninstall.sh`. Remove any nyx-flavored volume directly — this matches `nyxid_mongodb_data` (default), `nyx_mongodb_data`, or any `nyx*_mongodb_data` variant from a renamed checkout:
 
 ```bash
-docker volume rm nyxid_mongodb_data
+docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm
 docker rm -f nyxid-mongodb nyxid-mailpit nyxid-backend nyxid-frontend 2>/dev/null || true
 ```
 
