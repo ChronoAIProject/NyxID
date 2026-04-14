@@ -71,6 +71,19 @@ any REST API as MCP (Model Context Protocol) tools.
 - **Per-agent isolation** — each agent gets a scoped token. Agent A accesses Slack and Gmail. Agent B only accesses your internal API. Revoke any session without touching the underlying credentials.
 - **Full identity layer** — OIDC (OpenID Connect) / OAuth 2.0 with PKCE (Proof Key for Code Exchange), RBAC (Role-Based Access Control), service accounts, transaction approval (Telegram + mobile push), LLM (Large Language Model) gateway for 7 providers.
 
+## See it in action
+
+The end-to-end loop is short: connect a service to NyxID once, then any AI agent pointed at your NyxID MCP endpoint can use it — without ever seeing the raw API key.
+
+1. **Add a service** in the web console — paste your OpenAI (or Anthropic, GitHub, etc.) key once; NyxID stores it encrypted.
+2. **Wire up your AI tool** — `claude mcp add --transport http nyxid http://localhost:3001/mcp` (or one-click install for Cursor in **Settings → MCP**).
+3. **Use it** — Claude Code, Cursor, or any MCP client can now call the service through NyxID. The agent sees the response; never the key.
+
+<!-- TODO: Demo GIF — 30-second recording of the 3 steps above.
+     Capture with vhs (https://github.com/charmbracelet/vhs) or asciinema.
+     <p align="center"><img src="assets/demo.gif" alt="NyxID end-to-end demo" width="80%"></p>
+-->
+
 ## Why NyxID
 
 Other tools solve parts of this — NyxID combines credential injection, NAT traversal, and MCP tooling in one open-source gateway:
@@ -83,14 +96,6 @@ Other tools solve parts of this — NyxID combines credential injection, NAT tra
 | REST to MCP auto-wrap | Yes | No | No | No |
 | Per-agent isolation | Yes | No | No | No |
 | OIDC / OAuth 2.0 | Yes | No | No | Yes |
-
-<!-- TODO: Demo GIF
-     15-30 second terminal recording: install CLI → login → proxy a request
-     Tools: https://github.com/charmbracelet/vhs or https://asciinema.org
-     <p align="center">
-       <img src="assets/demo.gif" alt="NyxID Quick Start Demo" width="80%">
-     </p>
--->
 
 ## Quick Start
 
@@ -110,30 +115,13 @@ Sign up at the [NyxID console](https://nyx.chrono-ai.fun), then use the `nyxid` 
 
 Run NyxID on your own machine. This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
 
-```mermaid
-flowchart LR
-    A["1. Check prerequisites"] --> B["2. Clone & configure"]
-    B --> C["Start Docker stack"]
-    C --> D["3. Register account"]
-    D --> E{Connect AI agent}
-    E --> F[AI-assisted]
-    E --> G[Manual CLI]
-    E --> H[Web console]
-```
-
-**Prerequisites:**
-
-- [Docker](https://docs.docker.com/get-docker/) — required for the server stack (backend, frontend, MongoDB). ~2 GB disk for images on first pull.
-- A bash-compatible terminal — macOS Terminal, Linux shell, or [WSL (Windows Subsystem for Linux)](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows.
-- [Rust / Cargo](https://www.rust-lang.org/tools/install) — **optional**, only needed if you install the `nyxid` CLI (see [Manual CLI](#manual-cli) below). The installer will set this up automatically if missing. Budget ~1.5 GB disk (~300 MB for the toolchain plus ~1 GB for the build cache) and 3–10 minutes for the first compile.
-
-Total disk footprint: ~2 GB for the server only, ~3.5 GB if you also install the CLI from source.
+**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash-compatible terminal. The `nyxid` CLI is optional. Full prereqs and disk budgets in [docs/QUICKSTART.md](docs/QUICKSTART.md#prerequisites).
 
 #### AI-assisted (recommended)
 
 If you have Claude Code, Cursor, or any AI coding assistant open, paste this prompt and it will drive the entire self-host flow for you — clone, env generation, Docker stack, health check, optional CLI install, login, first credential, and MCP config:
 
-> I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full quickstart interactively:
+> I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full quickstart interactively. If anything fails or I'd prefer to follow the manual steps myself, the full step-by-step with troubleshooting is at https://github.com/ChronoAIProject/NyxID/blob/main/docs/QUICKSTART.md.
 > 1. Confirm Docker is installed and running before touching anything (check `git`, `docker`, `openssl`, `curl`, `docker compose` v2, and `docker info`).
 > 2. **Before cloning or generating anything, check whether NyxID install STATE is present** — look for a `./NyxID/.env.dev` file OR any Docker volume matching `nyx*_mongodb_data` (run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$'` — this catches the default `nyxid_mongodb_data` plus any variant from a renamed checkout). A bare `./NyxID` directory alone does NOT count as "installed" — `uninstall.sh` leaves the source tree in place, so the directory can exist with no state. **If install state is present, stop and tell me the quickstart is a first-time-only install.** Ask whether I want to (a) uninstall first — if `./NyxID` exists, run `cd NyxID && ./scripts/uninstall.sh --yes && cd ..`; if only the stale Docker volume is orphaned (checkout was manually deleted earlier), run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` directly. Either path wipes the volume, containers, and (for the script path) `.env.dev`/keys — destroys all NyxID accounts and encrypted credentials. Or (b) keep my existing install and stop here — I can verify it's still running with `curl -sf http://localhost:3001/health`. Do not proceed to step 3 until I answer.
 > 3. If `./NyxID` already exists (post-uninstall reinstall), `cd` into it; otherwise clone the repo into the current directory and `cd` in. Generate `.env.dev` with a fresh `ENCRYPTION_KEY` and `MONGO_ROOT_PASSWORD` (set `ENVIRONMENT=development`, `INVITE_CODE_REQUIRED=false`, `AUTO_VERIFY_EMAIL=true`, and `EMAIL_AUTH_ENABLED=true` so I don't get stuck on email verification or a locked-down signup page), symlink it to `.env.production`, create the PKCS#1 JWT signing keys under `keys/` (with a LibreSSL fallback using `-pubout` if `-RSAPublicKey_out` isn't supported), then pull images and start the stack with `docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d`. Wait up to 90 seconds for `http://localhost:3001/health` to return 200 — if it times out, tell me to run `docker logs nyxid-backend`. If the logs show `SCRAM failure: Authentication failed`, that means the MongoDB volume has a stale password from a previous install — tell me to run `./scripts/uninstall.sh --yes` (or, if the checkout is gone, `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` to remove any nyx-flavored orphan volume) and retry. Show me the generated `ENCRYPTION_KEY` so I can back it up.
@@ -143,215 +131,17 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste this pro
 
 <!-- AI quickstart maintenance: validate this prompt against actual CLI + web console on each release -->
 
-Prefer to run each step yourself? Follow the manual path below.
+#### Manual setup
 
-#### Manual (step-by-step)
+Prefer to run each step yourself, or need the full troubleshooting guide? The complete manual flow lives in **[docs/QUICKSTART.md](docs/QUICKSTART.md)**:
 
-**Step 1 of 3 — Check your system** (paste this into your terminal):
+- System preflight check — [Step 1](docs/QUICKSTART.md#step-1-of-3--check-your-system)
+- One paste-block install — [Step 2](docs/QUICKSTART.md#step-2-of-3--install-and-start)
+- Register your account — [Step 3](docs/QUICKSTART.md#step-3-of-3--register-and-connect)
+- Optional [CLI install](docs/QUICKSTART.md#optional-install-the-nyxid-cli) and [first credential / MCP wiring](docs/QUICKSTART.md#connect-your-ai-tool)
+- [Uninstall & reinstall](docs/QUICKSTART.md#uninstall--reinstall), [orphan volume recovery](docs/QUICKSTART.md#recovering-an-orphan-volume), and [SCRAM failure](docs/QUICKSTART.md#stuck-on-scram-failure) troubleshooting
 
-```bash
-bash << 'CHECK'
-err=0
-for cmd in git docker openssl curl; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then echo "Missing: $cmd"; err=1; fi
-done
-if ! docker compose version >/dev/null 2>&1; then echo "Missing: docker compose (v2 plugin)"; err=1; fi
-if ! docker info >/dev/null 2>&1; then echo "Docker is not running. Start Docker Desktop and re-run."; err=1; fi
-if [ "$err" -eq 1 ]; then exit 1; fi
-echo "All good — proceed to Step 2."
-CHECK
-```
-
-**Step 2 of 3 — Install and start** (paste after Step 1 passes):
-
-> **This is a first-time install.** If you already have NyxID set up locally, run `./scripts/uninstall.sh --yes` from inside `NyxID/` first (see [Uninstall & reinstall](#uninstall--reinstall) below), then come back here.
-
-The block below is wrapped in `bash << 'INSTALL' ... INSTALL` so it runs under bash regardless of your outer shell — no `zsh: command not found: #` errors on macOS. The trailing `cd NyxID` runs in your interactive shell after the bash subshell exits, so you land inside the checkout for later commands (stop, uninstall, CLI install).
-
-```bash
-bash << 'INSTALL'
-set -e
-
-# ── Pre-flight: refuse to run on an existing install ──
-# Checks for install STATE (.env.dev or any nyx-flavored Mongo volume), NOT
-# the NyxID/ source tree — so re-running this block after ./scripts/uninstall.sh
-# works cleanly. The volume grep matches nyxid_mongodb_data (default compose
-# project), nyx_mongodb_data, or any other nyx*_mongodb_data variant from a
-# renamed checkout, without false-positing on unrelated MongoDB projects.
-if [ -f NyxID/.env.dev ] \
-  || docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qE 'nyx.*_mongodb_data$'; then
-  echo "Existing NyxID install state detected."
-  if [ -d NyxID ]; then
-    echo "Uninstall first, then re-paste this block:"
-    echo "    cd NyxID && ./scripts/uninstall.sh --yes && cd .."
-  else
-    echo "NyxID/ is gone but a stale MongoDB volume remains. Remove it, then re-paste:"
-    echo "    docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data\$' | xargs -r docker volume rm"
-  fi
-  exit 0
-fi
-
-# Clone only if the source tree isn't already here (post-uninstall reinstall
-# reuses the existing checkout; uninstall.sh doesn't delete the repo itself).
-[ -d NyxID ] || git clone https://github.com/ChronoAIProject/NyxID.git
-cd NyxID
-
-# ── Generate .env.dev (dev config) and link for Docker ──
-EK=$(openssl rand -hex 32)
-cat > .env.dev << EOF
-MONGO_ROOT_PASSWORD=$(openssl rand -hex 24)
-ENCRYPTION_KEY=$EK
-BASE_URL=http://localhost:3001
-FRONTEND_URL=http://localhost:3000
-ENVIRONMENT=development
-JWT_PRIVATE_KEY_PATH=/app/keys/private.pem
-JWT_PUBLIC_KEY_PATH=/app/keys/public.pem
-INVITE_CODE_REQUIRED=false
-AUTO_VERIFY_EMAIL=true
-EMAIL_AUTH_ENABLED=true
-RUST_LOG=nyxid=info,tower_http=info
-EOF
-ln -sf .env.dev .env.production
-
-# ── Generate signing keys (LibreSSL fallback for macOS) ──
-mkdir -p keys
-openssl genrsa -out keys/private.pem 4096 2>/dev/null
-openssl rsa -in keys/private.pem -RSAPublicKey_out -out keys/public.pem 2>/dev/null \
-  || openssl rsa -in keys/private.pem -pubout -out keys/public.pem 2>/dev/null
-
-# ── Pull images and start the stack ──
-echo "Downloading NyxID (this may take a few minutes on first run)..."
-docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-  --env-file .env.production pull
-docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-  --env-file .env.production up -d
-
-# ── Wait for the server (up to 90s) ──
-# Track success explicitly so we print EXACTLY ONE of the two outcome
-# messages below, never both. Fixes #282 where timeout + success printed
-# together when /health didn't come up in time.
-echo "Waiting for NyxID to start..."
-ok=0
-n=0
-while [ "$n" -lt 45 ]; do
-  if curl -sf http://localhost:3001/health >/dev/null 2>&1; then
-    ok=1
-    break
-  fi
-  n=$((n+1))
-  sleep 2
-done
-
-if [ "$ok" -eq 1 ]; then
-  echo ""
-  echo "✓ NyxID is running at http://localhost:3000"
-  echo "  Save your encryption key (needed if you reset the database): $EK"
-else
-  echo ""
-  echo "✗ Timed out waiting for NyxID to start."
-  echo "  Check logs:  docker logs nyxid-backend"
-  echo "  Reset state: see the 'Uninstall & reinstall' section in README.md"
-fi
-INSTALL
-
-cd NyxID 2>/dev/null || true
-```
-
-**Step 3 of 3 — Register and connect**
-
-1. Open `http://localhost:3000` in your browser
-2. Register with your name, email, and a password — no email verification needed (accounts are auto-verified in dev mode)
-3. Log in and connect your AI agent using one of the methods below
-
-To stop NyxID: `docker compose -f docker-compose.yml -f docker-compose.prod.yml down`
-
-#### Uninstall & reinstall
-
-Quickstart is a **first-time install**. To reinstall — e.g. to try a new config, wipe test data, or recover from a broken state — uninstall first, then re-run Step 2.
-
-```bash
-cd NyxID
-./scripts/uninstall.sh               # interactive: type "wipe" to confirm
-./scripts/uninstall.sh --yes         # non-interactive (CI / repeat testing)
-./scripts/uninstall.sh --keep-config # keep .env.dev and keys/*.pem across reinstall
-```
-
-By default this removes:
-
-- Docker containers (`nyxid-mongodb`, `nyxid-mailpit`, `nyxid-backend`, `nyxid-frontend`)
-- The MongoDB named volume (`nyxid_mongodb_data`) — all NyxID accounts, encrypted credentials, and audit log entries
-- `.env.dev`, `.env.production`, `keys/private.pem`, `keys/public.pem`
-
-Docker images are preserved (no re-download). Pass `--keep-config` if you want to preserve your existing `ENCRYPTION_KEY` across reinstall (e.g. to keep encrypted database backups readable).
-
-After uninstall, `cd ..` out of `NyxID/` and re-paste **Step 2** above. The pre-flight now checks for install *state* (`.env.dev` or the Mongo volume), not the source tree — so the existing `NyxID/` checkout is reused and only regeneration runs.
-
-**Recovering an orphan volume:** If you hit issue #280 on an older quickstart and manually deleted your `NyxID/` checkout, but a stale MongoDB volume survived, you don't need to re-clone just to run `uninstall.sh`. Remove any nyx-flavored volume directly — this matches `nyxid_mongodb_data` (default), `nyx_mongodb_data`, or any `nyx*_mongodb_data` variant from a renamed checkout:
-
-```bash
-docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm
-docker rm -f nyxid-mongodb nyxid-mailpit nyxid-backend nyxid-frontend 2>/dev/null || true
-```
-
-Then re-paste Step 2 — the pre-flight will pass and Step 2 will clone fresh.
-
-> **Stuck on `SCRAM failure: Authentication failed` in `docker logs nyxid-backend`?** Your MongoDB volume still has the previous `MONGO_ROOT_PASSWORD` baked in from a prior run, and `.env.dev` no longer matches. Run `./scripts/uninstall.sh --yes` to wipe the volume, then re-run Step 2. See [#280](https://github.com/ChronoAIProject/NyxID/issues/280).
-
-For production deployment (TLS (Transport Layer Security), custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
-
-#### Optional: Install the `nyxid` CLI
-
-The server stack above is fully usable from the web console — the CLI (Command Line Interface) is only needed if you want to script credential setup, manage credential nodes, or drive NyxID from your terminal. Skip this section if you'd rather stay in the browser.
-
-> **Heads-up:** the installer builds from source via Cargo. It will install Rust automatically if you don't already have it (~300 MB) and then compile the CLI (~1 GB build cache, 3–10 minutes on first run). Make sure you have ~1.5 GB free.
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
-source ~/.cargo/env                               # make nyxid available in current shell
-nyxid --version                                   # verify
-```
-
-Once installed, jump to [Manual CLI](#manual-cli) below for login and first-credential setup.
-
----
-
-Finish the connection by picking one of these:
-
-#### Manual CLI
-
-```bash
-# Install the CLI (installs Rust automatically if needed, takes a few minutes on first run)
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
-source ~/.cargo/env                               # make nyxid available in current shell
-
-# Log in (opens browser for authentication)
-nyxid login --base-url http://localhost:3001
-
-# Add your first API credential (e.g. OpenAI — make sure OPENAI_API_KEY is set in your shell)
-nyxid service add llm-openai --credential-env OPENAI_API_KEY
-
-# Verify — you should see a JSON response listing models
-nyxid proxy request llm-openai models
-```
-
-If the proxy returns data, the full chain works: credential stored, injected, downstream accepted.
-
-To connect your AI tool to NyxID's MCP endpoint (`http://localhost:3001/mcp`):
-
-- **Claude Code** — `claude mcp add --transport http nyxid http://localhost:3001/mcp`
-- **Codex** — `codex mcp add nyxid --url http://localhost:3001/mcp`
-- **Cursor** — open **Settings > MCP** in the web console (`http://localhost:3000`) and click **Install to Cursor** for a one-click deeplink install
-
-> Already have Rust? You can also install with: `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli`
-
-#### Web console
-
-Prefer a GUI (Graphical User Interface)? Everything above can also be done through the web console at `http://localhost:3000`:
-
-- **AI Services** — add API credentials (OpenAI, Anthropic, GitHub, etc.)
-- **Settings > MCP** — one-click install for Cursor, or grab the `claude mcp add` / `codex mcp add` command for Claude Code and Codex
-
----
+For production deployment (TLS, custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ### Reach local services (optional)
 
@@ -380,6 +170,7 @@ nyxid catalog endpoints my-local-api
 
 | Topic | Link | |
 |-------|------|---|
+| Quickstart (manual) | [docs/QUICKSTART.md](docs/QUICKSTART.md) | Step-by-step self-host + troubleshooting |
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
 | Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |
