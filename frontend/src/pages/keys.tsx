@@ -265,10 +265,19 @@ function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
         <div className="flex h-14 w-14 items-center justify-center rounded-full border border-border">
           <KeyRound className="h-6 w-6 text-muted-foreground" />
         </div>
-        <div className="text-center">
+        <div className="max-w-md space-y-2 text-center">
           <p className="text-sm font-medium">No AI services yet</p>
           <p className="text-xs text-muted-foreground">
-            Add an AI service to connect to external APIs through NyxID.
+            Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your
+            AI agents can call it through NyxID without ever seeing the raw key.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Connect a service <span className="font-medium">before</span> wiring
+            up MCP &mdash; otherwise your AI agent will only see NyxID&apos;s{" "}
+            <code className="rounded bg-muted px-1 py-0.5 text-[0.7rem]">
+              nyx__&hellip;
+            </code>{" "}
+            meta-tools and proxy requests will look broken.
           </p>
         </div>
         <Button size="sm" onClick={onAdd}>
