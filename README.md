@@ -167,6 +167,11 @@ CHECK
 > **This is a first-time install.** If you already have NyxID set up locally, run `./scripts/uninstall.sh --yes` from inside `NyxID/` first (see [Uninstall & reinstall](#uninstall--reinstall) below), then come back here.
 
 ```bash
+# Wrapped in `bash << 'INSTALL'` so the whole block runs under bash regardless
+# of your outer shell (zsh on macOS, fish, etc.). Fixes shell-parsing errors
+# reported in #281. Trailing `cd NyxID` outside the subshell keeps your
+# interactive cwd inside the checkout after the block finishes.
+bash << 'INSTALL'
 # ── Pre-flight: refuse to run on an existing install ──
 # Checks for install STATE (.env.dev or the Mongo volume), NOT the NyxID/
 # source tree — so re-running this block after ./scripts/uninstall.sh works
@@ -180,15 +185,17 @@ if [ -f NyxID/.env.dev ] || docker volume inspect nyxid_mongodb_data >/dev/null 
     echo "NyxID/ is gone but a stale MongoDB volume remains. Remove it, then re-paste:"
     echo "    docker volume rm nyxid_mongodb_data"
   fi
-else
-  # Clone only if the source tree isn't already here (post-uninstall reinstall
-  # reuses the existing checkout; uninstall.sh doesn't delete the repo itself).
-  [ -d NyxID ] || git clone https://github.com/ChronoAIProject/NyxID.git
-  cd NyxID
+  exit 0
+fi
 
-  # ── Generate .env.dev (dev config) and link for Docker ──
-  EK=$(openssl rand -hex 32)
-  cat > .env.dev << EOF
+# Clone only if the source tree isn't already here (post-uninstall reinstall
+# reuses the existing checkout; uninstall.sh doesn't delete the repo itself).
+[ -d NyxID ] || git clone https://github.com/ChronoAIProject/NyxID.git
+cd NyxID
+
+# ── Generate .env.dev (dev config) and link for Docker ──
+EK=$(openssl rand -hex 32)
+cat > .env.dev << EOF
 MONGO_ROOT_PASSWORD=$(openssl rand -hex 24)
 ENCRYPTION_KEY=$EK
 BASE_URL=http://localhost:3001
@@ -201,31 +208,53 @@ AUTO_VERIFY_EMAIL=true
 EMAIL_AUTH_ENABLED=true
 RUST_LOG=nyxid=info,tower_http=info
 EOF
-  ln -sf .env.dev .env.production
+ln -sf .env.dev .env.production
 
-  # ── Generate signing keys (LibreSSL fallback for macOS) ──
-  mkdir -p keys
-  openssl genrsa -out keys/private.pem 4096 2>/dev/null
-  openssl rsa -in keys/private.pem -RSAPublicKey_out -out keys/public.pem 2>/dev/null \
-    || openssl rsa -in keys/private.pem -pubout -out keys/public.pem 2>/dev/null
+# ── Generate signing keys (LibreSSL fallback for macOS) ──
+mkdir -p keys
+openssl genrsa -out keys/private.pem 4096 2>/dev/null
+openssl rsa -in keys/private.pem -RSAPublicKey_out -out keys/public.pem 2>/dev/null \
+  || openssl rsa -in keys/private.pem -pubout -out keys/public.pem 2>/dev/null
 
-  # ── Pull images and start the stack ──
-  echo "Downloading NyxID (this may take a few minutes on first run)..."
-  docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-    --env-file .env.production pull &&
-  docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-    --env-file .env.production up -d
+# ── Pull images and start the stack ──
+echo "Downloading NyxID (this may take a few minutes on first run)..."
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  --env-file .env.production pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  --env-file .env.production up -d
 
-  # ── Wait for the server (up to 90s) ──
-  echo "Waiting for NyxID to start..."
-  n=0
-  until curl -sf http://localhost:3001/health >/dev/null 2>&1; do
-    n=$((n+1))
-    if [ "$n" -ge 45 ]; then echo "Timed out. Run: docker logs nyxid-backend"; break; fi
-    sleep 2
-  done && echo "NyxID is running at http://localhost:3000" &&
-  echo "Save your encryption key (needed if you reset the database): $EK"
+# ── Wait for the server (up to 90s) ──
+# Track success explicitly so we print EXACTLY ONE of the two outcome
+# messages below, never both. Fixes #282 where timeout + success printed
+# together when /health didn't come up in time.
+echo "Waiting for NyxID to start..."
+ok=0
+n=0
+while [ "$n" -lt 45 ]; do
+  if curl -sf http://localhost:3001/health >/dev/null 2>&1; then
+    ok=1
+    break
+  fi
+  n=$((n+1))
+  sleep 2
+done
+
+if [ "$ok" -eq 1 ]; then
+  echo ""
+  echo "✓ NyxID is running at http://localhost:3000"
+  echo "  Save your encryption key (needed if you reset the database): $EK"
+else
+  echo ""
+  echo "✗ Timed out waiting for NyxID to start."
+  echo "  Check logs:  docker logs nyxid-backend"
+  echo "  Reset state: see the 'Uninstall & reinstall' section in README.md"
 fi
+INSTALL
+
+# The bash subshell above exits back to your interactive shell. cd into the
+# checkout so later commands (docker compose down, ./scripts/uninstall.sh,
+# nyxid CLI install) work without re-navigating.
+cd NyxID 2>/dev/null || true
 ```
 
 **Step 3 of 3 — Register and connect**
