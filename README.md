@@ -109,7 +109,9 @@ There are two ways to use NyxID — pick the one that fits your situation:
 
 ### Option A: Hosted (closed beta)
 
-Sign up at the [NyxID console](https://nyx.chrono-ai.fun), then use the `nyxid` CLI — or point your AI agent at it — to connect your services. Currently invitation-only — [join the waitlist](https://nyx.chrono-ai.fun/#waitlist).
+1. Sign up at the [NyxID console](https://nyx.chrono-ai.fun) — currently invite-only ([join the waitlist](https://nyx.chrono-ai.fun/#waitlist)).
+2. Use `https://nyx.chrono-ai.fun` as your `<BASE_URL>`.
+3. Follow **[docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md)** to connect your first AI Service and verify the proxy works before you wire up MCP — this is the step that the previous quickstart wording skipped over ([#298](https://github.com/ChronoAIProject/NyxID/issues/298)).
 
 ### Option B: Self-host
 
@@ -138,7 +140,8 @@ Prefer to run each step yourself, or need the full troubleshooting guide? The co
 - System preflight check — [Step 1](docs/QUICKSTART.md#step-1-of-3--check-your-system)
 - One paste-block install — [Step 2](docs/QUICKSTART.md#step-2-of-3--install-and-start)
 - Register your account — [Step 3](docs/QUICKSTART.md#step-3-of-3--register-and-connect)
-- Optional [CLI install](docs/QUICKSTART.md#optional-install-the-nyxid-cli) and [first credential / MCP wiring](docs/QUICKSTART.md#connect-your-ai-tool)
+- Optional [CLI install](docs/QUICKSTART.md#optional-install-the-nyxid-cli)
+- [Connect your first AI Service](docs/CONNECTING_SERVICES.md) — verify the proxy works *before* wiring MCP, so your agent doesn't end up stuck with only `nyx__...` meta-tools
 - [Uninstall & reinstall](docs/QUICKSTART.md#uninstall--reinstall), [orphan volume recovery](docs/QUICKSTART.md#recovering-an-orphan-volume), and [SCRAM failure](docs/QUICKSTART.md#stuck-on-scram-failure) troubleshooting
 
 For production deployment (TLS, custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
@@ -170,6 +173,7 @@ nyxid catalog endpoints my-local-api
 
 | Topic | Link | |
 |-------|------|---|
+| Connecting Services | [docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md) | Add your first (or Nth) AI Service — works for hosted + self-host |
 | Quickstart (manual) | [docs/QUICKSTART.md](docs/QUICKSTART.md) | Step-by-step self-host + troubleshooting |
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
