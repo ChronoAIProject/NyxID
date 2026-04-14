@@ -166,21 +166,22 @@ nyxid catalog endpoints my-local-api
 
 After NyxID is running (hosted or self-host), the next step is to connect a downstream API — OpenAI, Anthropic, GitHub, your private API, anything — so your AI agents can call it through the proxy without ever seeing the raw key.
 
-> **Wiring MCP alone isn't enough.** Until you connect a real downstream service *and* verify the proxy works, your AI agent will only see NyxID's `nyx__...` meta-tools and proxy requests will look broken.
+> **Connect a service *before* wiring up MCP.** Otherwise your AI agent will only see NyxID's `nyx__...` meta-tools and proxy requests will look broken.
 
-### Recommended: let your AI agent drive it
+The full walkthrough is at **[docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md)** — base-URL-agnostic, so the same guide works for hosted (`https://nyx.chrono-ai.fun`) and self-host (`http://localhost:3001`). It covers four paths in order of friction:
 
-Once you're authenticated (`nyxid login --base-url <BASE_URL>`) and your AI tool is MCP-connected (`claude mcp add --transport http nyxid <BASE_URL>/mcp`, or the Codex / Cursor equivalents), paste this into your AI agent:
+- **AI-driven (recommended)** — paste a prompt into Claude Code / Codex / Cursor and let your agent use NyxID's MCP meta-tools (`nyx__discover_services`, `nyx__connect_service`, `nyx__call_tool`) to add and verify your first service end-to-end.
+- **CLI** — `nyxid service add llm-openai --credential-env OPENAI_API_KEY` then `nyxid proxy request llm-openai models` to verify.
+- **Web UI** — dashboard click-through with a "Test request" verify step.
+- **Direct API** — curl examples for automation and CI.
 
-> Help me connect an AI Service in NyxID. Use `nyx__discover_services` to list what's available in the catalog and ask me which one I want (e.g. OpenAI, Anthropic, GitHub). Once I pick, ask me for the credential I want to use (API key, token, etc.), then call `nyx__connect_service` with the `service_id` from discover results and my credential. After it returns success, call `nyx__search_tools` to confirm the new service's tools are now exposed, then call `nyx__call_tool` on one of them (e.g. list models, list repos) to verify the proxy works end-to-end. Report back with the actual response so I know it's working — not just "looks good." If anything errors, tell me whether it's a credential problem or a service config problem.
+Whichever path you pick, the verification step (calling a real downstream tool and getting a real response back) is the gate everything hinges on. The doc also has an "Adding more services later" section, so the same guide covers your tenth service the same way it covers your first.
 
-The agent walks the full loop: `nyx__discover_services` → `nyx__connect_service` → `nyx__search_tools` → `nyx__call_tool`. The final call **is** the verify-gate — a real downstream response (a list of OpenAI models, a list of GitHub repos, etc.) means everything is wired end-to-end.
+For the AI-driven path: after `nyxid login --base-url <BASE_URL>` and `claude mcp add --transport http nyxid <BASE_URL>/mcp` (or Codex / Cursor equivalents), paste this into your agent:
+
+> Help me connect an AI Service in NyxID. Use `nyx__discover_services` to list what's available in the catalog and ask me which one I want (e.g. OpenAI, Anthropic, GitHub). Once I pick, ask me for the credential I want to use, then call `nyx__connect_service` with the `service_id` from discover results and my credential. After it returns success, call `nyx__search_tools` to confirm the new service's tools are now exposed, then call `nyx__call_tool` on one of them (e.g. list models, list repos) to verify the proxy works end-to-end. Report back with the actual response so I know it's working — not just "looks good." If anything errors, tell me whether it's a credential problem or a service config problem.
 
 <!-- Sync this prompt with docs/CONNECTING_SERVICES.md Path A on every release. -->
-
-### Other paths
-
-Don't have the CLI yet, want to drive it yourself, or need to script it from CI? **[docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md)** has the full base-URL-agnostic walkthrough — CLI (`nyxid service add ...`), web console click-through, and direct curl/API examples — plus the auth bootstrap for users without the CLI installed. The doc also covers adding more services later, so it's the canonical reference for both your first and your tenth.
 
 ## Use Cases
 
