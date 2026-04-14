@@ -34,32 +34,29 @@ Step 3 is the gate everything hinges on. Skip it and you'll spend 20 minutes won
 
 ---
 
-## Step 1 — Get authenticated (one-time, ~30 seconds)
+## Step 1 — Get authenticated
 
-Before anything else you need a NyxID auth credential. Two ways:
+You need NyxID auth before MCP or any of the manual paths will work. Pick the route that matches what you'll use in Step 2.
 
-**CLI (recommended)** — installs the `nyxid` CLI if you don't have it, then opens your browser to log in:
+**Using Claude Code, Codex, or Cursor (most users):** skip ahead to Step 2. The `claude mcp add` / `codex mcp add` commands open a browser the first time and authenticate you interactively via OAuth — there's no separate login step.
 
-```bash
-nyxid login --base-url <BASE_URL>
-```
-
-Don't have the CLI yet? One-line install:
+**Using the `nyxid` CLI:** install it if you don't have it, then run `nyxid login`:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
 source ~/.cargo/env
+nyxid login --base-url <BASE_URL>
 ```
 
-**Or** — if you'd rather not install anything: open `<BASE_URL>` in your browser, sign in, go to **Settings → API Keys → Create**, and copy the key. You'll paste it into your AI agent's MCP config in Step 2.
+The login command opens your browser and stores a session locally. The CLI and any subsequent `claude mcp add` / `codex mcp add` will reuse it.
 
-> Already logged in from a previous session? Skip to Step 2.
+**Using a headless HTTP client (curl, n8n, Zapier, custom code, CI/CD):** open the web console (`https://nyx.chrono-ai.fun` for hosted, `http://localhost:3000` for self-host), sign in, go to **AI Services → API Keys → Create**, and copy the raw key. You'll pass it as an `x-api-key` header on every request. There's no `claude mcp add` for this route — your tool talks to NyxID directly.
 
 ---
 
 ## Step 2 — Wire your AI agent to NyxID's MCP endpoint
 
-So your agent can see NyxID at all. Pick whichever AI tool you use:
+So your AI agent can see NyxID at all. Pick whichever AI tool you use:
 
 ```bash
 # Claude Code
@@ -68,12 +65,15 @@ claude mcp add --transport http nyxid <BASE_URL>/mcp
 # Codex
 codex mcp add nyxid --url <BASE_URL>/mcp
 
-# Cursor — open <BASE_URL> in browser, go to Settings → MCP, click "Install to Cursor"
+# Cursor — open the web console (https://nyx.chrono-ai.fun for hosted, http://localhost:3000
+# for self-host), go to Settings → MCP, click "Install to Cursor"
 ```
 
-The first run uses your credentials from Step 1. After this, your AI agent will see NyxID's `nyx__discover_services`, `nyx__connect_service`, `nyx__search_tools`, and `nyx__call_tool` meta-tools — but **not yet** any real downstream tools, because you haven't connected a real service yet. That's Step 3.
+The first run of `claude mcp add` / `codex mcp add` opens a browser to authenticate you (OAuth) and stores a session. If you already ran `nyxid login` from Step 1, the session is reused and there's no second prompt.
 
-> Already wired up from a previous session? Skip to Step 3.
+After this, your AI agent will see NyxID's `nyx__discover_services`, `nyx__connect_service`, `nyx__search_tools`, and `nyx__call_tool` meta-tools — but **not yet** any real downstream tools, because you haven't connected a real service yet. That's Step 3. **Don't stop here**, or you'll hit issue [#298](https://github.com/ChronoAIProject/NyxID/issues/298).
+
+> **Headless HTTP client?** There is no `mcp add` for n8n / Zapier / curl. Skip directly to Step 3 Path D and pass `x-api-key: <YOUR_KEY>` (from Step 1) on every request to `<BASE_URL>/api/v1/...` and `<BASE_URL>/mcp`.
 
 ---
 
@@ -112,7 +112,9 @@ If `proxy request` returns a real response, your service is connected and the cr
 
 If you'd rather click through:
 
-1. Open `<BASE_URL>:3000` in your browser (or just `<BASE_URL>` for hosted) and sign in.
+1. Open the **web console** in your browser and sign in. The console URL is **not the same as `<BASE_URL>`** — it's the dashboard, a separate port from the API:
+   - **Hosted:** `https://nyx.chrono-ai.fun`
+   - **Self-host:** `http://localhost:3000` (port 3000, while the API runs on 3001)
 2. Click **AI Services** in the sidebar → **Add Service**.
 3. Pick a service from the catalog (OpenAI, Anthropic, GitHub, etc.).
 4. Paste the credential it asks for.

@@ -119,7 +119,10 @@ Run NyxID on your own machine. This sets up three Docker containers (database, b
 
 #### AI-assisted (recommended)
 
-If you have Claude Code, Cursor, or any AI coding assistant open, paste this prompt and it will drive the entire self-host flow for you — clone, env generation, Docker stack, health check, optional CLI install, login, first credential, and MCP config:
+If you have Claude Code, Cursor, or any AI coding assistant open, paste the prompt below into it and it will drive the entire self-host flow for you — preflight, clone, env generation, Docker stack, health check, optional CLI install, login, first credential, and MCP config.
+
+<details>
+<summary><strong>Click to expand the full AI-assisted self-host prompt</strong></summary>
 
 > I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full quickstart interactively. If anything fails or I'd prefer to follow the manual steps myself, the full step-by-step with troubleshooting is at https://github.com/ChronoAIProject/NyxID/blob/main/docs/QUICKSTART.md.
 > 1. Confirm Docker is installed and running before touching anything (check `git`, `docker`, `openssl`, `curl`, `docker compose` v2, and `docker info`).
@@ -128,6 +131,8 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste this pro
 > 4. Tell me to open http://localhost:3000 and register my account (no email verification needed — accounts are auto-verified in dev mode), and wait until I confirm I've done that.
 > 5. **Ask me whether I want to install the `nyxid` CLI.** Explain that it's optional, that the installer will pull the Rust toolchain (~300 MB) if I don't have it, and that the first build takes 3–10 minutes and ~1.5 GB of disk. If I say yes, install it using https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh, then `source ~/.cargo/env`, log me in with `nyxid login --base-url http://localhost:3001`, add my OpenAI key with `nyxid service add llm-openai --credential-env OPENAI_API_KEY`, and verify with `nyxid proxy request llm-openai models`. If I say no, walk me through adding the same OpenAI credential in the web console instead.
 > 6. Finish by connecting my AI tool to NyxID's MCP endpoint at `http://localhost:3001/mcp`. For Claude Code: `claude mcp add --transport http nyxid http://localhost:3001/mcp`. For Codex: `codex mcp add nyxid --url http://localhost:3001/mcp`. For Cursor: open **Settings > MCP** in the web console and click **Install to Cursor**.
+
+</details>
 
 <!-- AI quickstart maintenance: validate this prompt against actual CLI + web console on each release -->
 
@@ -145,6 +150,27 @@ Once NyxID is running, jump to [Connecting AI Services](#connecting-ai-services)
 
 For production deployment (TLS, custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
+## Connecting AI Services
+
+After NyxID is running (hosted or self-host), the next step is to connect a downstream API — OpenAI, Anthropic, GitHub, your private API, anything — so your AI agents can call it through the proxy without ever seeing the raw key.
+
+> **Wiring MCP alone won't show real tools.** Until you also connect a real downstream service *and* verify the proxy works, your AI agent will only see NyxID's `nyx__...` meta-tools — that's the trap behind issue [#298](https://github.com/ChronoAIProject/NyxID/issues/298). The flow below does both steps in one paste; the manual paths in [docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md) make the connect-and-verify step explicit.
+
+The full walkthrough is at **[docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md)** — base-URL-agnostic, so the same guide works for hosted (`https://nyx.chrono-ai.fun`) and self-host (`http://localhost:3001`). It covers four paths in order of friction:
+
+- **AI-driven (recommended)** — paste a prompt into Claude Code / Codex / Cursor and let your agent use NyxID's MCP meta-tools (`nyx__discover_services`, `nyx__connect_service`, `nyx__call_tool`) to add and verify your first service end-to-end.
+- **CLI** — `nyxid service add llm-openai --credential-env OPENAI_API_KEY` then `nyxid proxy request llm-openai models` to verify.
+- **Web UI** — dashboard click-through with a "Test request" verify step.
+- **Direct API** — curl + `x-api-key` header for automation and CI.
+
+Whichever path you pick, the verification step (calling a real downstream tool and getting a real response back) is the gate everything hinges on. The doc also has an "Adding more services later" section, so the same guide covers your tenth service the same way it covers your first.
+
+For the AI-driven path: wire MCP first with `claude mcp add --transport http nyxid <BASE_URL>/mcp` (or `codex mcp add nyxid --url <BASE_URL>/mcp`, or Cursor's one-click install) — the first run opens your browser to authenticate. Then paste this into your AI agent:
+
+> Help me connect an AI Service in NyxID. Use `nyx__discover_services` to list what's available in the catalog and ask me which one I want (e.g. OpenAI, Anthropic, GitHub). Once I pick, ask me for the credential I want to use, then call `nyx__connect_service` with the `service_id` from discover results and my credential. After it returns success, call `nyx__search_tools` to confirm the new service's tools are now exposed, then call `nyx__call_tool` on one of them (e.g. list models, list repos) to verify the proxy works end-to-end. Report back with the actual response so I know it's working — not just "looks good." If anything errors, tell me whether it's a credential problem or a service config problem.
+
+<!-- Sync this prompt with docs/CONNECTING_SERVICES.md Path A on every release. -->
+
 ### Reach local services (optional)
 
 Services behind a firewall? Deploy a credential node to punch through NAT and expose them as MCP tools:
@@ -161,27 +187,6 @@ nyxid node credentials setup --service my-local-api --api-url http://localhost:8
 # Import endpoints as MCP tools (if the service has an OpenAPI spec)
 nyxid catalog endpoints my-local-api
 ```
-
-## Connecting AI Services
-
-After NyxID is running (hosted or self-host), the next step is to connect a downstream API — OpenAI, Anthropic, GitHub, your private API, anything — so your AI agents can call it through the proxy without ever seeing the raw key.
-
-> **Connect a service *before* wiring up MCP.** Otherwise your AI agent will only see NyxID's `nyx__...` meta-tools and proxy requests will look broken.
-
-The full walkthrough is at **[docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md)** — base-URL-agnostic, so the same guide works for hosted (`https://nyx.chrono-ai.fun`) and self-host (`http://localhost:3001`). It covers four paths in order of friction:
-
-- **AI-driven (recommended)** — paste a prompt into Claude Code / Codex / Cursor and let your agent use NyxID's MCP meta-tools (`nyx__discover_services`, `nyx__connect_service`, `nyx__call_tool`) to add and verify your first service end-to-end.
-- **CLI** — `nyxid service add llm-openai --credential-env OPENAI_API_KEY` then `nyxid proxy request llm-openai models` to verify.
-- **Web UI** — dashboard click-through with a "Test request" verify step.
-- **Direct API** — curl examples for automation and CI.
-
-Whichever path you pick, the verification step (calling a real downstream tool and getting a real response back) is the gate everything hinges on. The doc also has an "Adding more services later" section, so the same guide covers your tenth service the same way it covers your first.
-
-For the AI-driven path: after `nyxid login --base-url <BASE_URL>` and `claude mcp add --transport http nyxid <BASE_URL>/mcp` (or Codex / Cursor equivalents), paste this into your agent:
-
-> Help me connect an AI Service in NyxID. Use `nyx__discover_services` to list what's available in the catalog and ask me which one I want (e.g. OpenAI, Anthropic, GitHub). Once I pick, ask me for the credential I want to use, then call `nyx__connect_service` with the `service_id` from discover results and my credential. After it returns success, call `nyx__search_tools` to confirm the new service's tools are now exposed, then call `nyx__call_tool` on one of them (e.g. list models, list repos) to verify the proxy works end-to-end. Report back with the actual response so I know it's working — not just "looks good." If anything errors, tell me whether it's a credential problem or a service config problem.
-
-<!-- Sync this prompt with docs/CONNECTING_SERVICES.md Path A on every release. -->
 
 ## Use Cases
 
