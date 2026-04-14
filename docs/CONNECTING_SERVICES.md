@@ -23,20 +23,21 @@ If you're on hosted and don't have an account yet, sign up at [nyx.chrono-ai.fun
 
 ## The 5-second mental model
 
-NyxID stores your credentials encrypted, then proxies your AI agent's requests to the real downstream API and injects the credential server-side. Connecting a service is always:
+NyxID stores your credentials encrypted, then proxies your AI agent's requests to the real downstream API and injects the credential server-side. Connecting a service has three substeps that need to happen at some point:
 
 1. Pick a service from the catalog (or define a custom one)
 2. Provide its credential
-3. **Verify the proxy actually works** before you wire MCP
-4. Then your AI agent can use it
+3. **Verify the proxy actually works** — call a real downstream tool, get a real response back
 
-Step 3 is the gate everything hinges on. Skip it and you'll spend 20 minutes wondering why MCP only shows `nyx__...` tools.
+The trap from issue [#298](https://github.com/ChronoAIProject/NyxID/issues/298) is wiring MCP **without** doing the three substeps. Your AI agent then sees only NyxID's `nyx__...` meta-tools and there's nothing real to call.
+
+Below you have four paths that complete the substeps. The **AI-driven path** uses an MCP-connected agent to do them itself, so MCP must be wired first. The **manual paths** (CLI, web UI, curl) don't depend on MCP at all — you can wire MCP whenever, or never. Either way, all that matters is that the three substeps actually happen.
 
 ---
 
 ## Step 1 — Get authenticated
 
-You need NyxID auth before MCP or any of the manual paths will work. Pick the route that matches what you'll use in Step 2.
+You need NyxID auth before any of the steps below will work. Pick the route that matches what you'll use next.
 
 **Using Claude Code, Codex, or Cursor (most users):** skip ahead to Step 2. The `claude mcp add` / `codex mcp add` commands open a browser the first time and authenticate you interactively via OAuth — there's no separate login step.
 
@@ -170,18 +171,18 @@ Same flow, skip the steps you've already done:
 - **Web UI users:** **AI Services → Add Service** any time.
 - **Bulk setup:** the API path scales — loop `POST /api/v1/keys` over your credentials with a small script.
 
-You can also rotate credentials on existing services from the same surfaces — `nyxid service rotate <slug>`, **AI Services → \[service\] → Rotate Credential**, or `PUT /api/v1/keys/<id>`.
+You can also rotate credentials on existing services from the same surfaces — `nyxid service rotate-credential <id> --credential-env <NEW_ENV_VAR>` (use `nyxid service list` to find the service ID), **AI Services → \[service\] → Rotate Credential**, or `PUT /api/v1/keys/<id>`.
 
 ---
 
 ## Connecting custom (non-catalog) services
 
-Got a private API NyxID's catalog doesn't know about? You can still connect it:
+Got a private API NyxID's catalog doesn't know about? You can still connect it. The slug is positional and the URL flag is `--endpoint-url`:
 
 ```bash
-nyxid service add --custom \
-  --slug my-internal-api \
-  --endpoint https://internal.example.com \
+nyxid service add my-internal-api \
+  --custom \
+  --endpoint-url https://internal.example.com \
   --credential-env MY_API_KEY \
   --auth-method bearer
 ```
