@@ -71,7 +71,7 @@ any REST API as MCP (Model Context Protocol) tools.
 - **Per-agent isolation** — each agent gets a scoped token. Agent A accesses Slack and Gmail. Agent B only accesses your internal API. Revoke any session without touching the underlying credentials.
 - **Full identity layer** — OIDC (OpenID Connect) / OAuth 2.0 with PKCE (Proof Key for Code Exchange), RBAC (Role-Based Access Control), service accounts, transaction approval (Telegram + mobile push), LLM (Large Language Model) gateway for 7 providers.
 
-## See it in action
+## See It in Action
 
 The end-to-end loop is short: connect a service to NyxID once, then any AI agent pointed at your NyxID MCP endpoint can use it — without ever seeing the raw API key.
 
@@ -107,7 +107,7 @@ There are two ways to use NyxID — pick the one that fits your situation:
 | **Best for** | Getting started quickly, no setup | Full control, private networks, offline use |
 | **Status** | Early access (invite code below) | Open — anyone can run it |
 
-### Option A: Hosted (recommended)
+### Option A: Hosted (Recommended)
 
 Start using NyxID in under a minute — no Docker, no setup:
 
@@ -118,13 +118,13 @@ Start using NyxID in under a minute — no Docker, no setup:
 
 Early access — limited to 20 users.
 
-### Option B: Self-host
+### Option B: Self-Host
 
 Run NyxID on your own machine. This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
 
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash-compatible terminal. The `nyxid` CLI is optional. Full prereqs and disk budgets in [docs/QUICKSTART.md](docs/QUICKSTART.md#prerequisites).
 
-#### AI-assisted (recommended)
+#### AI-Assisted (Recommended)
 
 If you have Claude Code, Cursor, or any AI coding assistant open, paste the prompt below into it and it will drive the entire self-host flow for you — preflight, clone, env generation, Docker stack, health check, optional CLI install, login, first credential, and MCP config.
 
@@ -143,7 +143,7 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste the prom
 
 <!-- AI quickstart maintenance: validate this prompt against actual CLI + web console on each release -->
 
-#### Manual setup
+#### Manual Setup
 
 Prefer to run each step yourself, or need the full troubleshooting guide? The complete manual flow lives in **[docs/QUICKSTART.md](docs/QUICKSTART.md)**:
 
@@ -178,7 +178,7 @@ For the AI-driven path: wire MCP first with `claude mcp add --transport http nyx
 
 <!-- Sync this prompt with docs/CONNECTING_SERVICES.md Path A on every release. -->
 
-### Reach local services (optional)
+## Reach Local Services (Optional)
 
 Services behind a firewall? Deploy a credential node to punch through NAT and expose them as MCP tools:
 
@@ -203,9 +203,9 @@ nyxid catalog endpoints my-local-api
 
 ## Resources
 
-| Topic | Link | |
-|-------|------|---|
-| Connecting Services | [docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md) | Add your first (or Nth) AI Service — works for hosted + self-host |
+| Topic | Link | Description |
+|-------|------|-------------|
+| Connecting AI Services | [docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md) | Add your first (or Nth) AI Service — works for hosted + self-host |
 | Quickstart (manual) | [docs/QUICKSTART.md](docs/QUICKSTART.md) | Step-by-step self-host + troubleshooting |
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
@@ -213,10 +213,10 @@ nyxid catalog endpoints my-local-api
 | API Reference | [docs/API.md](docs/API.md) | Full endpoint documentation |
 | Credential Nodes | [docs/NODE_PROXY.md](docs/NODE_PROXY.md) | NAT traversal setup |
 | MCP Integration | [docs/MCP_DELEGATION_FLOW.md](docs/MCP_DELEGATION_FLOW.md) | MCP protocol details |
-| SSH Tunneling | [docs/SSH_TUNNELING.md](docs/SSH_TUNNELING.md) | |
-| Security | [docs/SECURITY.md](docs/SECURITY.md) | |
-| Environment Variables | [docs/ENV.md](docs/ENV.md) | |
-| Developer Guide | [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | |
+| SSH Tunneling | [docs/SSH_TUNNELING.md](docs/SSH_TUNNELING.md) | Remote host access over WebSocket |
+| Security | [docs/SECURITY.md](docs/SECURITY.md) | Threat model and hardening |
+| Environment Variables | [docs/ENV.md](docs/ENV.md) | Full config reference |
+| Developer Guide | [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | Local development setup |
 
 ## Contributing
 
