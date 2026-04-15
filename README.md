@@ -1,5 +1,6 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/ChronoAIProject/NyxID)](https://github.com/ChronoAIProject/NyxID)
+[![Discord](https://img.shields.io/discord/1422500823925264438?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.com/channels/1422500823925264438/1485570725413650553)
 
 <p align="center">
   <img src="assets/banner.png" alt="NyxID — Connect AI agents to any API, anywhere. Securely." width="100%">
@@ -96,6 +97,12 @@ Other tools solve parts of this — NyxID combines credential injection, NAT tra
 | REST to MCP auto-wrap | Yes | No | No | No |
 | Per-agent isolation | Yes | No | No | No |
 | OIDC / OAuth 2.0 | Yes | No | No | Yes |
+
+## Use Cases
+
+- Give Claude Code access to your private APIs without sharing keys
+- Expose internal microservices to AI agents through a single MCP endpoint
+- Secure AI agent access to self-hosted tools (Grafana, Jenkins, n8n) behind your firewall
 
 ## Quick Start
 
@@ -194,12 +201,6 @@ nyxid node credentials setup --service my-local-api --api-url http://localhost:8
 # Import endpoints as MCP tools (if the service has an OpenAPI spec)
 nyxid catalog endpoints my-local-api
 ```
-
-## Use Cases
-
-- Give Claude Code access to your private APIs without sharing keys
-- Expose internal microservices to AI agents through a single MCP endpoint
-- Secure AI agent access to self-hosted tools (Grafana, Jenkins, n8n) behind your firewall
 
 ## Resources
 
