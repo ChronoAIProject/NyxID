@@ -252,11 +252,13 @@ pub async fn release_reservation(db: &mongodb::Database, invite_code_id: &str) {
     }
 }
 
-/// Batch-fetch minimal user details for every `user_id` referenced by the
-/// `usages` array of any code in the input slice. A single `$in` query over
-/// the `users` collection avoids per-redemption N+1 reads. Users deleted since
-/// their redemption simply won't appear in the returned map — callers must
-/// treat the mapping as best-effort.
+/// Batch-fetch minimal user details for every user referenced by any code in
+/// the input slice. Collects both the `usages[n].user_id` redemption set AND
+/// `created_by` admin ids into a single `$in` query over the `users`
+/// collection — one round-trip, de-duplicated via HashSet (cheap when an admin
+/// both creates and redeems the same code). Users deleted since they appeared
+/// in an invite code simply won't appear in the returned map — callers must
+/// treat the mapping as best-effort for both redemption and creator resolution.
 ///
 /// Uses an explicit projection + a tight [`UserUsageProjection`] struct so the
 /// admin invite-code path never pulls password hashes or other sensitive User
@@ -269,7 +271,12 @@ pub async fn fetch_usage_users(
 
     let user_ids: HashSet<String> = codes
         .iter()
-        .flat_map(|ic| ic.usages.iter().map(|u| u.user_id.clone()))
+        .flat_map(|ic| {
+            ic.usages
+                .iter()
+                .map(|u| u.user_id.clone())
+                .chain(std::iter::once(ic.created_by.clone()))
+        })
         .collect();
 
     if user_ids.is_empty() {

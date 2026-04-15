@@ -566,9 +566,39 @@ export function AdminInviteCodesPage() {
                   <p className="text-xs uppercase tracking-wider text-text-tertiary">
                     Created by
                   </p>
-                  <p className="mt-1 font-mono text-xs text-muted-foreground">
-                    {selectedCode.created_by}
-                  </p>
+                  {(() => {
+                    // Mirror the Redemptions list fallback chain: display_name →
+                    // email → UUID. Use truthy checks + optional chaining so a
+                    // legacy backend that omits the creator sidecar (null or
+                    // absent) degrades to the mono UUID rather than rendering
+                    // a blank line.
+                    const creator = selectedCode.creator;
+                    const primary =
+                      creator?.display_name ||
+                      creator?.email ||
+                      selectedCode.created_by;
+                    const showEmailLine =
+                      !!creator?.display_name && !!creator.email;
+                    const isUuidFallback = !creator;
+                    return (
+                      <>
+                        <p
+                          className={cn(
+                            "mt-1 truncate text-sm text-foreground",
+                            isUuidFallback &&
+                              "font-mono text-xs text-muted-foreground",
+                          )}
+                        >
+                          {primary}
+                        </p>
+                        {showEmailLine && (
+                          <p className="truncate text-xs text-muted-foreground">
+                            {creator.email}
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
 

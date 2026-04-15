@@ -62,6 +62,20 @@ pub struct InviteCodeUsageResponse {
     pub user_display_name: Option<String>,
 }
 
+/// Nested sidecar describing the admin who created this invite code. Resolved
+/// via the same batch user lookup used for redemption enrichment, so exposing
+/// this adds zero extra DB round-trips. `None` when the creator has been
+/// deleted since the code was minted — callers should fall back to rendering
+/// the raw `created_by` UUID in that case.
+#[derive(Debug, Serialize)]
+pub struct InviteCodeCreator {
+    /// Email of the admin. Always present whenever `creator` itself is non-null
+    /// (the user projection requires it).
+    pub email: String,
+    /// Display name of the admin, or `null` if they have no display name set.
+    pub display_name: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct InviteCodeResponse {
     pub id: String,
@@ -69,6 +83,9 @@ pub struct InviteCodeResponse {
     pub max_uses: i32,
     pub used_count: i32,
     pub created_by: String,
+    /// Resolved creator info (email + display name). `null` when the admin
+    /// has been deleted since the code was minted. See [`InviteCodeCreator`].
+    pub creator: Option<InviteCodeCreator>,
     pub note: Option<String>,
     pub is_active: bool,
     pub created_at: String,
@@ -100,11 +117,16 @@ fn usage_to_response(
 }
 
 fn to_response(ic: InviteCode, users: &HashMap<String, InviteCodeUsageUser>) -> InviteCodeResponse {
+    let creator = users.get(&ic.created_by).map(|u| InviteCodeCreator {
+        email: u.email.clone(),
+        display_name: u.display_name.clone(),
+    });
     InviteCodeResponse {
         id: ic.id,
         code: ic.code,
         max_uses: ic.max_uses,
         used_count: ic.used_count,
+        creator,
         created_by: ic.created_by,
         note: ic.note,
         is_active: ic.is_active,
