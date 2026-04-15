@@ -35,6 +35,7 @@
         crate::handlers::user_endpoints::list_endpoints,
         crate::handlers::user_endpoints::update_endpoint,
         crate::handlers::user_endpoints::delete_endpoint,
+        crate::handlers::user_endpoints::list_openapi_endpoints,
         // External API Keys
         crate::handlers::user_api_keys_external::list_external_api_keys,
         crate::handlers::user_api_keys_external::update_external_api_key,
@@ -85,6 +86,8 @@
             crate::handlers::user_endpoints::UpdateEndpointRequest,
             crate::handlers::user_endpoints::EndpointResponse,
             crate::handlers::user_endpoints::EndpointListResponse,
+            crate::handlers::user_endpoints::UserEndpointOperationResponse,
+            crate::handlers::user_endpoints::UserEndpointOperationsResponse,
             // External API Keys
             crate::handlers::user_api_keys_external::UpdateExternalApiKeyRequest,
             crate::handlers::user_api_keys_external::ExternalApiKeyResponse,

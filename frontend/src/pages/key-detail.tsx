@@ -55,6 +55,7 @@ import {
   Copy,
   Shield,
   Code,
+  FileJson,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { SshServiceConfig } from "@/types/api";
@@ -169,6 +170,112 @@ function EndpointSection({
                 variant="ghost"
                 onClick={() => setEditing(true)}
               >
+                <Pencil className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function OpenApiSpecSection({
+  endpointId,
+  specUrl,
+  readOnly = false,
+}: {
+  readonly endpointId: string;
+  readonly specUrl: string | null;
+  readonly readOnly?: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  // Seeded only when entering edit mode (handleEdit), not from specUrl
+  // changes, to avoid a setState-in-effect loop that lint flags.
+  const [draft, setDraft] = useState("");
+  const updateEndpoint = useUpdateEndpoint();
+
+  function handleEdit() {
+    setDraft(specUrl ?? "");
+    setEditing(true);
+  }
+
+  function handleSave() {
+    const trimmed = draft.trim();
+    updateEndpoint.mutate(
+      { endpointId, openapi_spec_url: trimmed },
+      {
+        onSuccess: () => {
+          toast.success(
+            trimmed ? "OpenAPI spec URL saved" : "OpenAPI spec URL cleared",
+          );
+          setEditing(false);
+        },
+        onError: (err) => {
+          const message =
+            err instanceof ApiError
+              ? err.message
+              : "Failed to update OpenAPI spec URL";
+          toast.error(message);
+        },
+      },
+    );
+  }
+
+  function handleCancel() {
+    setEditing(false);
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <FileJson className="h-4 w-4 text-primary" />
+          <CardTitle className="text-sm">OpenAPI Spec</CardTitle>
+        </div>
+        <CardDescription>
+          Optional — lets AI agents discover concrete API operations instead of
+          falling back to a single generic proxy tool.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {editing ? (
+          <div className="flex items-center gap-2">
+            <Input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="https://api.example.com/openapi.json"
+              className="flex-1 font-mono text-sm"
+              type="url"
+            />
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={handleSave}
+              disabled={updateEndpoint.isPending}
+            >
+              <Check className="h-4 w-4" />
+            </Button>
+            <Button size="icon" variant="ghost" onClick={handleCancel}>
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        ) : specUrl ? (
+          <div className="flex items-center justify-between gap-2">
+            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-sm">
+              {specUrl}
+            </code>
+            {!readOnly && (
+              <Button size="icon" variant="ghost" onClick={handleEdit}>
+                <Pencil className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <span>Not set</span>
+            {!readOnly && (
+              <Button size="icon" variant="ghost" onClick={handleEdit}>
                 <Pencil className="h-4 w-4" />
               </Button>
             )}
@@ -1297,6 +1404,14 @@ export function KeyDetailPage() {
             nodeRouted={keyInfo.node_id !== null}
             readOnly={readOnly}
           />
+
+          {keyInfo.service_type !== "ssh" && (
+            <OpenApiSpecSection
+              endpointId={keyInfo.endpoint_id}
+              specUrl={keyInfo.openapi_spec_url ?? null}
+              readOnly={readOnly}
+            />
+          )}
 
           {keyInfo.service_type === "ssh" &&
           keyInfo.ssh_host &&

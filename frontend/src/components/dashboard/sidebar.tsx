@@ -130,8 +130,8 @@ export function Sidebar({
   const currentPath = routerState.location.pathname;
 
   /* Initials from user name or email */
-  const initials = user?.name
-    ? user.name
+  const initials = user?.display_name
+    ? user.display_name
         .split(" ")
         .map((w) => w[0])
         .join("")
@@ -218,7 +218,7 @@ export function Sidebar({
         </div>
         <div className="flex min-w-0 flex-col gap-0.5">
           <span className="truncate text-[13px] font-medium text-foreground">
-            {user?.name ?? "User"}
+            {user?.display_name ?? "User"}
           </span>
           <span className="truncate text-[11px] text-text-tertiary">
             {user?.email ?? ""}

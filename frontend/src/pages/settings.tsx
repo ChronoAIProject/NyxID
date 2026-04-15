@@ -120,7 +120,7 @@ function ProfileTab() {
     return <Skeleton className="h-64 w-full" />;
   }
 
-  const displayName = name || user?.name || "";
+  const displayName = name || user?.display_name || "";
 
   async function handleSave() {
     setSaving(true);

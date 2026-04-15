@@ -19,11 +19,12 @@ use crate::models::downstream_service::{
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
+use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
 use crate::services::{api_docs_service, audit_service, oauth_client_service, ssh_service};
 
 use super::services_helpers::{
     DeleteServiceResponse, fetch_service, require_admin_or_creator, service_to_response,
-    validate_base_url, validate_developer_app_ids, validate_optional_spec_url,
+    validate_developer_app_ids,
 };
 
 // --- Request / Response types ---

@@ -73,7 +73,7 @@ export function DashboardPage() {
     <div className="flex flex-col gap-12">
       <div className="flex flex-col gap-2">
         <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
-          Welcome back{user?.name ? `, ${user.name}` : ""}
+          Welcome back{user?.display_name ? `, ${user.display_name}` : ""}
         </h2>
         <p className="text-sm text-muted-foreground">
           Here is an overview of your NyxID account

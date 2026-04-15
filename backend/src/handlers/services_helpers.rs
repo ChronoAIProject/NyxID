@@ -173,56 +173,6 @@ pub async fn validate_developer_app_ids(
     Ok(())
 }
 
-/// Validate that a URL has a valid scheme and hostname.
-///
-/// Cloud metadata endpoints (169.254.169.254, metadata.google.internal)
-/// are blocked in every environment.  Private IPs and localhost are
-/// allowed so that self-hosted nodes and services remain reachable.
-pub fn validate_base_url(url: &str) -> AppResult<()> {
-    // Must start with https:// or http://
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err(AppError::ValidationError(
-            "base_url must start with https:// or http://".to_string(),
-        ));
-    }
-
-    // Parse the URL to extract the hostname
-    let parsed = url::Url::parse(url)
-        .map_err(|_| AppError::ValidationError("Invalid base_url format".to_string()))?;
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| AppError::ValidationError("base_url must contain a hostname".to_string()))?;
-
-    // Block cloud metadata endpoints -- dangerous in any environment
-    if is_cloud_metadata_host(host) {
-        return Err(AppError::ValidationError(
-            "URL must not point to a cloud metadata endpoint".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-/// Returns true if the hostname is a known cloud metadata endpoint.
-fn is_cloud_metadata_host(host: &str) -> bool {
-    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
-    normalized == "metadata.google.internal"
-        || normalized == "169.254.169.254"
-        || normalized == "[fd00:ec2::254]"
-}
-
-/// Validate an optional documentation spec URL.
-pub fn validate_optional_spec_url(url: &str) -> AppResult<()> {
-    if url.len() > 2048 {
-        return Err(AppError::ValidationError(
-            "Spec URL must not exceed 2048 characters".to_string(),
-        ));
-    }
-
-    validate_base_url(url)
-}
-
 pub fn require_http_service(service: &DownstreamService) -> AppResult<()> {
     if service.service_type != "http" {
         return Err(AppError::BadRequest(
@@ -237,47 +187,4 @@ pub fn require_http_service(service: &DownstreamService) -> AppResult<()> {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteServiceResponse {
     pub message: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{validate_base_url, validate_optional_spec_url};
-
-    #[test]
-    fn validate_base_url_accepts_public_url() {
-        assert!(validate_base_url("https://api.example.com").is_ok());
-        assert!(validate_base_url("http://api.example.com").is_ok());
-    }
-
-    #[test]
-    fn validate_base_url_accepts_private_ips() {
-        assert!(validate_base_url("http://localhost:3000").is_ok());
-        assert!(validate_base_url("http://127.0.0.1:8080").is_ok());
-        assert!(validate_base_url("http://192.168.1.50:3000").is_ok());
-        assert!(validate_base_url("http://10.0.0.5:8080").is_ok());
-        assert!(validate_base_url("http://100.64.0.10:3000").is_ok());
-        assert!(validate_base_url("http://172.16.0.1:3000").is_ok());
-    }
-
-    #[test]
-    fn validate_base_url_rejects_cloud_metadata() {
-        assert!(validate_base_url("http://metadata.google.internal").is_err());
-        assert!(validate_base_url("http://169.254.169.254").is_err());
-    }
-
-    #[test]
-    fn validate_base_url_rejects_invalid_scheme() {
-        assert!(validate_base_url("ftp://example.com").is_err());
-        assert!(validate_base_url("javascript:alert(1)").is_err());
-    }
-
-    #[test]
-    fn validate_optional_spec_url_accepts_public_https_url() {
-        assert!(validate_optional_spec_url("https://example.com/openapi.json").is_ok());
-    }
-
-    #[test]
-    fn validate_optional_spec_url_rejects_metadata() {
-        assert!(validate_optional_spec_url("http://169.254.169.254/latest").is_err());
-    }
 }

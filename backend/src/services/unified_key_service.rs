@@ -136,6 +136,41 @@ pub struct SshCreateParams<'a> {
     pub certificate_ttl_minutes: u32,
 }
 
+/// Three-state representation for `openapi_spec_url` on create. The wire
+/// format collapses "field absent" and "null" into the same value, so we
+/// cannot round-trip the caller's intent through a bare `Option<String>`:
+/// empty string must mean "opt out of catalog inheritance" while absent
+/// must mean "inherit". Callers in the handler layer translate the HTTP
+/// body into this enum.
+#[derive(Clone, Debug)]
+pub enum OpenApiSpecUrlInput<'a> {
+    /// Field was omitted from the request. For catalog-backed keys, inherit
+    /// the catalog entry's spec URL. For custom endpoints, store None.
+    Inherit,
+    /// Caller sent an empty string. Store None regardless of catalog default.
+    Clear,
+    /// Caller sent a non-empty URL.
+    Set(&'a str),
+}
+
+/// Resolve the final OpenAPI spec URL to store, given the caller's intent,
+/// whether the key is SSH-backed, and the catalog default (if any). Pulled
+/// out of `create_key` so the three-state behaviour is unit-testable.
+fn resolve_openapi_spec_url(
+    input: &OpenApiSpecUrlInput<'_>,
+    is_ssh: bool,
+    catalog_default: Option<&str>,
+) -> Option<String> {
+    if is_ssh {
+        return None;
+    }
+    match input {
+        OpenApiSpecUrlInput::Inherit => catalog_default.map(str::to_string),
+        OpenApiSpecUrlInput::Clear => None,
+        OpenApiSpecUrlInput::Set(url) => Some(url.trim().to_string()),
+    }
+}
+
 /// Result of creating a key (all 3 records).
 pub struct CreateKeyResult {
     pub endpoint: UserEndpoint,
@@ -191,6 +226,9 @@ pub struct KeyView {
     pub ssh_ca_public_key: Option<String>,
     pub ssh_allowed_principals: Option<Vec<String>>,
     pub ssh_certificate_ttl_minutes: Option<u32>,
+    /// User-supplied (or catalog-inherited) OpenAPI spec URL for endpoint
+    /// discovery, lifted from `UserEndpoint.openapi_spec_url`.
+    pub openapi_spec_url: Option<String>,
     /// Provenance: personal credentials, or inherited from an org membership.
     /// Defaults to `Personal` for backward compatibility with single-key paths
     /// (`get_key`, post-create) which always operate on personally-owned keys.
@@ -330,6 +368,7 @@ pub async fn create_key(
     node_id: Option<&str>,
     ssh_params: Option<SshCreateParams<'_>>,
     identity: Option<user_service_service::IdentityConfig>,
+    openapi_spec_url: OpenApiSpecUrlInput<'_>,
 ) -> AppResult<CreateKeyResult> {
     let node_id = node_id.filter(|nid| !nid.is_empty());
 
@@ -429,10 +468,20 @@ pub async fn create_key(
         // Determine provider_config_id for the api key
         let provider_config_id = svc.provider_config_id.as_deref();
 
-        // Create all three records
-        let endpoint =
-            user_endpoint_service::create_endpoint(db, user_id, &svc.name, &ep_url, Some(&svc.id))
-                .await?;
+        // Create all three records. Resolution is centralised in
+        // `resolve_openapi_spec_url` so the SSH / inherit / clear / set
+        // matrix is covered by unit tests.
+        let resolved_spec_url =
+            resolve_openapi_spec_url(&openapi_spec_url, is_ssh, svc.openapi_spec_url.as_deref());
+        let endpoint = user_endpoint_service::create_endpoint(
+            db,
+            user_id,
+            &svc.name,
+            &ep_url,
+            Some(&svc.id),
+            resolved_spec_url.as_deref(),
+        )
+        .await?;
 
         let api_key = if is_truly_no_auth {
             None
@@ -675,9 +724,16 @@ pub async fn create_key(
             .insert_one(&ds)
             .await?;
 
-        let endpoint =
-            user_endpoint_service::create_endpoint(db, user_id, label, &base_url, Some(&ds_id))
-                .await?;
+        // Custom SSH services don't have OpenAPI specs; ignore any URL sent.
+        let endpoint = user_endpoint_service::create_endpoint(
+            db,
+            user_id,
+            label,
+            &base_url,
+            Some(&ds_id),
+            None,
+        )
+        .await?;
 
         let api_key = user_api_key_service::create_api_key(
             db,
@@ -767,8 +823,18 @@ pub async fn create_key(
             ));
         }
 
-        let endpoint =
-            user_endpoint_service::create_endpoint(db, user_id, label, ep_url, None).await?;
+        // Custom HTTP path: no catalog default exists, so the resolver
+        // collapses Inherit/Clear to None and only a Set is stored.
+        let custom_spec_url = resolve_openapi_spec_url(&openapi_spec_url, false, None);
+        let endpoint = user_endpoint_service::create_endpoint(
+            db,
+            user_id,
+            label,
+            ep_url,
+            None,
+            custom_spec_url.as_deref(),
+        )
+        .await?;
 
         // Skip api key creation for no-auth custom endpoints
         let api_key = if is_no_auth {
@@ -1023,6 +1089,7 @@ pub async fn auto_provision_no_auth_services(
             &svc.name,
             &svc.base_url,
             Some(&svc.id),
+            svc.openapi_spec_url.as_deref(),
         )
         .await
         {
@@ -1727,6 +1794,7 @@ fn build_key_view(
         ssh_ca_public_key,
         ssh_allowed_principals,
         ssh_certificate_ttl_minutes,
+        openapi_spec_url: ep.openapi_spec_url.clone(),
         credential_source,
     }
 }
@@ -1738,9 +1806,10 @@ mod tests {
     use chrono::Utc;
 
     use super::{
-        AUTO_PROVISION_SOURCE, auto_provision_source_id, build_key_view,
+        AUTO_PROVISION_SOURCE, OpenApiSpecUrlInput, auto_provision_source_id, build_key_view,
         direct_credential_type_for_service, direct_credential_type_from_auth_method,
-        identity_config_from_downstream_service, validate_token_exchange_catalog_credential,
+        identity_config_from_downstream_service, resolve_openapi_spec_url,
+        validate_token_exchange_catalog_credential,
     };
     use crate::errors::AppError;
     use crate::models::downstream_service::{
@@ -1812,6 +1881,7 @@ mod tests {
             label: "Test Endpoint".to_string(),
             url: "https://example.com".to_string(),
             catalog_service_id: None,
+            openapi_spec_url: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1866,6 +1936,95 @@ mod tests {
     }
 
     #[test]
+    fn resolve_spec_inherit_uses_catalog_default_for_http_services() {
+        let out = resolve_openapi_spec_url(
+            &OpenApiSpecUrlInput::Inherit,
+            false,
+            Some("https://catalog.example/openapi.json"),
+        );
+        assert_eq!(out.as_deref(), Some("https://catalog.example/openapi.json"));
+    }
+
+    #[test]
+    fn resolve_spec_clear_opts_out_even_when_catalog_has_default() {
+        // Regression: P3 finding -- empty-string opt-out used to fall back
+        // to the catalog default because `""` was normalised to `None` before
+        // the inheritance lookup.
+        let out = resolve_openapi_spec_url(
+            &OpenApiSpecUrlInput::Clear,
+            false,
+            Some("https://catalog.example/openapi.json"),
+        );
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn resolve_spec_set_overrides_catalog_default() {
+        let out = resolve_openapi_spec_url(
+            &OpenApiSpecUrlInput::Set("https://user.example/spec.json"),
+            false,
+            Some("https://catalog.example/openapi.json"),
+        );
+        assert_eq!(out.as_deref(), Some("https://user.example/spec.json"));
+    }
+
+    #[test]
+    fn resolve_spec_set_trims_whitespace() {
+        let out = resolve_openapi_spec_url(
+            &OpenApiSpecUrlInput::Set("  https://user.example/spec.json  "),
+            false,
+            None,
+        );
+        assert_eq!(out.as_deref(), Some("https://user.example/spec.json"));
+    }
+
+    #[test]
+    fn resolve_spec_ssh_catalog_always_none() {
+        // Regression: P3 finding -- SSH catalog services could persist a
+        // user-supplied or catalog-inherited spec URL even though they have
+        // no OpenAPI surface and the frontend hides the field.
+        assert_eq!(
+            resolve_openapi_spec_url(
+                &OpenApiSpecUrlInput::Set("https://user.example/spec.json"),
+                true,
+                Some("https://catalog.example/openapi.json"),
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_openapi_spec_url(
+                &OpenApiSpecUrlInput::Inherit,
+                true,
+                Some("https://catalog.example/openapi.json"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_spec_custom_http_no_catalog_default() {
+        // Custom HTTP path: Inherit and Clear both collapse to None because
+        // there is no catalog entry to inherit from.
+        assert_eq!(
+            resolve_openapi_spec_url(&OpenApiSpecUrlInput::Inherit, false, None),
+            None
+        );
+        assert_eq!(
+            resolve_openapi_spec_url(&OpenApiSpecUrlInput::Clear, false, None),
+            None
+        );
+        assert_eq!(
+            resolve_openapi_spec_url(
+                &OpenApiSpecUrlInput::Set("https://user.example/spec.json"),
+                false,
+                None,
+            )
+            .as_deref(),
+            Some("https://user.example/spec.json"),
+        );
+    }
+
+    #[test]
     fn infers_direct_credential_type_from_auth_method() {
         assert_eq!(
             direct_credential_type_from_auth_method("bearer"),
@@ -1908,6 +2067,7 @@ mod tests {
             label: "Public service".to_string(),
             url: "https://example.com".to_string(),
             catalog_service_id: Some("cat-1".to_string()),
+            openapi_spec_url: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

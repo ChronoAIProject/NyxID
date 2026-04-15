@@ -2760,6 +2760,7 @@ mod tests {
             label: "Lark Bot".to_string(),
             url: "https://open.larksuite.com".to_string(),
             catalog_service_id: Some("cat-1".to_string()),
+            openapi_spec_url: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

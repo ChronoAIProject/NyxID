@@ -4,9 +4,9 @@ use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
-use crate::handlers::services_helpers::validate_base_url;
 use crate::models::user_endpoint::{COLLECTION_NAME, UserEndpoint};
 use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
+use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
 
 fn validate_endpoint_url(url: &str) -> AppResult<()> {
     // Skip URL validation for node-resolved endpoints (empty URL) and SSH endpoints.
@@ -15,6 +15,14 @@ fn validate_endpoint_url(url: &str) -> AppResult<()> {
     }
 
     validate_base_url(url)
+}
+
+fn validate_openapi_spec_url(url: &str) -> AppResult<()> {
+    // Empty string is not accepted -- callers should pass None to clear.
+    // `validate_optional_spec_url` enforces 2048-char ceiling + scheme +
+    // cloud-metadata blocks. Deeper SSRF hardening happens at fetch time
+    // in `api_docs_service::fetch_spec_json`.
+    validate_optional_spec_url(url)
 }
 
 /// List all endpoints for a user, sorted by created_at descending.
@@ -48,6 +56,7 @@ pub async fn create_endpoint(
     label: &str,
     url: &str,
     catalog_service_id: Option<&str>,
+    openapi_spec_url: Option<&str>,
 ) -> AppResult<UserEndpoint> {
     if label.is_empty() || label.len() > 200 {
         return Err(AppError::ValidationError(
@@ -55,6 +64,13 @@ pub async fn create_endpoint(
         ));
     }
     validate_endpoint_url(url)?;
+    let openapi_spec_url = match openapi_spec_url {
+        Some(s) if !s.trim().is_empty() => {
+            validate_openapi_spec_url(s.trim())?;
+            Some(s.trim().to_string())
+        }
+        _ => None,
+    };
 
     let now = Utc::now();
     let endpoint = UserEndpoint {
@@ -63,6 +79,7 @@ pub async fn create_endpoint(
         label: label.to_string(),
         url: url.to_string(),
         catalog_service_id: catalog_service_id.map(|s| s.to_string()),
+        openapi_spec_url,
         created_at: now,
         updated_at: now,
     };
@@ -74,15 +91,42 @@ pub async fn create_endpoint(
     Ok(endpoint)
 }
 
-/// Update endpoint URL and/or label.
+/// How the caller wants to treat the `openapi_spec_url` field on update.
+#[derive(Debug, Default)]
+pub enum OpenApiSpecUrlUpdate<'a> {
+    /// Leave existing value untouched.
+    #[default]
+    Leave,
+    /// Replace with a new value.
+    Set(&'a str),
+    /// Remove the field (e.g. `""` from the client maps here).
+    Clear,
+}
+
+/// Update endpoint URL, label, and/or OpenAPI spec URL.
 pub async fn update_endpoint(
     db: &mongodb::Database,
     user_id: &str,
     endpoint_id: &str,
     url: Option<&str>,
     label: Option<&str>,
+    openapi_spec_url: OpenApiSpecUrlUpdate<'_>,
 ) -> AppResult<()> {
-    if url.is_none() && label.is_none() {
+    let spec_update = match openapi_spec_url {
+        OpenApiSpecUrlUpdate::Leave => None,
+        OpenApiSpecUrlUpdate::Clear => Some(None),
+        OpenApiSpecUrlUpdate::Set(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Some(None)
+            } else {
+                validate_openapi_spec_url(trimmed)?;
+                Some(Some(trimmed.to_string()))
+            }
+        }
+    };
+
+    if url.is_none() && label.is_none() && spec_update.is_none() {
         return Err(AppError::BadRequest(
             "At least one field must be provided".to_string(),
         ));
@@ -91,6 +135,7 @@ pub async fn update_endpoint(
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
+    let mut unset_doc = doc! {};
 
     if let Some(u) = url {
         validate_endpoint_url(u)?;
@@ -104,13 +149,24 @@ pub async fn update_endpoint(
         }
         set_doc.insert("label", l);
     }
+    match spec_update {
+        None => {}
+        Some(Some(value)) => {
+            set_doc.insert("openapi_spec_url", value);
+        }
+        Some(None) => {
+            unset_doc.insert("openapi_spec_url", "");
+        }
+    }
+
+    let mut update_doc = doc! { "$set": set_doc };
+    if !unset_doc.is_empty() {
+        update_doc.insert("$unset", unset_doc);
+    }
 
     let result = db
         .collection::<UserEndpoint>(COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": endpoint_id, "user_id": user_id },
-            doc! { "$set": set_doc },
-        )
+        .update_one(doc! { "_id": endpoint_id, "user_id": user_id }, update_doc)
         .await?;
 
     if result.matched_count == 0 {

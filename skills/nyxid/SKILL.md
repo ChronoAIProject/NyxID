@@ -357,10 +357,32 @@ nyxid service add --custom                                     # add custom endp
 nyxid service list --output json                               # list services (includes IDs)
 nyxid service show <id>                                        # show service details
 nyxid service update <id> --label "My Custom Name"             # rename service
+nyxid service update <id> --openapi-spec-url https://api.example.com/openapi.json  # attach an OpenAPI spec
+nyxid service update <id> --openapi-spec-url ""                # clear the OpenAPI spec URL
 nyxid service delete <id> --yes                                # remove service (no prompt)
 ```
 
 > Node commands accept names (e.g., `--via-node test-server`) in addition to UUIDs.
+
+### Attaching an OpenAPI spec to a custom endpoint
+
+Custom endpoints default to a single generic proxy tool. If the target service publishes an OpenAPI spec, attach the spec URL so AI agents (MCP, `/api/v1/endpoints/{id}/openapi-endpoints`) surface one tool per operation instead. Catalog-backed services inherit the catalog entry's spec URL automatically -- pass an empty string (`--openapi-spec-url ""`) on create if you want to opt out.
+
+```bash
+# Custom endpoint with OpenAPI discovery
+nyxid service add --custom --label "My API" \
+  --endpoint-url https://api.example.com/v1 \
+  --openapi-spec-url https://api.example.com/openapi.json \
+  --credential-env MY_API_TOKEN
+
+# Catalog-backed key that suppresses the catalog's default spec URL
+nyxid service add llm-openai --openapi-spec-url ""
+
+# Attach or update the spec URL after the fact
+nyxid service update <id> --openapi-spec-url https://api.example.com/openapi.json
+```
+
+URLs must be `http(s)://` and cannot contain `user:pass@` userinfo. The backend fetches them through a hardened path (DNS pinning, 5 MB size cap, no redirects, per-user cache scoping) and falls back to the generic proxy tool if the spec can't be fetched or parsed, so a broken spec URL never takes the service offline. SSH services ignore this field.
 
 ## Managing API Keys
 
@@ -409,6 +431,10 @@ Set `NYXID_ACCESS_TOKEN` in your agent's environment to authenticate:
 ```bash
 export NYXID_ACCESS_TOKEN="nyxid_ag_..."
 ```
+
+### Scope requirements for management writes
+
+Agent keys need `write` or `admin` scope to call management endpoints via REST (create/update/delete/rotate API keys, services, endpoints, bindings, etc.). `proxy read` is sufficient for proxy traffic only -- paths under `/proxy`, `/llm`, `/ssh`, `/channel-events`, `/channel-relay`, and `/delegation` do not require write scope. The `nyxid` CLI uses session auth (not API keys) and is unaffected.
 
 ## Organizations (Shared Credentials)
 

@@ -31,6 +31,13 @@ export interface KeyInfo {
   readonly ssh_allowed_principals: readonly string[] | null;
   readonly ssh_certificate_ttl_minutes: number | null;
   /**
+   * Optional OpenAPI spec URL stored on the underlying user endpoint. When
+   * present, AI agent surfaces (MCP, `/endpoints/{id}/openapi-endpoints`)
+   * expose concrete operations parsed from the spec instead of only a
+   * generic proxy tool.
+   */
+  readonly openapi_spec_url?: string | null;
+  /**
    * Provenance of the credential backing this key. Personal items are owned
    * directly; org items are inherited from an org membership. When undefined
    * (older backends without the org model) consumers should assume

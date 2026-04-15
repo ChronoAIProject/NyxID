@@ -1364,7 +1364,7 @@ At startup, `provider_service::seed_default_llm_services()` idempotently creates
 | `openai` | `llm-openai` | `https://api.openai.com/v1` | Bearer |
 | `openai-codex` | `llm-openai-codex` | `https://api.openai.com/v1` | Bearer |
 | `anthropic` | `llm-anthropic` | `https://api.anthropic.com/v1` | Header (`x-api-key`) |
-| `google-ai` | `llm-google-ai` | `https://generativelanguage.googleapis.com/v1beta` | Query (`key`) |
+| `google-ai` | `llm-google-ai` | `https://generativelanguage.googleapis.com/v1beta` | Header (`x-goog-api-key`) |
 | `mistral` | `llm-mistral` | `https://api.mistral.ai/v1` | Bearer |
 | `cohere` | `llm-cohere` | `https://api.cohere.com/v2` | Bearer |
 

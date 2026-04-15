@@ -9,12 +9,11 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
+use crate::services::url_validation::validate_base_url;
 use crate::services::{
     audit_service, credential_push_service, org_service, provider_service, user_api_key_service,
     user_token_service,
 };
-
-use super::services_helpers::validate_base_url;
 
 // TODO(SEC-9): Apply stricter per-endpoint rate limiting to OAuth callback and
 // initiate endpoints (e.g. 10 requests/minute per user) instead of relying

@@ -1473,8 +1473,8 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_slug: "llm-google-ai",
         service_name: "Google AI API",
         base_url: "https://generativelanguage.googleapis.com/v1beta",
-        injection_method: "query",
-        injection_key: "key",
+        injection_method: "header",
+        injection_key: "x-goog-api-key",
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
@@ -2095,6 +2095,39 @@ pub async fn seed_default_services(
                 "Migrated Telegram Bot user services to direct path auth"
             );
         }
+    }
+
+    // Migration: llm-google-ai was originally seeded with query-param auth
+    // (`?key=<api_key>`), which leaks into downstream access logs and
+    // Referer headers. Flip the catalog row to Google's recommended
+    // `x-goog-api-key` header instead. Strict filter on the original
+    // seeded values so any admin customization is left alone. Existing
+    // `UserService` rows are snapshots copied from the catalog at
+    // provision time and are intentionally not touched -- the proxy reads
+    // `auth_method` from those snapshots, so current users keep working
+    // exactly as they do today. Only new auto-provisions pick up the
+    // header method. The legacy delegated path reads the catalog live, so
+    // it flips on the next proxy call; Gemini accepts both methods, so
+    // there is no observable change downstream.
+    let res = service_col
+        .update_one(
+            doc! {
+                "slug": "llm-google-ai",
+                "created_by": "system",
+                "auth_method": "query",
+                "auth_key_name": "key",
+            },
+            doc! {
+                "$set": {
+                    "auth_method": "header",
+                    "auth_key_name": "x-goog-api-key",
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+    if res.modified_count > 0 {
+        tracing::info!("Migrated llm-google-ai catalog to x-goog-api-key header auth");
     }
 
     let mut migrated_count: u32 = 0;

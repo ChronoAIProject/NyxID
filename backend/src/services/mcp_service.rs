@@ -19,7 +19,9 @@ use crate::services::content_type::{
     is_binary_content_type, is_json_content_type, normalize_content_type, schema_is_binary,
 };
 use crate::services::node_ws_manager::NodeWsManager;
-use crate::services::{connection_service, node_routing_service, proxy_service};
+use crate::services::{
+    api_docs_service, connection_service, node_routing_service, openapi_parser, proxy_service,
+};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -313,17 +315,45 @@ async fn load_user_tools_inner(
     // 4a. User-managed services
     for r in &all_user_services {
         let us = &r.service;
-        let endpoint_label = endpoints_by_id
-            .get(us.endpoint_id.as_str())
+        let user_endpoint = endpoints_by_id.get(us.endpoint_id.as_str()).copied();
+        let endpoint_label = user_endpoint
             .map(|ep| ep.label.as_str())
             .unwrap_or(&us.slug);
 
         let (endpoints, is_generic) = if let Some(catalog_id) = us.catalog_service_id.as_deref() {
+            // Catalog-backed: use the ServiceEndpoint rows pre-parsed at catalog
+            // registration time. Unchanged path.
             let eps = eps_by_svc
                 .get(catalog_id)
                 .map(|eps| service_endpoints_to_mcp(eps))
                 .unwrap_or_default();
             (eps, false)
+        } else if let Some(spec_url) = user_endpoint.and_then(|ep| ep.openapi_spec_url.as_deref()) {
+            // Custom endpoint with a user-supplied OpenAPI spec: fetch + parse
+            // through the hardened cache (scoped by owner) and surface each
+            // operation as a tool. On any failure we silently fall back to the
+            // generic proxy tool so a broken spec URL never takes the service
+            // offline for the agent.
+            match fetch_and_parse_user_spec(spec_url, &r.effective_owner_id).await {
+                Ok(mcp_endpoints) if !mcp_endpoints.is_empty() => (mcp_endpoints, false),
+                Ok(_) => {
+                    tracing::debug!(
+                        user_service_id = %us.id,
+                        spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                        "Parsed user OpenAPI spec contained no operations; falling back to generic proxy tool"
+                    );
+                    (vec![build_generic_proxy_endpoint(endpoint_label)], true)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        user_service_id = %us.id,
+                        spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                        %error,
+                        "Failed to parse user OpenAPI spec; falling back to generic proxy tool"
+                    );
+                    (vec![build_generic_proxy_endpoint(endpoint_label)], true)
+                }
+            }
         } else {
             let generic_ep = build_generic_proxy_endpoint(endpoint_label);
             (vec![generic_ep], true)
@@ -393,6 +423,34 @@ fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
             response_description: ep.response_description.clone(),
         })
         .collect()
+}
+
+/// Fetch the user-supplied OpenAPI spec through the hardened cache (scoped
+/// by the owning user id), parse it, and convert to MCP tool endpoints.
+async fn fetch_and_parse_user_spec(
+    spec_url: &str,
+    owner_id: &str,
+) -> AppResult<Vec<McpToolEndpoint>> {
+    let spec = api_docs_service::fetch_spec_json_scoped(spec_url, owner_id).await?;
+    let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
+    Ok(parsed
+        .into_iter()
+        .map(|p| McpToolEndpoint {
+            // User-endpoint operations have no persistent ID; synthesise a
+            // stable one from method+path so downstream logging / metrics can
+            // distinguish tools.
+            endpoint_id: format!("{}:{}", p.method, p.path),
+            name: p.name,
+            description: p.description,
+            method: p.method,
+            path: p.path,
+            parameters: p.parameters,
+            request_body_schema: p.request_body_schema,
+            request_content_type: p.request_content_type,
+            request_body_required: p.request_body_required,
+            response_description: None,
+        })
+        .collect())
 }
 
 /// A resolved user service ready for MCP tool generation.

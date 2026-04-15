@@ -527,6 +527,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             "/{endpoint_id}",
             put(handlers::user_endpoints::update_endpoint)
                 .delete(handlers::user_endpoints::delete_endpoint),
+        )
+        .route(
+            "/{endpoint_id}/openapi-endpoints",
+            get(handlers::user_endpoints::list_openapi_endpoints),
         );
 
     let external_api_key_routes = Router::new()

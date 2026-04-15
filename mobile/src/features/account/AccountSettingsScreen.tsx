@@ -81,8 +81,9 @@ function AccountRow({
 }
 
 function getInitials(name?: string | null, email?: string): string {
-  if (name) {
-    return name
+  const trimmedName = name?.trim();
+  if (trimmedName) {
+    return trimmedName
       .split(" ")
       .map((w) => w[0])
       .join("")
@@ -90,6 +91,20 @@ function getInitials(name?: string | null, email?: string): string {
       .slice(0, 2);
   }
   return (email?.[0] ?? "?").toUpperCase();
+}
+
+function getIdentityName(name?: string | null, provider?: string | null): string {
+  const trimmedName = name?.trim();
+  if (trimmedName) return trimmedName;
+  if (provider === "apple") return "Apple account";
+  return "User";
+}
+
+function getDisplayNameValue(name?: string | null, provider?: string | null): string {
+  const trimmedName = name?.trim();
+  if (trimmedName) return trimmedName;
+  if (provider === "apple") return "Not provided by Apple";
+  return "No display name provided";
 }
 
 export function AccountSettingsScreen({ navigation }: Props) {
@@ -276,6 +291,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
   };
 
   const initials = getInitials(profile?.display_name, profile?.email);
+  const identityName = getIdentityName(profile?.display_name, profile?.social_provider);
   const isOffline = !isConnected;
   const profileOpacity = isOffline ? 0.5 : 1;
 
@@ -306,7 +322,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
             )}
           </View>
           <View style={styles.identityInfo}>
-            <Text style={styles.identityName}>{profile?.display_name ?? "User"}</Text>
+            <Text style={styles.identityName}>{identityName}</Text>
             <Text style={styles.identityEmail}>{profile?.email ?? "..."}</Text>
           </View>
           <View style={[styles.statusBadge, isOffline && styles.statusBadgeOffline]}>
@@ -328,7 +344,10 @@ export function AccountSettingsScreen({ navigation }: Props) {
             </>
           ) : (
             <>
-              <AccountRow label="Display Name" value={profile.display_name ?? "Not set"} />
+              <AccountRow
+                label="Display Name"
+                value={getDisplayNameValue(profile.display_name, profile.social_provider)}
+              />
               <AccountRow label="Email" value={profile.email} />
               <AccountRow label="Sign-in Method" value={profile.social_provider ? profile.social_provider.charAt(0).toUpperCase() + profile.social_provider.slice(1) : "Email"} isLast />
             </>

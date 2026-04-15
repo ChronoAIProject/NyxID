@@ -51,7 +51,7 @@ export function useRegister() {
     mutationFn: async (credentials: {
       email: string;
       password: string;
-      name: string;
+      display_name: string;
       invite_code: string;
     }): Promise<RegisterResponse> => {
       return api.post<RegisterResponse>("/auth/register", credentials);

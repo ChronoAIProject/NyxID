@@ -534,6 +534,11 @@ fn resolve_social_login(
             "last_login_at": bson::DateTime::from_chrono(now),
             "updated_at": bson::DateTime::from_chrono(now),
         };
+        if user.display_name.is_none()
+            && let Some(ref name) = profile.display_name
+        {
+            update.insert("display_name", name);
+        }
         if user.avatar_url.is_none()
             && let Some(ref avatar) = profile.avatar_url
         {
@@ -1046,6 +1051,36 @@ mod tests {
                 assert!(user.password_hash.is_none());
             }
             other => panic!("expected CreateNew, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_link_sets_display_name_when_missing() {
+        let user = make_test_user("user@example.com", None, None);
+        assert!(user.display_name.is_none()); // precondition
+        let profile = github_profile();
+
+        let result = resolve_social_login(None, Some(user), &profile).unwrap();
+        match result {
+            SocialLoginOutcome::LinkToExisting { update, .. } => {
+                assert_eq!(update.get_str("display_name").unwrap(), "Test User");
+            }
+            other => panic!("expected LinkToExisting, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_link_preserves_existing_display_name() {
+        let mut user = make_test_user("user@example.com", None, None);
+        user.display_name = Some("Existing Name".to_string());
+        let profile = github_profile();
+
+        let result = resolve_social_login(None, Some(user), &profile).unwrap();
+        match result {
+            SocialLoginOutcome::LinkToExisting { update, .. } => {
+                assert!(!update.contains_key("display_name"));
+            }
+            other => panic!("expected LinkToExisting, got {other:?}"),
         }
     }
 

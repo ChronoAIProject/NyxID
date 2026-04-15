@@ -81,9 +81,9 @@ export function Header({
             {/* Name + email right-aligned — hidden on mobile */}
             <div className="hidden flex-col items-end gap-0.5 sm:flex">
               <span className="text-[13px] font-medium text-foreground">
-                {user?.name ?? user?.email ?? "User"}
+                {user?.display_name ?? user?.email ?? "User"}
               </span>
-              {user?.name && (
+              {user?.display_name && (
                 <span className="text-[11px] text-text-tertiary">
                   {user.email}
                 </span>
@@ -92,7 +92,7 @@ export function Header({
             <Avatar className="h-10 w-10">
               {safeAvatarUrl && <AvatarImage src={safeAvatarUrl} alt="" />}
               <AvatarFallback className="text-xs">
-                {getInitials(user?.name ?? null, user?.email ?? "")}
+                {getInitials(user?.display_name ?? null, user?.email ?? "")}
               </AvatarFallback>
             </Avatar>
           </button>

@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
+use crate::services::url_validation::validate_base_url;
 use crate::services::{audit_service, provider_service, user_credentials_service};
 
-use super::services_helpers::{require_admin, validate_base_url};
+use super::services_helpers::require_admin;
 
 // --- Request / Response types ---
 

@@ -148,6 +148,24 @@ fn extract_text_content(content_str: &str) -> Option<String> {
     inner.get("text").and_then(|v| v.as_str()).map(String::from)
 }
 
+/// Build `(msg_type, content)` for Lark's `im.v1.messages` send endpoint.
+///
+/// If `reply.metadata` contains a `"card"` key, sends as an interactive
+/// Feishu Card (JSON 2.0 format) with `msg_type = "interactive"`. The card
+/// JSON is passed through as-is; Feishu validates it server-side.
+///
+/// Otherwise falls back to a plain text message wrapping `reply.text`.
+fn build_message_body(reply: &OutboundReply) -> (&'static str, String) {
+    if let Some(metadata) = reply.metadata.as_ref()
+        && let Some(card) = metadata.get("card")
+    {
+        return ("interactive", card.to_string());
+    }
+
+    let text = reply.text.as_deref().unwrap_or("");
+    ("text", serde_json::json!({ "text": text }).to_string())
+}
+
 /// Detect the content type from the Lark `message_type` field.
 fn detect_content_type(message_type: &str) -> &'static str {
     match message_type {
@@ -350,14 +368,11 @@ impl PlatformAdapter for LarkFamilyAdapter {
             .get_tenant_access_token(http, app_id, app_secret)
             .await?;
 
-        let text = reply.text.as_deref().unwrap_or("");
-
-        // Lark requires content as a JSON string inside the body
-        let content = serde_json::json!({ "text": text }).to_string();
+        let (msg_type, content) = build_message_body(reply);
 
         let body = serde_json::json!({
             "receive_id": conversation_id,
-            "msg_type": "text",
+            "msg_type": msg_type,
             "content": content,
         });
 
@@ -704,6 +719,79 @@ mod tests {
     fn feishu_base_url() {
         let adapter = LarkFamilyAdapter::feishu(test_cache());
         assert_eq!(adapter.base_url, "https://open.feishu.cn");
+    }
+
+    // -- build_message_body --------------------------------------------------
+
+    #[test]
+    fn build_body_plain_text() {
+        let reply = OutboundReply {
+            text: Some("hello".to_string()),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        let (msg_type, content) = build_message_body(&reply);
+        assert_eq!(msg_type, "text");
+        assert_eq!(content, r#"{"text":"hello"}"#);
+    }
+
+    #[test]
+    fn build_body_text_missing_defaults_to_empty() {
+        let reply = OutboundReply {
+            text: None,
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        let (msg_type, content) = build_message_body(&reply);
+        assert_eq!(msg_type, "text");
+        assert_eq!(content, r#"{"text":""}"#);
+    }
+
+    #[test]
+    fn build_body_interactive_card() {
+        let card = serde_json::json!({
+            "config": { "update_multi": true },
+            "header": {
+                "title": { "tag": "plain_text", "content": "Agent Created" },
+                "template": "green"
+            },
+            "elements": [
+                { "tag": "markdown", "content": "Your agent is running!" }
+            ]
+        });
+        let reply = OutboundReply {
+            text: None,
+            reply_to_platform_message_id: None,
+            metadata: Some(serde_json::json!({ "card": card.clone() })),
+        };
+        let (msg_type, content) = build_message_body(&reply);
+        assert_eq!(msg_type, "interactive");
+        // Content is the card JSON serialized as a string
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed, card);
+    }
+
+    #[test]
+    fn build_body_card_wins_over_text() {
+        let reply = OutboundReply {
+            text: Some("ignored fallback".to_string()),
+            reply_to_platform_message_id: None,
+            metadata: Some(serde_json::json!({ "card": { "elements": [] } })),
+        };
+        let (msg_type, _) = build_message_body(&reply);
+        assert_eq!(msg_type, "interactive");
+    }
+
+    #[test]
+    fn build_body_metadata_without_card_uses_text() {
+        let reply = OutboundReply {
+            text: Some("plain".to_string()),
+            reply_to_platform_message_id: None,
+            metadata: Some(serde_json::json!({ "other": "value" })),
+        };
+        let (msg_type, content) = build_message_body(&reply);
+        assert_eq!(msg_type, "text");
+        assert_eq!(content, r#"{"text":"plain"}"#);
     }
 
     // -- message with reply and thread ---------------------------------------

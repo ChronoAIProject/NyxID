@@ -212,6 +212,8 @@ pub async fn create_binding(
     Path(key_id): Path<String>,
     Json(body): Json<CreateBindingRequest>,
 ) -> AppResult<Json<BindingResponse>> {
+    auth_user.ensure_write_scope()?;
+
     let actor = auth_user.user_id.to_string();
     // Effective owner = the org user_id for org-owned keys, else the actor.
     // `agent_binding_service::create_binding` then validates that the
@@ -308,6 +310,8 @@ pub async fn delete_binding(
     auth_user: AuthUser,
     Path((key_id, binding_id)): Path<(String, String)>,
 ) -> AppResult<Json<DeleteBindingResponse>> {
+    auth_user.ensure_write_scope()?;
+
     let actor = auth_user.user_id.to_string();
     let BindingOwnerAccess { user_id, access } =
         resolve_binding_owner(&state, &actor, &key_id, true).await?;

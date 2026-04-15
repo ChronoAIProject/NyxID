@@ -1021,6 +1021,8 @@ pub async fn create_key(
     auth_user: AuthUser,
     Json(body): Json<CreateApiKeyRequest>,
 ) -> AppResult<Json<CreateApiKeyResponse>> {
+    auth_user.ensure_write_scope()?;
+
     if body.name.is_empty() {
         return Err(AppError::ValidationError(
             "API key name is required".to_string(),
@@ -1113,6 +1115,8 @@ pub async fn update_key(
     Path(key_id): Path<String>,
     Json(body): Json<UpdateApiKeyRequest>,
 ) -> AppResult<Json<ApiKeyResponse>> {
+    auth_user.ensure_write_scope()?;
+
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
 
@@ -1157,6 +1161,8 @@ pub async fn delete_key(
     auth_user: AuthUser,
     Path(key_id): Path<String>,
 ) -> AppResult<Json<DeleteApiKeyResponse>> {
+    auth_user.ensure_write_scope()?;
+
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
     key_service::delete_api_key(&state.db, &user_id_str, &key_id).await?;
@@ -1185,6 +1191,8 @@ pub async fn rotate_key(
     auth_user: AuthUser,
     Path(key_id): Path<String>,
 ) -> AppResult<Json<CreateApiKeyResponse>> {
+    auth_user.ensure_write_scope()?;
+
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
     let created = key_service::rotate_api_key(&state.db, &user_id_str, &key_id).await?;
@@ -1234,6 +1242,12 @@ mod tests {
     fn callback_url_null_means_clear() {
         let req: UpdateApiKeyRequest = serde_json::from_str(r#"{"callback_url": null}"#).unwrap();
         assert_eq!(req.callback_url, Some(None));
+    }
+
+    #[test]
+    fn callback_url_empty_string_deserializes_as_present() {
+        let req: UpdateApiKeyRequest = serde_json::from_str(r#"{"callback_url": ""}"#).unwrap();
+        assert_eq!(req.callback_url, Some(Some(String::new())));
     }
 
     #[test]

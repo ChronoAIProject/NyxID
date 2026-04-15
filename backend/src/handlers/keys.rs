@@ -174,6 +174,18 @@ pub struct CreateKeyRequest {
     /// every member of that org). The caller must be an admin of the org.
     /// Omit to create a personal key owned by the caller.
     pub target_org_id: Option<String>,
+    /// Optional OpenAPI spec URL for endpoint discovery. Three-state:
+    ///   - Omitted: for catalog-backed keys, inherit the catalog entry's
+    ///     spec URL automatically. For custom endpoints, store none.
+    ///   - Empty string: opt out of catalog inheritance -- store none even
+    ///     when the catalog has a default.
+    ///   - Non-empty URL: store this value verbatim.
+    ///
+    /// When present, agent-facing surfaces (MCP,
+    /// `/endpoints/{id}/openapi-endpoints`) parse this spec so AI tools can
+    /// call specific operations instead of only the generic proxy tool.
+    /// SSH services ignore this field entirely.
+    pub openapi_spec_url: Option<String>,
 }
 
 impl std::fmt::Debug for CreateKeyRequest {
@@ -263,6 +275,11 @@ pub struct KeyResponse {
     pub ssh_allowed_principals: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_certificate_ttl_minutes: Option<u32>,
+    /// User-supplied (or catalog-inherited) OpenAPI spec URL. When present,
+    /// AI agents can call `GET /api/v1/endpoints/{endpoint_id}/openapi-endpoints`
+    /// to discover the concrete operations this service exposes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openapi_spec_url: Option<String>,
     /// Provenance: personal credentials, or inherited from an org membership.
     /// Mirrors the same field on the `/user-services` response so the
     /// frontend can group AI Services by personal vs each org section.
@@ -299,6 +316,9 @@ pub struct UpdateKeyRequest {
     pub delegation_token_scope: Option<String>,
     /// Custom User-Agent override. Set to "" to clear, Some(value) to set.
     pub custom_user_agent: Option<String>,
+    /// OpenAPI spec URL for endpoint discovery. Set to "" to clear,
+    /// Some(value) to set.
+    pub openapi_spec_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -392,6 +412,15 @@ pub async fn create_key(
         None
     };
 
+    // Translate the three-state wire format for openapi_spec_url. `None`
+    // (field absent) inherits the catalog default; `Some("")` opts out of
+    // inheritance; `Some(value)` overrides.
+    let openapi_input = match body.openapi_spec_url.as_deref() {
+        None => unified_key_service::OpenApiSpecUrlInput::Inherit,
+        Some(s) if s.trim().is_empty() => unified_key_service::OpenApiSpecUrlInput::Clear,
+        Some(s) => unified_key_service::OpenApiSpecUrlInput::Set(s),
+    };
+
     let result = unified_key_service::create_key(
         &state.db,
         &state.encryption_keys,
@@ -407,6 +436,7 @@ pub async fn create_key(
         body.node_id.as_deref(),
         ssh_params,
         identity,
+        openapi_input,
     )
     .await?;
 
@@ -564,6 +594,7 @@ pub async fn update_key(
                 &view.endpoint_id,
                 None,
                 Some(label.as_str()),
+                user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
             )
             .await?;
         }
@@ -577,6 +608,25 @@ pub async fn update_key(
             &view.endpoint_id,
             Some(url.as_str()),
             None,
+            user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
+        )
+        .await?;
+    }
+
+    // Update OpenAPI spec URL if provided. Empty string clears.
+    if let Some(ref spec_url) = body.openapi_spec_url {
+        let update = if spec_url.trim().is_empty() {
+            user_endpoint_service::OpenApiSpecUrlUpdate::Clear
+        } else {
+            user_endpoint_service::OpenApiSpecUrlUpdate::Set(spec_url.as_str())
+        };
+        user_endpoint_service::update_endpoint(
+            &state.db,
+            &user_id_str,
+            &view.endpoint_id,
+            None,
+            None,
+            update,
         )
         .await?;
     }
@@ -764,6 +814,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         ssh_ca_public_key: result.ssh_ca_public_key.clone(),
         ssh_allowed_principals: result.ssh_allowed_principals.clone(),
         ssh_certificate_ttl_minutes: result.ssh_certificate_ttl_minutes,
+        openapi_spec_url: result.endpoint.openapi_spec_url.clone(),
         // Newly created keys are always personal -- create_key only inserts
         // into the actor's own user_id, not into an org.
         credential_source:
@@ -811,6 +862,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         ssh_ca_public_key: view.ssh_ca_public_key,
         ssh_allowed_principals: view.ssh_allowed_principals,
         ssh_certificate_ttl_minutes: view.ssh_certificate_ttl_minutes,
+        openapi_spec_url: view.openapi_spec_url,
         credential_source: view.credential_source.into(),
     }
 }

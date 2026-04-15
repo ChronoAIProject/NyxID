@@ -122,7 +122,10 @@ export function CallbackUrlCard({
                 size="icon"
                 variant="ghost"
                 className="h-6 w-6"
-                onClick={() => setEditing(true)}
+                onClick={() => {
+                  setValue(callbackUrl ?? "");
+                  setEditing(true);
+                }}
               >
                 <Pencil className="h-3 w-3" />
               </Button>

@@ -1191,8 +1191,8 @@ nyxid node credentials add --service "my-api" --header "Authorization" --secret-
 # Manual for catalog services (requires separate backend registration, see Step 5)
 nyxid node credentials add --service "llm-openai" --header "Authorization" --secret-format Bearer
 
-# Manual: query parameter injection (requires separate backend registration, see Step 5)
-nyxid node credentials add --service "llm-google-ai" --query-param "key"
+# Manual: header injection (requires separate backend registration, see Step 5)
+nyxid node credentials add --service "llm-google-ai" --header "x-goog-api-key"
 
 # OAuth: run device code flow from the node
 nyxid node credentials add-oauth --service "api-twitter" --from-catalog

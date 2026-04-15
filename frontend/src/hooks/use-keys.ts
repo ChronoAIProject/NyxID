@@ -68,6 +68,7 @@ interface CreateKeyParams {
   readonly ssh_certificate_auth?: boolean;
   readonly ssh_principals?: string;
   readonly ssh_certificate_ttl_minutes?: number;
+  readonly openapi_spec_url?: string;
 }
 
 export function useCreateKey() {
@@ -106,6 +107,8 @@ interface UpdateKeyParams {
   readonly auth_key_name?: string;
   readonly node_id?: string;
   readonly is_active?: boolean;
+  /** Empty string clears the existing value. */
+  readonly openapi_spec_url?: string;
 }
 
 export function useUpdateKey() {
@@ -129,6 +132,8 @@ interface UpdateEndpointParams {
   readonly endpointId: string;
   readonly url?: string;
   readonly label?: string;
+  /** Empty string clears the existing value. */
+  readonly openapi_spec_url?: string;
 }
 
 export function useUpdateEndpoint() {
@@ -139,6 +144,7 @@ export function useUpdateEndpoint() {
       return api.put<void>(`/endpoints/${params.endpointId}`, {
         url: params.url,
         label: params.label,
+        openapi_spec_url: params.openapi_spec_url,
       });
     },
     onSuccess: () => {

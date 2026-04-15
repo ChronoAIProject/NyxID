@@ -69,6 +69,8 @@ interface FormState {
   readonly sshCertificateAuth: boolean;
   readonly sshPrincipals: string;
   readonly sshCertificateTtlMinutes: string;
+  /** Optional OpenAPI spec URL — enables endpoint discovery for AI tools. */
+  readonly openapiSpecUrl: string;
 }
 
 const AUTH_METHOD_DEFAULTS: Record<string, string> = {
@@ -188,6 +190,7 @@ const INITIAL_FORM: FormState = {
   sshCertificateAuth: true,
   sshPrincipals: "",
   sshCertificateTtlMinutes: "30",
+  openapiSpecUrl: "",
 };
 
 function CopyableCode({ children }: { readonly children: string }) {
@@ -643,6 +646,23 @@ function KeyForm({
                 : "bg-muted text-muted-foreground cursor-default"
             }
           />
+        </div>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="add-key-openapi-spec">
+            OpenAPI spec URL <span className="text-muted-foreground">(optional)</span>
+          </Label>
+          <Input
+            id="add-key-openapi-spec"
+            placeholder="https://api.example.com/openapi.json"
+            value={form.openapiSpecUrl}
+            onChange={(e) => onChange({ openapiSpecUrl: e.target.value })}
+            type="url"
+          />
+          <p className="text-[11px] text-muted-foreground">
+            When set, AI agents discover concrete operations from the spec instead
+            of being limited to a single generic proxy tool.
+          </p>
         </div>
 
         {(isCustom || catalogEntry?.auth_method !== "none") && (
@@ -1759,6 +1779,9 @@ export function AddKeyDialog({
         ? { auth_key_name: form.authKeyName }
         : {}),
       ...(form.nodeId.trim() ? { node_id: form.nodeId.trim() } : {}),
+      ...(form.openapiSpecUrl.trim()
+        ? { openapi_spec_url: form.openapiSpecUrl.trim() }
+        : {}),
     };
   }
 
@@ -1779,6 +1802,7 @@ export function AddKeyDialog({
   }
 
   function handleFormSubmit() {
+    const specUrl = form.openapiSpecUrl.trim();
     const params = selectedEntry
       ? {
           credential: form.credential,
@@ -1794,6 +1818,7 @@ export function AddKeyDialog({
           (selectedEntry.auth_key_name ?? "Authorization")
             ? { auth_key_name: form.authKeyName }
             : {}),
+          ...(specUrl ? { openapi_spec_url: specUrl } : {}),
         }
       : {
           credential: form.credential,
@@ -1801,6 +1826,7 @@ export function AddKeyDialog({
           endpoint_url: form.endpointUrl.trim(),
           auth_method: form.authMethod,
           auth_key_name: form.authKeyName,
+          ...(specUrl ? { openapi_spec_url: specUrl } : {}),
         };
 
     createKey.mutate(params, {
@@ -1847,6 +1873,9 @@ export function AddKeyDialog({
             auth_key_name: form.authKeyName,
             node_id: form.nodeId,
             service_type: form.serviceType,
+            ...(form.openapiSpecUrl.trim()
+              ? { openapi_spec_url: form.openapiSpecUrl.trim() }
+              : {}),
           };
 
     createKey.mutate(params, {

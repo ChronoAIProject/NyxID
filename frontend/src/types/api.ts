@@ -1,7 +1,7 @@
 export interface User {
   readonly id: string;
   readonly email: string;
-  readonly name: string | null;
+  readonly display_name: string | null;
   readonly avatar_url: string | null;
   readonly email_verified: boolean;
   readonly mfa_enabled: boolean;
@@ -337,7 +337,7 @@ export interface LoginCredentials {
 export interface RegisterCredentials {
   readonly email: string;
   readonly password: string;
-  readonly name: string;
+  readonly display_name: string;
 }
 
 export interface LoginResponse {

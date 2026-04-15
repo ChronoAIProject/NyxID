@@ -215,7 +215,7 @@ pub async fn create_api_key(
         platform: platform.map(|s| s.to_string()),
         callback_url: {
             if let Some(url) = callback_url {
-                crate::handlers::services_helpers::validate_base_url(url)?;
+                crate::services::url_validation::validate_base_url(url)?;
                 Some(url.to_string())
             } else {
                 None
@@ -439,11 +439,11 @@ pub async fn update_api_key_scope(
     }
     if let Some(url) = callback_url {
         match url {
-            Some(value) => {
-                crate::handlers::services_helpers::validate_base_url(value)?;
+            Some(value) if !value.trim().is_empty() => {
+                crate::services::url_validation::validate_base_url(value)?;
                 update.insert("callback_url", value);
             }
-            None => {
+            _ => {
                 update.insert("callback_url", bson::Bson::Null);
             }
         }

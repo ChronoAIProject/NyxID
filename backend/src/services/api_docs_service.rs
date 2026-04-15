@@ -113,7 +113,31 @@ pub fn is_auto_discovered_asyncapi_spec_url(base_url: &str, spec_url: &str) -> b
 /// Fetch a JSON spec from a URL using the hardened fetch path (DNS pinning,
 /// response-size limit, redirect policy, 60s cache). Returns the cached Arc.
 pub async fn fetch_spec_json(url: &str) -> AppResult<Arc<serde_json::Value>> {
-    fetch_json_spec(url).await
+    fetch_json_spec_internal(url, None).await
+}
+
+/// Like [`fetch_spec_json`] but partitions the cache by `scope` (e.g. the
+/// owning `user_id`). Use this for user-supplied spec URLs so two users
+/// pointing at the same private URL don't share a cached payload.
+pub async fn fetch_spec_json_scoped(url: &str, scope: &str) -> AppResult<Arc<serde_json::Value>> {
+    fetch_json_spec_internal(url, Some(scope)).await
+}
+
+/// Render a URL for logs without leaking userinfo or query parameters.
+/// User-supplied spec URLs can be signed URLs or include bearer tokens in
+/// the query string, so we only emit scheme + host (+ port) + path. Parse
+/// failures collapse to `<invalid-url>` rather than the raw input.
+pub fn redact_url_for_logs(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(parsed) => {
+            let scheme = parsed.scheme();
+            let host = parsed.host_str().unwrap_or("");
+            let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+            let path = parsed.path();
+            format!("{scheme}://{host}{port}{path}")
+        }
+        Err(_) => "<invalid-url>".to_string(),
+    }
 }
 
 pub async fn fetch_downstream_openapi_spec(
@@ -653,11 +677,32 @@ fn is_probe_url(base_url: &str, spec_url: &str, candidate_paths: &[&str]) -> boo
 }
 
 async fn fetch_json_spec(url: &str) -> AppResult<Arc<serde_json::Value>> {
+    fetch_json_spec_internal(url, None).await
+}
+
+/// Build the DashMap cache key. Unscoped callers share the global URL-keyed
+/// cache (legacy behaviour). Scoped callers prepend a namespace so private
+/// user specs don't leak between users.
+fn build_cache_key(url: &str, scope: Option<&str>) -> String {
+    match scope {
+        Some(s) => format!("scope:{s}|{url}"),
+        None => url.to_string(),
+    }
+}
+
+async fn fetch_json_spec_internal(
+    url: &str,
+    scope: Option<&str>,
+) -> AppResult<Arc<serde_json::Value>> {
     let target = validate_spec_fetch_target(url).await?;
-    let cache_key = target.url.to_string();
+    let cache_key = build_cache_key(target.url.as_ref(), scope);
     if let Some(spec) = get_cached_spec(&cache_key) {
         return Ok(spec);
     }
+
+    // Pre-compute the redacted URL once -- validated targets strip userinfo
+    // but query strings may still carry signed-URL secrets.
+    let log_url = redact_url_for_logs(target.url.as_ref());
 
     let response = if target.requires_dns_pinning {
         build_pinned_spec_fetch_client(&target)?
@@ -673,7 +718,7 @@ async fn fetch_json_spec(url: &str) -> AppResult<Arc<serde_json::Value>> {
             .await
     }
     .map_err(|error| {
-        tracing::warn!(url = %target.url, %error, "Failed to fetch downstream API spec");
+        tracing::warn!(url = %log_url, %error, "Failed to fetch downstream API spec");
         AppError::BadRequest("Failed to fetch spec".to_string())
     })?;
 
@@ -687,12 +732,12 @@ async fn fetch_json_spec(url: &str) -> AppResult<Arc<serde_json::Value>> {
     let mut response = response;
     let mut body = BytesMut::new();
     while let Some(chunk) = response.chunk().await.map_err(|error| {
-        tracing::warn!(url = %target.url, %error, "Failed to read downstream API spec body");
+        tracing::warn!(url = %log_url, %error, "Failed to read downstream API spec body");
         AppError::BadRequest("Failed to read spec body".to_string())
     })? {
         if body.len() + chunk.len() > MAX_SPEC_RESPONSE_BYTES {
             tracing::warn!(
-                url = %target.url,
+                url = %log_url,
                 limit_bytes = MAX_SPEC_RESPONSE_BYTES,
                 "Downstream API spec exceeded size limit"
             );
@@ -774,6 +819,13 @@ async fn validate_spec_fetch_target(url: &str) -> AppResult<ValidatedSpecFetchTa
             "Spec URL must use http or https".to_string(),
         ));
     }
+
+    // Reject embedded credentials. Storage-time validation
+    // (`url_validation::validate_optional_spec_url`) already rejects these
+    // before they land in MongoDB, but keep this belt-and-suspenders: a
+    // legacy row predating that check should still be blocked from being
+    // fetched.
+    crate::services::url_validation::reject_url_userinfo(&parsed)?;
 
     let host = parsed
         .host_str()
@@ -1110,5 +1162,51 @@ mod tests {
         assert_eq!(super::SPEC_CACHE.len(), MAX_SPEC_CACHE_ENTRIES);
         assert!(!super::SPEC_CACHE.contains_key("https://example.com/spec-0.json"));
         assert!(super::SPEC_CACHE.contains_key("https://example.com/spec-new.json"));
+    }
+
+    #[test]
+    fn cache_key_is_partitioned_by_scope() {
+        // Two users pointing at the same URL must not share a cached entry,
+        // so their cache keys have to differ.
+        let unscoped = super::build_cache_key("https://example.com/openapi.json", None);
+        let user_a = super::build_cache_key("https://example.com/openapi.json", Some("user-a"));
+        let user_b = super::build_cache_key("https://example.com/openapi.json", Some("user-b"));
+
+        assert_ne!(unscoped, user_a);
+        assert_ne!(user_a, user_b);
+    }
+
+    #[test]
+    fn redact_url_strips_userinfo_and_query() {
+        // Signed URL: the query carries the token and must never appear in logs.
+        let redacted = super::redact_url_for_logs(
+            "https://user:secret@host.example.com:8443/specs/openapi.json?sig=DEADBEEF&exp=12345",
+        );
+        assert_eq!(redacted, "https://host.example.com:8443/specs/openapi.json");
+    }
+
+    #[test]
+    fn redact_url_preserves_default_port() {
+        let redacted = super::redact_url_for_logs("https://host.example.com/openapi.json");
+        assert_eq!(redacted, "https://host.example.com/openapi.json");
+    }
+
+    #[test]
+    fn redact_url_collapses_invalid_input() {
+        assert_eq!(super::redact_url_for_logs("not a url"), "<invalid-url>");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_urls_with_embedded_credentials() {
+        assert!(
+            validate_spec_fetch_target("https://user:pass@example.com/openapi.json")
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_spec_fetch_target("https://user@example.com/openapi.json")
+                .await
+                .is_err()
+        );
     }
 }

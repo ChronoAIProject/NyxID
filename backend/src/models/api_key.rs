@@ -166,4 +166,14 @@ mod tests {
             Some("https://agent.example.com/callback")
         );
     }
+
+    #[test]
+    fn bson_null_callback_url_deserializes_to_none() {
+        let mut key = make_api_key();
+        key.callback_url = Some("https://old.example.com/hook".to_string());
+        let mut doc = bson::to_document(&key).expect("serialize");
+        doc.insert("callback_url", bson::Bson::Null);
+        let restored: ApiKey = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.callback_url, None);
+    }
 }

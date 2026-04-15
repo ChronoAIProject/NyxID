@@ -1531,6 +1531,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             label: provider_name.clone(),
             url: endpoint_url,
             catalog_service_id: catalog_service_id.clone(),
+            openapi_spec_url: None,
             created_at: now,
             updated_at: now,
         };
@@ -1738,6 +1739,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             label: service.name.clone(),
             url: service.base_url.clone(),
             catalog_service_id: Some(service.id.clone()),
+            openapi_spec_url: service.openapi_spec_url.clone(),
             created_at: now,
             updated_at: now,
         };
@@ -1978,6 +1980,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             label: service.name.clone(),
             url: ep_url,
             catalog_service_id: Some(service.id.clone()),
+            openapi_spec_url: service.openapi_spec_url.clone(),
             created_at: now,
             updated_at: now,
         };

@@ -475,6 +475,13 @@ pub enum ServiceCommands {
         /// NyxID account. Omit for a personal key.
         #[arg(long, value_name = "ORG_ID")]
         org: Option<String>,
+        /// Optional OpenAPI spec URL for endpoint discovery. When set, AI
+        /// agents (MCP, proxy discovery) surface concrete operations parsed
+        /// from this spec instead of a single generic proxy tool. Pass
+        /// `--openapi-spec-url ""` on a catalog key to opt out of inheriting
+        /// the catalog entry's default spec URL.
+        #[arg(long, value_name = "URL")]
+        openapi_spec_url: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -536,6 +543,10 @@ pub enum ServiceCommands {
         /// New endpoint URL
         #[arg(long)]
         endpoint_url: Option<String>,
+        /// New OpenAPI spec URL. Pass an empty string (`--openapi-spec-url ""`)
+        /// to clear the existing value.
+        #[arg(long, value_name = "URL")]
+        openapi_spec_url: Option<String>,
         /// New node ID for routing
         #[arg(long)]
         node_id: Option<String>,

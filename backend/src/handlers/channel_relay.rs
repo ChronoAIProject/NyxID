@@ -121,6 +121,46 @@ pub struct ResolveSenderResponse {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Platforms that support `metadata.card` as a content carrier.
+///
+/// Feishu Card JSON 2.0 is the only card format currently wired through the
+/// proxy. Telegram and Discord have their own rich-message concepts
+/// (inline keyboards, embeds) but route through different metadata keys,
+/// so a `card` key sent to them would drop on the floor and the reply
+/// would go out as empty text.
+fn platform_supports_cards(platform: &str) -> bool {
+    matches!(platform, "lark" | "feishu")
+}
+
+/// Validate that a reply body carries something the target platform can send.
+///
+/// Rules:
+/// - Non-empty `text` is always accepted.
+/// - `metadata.card` is accepted only for platforms where
+///   [`platform_supports_cards`] returns true; per issue #306, agents may
+///   send card-only replies with `text: null` to Lark/Feishu.
+/// - Otherwise reject before hitting the platform API, so callers get a
+///   clear error instead of an empty message going out.
+fn validate_reply_for_platform(body: &AsyncReplyBody, platform: &str) -> AppResult<()> {
+    let has_text = body.text.as_deref().is_some_and(|s| !s.is_empty());
+    let has_card = body.metadata.as_ref().and_then(|m| m.get("card")).is_some();
+
+    if has_text {
+        return Ok(());
+    }
+    if has_card && platform_supports_cards(platform) {
+        return Ok(());
+    }
+    if has_card {
+        return Err(AppError::ValidationError(format!(
+            "metadata.card is only supported on Lark/Feishu (got platform={platform})"
+        )));
+    }
+    Err(AppError::ValidationError(
+        "Reply must include non-empty text or metadata.card".to_string(),
+    ))
+}
+
 fn message_to_item(msg: &crate::models::channel_message::ChannelMessage) -> MessageItem {
     MessageItem {
         id: msg.id.clone(),
@@ -176,13 +216,6 @@ pub async fn async_reply(
         ));
     }
 
-    let reply_text = body.reply.text.as_deref().unwrap_or("");
-    if reply_text.is_empty() {
-        return Err(AppError::ValidationError(
-            "Reply text must not be empty".to_string(),
-        ));
-    }
-
     // Get the bot and verify it is still active
     let bot = channel_bot_service::get_bot(&state.db, &original.channel_bot_id).await?;
     if !bot.is_active {
@@ -190,6 +223,12 @@ pub async fn async_reply(
             "Bot has been deactivated".to_string(),
         ));
     }
+
+    // Validate reply content against the target platform's capabilities.
+    // Runs after bot lookup so we can reject card-only replies destined
+    // for platforms (Telegram/Discord) that would otherwise emit an empty
+    // message downstream.
+    validate_reply_for_platform(&body.reply, &bot.platform)?;
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
     let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
 
@@ -271,7 +310,7 @@ pub async fn async_reply(
     }
 
     let outbound = OutboundReply {
-        text: Some(reply_text.to_string()),
+        text: body.reply.text,
         reply_to_platform_message_id: original.platform_message_id.clone(),
         metadata,
     };
@@ -405,4 +444,109 @@ pub async fn resolve_sender(
         nyxid_user_id,
         linked,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(text: Option<&str>, metadata: Option<serde_json::Value>) -> AsyncReplyBody {
+        AsyncReplyBody {
+            text: text.map(String::from),
+            metadata,
+        }
+    }
+
+    #[test]
+    fn card_support_matrix() {
+        assert!(platform_supports_cards("lark"));
+        assert!(platform_supports_cards("feishu"));
+        assert!(!platform_supports_cards("telegram"));
+        assert!(!platform_supports_cards("discord"));
+        assert!(!platform_supports_cards("openclaw"));
+        assert!(!platform_supports_cards(""));
+    }
+
+    #[test]
+    fn text_only_ok_on_any_platform() {
+        for platform in ["lark", "feishu", "telegram", "discord", "openclaw"] {
+            assert!(
+                validate_reply_for_platform(&body(Some("hello"), None), platform).is_ok(),
+                "text-only should be accepted on {platform}"
+            );
+        }
+    }
+
+    #[test]
+    fn card_only_ok_on_lark() {
+        let md = serde_json::json!({ "card": { "elements": [] } });
+        assert!(validate_reply_for_platform(&body(None, Some(md)), "lark").is_ok());
+    }
+
+    #[test]
+    fn card_only_ok_on_feishu_with_null_text() {
+        // Matches issue #306 example payload: { text: null, metadata: { card: {...} } }
+        let md = serde_json::json!({ "card": { "header": {} } });
+        assert!(validate_reply_for_platform(&body(None, Some(md)), "feishu").is_ok());
+    }
+
+    #[test]
+    fn card_only_rejected_on_telegram() {
+        let md = serde_json::json!({ "card": { "elements": [] } });
+        let err = validate_reply_for_platform(&body(None, Some(md)), "telegram").unwrap_err();
+        match err {
+            AppError::ValidationError(msg) => {
+                assert!(msg.contains("Lark/Feishu"), "unexpected message: {msg}");
+                assert!(msg.contains("telegram"), "unexpected message: {msg}");
+            }
+            other => panic!("expected ValidationError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn card_only_rejected_on_discord() {
+        let md = serde_json::json!({ "card": { "elements": [] } });
+        let err = validate_reply_for_platform(&body(None, Some(md)), "discord").unwrap_err();
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn text_and_card_ok_even_on_non_card_platform() {
+        // Text is present, so card is irrelevant. This shape is legal and
+        // card will silently drop on platforms that don't support it.
+        let md = serde_json::json!({ "card": {} });
+        assert!(validate_reply_for_platform(&body(Some("hi"), Some(md)), "telegram").is_ok());
+    }
+
+    #[test]
+    fn empty_text_no_card_rejected_on_any_platform() {
+        for platform in ["lark", "feishu", "telegram", "discord"] {
+            let err = validate_reply_for_platform(&body(Some(""), None), platform).unwrap_err();
+            assert!(
+                matches!(err, AppError::ValidationError(_)),
+                "expected ValidationError on {platform}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_text_no_card_rejected_on_any_platform() {
+        for platform in ["lark", "feishu", "telegram", "discord"] {
+            let err = validate_reply_for_platform(&body(None, None), platform).unwrap_err();
+            assert!(matches!(err, AppError::ValidationError(_)));
+        }
+    }
+
+    #[test]
+    fn metadata_without_card_rejected() {
+        // Other metadata keys (e.g. thread ids injected by the handler)
+        // must not count as content.
+        let md = serde_json::json!({ "message_thread_id": 42 });
+        let err = validate_reply_for_platform(&body(None, Some(md)), "lark").unwrap_err();
+        assert!(matches!(err, AppError::ValidationError(_)));
+    }
 }

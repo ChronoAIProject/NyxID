@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useRotateApiKey } from "@/hooks/use-api-keys";
 import { copyToClipboard } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -22,14 +23,17 @@ export function RotateKeyDialog({
   readonly onOpenChange: (open: boolean) => void;
   readonly keyId: string;
 }) {
+  const navigate = useNavigate();
   const rotateMutation = useRotateApiKey();
   const [newKeyValue, setNewKeyValue] = useState<string | null>(null);
+  const [newKeyId, setNewKeyId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   async function handleRotate() {
     try {
       const result = await rotateMutation.mutateAsync(keyId);
       setNewKeyValue(result.full_key);
+      setNewKeyId(result.id);
     } catch {
       toast.error("Failed to rotate key");
     }
@@ -47,9 +51,14 @@ export function RotateKeyDialog({
   }
 
   function handleClose() {
+    const rotatedKeyId = newKeyId;
     setNewKeyValue(null);
+    setNewKeyId(null);
     setCopied(false);
     onOpenChange(false);
+    if (rotatedKeyId) {
+      void navigate({ to: "/keys/api-key/$keyId", params: { keyId: rotatedKeyId } });
+    }
   }
 
   return (

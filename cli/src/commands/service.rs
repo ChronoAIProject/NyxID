@@ -23,6 +23,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             credential_env,
             scopes,
             org,
+            openapi_spec_url,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -67,6 +68,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     via_node.as_deref(),
                     &additional_scopes,
                     org.as_deref(),
+                    openapi_spec_url.as_deref(),
                     &auth,
                 )
                 .await;
@@ -80,6 +82,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     via_node.as_deref(),
                     &additional_scopes,
                     org.as_deref(),
+                    openapi_spec_url.as_deref(),
                     &auth,
                 )
                 .await;
@@ -244,6 +247,13 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // org. The backend enforces this via resolve_owner_access.
             if let Some(ref org_id) = org {
                 body.insert("target_org_id".into(), Value::String(org_id.clone()));
+            }
+
+            // Forward three-state openapi_spec_url verbatim. Backend treats
+            // absent as "inherit catalog default", empty string as "opt out",
+            // and a non-empty URL as an explicit override.
+            if let Some(ref url) = openapi_spec_url {
+                body.insert("openapi_spec_url".into(), Value::String(url.clone()));
             }
 
             let result: Value = api.post("/keys", &body).await?;
@@ -422,6 +432,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     eprintln!("Endpoint:   {endpoint}");
                     eprintln!("Auth:       {auth_method} / {auth_key}");
                     eprintln!("Node:       {node}");
+                    if let Some(spec) = svc["openapi_spec_url"].as_str() {
+                        eprintln!("OpenAPI:    {spec}");
+                    }
 
                     // SSH-specific fields
                     if svc_type == "ssh" {
@@ -475,6 +488,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             id,
             label,
             endpoint_url,
+            openapi_spec_url,
             node_id,
             no_node,
             active,
@@ -490,6 +504,10 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             }
             if let Some(url) = endpoint_url {
                 body.insert("endpoint_url".into(), Value::String(url));
+            }
+            // PUT /keys/{id} treats empty string as "clear" for openapi_spec_url.
+            if let Some(url) = openapi_spec_url {
+                body.insert("openapi_spec_url".into(), Value::String(url));
             }
             if no_node {
                 body.insert("node_id".into(), Value::String(String::new()));
@@ -660,6 +678,7 @@ async fn run_oauth_add(
     via_node: Option<&str>,
     additional_scopes: &[String],
     target_org_id: Option<&str>,
+    openapi_spec_url: Option<&str>,
     auth: &crate::cli::AuthArgs,
 ) -> Result<()> {
     let slug = slug.ok_or_else(|| anyhow::anyhow!("Catalog slug is required for --oauth"))?;
@@ -679,6 +698,11 @@ async fn run_oauth_add(
     }
     if let Some(org_id) = target_org_id {
         key_body.insert("target_org_id".into(), Value::String(org_id.to_string()));
+    }
+    // Forward the three-state spec URL as-is: `None` omits the field so the
+    // catalog default applies; `Some("")` opts out; `Some(url)` overrides.
+    if let Some(url) = openapi_spec_url {
+        key_body.insert("openapi_spec_url".into(), Value::String(url.to_string()));
     }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
     let key_id = key_result["id"]
@@ -748,6 +772,7 @@ async fn run_device_code_add(
     via_node: Option<&str>,
     additional_scopes: &[String],
     target_org_id: Option<&str>,
+    openapi_spec_url: Option<&str>,
     auth: &crate::cli::AuthArgs,
 ) -> Result<()> {
     let slug = slug.ok_or_else(|| anyhow::anyhow!("Catalog slug is required for --device-code"))?;
@@ -766,6 +791,9 @@ async fn run_device_code_add(
     }
     if let Some(org_id) = target_org_id {
         key_body.insert("target_org_id".into(), Value::String(org_id.to_string()));
+    }
+    if let Some(url) = openapi_spec_url {
+        key_body.insert("openapi_spec_url".into(), Value::String(url.to_string()));
     }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
     let key_id = key_result["id"]
