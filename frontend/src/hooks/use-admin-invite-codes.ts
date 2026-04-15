@@ -35,6 +35,11 @@ export function useCreateInviteCode() {
   });
 }
 
+/// Hard ceiling for a single note PATCH. If the backend or network hangs,
+/// aborting here releases the drawer's save-in-progress lock so the admin can
+/// retry instead of being stuck staring at a spinner indefinitely.
+const UPDATE_INVITE_CODE_TIMEOUT_MS = 10_000;
+
 /// Update mutable fields on an invite code. Today only `note` is mutable.
 ///
 /// The PATCH response is the canonical, enriched record (same shape as a list
@@ -53,7 +58,19 @@ export function useUpdateInviteCode() {
       id: string;
       body: UpdateInviteCodeRequest;
     }): Promise<InviteCode> => {
-      return api.patch<InviteCode>(`/admin/invite-codes/${id}`, body);
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => {
+        controller.abort();
+      }, UPDATE_INVITE_CODE_TIMEOUT_MS);
+      try {
+        return await api.patch<InviteCode>(
+          `/admin/invite-codes/${id}`,
+          body,
+          { signal: controller.signal },
+        );
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
     },
     onSuccess: (updated) => {
       queryClient.setQueryData<InviteCodeListResponse>(QUERY_KEY, (prev) => {

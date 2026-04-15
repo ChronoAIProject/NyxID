@@ -12,7 +12,7 @@ import {
   type CreateInviteCodeFormData,
 } from "@/schemas/admin";
 import { ApiError } from "@/lib/api-client";
-import { copyToClipboard, formatDate } from "@/lib/utils";
+import { cn, copyToClipboard, formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -86,6 +86,11 @@ export function AdminInviteCodesPage() {
       : null;
   const noteHasChanges =
     selectedCode !== null && noteDraft !== lastSyncedNoteRef.current;
+  // Single source of truth for "save in flight". Every interaction that could
+  // change `selectedCodeId` or submit another PATCH is gated on this flag, so
+  // the cross-row race and double-submit windows are closed at the UI level
+  // rather than defensively patched in the handler.
+  const isSaving = updateMutation.isPending;
 
   // Reset the draft only when the user opens a different row — not on every
   // background refetch, otherwise React Query's default refetchOnWindowFocus
@@ -160,21 +165,33 @@ export function AdminInviteCodesPage() {
 
   async function handleSaveNote() {
     if (!selectedCode || !noteHasChanges) return;
+    // Capture the id at call time. Even though the row-click / drawer-close
+    // guards below make `selectedCodeId` immutable while `isSaving === true`,
+    // keeping an explicit local + post-await equality check means a future
+    // refactor that relaxes those guards can't silently reintroduce the
+    // cross-row race (ref gets written for the wrong code after navigation).
+    const savingId = selectedCode.id;
     try {
       const updated = await updateMutation.mutateAsync({
-        id: selectedCode.id,
+        id: savingId,
         body: { note: noteDraft },
       });
-      // Sync the ref so noteHasChanges flips false now that the saved value
-      // is the new baseline. Without this the Save button would stay enabled
-      // because the ref still points at the value we loaded when the drawer
-      // first opened.
-      lastSyncedNoteRef.current = updated.note ?? "";
+      if (selectedCodeId === savingId) {
+        // Sync the ref so noteHasChanges flips false now that the saved value
+        // is the new baseline. Without this the Save button would stay enabled
+        // because the ref still points at the value we loaded when the drawer
+        // first opened.
+        lastSyncedNoteRef.current = updated.note ?? "";
+      }
       toast.success("Note updated");
     } catch (err) {
-      toast.error(
-        err instanceof ApiError ? err.message : "Failed to update note",
-      );
+      if (err instanceof DOMException && err.name === "AbortError") {
+        toast.error("Save timed out after 10 seconds. Try again.");
+      } else if (err instanceof ApiError) {
+        toast.error(err.message);
+      } else {
+        toast.error("Failed to update note");
+      }
     }
   }
 
@@ -239,8 +256,14 @@ export function AdminInviteCodesPage() {
               {inviteCodes.map((ic) => (
                 <TableRow
                   key={ic.id}
-                  onClick={() => setSelectedCodeId(ic.id)}
-                  className="cursor-pointer"
+                  onClick={() => {
+                    if (isSaving) return;
+                    setSelectedCodeId(ic.id);
+                  }}
+                  className={cn(
+                    "cursor-pointer",
+                    isSaving && "pointer-events-none opacity-60",
+                  )}
                 >
                   <TableCell>
                     <span className="font-mono text-sm font-medium text-foreground">
@@ -491,10 +514,22 @@ export function AdminInviteCodesPage() {
       <Sheet
         open={selectedCode !== null}
         onOpenChange={(open) => {
-          if (!open) setSelectedCodeId(null);
+          // Never let a close interaction land while a PATCH is in flight.
+          // Combined with the row-click guard above, this makes the cross-row
+          // save race structurally impossible: `selectedCodeId` cannot change
+          // between `mutateAsync` call and resolution.
+          if (!open && !isSaving) setSelectedCodeId(null);
         }}
       >
-        <SheetContent className="flex w-full flex-col gap-6 overflow-y-auto sm:max-w-lg">
+        <SheetContent
+          className="flex w-full flex-col gap-6 overflow-y-auto sm:max-w-lg"
+          onPointerDownOutside={(e) => {
+            if (isSaving) e.preventDefault();
+          }}
+          onEscapeKeyDown={(e) => {
+            if (isSaving) e.preventDefault();
+          }}
+        >
           {selectedCode && (
             <>
               <SheetHeader>
@@ -558,8 +593,8 @@ export function AdminInviteCodesPage() {
                   <Button
                     size="sm"
                     onClick={() => void handleSaveNote()}
-                    disabled={!noteHasChanges}
-                    isLoading={updateMutation.isPending}
+                    disabled={!noteHasChanges || isSaving}
+                    isLoading={isSaving}
                   >
                     Save
                   </Button>
