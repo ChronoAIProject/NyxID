@@ -68,8 +68,19 @@ export class ChunkErrorBoundary extends Component<Props, State> {
             textAlign: "center",
           }}
         >
-          <p style={{ fontSize: "1.125rem", marginBottom: "1.5rem" }}>
+          <p style={{ fontSize: "1.125rem", marginBottom: "0.5rem" }}>
             A new version has been deployed.
+          </p>
+          <p
+            style={{
+              fontSize: "0.875rem",
+              color: "#a1a1aa",
+              marginBottom: "1.5rem",
+              maxWidth: "24rem",
+            }}
+          >
+            Your browser has cached an older version of the app. Please reload
+            to get the latest update.
           </p>
           <button
             type="button"
