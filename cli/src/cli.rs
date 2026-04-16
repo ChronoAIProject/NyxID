@@ -1715,11 +1715,6 @@ pub enum SetupCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Generic interactive setup wizard
-    Interactive {
-        #[command(flatten)]
-        auth: AuthArgs,
-    },
 }
 
 #[derive(Subcommand)]

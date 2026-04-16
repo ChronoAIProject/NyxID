@@ -12,7 +12,6 @@ use crate::api::ApiClient;
 use crate::cli::SetupCommands;
 
 use integrations::IntegrationAdapter;
-use integrations::InteractiveAdapter;
 use integrations::ha_addon::HaAddonAdapter;
 use server::{CompletionResult, WizardState};
 
@@ -33,7 +32,6 @@ pub async fn run(command: SetupCommands) -> Result<()> {
                 ha_url: ha_url.clone(),
             }),
         ),
-        SetupCommands::Interactive { auth } => (auth.clone(), Box::new(InteractiveAdapter)),
     };
 
     // 2. Require authentication
