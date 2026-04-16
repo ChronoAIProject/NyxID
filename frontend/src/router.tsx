@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-router";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
+import { ChunkErrorBoundary } from "@/components/chunk-error-boundary";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { useAuthStore } from "@/stores/auth-store";
@@ -71,9 +72,11 @@ import {
 const rootRoute = createRootRoute({
   component: () => (
     <TooltipProvider>
-      <Suspense>
-        <Outlet />
-      </Suspense>
+      <ChunkErrorBoundary>
+        <Suspense>
+          <Outlet />
+        </Suspense>
+      </ChunkErrorBoundary>
       <Toaster />
     </TooltipProvider>
   ),
