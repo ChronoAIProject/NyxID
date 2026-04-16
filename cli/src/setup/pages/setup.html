@@ -119,11 +119,11 @@ h1{font-size:1.5rem;margin-bottom:0.25rem}
       stepsEl.appendChild(el);
     });
 
-    // Complete button after all steps
+    // Auto-complete when all steps are done (no extra button click needed)
     const actionsEl = document.getElementById("actions");
     if (currentStep >= steps.length) {
-      actionsEl.innerHTML = '<button class="btn btn-primary" id="completeBtn">Complete Setup</button>';
-      document.getElementById("completeBtn").onclick = completeSetup;
+      actionsEl.innerHTML = '<div class="msg-success">Finishing setup...</div>';
+      completeSetup();
     } else {
       actionsEl.innerHTML = "";
     }
@@ -248,9 +248,10 @@ h1{font-size:1.5rem;margin-bottom:0.25rem}
     advance();
   }
 
+  var completing = false;
   async function completeSetup() {
-    const btn = document.getElementById("completeBtn");
-    if (btn) btn.disabled = true;
+    if (completing) return;
+    completing = true;
     try {
       // Walk all step results to find slug/name (not hardcoded to any step id)
       var slug = null, serviceName = null;
@@ -287,8 +288,12 @@ h1{font-size:1.5rem;margin-bottom:0.25rem}
         '</div>';
       document.getElementById("actions").innerHTML = "";
     } catch (e) {
-      if (btn) btn.disabled = false;
-      alert("Failed to signal completion: " + e.message);
+      completing = false;
+      document.getElementById("actions").innerHTML =
+        '<div class="msg-error">Error: ' + esc(e.message) + '</div>' +
+        '<button class="btn btn-primary" style="margin-top:0.5rem" id="retryComplete">Retry</button>';
+      var rb = document.getElementById("retryComplete");
+      if (rb) rb.onclick = completeSetup;
     }
   }
 
