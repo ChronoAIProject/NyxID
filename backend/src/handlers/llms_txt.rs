@@ -37,8 +37,7 @@ pub async fn llms_full_txt(State(state): State<AppState>) -> Response {
     let body = PLAYBOOK
         .replace("ws://localhost:3001", &ws_base)
         .replace("http://localhost:3001", base)
-        .replace("http://localhost:3000", frontend)
-        .replace("http://localhost:5173", frontend);
+        .replace("http://localhost:3000", frontend);
 
     markdown_response(body)
 }
