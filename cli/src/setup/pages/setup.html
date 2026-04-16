@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NyxID Setup Wizard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f172a;color:#e2e8f0;font-family:system-ui,-apple-system,sans-serif;min-height:100vh;display:flex;justify-content:center;padding:2rem}
+.container{max-width:640px;width:100%}
+h1{font-size:1.5rem;margin-bottom:0.25rem}
+.subtitle{color:#94a3b8;margin-bottom:2rem;font-size:0.875rem}
+.step{padding:1rem;border:1px solid #1e293b;border-radius:0.5rem;margin-bottom:0.75rem;transition:border-color 0.2s}
+.step.active{border-color:#3b82f6;background:#1e293b}
+.step.complete{border-color:#22c55e}
+.step-header{display:flex;align-items:center;gap:0.75rem}
+.step-icon{width:1.5rem;height:1.5rem;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:0.7rem;flex-shrink:0}
+.step-icon.pending{background:#334155;color:#94a3b8}
+.step-icon.active{background:#3b82f6;color:#fff}
+.step-icon.complete{background:#22c55e;color:#fff}
+.step-label{font-size:0.9375rem}
+.step-content{margin-top:0.75rem;padding-left:2.25rem}
+.field{margin-bottom:0.75rem}
+.field label{display:block;font-size:0.8125rem;color:#94a3b8;margin-bottom:0.25rem}
+.field input{width:100%;padding:0.5rem 0.75rem;background:#0f172a;border:1px solid #334155;border-radius:0.375rem;color:#e2e8f0;font-size:0.875rem;outline:none;transition:border-color 0.15s}
+.field input:focus{border-color:#3b82f6}
+.field input.error{border-color:#ef4444}
+.btn{padding:0.5rem 1.25rem;border:none;border-radius:0.375rem;cursor:pointer;font-size:0.875rem;font-weight:500;transition:background 0.15s}
+.btn-primary{background:#3b82f6;color:#fff}
+.btn-primary:hover{background:#2563eb}
+.btn-primary:disabled{background:#334155;color:#64748b;cursor:not-allowed}
+.cred-box{background:#1e293b;border:1px solid #334155;border-radius:0.375rem;padding:0.625rem 0.75rem;margin:0.25rem 0 0.75rem;font-family:'SF Mono',ui-monospace,monospace;font-size:0.8125rem;word-break:break-all;display:flex;align-items:flex-start;gap:0.5rem}
+.cred-value{flex:1;line-height:1.4}
+.copy-btn{background:#334155;border:none;color:#94a3b8;padding:0.25rem 0.625rem;border-radius:0.25rem;cursor:pointer;font-size:0.75rem;white-space:nowrap;flex-shrink:0}
+.copy-btn:hover{background:#475569;color:#e2e8f0}
+.spinner{display:inline-block;width:1rem;height:1rem;border:2px solid #334155;border-top-color:#3b82f6;border-radius:50%;animation:spin .6s linear infinite;margin-left:0.5rem}
+@keyframes spin{to{transform:rotate(360deg)}}
+.msg-error{color:#ef4444;font-size:0.8125rem;margin-top:0.5rem}
+.msg-success{color:#22c55e;font-size:0.8125rem}
+.result-row{display:flex;justify-content:space-between;padding:0.375rem 0;border-bottom:1px solid #1e293b;font-size:0.875rem}
+.result-label{color:#94a3b8}
+.footer{margin-top:2rem;padding-top:1rem;border-top:1px solid #1e293b;color:#475569;font-size:0.75rem;text-align:center;line-height:1.6}
+.done-screen{text-align:center;padding:3rem 1rem}
+.done-screen .icon{font-size:2.5rem;margin-bottom:1rem}
+.done-screen h2{margin-bottom:0.5rem}
+.done-screen p{color:#94a3b8}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1 id="title">NyxID Setup Wizard</h1>
+  <div class="subtitle" id="subtitle">Loading...</div>
+  <div id="steps"></div>
+  <div id="actions" style="margin-top:1rem"></div>
+  <div class="footer">
+    Credentials are handled securely in your browser.<br>
+    Nothing sensitive was printed to your terminal.
+  </div>
+</div>
+<script>
+(function(){
+  "use strict";
+
+  // ---- State ----
+  let config = null;
+  let currentStep = 0;
+  let stepResults = {};  // keyed by step.id
+  let stepData = {};     // collected user inputs across steps
+  // Credentials stored here, NOT in localStorage or cookies.
+  let credentials = {};
+
+  // ---- API helper ----
+  async function api(method, path, body) {
+    const opts = { method, headers: {} };
+    if (body !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    const resp = await fetch("/api/proxy" + path, opts);
+    const text = await resp.text();
+    if (!resp.ok) throw new Error(method + " " + path + " (" + resp.status + "): " + text);
+    try { return JSON.parse(text); } catch { return text; }
+  }
+
+  // ---- Rendering ----
+  function render() {
+    const stepsEl = document.getElementById("steps");
+    stepsEl.innerHTML = "";
+    const steps = config.integration.steps;
+
+    steps.forEach(function(step, i) {
+      const status = i < currentStep ? "complete" : i === currentStep ? "active" : "pending";
+      const iconText = status === "complete" ? "\u2713" : String(i + 1);
+
+      const el = document.createElement("div");
+      el.className = "step " + status;
+
+      let headerHtml = '<div class="step-header">' +
+        '<div class="step-icon ' + status + '">' + iconText + '</div>' +
+        '<span class="step-label">' + esc(step.label) + '</span>';
+      if (status === "active" && step.type === "auto") {
+        headerHtml += '<div class="spinner"></div>';
+      }
+      headerHtml += '</div>';
+      el.innerHTML = headerHtml;
+
+      if (status === "active") {
+        const content = document.createElement("div");
+        content.className = "step-content";
+        renderActiveStep(step, content);
+        el.appendChild(content);
+      } else if (status === "complete" && stepResults[step.id]) {
+        const content = document.createElement("div");
+        content.className = "step-content";
+        const s = stepResults[step.id].summary;
+        if (s) content.innerHTML = '<span class="msg-success">' + esc(s) + '</span>';
+        el.appendChild(content);
+      }
+      stepsEl.appendChild(el);
+    });
+
+    // Complete button after all steps
+    const actionsEl = document.getElementById("actions");
+    if (currentStep >= steps.length) {
+      actionsEl.innerHTML = '<button class="btn btn-primary" id="completeBtn">Complete Setup</button>';
+      document.getElementById("completeBtn").onclick = completeSetup;
+    } else {
+      actionsEl.innerHTML = "";
+    }
+  }
+
+  function renderActiveStep(step, el) {
+    if (step.type === "input") {
+      let html = "";
+      if (step.description) html += '<p style="color:#94a3b8;font-size:0.8125rem;margin-bottom:0.75rem">' + esc(step.description) + '</p>';
+      (step.fields || []).forEach(function(f) {
+        const val = stepData[f.name] || f.value || "";
+        html += '<div class="field"><label>' + esc(f.label) + '</label>' +
+          '<input type="text" data-field="' + esc(f.name) + '" placeholder="' + esc(f.placeholder || "") +
+          '" value="' + esc(val) + '"' + (f.required ? ' required' : '') + '></div>';
+      });
+      html += '<button class="btn btn-primary" id="submitInput">Continue</button>';
+      el.innerHTML = html;
+      document.getElementById("submitInput").onclick = function() { submitInput(step); };
+
+    } else if (step.type === "display") {
+      let html = "";
+      const src = stepResults[step.source_step];
+      if (src && src.creds) {
+        src.creds.forEach(function(c) {
+          html += '<div class="field"><label>' + esc(c.label) + '</label>' +
+            '<div class="cred-box"><span class="cred-value">' + esc(c.value) + '</span>' +
+            '<button class="copy-btn" data-copy="' + esc(c.id) + '">Copy</button></div></div>';
+        });
+      }
+      if (src && src.base_url) {
+        html += '<div class="field"><label>NyxID URL</label>' +
+          '<div class="cred-box"><span class="cred-value">' + esc(src.base_url) + '</span>' +
+          '<button class="copy-btn" data-copy="base_url">Copy</button></div></div>';
+      }
+      if (step.instructions) html += '<p style="color:#94a3b8;font-size:0.8125rem;margin:0.5rem 0">' + esc(step.instructions) + '</p>';
+      html += '<button class="btn btn-primary" id="displayNext">Continue</button>';
+      el.innerHTML = html;
+      el.querySelectorAll("[data-copy]").forEach(function(btn) {
+        btn.onclick = function() { copyCredential(btn.getAttribute("data-copy"), btn); };
+      });
+      document.getElementById("displayNext").onclick = advance;
+
+    } else if (step.type === "confirm") {
+      let html = '<div style="margin-bottom:0.75rem">';
+      Object.keys(stepResults).forEach(function(id) {
+        const r = stepResults[id];
+        if (r.display) {
+          r.display.forEach(function(d) {
+            html += '<div class="result-row"><span class="result-label">' + esc(d.label) +
+              '</span><span>' + esc(d.value) + '</span></div>';
+          });
+        }
+      });
+      html += '</div><button class="btn btn-primary" id="confirmNext">Continue</button>';
+      el.innerHTML = html;
+      document.getElementById("confirmNext").onclick = advance;
+    }
+    // auto steps execute immediately (handled by runAutoStep)
+  }
+
+  // ---- Step logic ----
+  async function runAutoStep(step) {
+    if (step.type !== "auto" || !step.action) return;
+    try {
+      const body = step.action.method !== "GET"
+        ? Object.assign({}, step.action.body || {}, stepData)
+        : undefined;
+      const result = await api(step.action.method, step.action.path, body);
+
+      // Store result
+      const creds = [];
+      const display = [];
+      if (result.full_key) {
+        credentials[step.id + "_key"] = result.full_key;
+        creds.push({ id: step.id + "_key", label: "API Key", value: result.full_key });
+      }
+      if (result.name) display.push({ label: "Name", value: result.name });
+      if (result.id) display.push({ label: "ID", value: result.id });
+
+      stepResults[step.id] = {
+        raw: result,
+        summary: "Done",
+        creds: creds.length ? creds : undefined,
+        base_url: config.base_url,
+        display: display.length ? display : undefined,
+      };
+      advance();
+    } catch (e) {
+      const content = document.querySelector(".step.active .step-content");
+      if (content) {
+        content.innerHTML = '<div class="msg-error">Error: ' + esc(e.message) + '</div>' +
+          '<button class="btn btn-primary" style="margin-top:0.5rem" id="retryBtn">Retry</button>';
+        document.getElementById("retryBtn").onclick = function() { render(); runAutoStep(step); };
+      }
+    }
+  }
+
+  function advance() {
+    currentStep++;
+    render();
+    const steps = config.integration.steps;
+    if (currentStep < steps.length && steps[currentStep].type === "auto") {
+      runAutoStep(steps[currentStep]);
+    }
+  }
+
+  function submitInput(step) {
+    let valid = true;
+    (step.fields || []).forEach(function(f) {
+      const input = document.querySelector('[data-field="' + f.name + '"]');
+      if (!input) return;
+      stepData[f.name] = input.value.trim();
+      if (f.required && !input.value.trim()) {
+        input.classList.add("error");
+        valid = false;
+      } else {
+        input.classList.remove("error");
+      }
+    });
+    if (!valid) return;
+    stepResults[step.id] = { summary: "Configured" };
+    advance();
+  }
+
+  async function completeSetup() {
+    const btn = document.getElementById("completeBtn");
+    if (btn) btn.disabled = true;
+    try {
+      // Walk all step results to find slug/name (not hardcoded to any step id)
+      var slug = null, serviceName = null;
+      Object.keys(stepResults).forEach(function(id) {
+        var r = stepResults[id] && stepResults[id].raw;
+        if (r) {
+          if (!slug && r.slug) slug = r.slug;
+          if (!serviceName && r.name) serviceName = r.name;
+        }
+      });
+      var resp = await fetch("/api/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          csrf_state: config.csrf_state,
+          slug: slug,
+          service_name: serviceName,
+        })
+      });
+      if (!resp.ok) {
+        var errText = await resp.text().catch(function() { return "unknown error"; });
+        throw new Error("Completion failed (" + resp.status + "): " + errText);
+      }
+
+      // Overwrite credential memory
+      Object.keys(credentials).forEach(function(k) { credentials[k] = ""; });
+      credentials = {};
+
+      document.getElementById("steps").innerHTML =
+        '<div class="done-screen">' +
+        '<div class="icon">\u2713</div>' +
+        '<h2>Setup Complete</h2>' +
+        '<p>You can close this tab and return to your terminal.</p>' +
+        '</div>';
+      document.getElementById("actions").innerHTML = "";
+    } catch (e) {
+      if (btn) btn.disabled = false;
+      alert("Failed to signal completion: " + e.message);
+    }
+  }
+
+  function copyCredential(id, btn) {
+    const text = id === "base_url" ? config.base_url : (credentials[id] || "");
+    navigator.clipboard.writeText(text).then(function() {
+      btn.textContent = "Copied!";
+      setTimeout(function() { btn.textContent = "Copy"; }, 2000);
+    });
+  }
+
+  function esc(s) {
+    if (s == null) return "";
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  // ---- Init ----
+  async function init() {
+    try {
+      const resp = await fetch("/api/config");
+      config = await resp.json();
+      document.getElementById("title").textContent = "NyxID Setup: " + config.integration.name;
+      document.getElementById("subtitle").textContent = (config.user && config.user.email) || "";
+      render();
+      const first = config.integration.steps[0];
+      if (first && first.type === "auto") runAutoStep(first);
+    } catch (e) {
+      document.getElementById("subtitle").textContent = "Failed to load: " + e.message;
+    }
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

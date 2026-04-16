@@ -113,6 +113,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: AiSetupCommands,
     },
+    /// Browser-based setup wizard (credentials never touch the terminal)
+    Setup {
+        #[command(subcommand)]
+        command: SetupCommands,
+    },
     /// Update the CLI and installed skills
     Update(UpdateArgs),
     /// Manage channel bot relay (Telegram/Discord/Lark/Feishu bridge to agents)
@@ -1696,6 +1701,25 @@ impl std::fmt::Display for AiToolTarget {
             Self::Generic => write!(f, "generic"),
         }
     }
+}
+
+// ---- Setup Wizard (LLM-safe credential flow) ----
+
+#[derive(Subcommand)]
+pub enum SetupCommands {
+    /// Home Assistant NyxID Add-on
+    Ha {
+        /// Home Assistant URL (e.g. http://homeassistant.local:8123)
+        #[arg(long)]
+        ha_url: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Generic interactive setup wizard
+    Interactive {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 #[derive(Subcommand)]

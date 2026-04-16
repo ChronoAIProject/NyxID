@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod commands;
 pub mod node;
+mod setup;
 
 use anyhow::Result;
 use clap::Parser;
@@ -77,6 +78,9 @@ async fn run() -> Result<()> {
 
         // AI skill setup
         Commands::AiSetup { command } => commands::ai_setup::run(command).await,
+
+        // Browser-based setup wizard (LLM-safe credential flow)
+        Commands::Setup { command } => setup::run(command).await,
 
         // Self-update CLI + skills
         Commands::Update(args) => commands::update::run(args).await,
