@@ -27,27 +27,32 @@ export class ChunkErrorBoundary extends Component<Props, State> {
   }
 
   static getDerivedStateFromError(error: Error): State | null {
-    if (isChunkLoadError(error)) {
+    if (!isChunkLoadError(error)) {
+      return null;
+    }
+
+    // First chunk error: auto-reload to pick up new assets.
+    // The sessionStorage guard prevents an infinite reload loop.
+    if (!sessionStorage.getItem(RELOAD_KEY)) {
+      sessionStorage.setItem(RELOAD_KEY, "1");
+      window.location.reload();
+      // Return chunkError so React doesn't try to render stale children
+      // while the reload is in progress.
       return { chunkError: true };
     }
-    return null;
+
+    // Reload already happened and chunks still fail — show fallback UI.
+    return { chunkError: true };
   }
 
   componentDidCatch(error: Error): void {
     if (!isChunkLoadError(error)) {
       throw error;
     }
-
-    // First attempt: auto-reload (guard prevents infinite loop)
-    if (!sessionStorage.getItem(RELOAD_KEY)) {
-      sessionStorage.setItem(RELOAD_KEY, "1");
-      window.location.reload();
-    }
-    // Second attempt: guard is set, so we show the fallback UI
   }
 
   render(): ReactNode {
-    if (this.state.chunkError && sessionStorage.getItem(RELOAD_KEY)) {
+    if (this.state.chunkError) {
       return (
         <div
           style={{
