@@ -24,14 +24,19 @@ const MAX_PROXY_BODY_SIZE: usize = 1024 * 1024;
 // ---------------------------------------------------------------------------
 
 /// Reject requests with a cross-origin `Origin` header.
-/// Same-origin fetch from our page sends `Origin: http://127.0.0.1:{port}`.
-/// A malicious page in another tab (even on a different localhost port) gets rejected.
+/// Browsers may send `127.0.0.1`, `localhost`, or `[::1]` depending on how
+/// they resolve the URL we opened. All three are loopback, but the port must
+/// match exactly to block other local apps from using the proxy.
 /// Requests without an Origin header (same-origin navigations, curl) pass
 /// since the server is 127.0.0.1-only.
 fn validate_origin(headers: &HeaderMap, wizard_port: u16) -> Result<(), StatusCode> {
     if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
-        let expected = format!("http://127.0.0.1:{wizard_port}");
-        if origin != expected {
+        let allowed = [
+            format!("http://127.0.0.1:{wizard_port}"),
+            format!("http://localhost:{wizard_port}"),
+            format!("http://[::1]:{wizard_port}"),
+        ];
+        if !allowed.iter().any(|a| a == origin) {
             return Err(StatusCode::FORBIDDEN);
         }
     }
@@ -160,9 +165,23 @@ mod tests {
     const TEST_PORT: u16 = 52341;
 
     #[test]
-    fn origin_exact_port_allowed() {
+    fn origin_127_allowed() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://127.0.0.1:52341".parse().unwrap());
+        assert!(validate_origin(&headers, TEST_PORT).is_ok());
+    }
+
+    #[test]
+    fn origin_localhost_allowed() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://localhost:52341".parse().unwrap());
+        assert!(validate_origin(&headers, TEST_PORT).is_ok());
+    }
+
+    #[test]
+    fn origin_ipv6_loopback_allowed() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://[::1]:52341".parse().unwrap());
         assert!(validate_origin(&headers, TEST_PORT).is_ok());
     }
 
@@ -183,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn origin_different_localhost_port_rejected() {
+    fn origin_different_port_rejected() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "http://127.0.0.1:9999".parse().unwrap());
         assert_eq!(
@@ -193,7 +212,17 @@ mod tests {
     }
 
     #[test]
-    fn origin_localhost_wrong_scheme_rejected() {
+    fn origin_localhost_different_port_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert("origin", "http://localhost:9999".parse().unwrap());
+        assert_eq!(
+            validate_origin(&headers, TEST_PORT).unwrap_err(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn origin_https_rejected() {
         let mut headers = HeaderMap::new();
         headers.insert("origin", "https://127.0.0.1:52341".parse().unwrap());
         assert_eq!(
