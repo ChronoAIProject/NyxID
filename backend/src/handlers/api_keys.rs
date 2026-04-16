@@ -2,7 +2,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{DateTime as BsonDateTime, doc};
 use serde::{Deserialize, Serialize};
@@ -662,6 +662,17 @@ fn extract_response_status(event_data: Option<&serde_json::Value>) -> Option<u16
         .and_then(|status| u16::try_from(status).ok())
 }
 
+/// Classify an audit event as an error for Usage aggregation.
+///
+/// `proxy_request_denied` events are always errors (emitted for pre-proxy
+/// failures like 403 scope-forbidden and 429 rate-limited — see
+/// ChronoAIProject/NyxID#341). For other event types (e.g. `proxy_request`),
+/// we fall back to the downstream response status.
+fn is_error_event(event_type: &str, event_data: Option<&serde_json::Value>) -> bool {
+    matches!(event_type, "proxy_request_denied")
+        || extract_response_status(event_data).is_some_and(|status| status >= 400)
+}
+
 fn extract_service_usage_info(
     event_data: Option<&serde_json::Value>,
     service_info_map: &HashMap<String, (String, String)>,
@@ -707,6 +718,19 @@ fn extract_service_usage_info(
     )
 }
 
+/// Build the contiguous UTC date range (oldest first) that the usage chart
+/// should cover. Always returns exactly `days` entries, ending on `today`.
+fn usage_date_range(today: NaiveDate, days: u32) -> Vec<String> {
+    let count = days.max(1);
+    (0..count)
+        .rev()
+        .map(|offset| {
+            let date = today - chrono::Duration::days(i64::from(offset));
+            date.format("%Y-%m-%d").to_string()
+        })
+        .collect()
+}
+
 async fn build_api_key_usage(
     state: &AppState,
     user_id: &str,
@@ -718,7 +742,13 @@ async fn build_api_key_usage(
     }
 
     let clamped_days = days.clamp(1, 30);
-    let since = Utc::now() - chrono::Duration::days(i64::from(clamped_days));
+    let today = Utc::now().date_naive();
+    let bucket_dates = usage_date_range(today, clamped_days);
+    let start_date = today - chrono::Duration::days(i64::from(clamped_days - 1));
+    let since = start_date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is always valid")
+        .and_utc();
     let since_bson = BsonDateTime::from_millis(since.timestamp_millis());
     let key_ids: Vec<&str> = keys.iter().map(|key| key.id.as_str()).collect();
 
@@ -758,9 +788,7 @@ async fn build_api_key_usage(
             continue;
         };
 
-        let is_error = matches!(entry.event_type.as_str(), "proxy_request_denied")
-            || extract_response_status(entry.event_data.as_ref())
-                .is_some_and(|status| status >= 400);
+        let is_error = is_error_event(entry.event_type.as_str(), entry.event_data.as_ref());
 
         accumulator.request_count += 1;
         if is_error {
@@ -820,8 +848,11 @@ async fn build_api_key_usage(
             });
             top_services.truncate(5);
 
-            let daily_buckets = accumulator
-                .daily_buckets
+            let mut bucket_map = accumulator.daily_buckets;
+            for date in &bucket_dates {
+                bucket_map.entry(date.clone()).or_insert((0, 0));
+            }
+            let daily_buckets = bucket_map
                 .into_iter()
                 .map(|(date, (request_count, error_count))| ApiKeyUsageBucket {
                     date,
@@ -1038,6 +1069,14 @@ pub async fn create_key(
         .map(parse_expires_at)
         .transpose()?;
 
+    if let Some(exp) = expires_at
+        && exp <= Utc::now()
+    {
+        return Err(AppError::ValidationError(
+            "expires_at must be in the future".to_string(),
+        ));
+    }
+
     let actor = auth_user.user_id.to_string();
 
     // If `target_org_id` is set, write the key under the org's user_id so
@@ -1217,7 +1256,77 @@ pub async fn rotate_key(
 
 #[cfg(test)]
 mod tests {
-    use super::UpdateApiKeyRequest;
+    use super::{
+        UpdateApiKeyRequest, extract_response_status, is_error_event, parse_expires_at,
+        usage_date_range,
+    };
+    use chrono::{Duration, NaiveDate, Utc};
+    use serde_json::json;
+
+    #[test]
+    fn parse_expires_at_accepts_future_rfc3339() {
+        let future = (Utc::now() + Duration::days(7)).to_rfc3339();
+        assert!(parse_expires_at(&future).is_ok());
+    }
+
+    #[test]
+    fn parse_expires_at_accepts_past_dates_string_validation_is_handler_responsibility() {
+        // parse_expires_at itself only parses; the handler enforces "must be in the future".
+        assert!(parse_expires_at("2020-01-01").is_ok());
+    }
+
+    #[test]
+    fn parse_expires_at_rejects_garbage() {
+        assert!(parse_expires_at("not-a-date").is_err());
+    }
+
+    #[test]
+    fn usage_date_range_returns_seven_contiguous_days() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 15).unwrap();
+        let dates = usage_date_range(today, 7);
+        assert_eq!(
+            dates,
+            vec![
+                "2026-04-09",
+                "2026-04-10",
+                "2026-04-11",
+                "2026-04-12",
+                "2026-04-13",
+                "2026-04-14",
+                "2026-04-15",
+            ],
+        );
+    }
+
+    #[test]
+    fn usage_date_range_handles_single_day() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 15).unwrap();
+        assert_eq!(usage_date_range(today, 1), vec!["2026-04-15"]);
+    }
+
+    #[test]
+    fn usage_date_range_clamps_zero_to_today_only() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 15).unwrap();
+        assert_eq!(usage_date_range(today, 0), vec!["2026-04-15"]);
+    }
+
+    #[test]
+    fn usage_date_range_spans_month_boundary() {
+        let today = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
+        let dates = usage_date_range(today, 7);
+        assert_eq!(
+            dates,
+            vec![
+                "2026-04-26",
+                "2026-04-27",
+                "2026-04-28",
+                "2026-04-29",
+                "2026-04-30",
+                "2026-05-01",
+                "2026-05-02",
+            ],
+        );
+    }
 
     #[test]
     fn platform_absent_means_no_change() {
@@ -1255,5 +1364,86 @@ mod tests {
         let req: UpdateApiKeyRequest =
             serde_json::from_str(r#"{"rate_limit_per_second": null}"#).unwrap();
         assert_eq!(req.rate_limit_per_second, Some(None));
+    }
+
+    // Regression tests for ChronoAIProject/NyxID#341: pre-proxy failures
+    // (403 scope-forbidden and 429 rate-limited) emit `proxy_request_denied`
+    // audit events and MUST be counted as errors in Usage aggregation.
+
+    #[test]
+    fn proxy_request_denied_counts_as_error() {
+        assert!(is_error_event("proxy_request_denied", None));
+    }
+
+    #[test]
+    fn rate_limited_denial_counts_as_error() {
+        let data = json!({
+            "service_id": "svc-1",
+            "denial_reason": "rate_limited",
+            "response_status": 429,
+        });
+        assert!(is_error_event("proxy_request_denied", Some(&data)));
+    }
+
+    #[test]
+    fn scope_forbidden_service_denial_counts_as_error() {
+        let data = json!({
+            "service_id": "svc-1",
+            "user_service_id": "us-1",
+            "denial_reason": "api_key_scope_forbidden_service",
+            "response_status": 403,
+        });
+        assert!(is_error_event("proxy_request_denied", Some(&data)));
+    }
+
+    #[test]
+    fn scope_forbidden_node_denial_counts_as_error() {
+        let data = json!({
+            "service_id": "svc-1",
+            "node_id": "node-1",
+            "denial_reason": "api_key_scope_forbidden_node",
+            "response_status": 403,
+        });
+        assert!(is_error_event("proxy_request_denied", Some(&data)));
+    }
+
+    #[test]
+    fn scope_forbidden_legacy_denial_counts_as_error() {
+        let data = json!({
+            "service_id": "svc-1",
+            "denial_reason": "api_key_scope_forbidden_legacy",
+            "response_status": 403,
+        });
+        assert!(is_error_event("proxy_request_denied", Some(&data)));
+    }
+
+    #[test]
+    fn successful_proxy_request_is_not_an_error() {
+        let data = json!({
+            "service_id": "svc-1",
+            "response_status": 200,
+        });
+        assert!(!is_error_event("proxy_request", Some(&data)));
+    }
+
+    #[test]
+    fn downstream_4xx_proxy_request_counts_as_error() {
+        // Sanity check: the existing contract for 400/401/503 still holds.
+        for status in [400u16, 401, 403, 429, 503] {
+            let data = json!({
+                "service_id": "svc-1",
+                "response_status": status,
+            });
+            assert!(
+                is_error_event("proxy_request", Some(&data)),
+                "expected status {status} to count as error"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_response_status_returns_denial_status() {
+        let data = json!({ "response_status": 403 });
+        assert_eq!(extract_response_status(Some(&data)), Some(403));
     }
 }

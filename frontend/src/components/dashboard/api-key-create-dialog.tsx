@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -33,7 +33,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import { Plus, Copy, Check, Shield, Server } from "lucide-react";
+import { Plus, Copy, Check, Calendar, Shield, Server } from "lucide-react";
 import { toast } from "sonner";
 
 function toggleInArray(
@@ -50,9 +50,20 @@ export function ApiKeyCreateDialog() {
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const createMutation = useCreateApiKey();
+  const expiryInputRef = useRef<HTMLInputElement | null>(null);
 
   const { data: services } = useKeys();
   const { data: nodes } = useNodes();
+
+  function openDatePicker() {
+    const input = expiryInputRef.current;
+    if (!input) return;
+    try {
+      input.showPicker?.();
+    } catch {
+      input.focus();
+    }
+  }
 
   const form = useForm<CreateApiKeyFormData>({
     resolver: zodResolver(createApiKeySchema),
@@ -212,27 +223,49 @@ export function ApiKeyCreateDialog() {
                 <FormField
                   control={form.control}
                   name="expires_at"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>
-                        Expiry Date{" "}
-                        <span className="text-muted-foreground">
-                          (optional)
-                        </span>
-                      </FormLabel>
-                      <FormControl>
-                        <Input
-                          type="date"
-                          {...field}
-                          value={field.value ?? ""}
-                          onChange={(e) =>
-                            field.onChange(e.target.value || null)
-                          }
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
+                  render={({ field }) => {
+                    const { ref: rhfRef, ...fieldRest } = field;
+                    return (
+                      <FormItem>
+                        <FormLabel>
+                          Expiry Date{" "}
+                          <span className="text-muted-foreground">
+                            (optional)
+                          </span>
+                        </FormLabel>
+                        <FormControl>
+                          <div className="relative">
+                            <Input
+                              type="date"
+                              min={new Date().toISOString().slice(0, 10)}
+                              className="cursor-pointer pr-10 [&::-webkit-calendar-picker-indicator]:opacity-0"
+                              {...fieldRest}
+                              ref={(el) => {
+                                rhfRef(el);
+                                expiryInputRef.current = el;
+                              }}
+                              value={field.value ?? ""}
+                              onChange={(e) =>
+                                field.onChange(e.target.value || null)
+                              }
+                              onClick={openDatePicker}
+                              onFocus={openDatePicker}
+                            />
+                            <button
+                              type="button"
+                              aria-label="Open date picker"
+                              tabIndex={-1}
+                              onClick={openDatePicker}
+                              className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                            >
+                              <Calendar className="h-4 w-4" />
+                            </button>
+                          </div>
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    );
+                  }}
                 />
 
                 <FormField

@@ -19,13 +19,53 @@ describe("createApiKeySchema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("accepts data with string expires_at", () => {
+  it("accepts data with future expires_at", () => {
+    const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     const result = createApiKeySchema.safeParse({
       name: "Test Key",
       scopes: ["admin"],
-      expires_at: "2025-12-31T00:00:00Z",
+      expires_at: future,
     });
     expect(result.success).toBe(true);
+  });
+
+  it("accepts a future date-only expires_at (treated as 23:59:59 UTC)", () => {
+    const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const result = createApiKeySchema.safeParse({
+      name: "Test Key",
+      scopes: ["admin"],
+      expires_at: future,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects past expires_at (RFC 3339)", () => {
+    const result = createApiKeySchema.safeParse({
+      name: "Test Key",
+      scopes: ["admin"],
+      expires_at: "2020-01-01T00:00:00Z",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects past expires_at (date-only)", () => {
+    const result = createApiKeySchema.safeParse({
+      name: "Test Key",
+      scopes: ["admin"],
+      expires_at: "2020-01-01",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects malformed expires_at", () => {
+    const result = createApiKeySchema.safeParse({
+      name: "Test Key",
+      scopes: ["admin"],
+      expires_at: "not-a-date",
+    });
+    expect(result.success).toBe(false);
   });
 
   it("accepts proxy scope for service access", () => {

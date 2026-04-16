@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import Animated, { FadeOut, Layout, SlideInUp } from "react-native-reanimated";
+import Animated, { FadeIn, FadeOut, LinearTransition } from "react-native-reanimated";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { radius } from "../theme/designTokens";
@@ -61,9 +61,9 @@ export function ToastOverlay({ toast, duration = 2400 }: Props) {
       {queue.map((entry) => (
         <Animated.View
           key={entry.id}
-          entering={SlideInUp.springify().damping(20).stiffness(250)}
+          entering={FadeIn.duration(200)}
           exiting={FadeOut.duration(200)}
-          layout={Layout.springify().damping(20).stiffness(250)}
+          layout={LinearTransition.duration(200)}
           style={[styles.toast, { borderColor: getAccentBorder(colors)[entry.kind] }]}
         >
           <View style={[styles.dot, { backgroundColor: getAccent(colors)[entry.kind] }]} />

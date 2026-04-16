@@ -207,6 +207,15 @@ pub enum AppError {
 
     #[error("Organization approval policy has no admins to decide: {0}")]
     OrgApprovalNoAdmin(String),
+
+    #[error("Invalid invite code")]
+    InviteCodeInvalid,
+
+    #[error("Invite code has been used up")]
+    InviteCodeExhausted,
+
+    #[error("Invite code has been deactivated")]
+    InviteCodeDeactivated,
 }
 
 impl AppError {
@@ -266,6 +275,9 @@ impl AppError {
             Self::OrgInviteInvalid(_) => StatusCode::BAD_REQUEST,
             Self::OrgInviteExpired => StatusCode::GONE,
             Self::OrgApprovalNoAdmin(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::InviteCodeInvalid | Self::InviteCodeExhausted | Self::InviteCodeDeactivated => {
+                StatusCode::BAD_REQUEST
+            }
             Self::Internal(_) | Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -330,6 +342,9 @@ impl AppError {
             Self::OrgInviteInvalid(_) => 8104,
             Self::OrgInviteExpired => 8105,
             Self::OrgApprovalNoAdmin(_) => 8106,
+            Self::InviteCodeInvalid => 8200,
+            Self::InviteCodeExhausted => 8201,
+            Self::InviteCodeDeactivated => 8202,
         }
     }
 
@@ -424,6 +439,9 @@ impl AppError {
             Self::OrgInviteInvalid(_) => "org_invite_invalid",
             Self::OrgInviteExpired => "org_invite_expired",
             Self::OrgApprovalNoAdmin(_) => "org_approval_no_admin",
+            Self::InviteCodeInvalid => "invite_code_invalid",
+            Self::InviteCodeExhausted => "invite_code_exhausted",
+            Self::InviteCodeDeactivated => "invite_code_deactivated",
         }
     }
 }
@@ -701,6 +719,18 @@ mod tests {
             AppError::ChannelPlatformError("x".into()).status_code(),
             StatusCode::BAD_GATEWAY
         );
+        assert_eq!(
+            AppError::InviteCodeInvalid.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::InviteCodeExhausted.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::InviteCodeDeactivated.status_code(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
@@ -765,6 +795,9 @@ mod tests {
             AppError::ChannelWebhookVerificationFailed("".into()).error_code(),
             AppError::ChannelRelayFailed("".into()).error_code(),
             AppError::ChannelPlatformError("".into()).error_code(),
+            AppError::InviteCodeInvalid.error_code(),
+            AppError::InviteCodeExhausted.error_code(),
+            AppError::InviteCodeDeactivated.error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(
@@ -953,6 +986,33 @@ mod tests {
         assert_eq!(
             AppError::ChannelPlatformError("".into()).error_key(),
             "channel_platform_error"
+        );
+        assert_eq!(
+            AppError::InviteCodeInvalid.error_key(),
+            "invite_code_invalid"
+        );
+        assert_eq!(AppError::InviteCodeInvalid.error_code(), 8200);
+        assert_eq!(
+            AppError::InviteCodeExhausted.error_key(),
+            "invite_code_exhausted"
+        );
+        assert_eq!(AppError::InviteCodeExhausted.error_code(), 8201);
+        assert_eq!(
+            AppError::InviteCodeDeactivated.error_key(),
+            "invite_code_deactivated"
+        );
+        assert_eq!(AppError::InviteCodeDeactivated.error_code(), 8202);
+        assert_eq!(
+            format!("{}", AppError::InviteCodeInvalid),
+            "Invalid invite code"
+        );
+        assert_eq!(
+            format!("{}", AppError::InviteCodeExhausted),
+            "Invite code has been used up"
+        );
+        assert_eq!(
+            format!("{}", AppError::InviteCodeDeactivated),
+            "Invite code has been deactivated"
         );
     }
 

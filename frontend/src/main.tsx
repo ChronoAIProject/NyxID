@@ -6,6 +6,10 @@ import { router } from "./router";
 import { useAuthStore } from "./stores/auth-store";
 import "./app.css";
 
+// Clear the chunk-reload guard on successful app bootstrap.
+// This ensures future deploys can auto-reload again.
+sessionStorage.removeItem("nyxid_chunk_reload");
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

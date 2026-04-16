@@ -7,6 +7,22 @@ use serde_json::Value;
 use crate::api::ApiClient;
 use crate::cli::{OutputFormat, ServiceCommands};
 
+// Backend `UpdateUserServiceRequest::node_id` semantics:
+//   ""        -> clear node_id (switch to direct routing)
+//   Some(id)  -> set node_id
+//   null/None -> leave unchanged
+// Sending `null` for --direct silently leaves stale node routing in place.
+fn build_route_body(direct: bool, node: Option<&str>) -> Result<Value> {
+    let node_value = if direct {
+        Value::String(String::new())
+    } else if let Some(node_id) = node {
+        Value::String(node_id.to_string())
+    } else {
+        bail!("Specify --node <NODE_ID> or --direct");
+    };
+    Ok(serde_json::json!({ "node_id": node_value }))
+}
+
 pub async fn run(command: ServiceCommands) -> Result<()> {
     match command {
         ServiceCommands::Add {
@@ -583,15 +599,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 .or(svc["_id"].as_str())
                 .ok_or_else(|| anyhow::anyhow!("Could not resolve user_service_id"))?;
 
-            let node_value = if direct {
-                Value::Null
-            } else if let Some(node_id) = node {
-                Value::String(node_id)
-            } else {
-                bail!("Specify --node <NODE_ID> or --direct");
-            };
-
-            let body = serde_json::json!({ "node_id": node_value });
+            let body = build_route_body(direct, node.as_deref())?;
             let _: Value = api
                 .put(&format!("/user-services/{service_id}"), &body)
                 .await?;
@@ -1206,5 +1214,30 @@ mod tests {
         assert!(parse_token_exchange_fields(&serde_json::Value::Null).is_none());
         assert!(parse_token_exchange_fields(&serde_json::json!([])).is_none());
         assert!(parse_token_exchange_fields(&serde_json::json!("not an array")).is_none());
+    }
+
+    // Regression for issue #327: --direct must send "" so the backend
+    // actually clears node_id. null is interpreted as "leave unchanged".
+    #[test]
+    fn route_direct_sends_empty_string_to_clear_node_id() {
+        let body = build_route_body(true, None).unwrap();
+        assert_eq!(body, serde_json::json!({ "node_id": "" }));
+    }
+
+    #[test]
+    fn route_direct_sends_empty_string_even_when_node_is_provided() {
+        let body = build_route_body(true, Some("node-a")).unwrap();
+        assert_eq!(body, serde_json::json!({ "node_id": "" }));
+    }
+
+    #[test]
+    fn route_via_node_sends_node_id() {
+        let body = build_route_body(false, Some("node-a")).unwrap();
+        assert_eq!(body, serde_json::json!({ "node_id": "node-a" }));
+    }
+
+    #[test]
+    fn route_without_node_or_direct_errors() {
+        assert!(build_route_body(false, None).is_err());
     }
 }

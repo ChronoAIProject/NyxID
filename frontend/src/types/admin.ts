@@ -118,6 +118,20 @@ export interface AdminAuditLogListResponse {
 export interface InviteCodeUsage {
   readonly user_id: string;
   readonly used_at: string;
+  /** Email of the redeeming user, or null if the user has been deleted. */
+  readonly user_email: string | null;
+  /** Display name of the redeeming user, or null if not set / deleted. */
+  readonly user_display_name: string | null;
+}
+
+/** Resolved creator info for an invite code. Null when the admin who minted
+ * the code has been deleted since — callers should fall back to rendering the
+ * raw `created_by` UUID in that case. */
+export interface InviteCodeCreator {
+  /** Email of the admin. Always present whenever the creator object itself is non-null. */
+  readonly email: string;
+  /** Display name of the admin, or null if they have no display name set. */
+  readonly display_name: string | null;
 }
 
 export interface InviteCode {
@@ -125,7 +139,11 @@ export interface InviteCode {
   readonly code: string;
   readonly max_uses: number;
   readonly used_count: number;
+  /** UUID of the admin who created this code. Stable foreign key. */
   readonly created_by: string;
+  /** Resolved creator details (email + display name). Null if the admin has
+   * been deleted since the code was minted. */
+  readonly creator: InviteCodeCreator | null;
   readonly note: string | null;
   readonly is_active: boolean;
   readonly created_at: string;
@@ -140,6 +158,16 @@ export interface InviteCodeListResponse {
 export interface CreateInviteCodeRequest {
   readonly max_uses?: number;
   readonly note?: string;
+}
+
+export interface UpdateInviteCodeRequest {
+  /**
+   * The new note value. The PATCH endpoint is authoritative — whatever you
+   * send (or omit) becomes the stored value. A non-empty string sets the
+   * note; `""`, `null`, or omitting the field all clear it. There is no
+   * "leave unchanged" mode today, so always send the full intended value.
+   */
+  readonly note?: string | null;
 }
 
 export interface DeactivateInviteCodeResponse {

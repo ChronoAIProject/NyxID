@@ -5,6 +5,9 @@ use uuid::Uuid;
 
 use crate::crypto::token::{generate_api_key, hash_token};
 use crate::errors::{AppError, AppResult};
+use crate::models::agent_service_binding::{
+    AgentServiceBinding, COLLECTION_NAME as AGENT_BINDINGS,
+};
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
@@ -298,6 +301,14 @@ pub async fn rotate_api_key(
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
+    // Snapshot old bindings BEFORE deactivating so we can clone them onto the new key.
+    let old_bindings: Vec<AgentServiceBinding> = db
+        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .find(doc! { "api_key_id": &old_key.id, "user_id": user_id })
+        .await?
+        .try_collect()
+        .await?;
+
     // Deactivate old key
     db.collection::<ApiKey>(API_KEYS)
         .update_one(
@@ -325,10 +336,37 @@ pub async fn rotate_api_key(
     )
     .await?;
 
+    // Clone agent_service_bindings from the old key to the new key so per-service
+    // credential overrides survive rotation. The (api_key_id, user_service_id)
+    // unique index is satisfied because new_key.id differs from old_key.id.
+    let cloned_count = if old_bindings.is_empty() {
+        0
+    } else {
+        let now = Utc::now();
+        let new_bindings: Vec<AgentServiceBinding> = old_bindings
+            .iter()
+            .map(|b| AgentServiceBinding {
+                id: Uuid::new_v4().to_string(),
+                api_key_id: new_key.id.clone(),
+                user_service_id: b.user_service_id.clone(),
+                user_api_key_id: b.user_api_key_id.clone(),
+                user_id: user_id.to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .collect();
+        let count = new_bindings.len();
+        db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
+            .insert_many(&new_bindings)
+            .await?;
+        count
+    };
+
     tracing::info!(
         old_key_id = %key_id,
         new_key_id = %new_key.id,
         user_id = %user_id,
+        cloned_bindings = cloned_count,
         "API key rotated"
     );
 

@@ -22,6 +22,7 @@ interface RequestOptions {
   readonly method?: string;
   readonly body?: unknown;
   readonly headers?: Record<string, string>;
+  readonly signal?: AbortSignal;
 }
 
 // Endpoints that should not clear the global auth state on 401 because they
@@ -37,7 +38,7 @@ const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
 ]);
 
 function buildFetchConfig(options: RequestOptions): RequestInit {
-  const { method = "GET", body, headers = {} } = options;
+  const { method = "GET", body, headers = {}, signal } = options;
 
   const config: RequestInit = {
     method,
@@ -46,6 +47,7 @@ function buildFetchConfig(options: RequestOptions): RequestInit {
       ...headers,
     },
     credentials: "include",
+    signal,
   };
 
   if (body !== undefined) {
@@ -120,8 +122,16 @@ export const api = {
     return apiClient<T>(endpoint, { method: "PUT", body });
   },
 
-  patch<T>(endpoint: string, body?: unknown): Promise<T> {
-    return apiClient<T>(endpoint, { method: "PATCH", body });
+  patch<T>(
+    endpoint: string,
+    body?: unknown,
+    options?: { signal?: AbortSignal },
+  ): Promise<T> {
+    return apiClient<T>(endpoint, {
+      method: "PATCH",
+      body,
+      signal: options?.signal,
+    });
   },
 
   delete<T>(endpoint: string): Promise<T> {

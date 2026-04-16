@@ -26,7 +26,23 @@ export const createApiKeySchema = z.object({
   scopes: z
     .array(z.enum(API_KEY_SCOPES))
     .min(1, "At least one scope is required"),
-  expires_at: z.string().nullable().optional(),
+  expires_at: z
+    .string()
+    .nullable()
+    .optional()
+    .refine(
+      (value) => {
+        if (value === null || value === undefined || value === "") return true;
+        // Backend treats date-only (YYYY-MM-DD) as 23:59:59 UTC.
+        const dateOnlyMatch = /^\d{4}-\d{2}-\d{2}$/.test(value);
+        const parsed = dateOnlyMatch
+          ? new Date(`${value}T23:59:59Z`)
+          : new Date(value);
+        if (Number.isNaN(parsed.getTime())) return false;
+        return parsed.getTime() > Date.now();
+      },
+      { message: "Expiry date must be in the future" },
+    ),
   description: z.string().nullable().optional(),
   allow_all_services: z.boolean().optional(),
   allow_all_nodes: z.boolean().optional(),

@@ -49,6 +49,14 @@ pub(crate) struct PreparedDelegatedRequest {
 
 /// Headers that are safe to forward to downstream services.
 /// Uses an allowlist approach to prevent leaking sensitive headers.
+///
+/// In addition to the explicit list below, any caller-supplied header whose
+/// lowercased name starts with `x-openclaw-` is forwarded. OpenClaw gateways
+/// require arbitrary namespaced headers (e.g. `x-openclaw-scopes`) to select
+/// operator permissions; listing every one individually caused the bug in
+/// NyxID#161 where `x-openclaw-scopes` was silently stripped. The prefix is
+/// narrow enough to keep sensitive NyxID/infrastructure headers (authorization,
+/// cookie, x-nyxid-*) outside the passthrough.
 const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "content-type",
     "accept",
@@ -64,12 +72,22 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "if-range",
     "if-none-match",
     "if-modified-since",
-    // OpenClaw gateway session and routing headers
-    "x-openclaw-session-key",
-    "x-openclaw-agent-id",
-    "x-openclaw-model",
-    "x-openclaw-message-channel",
 ];
+
+/// Namespaced header prefixes that should be forwarded transparently.
+///
+/// Headers under `x-openclaw-*` are caller-supplied OpenClaw routing / scope
+/// hints; the gateway owns their semantics, so NyxID must not strip them.
+const ALLOWED_FORWARD_HEADER_PREFIXES: &[&str] = &["x-openclaw-"];
+
+/// Returns `true` when the header name is in the allowlist or matches an
+/// allowlisted prefix. Caller must lowercase the name before calling.
+fn is_allowed_forward_header(name_lower: &str) -> bool {
+    ALLOWED_FORWARD_HEADERS.contains(&name_lower)
+        || ALLOWED_FORWARD_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| name_lower.starts_with(prefix))
+}
 
 fn validate_path_injection_prefix(value: &str) -> AppResult<()> {
     if value.trim().is_empty()
@@ -336,10 +354,22 @@ pub async fn resolve_proxy_target(
         ));
     }
 
-    // No-auth services: skip credential handling entirely
+    // No-auth services: skip credential handling entirely.
+    //
+    // Still resolve the gateway URL override so per-user gateway
+    // services (e.g. OpenClaw, where the seed `base_url` is the
+    // `https://openclaw-gateway.invalid` placeholder and the real URL
+    // lives on `UserProviderToken.gateway_url`) get the right
+    // `base_url` on the strict path -- which is what the direct WS
+    // route uses. Errors propagate so a missing gateway URL surfaces
+    // as `Connect your <provider> instance first` instead of building
+    // a request against the placeholder. See ChronoAIProject/NyxID#160.
     if service.auth_method == "none" {
+        let base_url = resolve_gateway_url_override(db, user_id, &service)
+            .await?
+            .unwrap_or_else(|| service.base_url.clone());
         return Ok(ProxyTarget {
-            base_url: service.base_url.clone(),
+            base_url,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             credential: String::new(),
@@ -417,17 +447,45 @@ pub async fn resolve_proxy_target_lenient(
         ));
     }
 
-    // No-auth services: no credential needed
+    // No-auth services: no credential needed.
+    //
+    // Resolve the gateway URL override so per-user gateway services
+    // (e.g. OpenClaw, where the seed `base_url` is the
+    // `https://openclaw-gateway.invalid` placeholder and the real URL
+    // lives on `UserProviderToken.gateway_url`) get the right
+    // `base_url` -- but tolerate a missing server-side gateway URL.
+    // The lenient path is used for node-routed requests, where the
+    // node agent has the target URL configured locally; treating
+    // "no UserProviderToken" as a hard error here would break
+    // node-managed OpenClaw setups that intentionally keep the URL
+    // off the server. We hand the node an empty `base_url` so its
+    // `proxy_executor` falls back to the credential's `target_url()`.
+    //
+    // The returned `has_server_credential` flag must reflect whether
+    // the SERVER on its own can complete the request without the
+    // node. For the empty-base_url case it cannot: a direct fallback
+    // would call `forward_request` against `""` and surface as an
+    // internal error instead of the intended "node offline" failure.
+    // So we only mark the server target viable when we resolved a
+    // concrete URL (either the user's gateway override or the seed
+    // base_url for non-gateway services).
+    // See ChronoAIProject/NyxID#160.
     if service.auth_method == "none" {
+        let (base_url, has_server_credential) =
+            match resolve_gateway_url_override(db, user_id, &service).await {
+                Ok(Some(url)) => (url, true),
+                Ok(None) => (service.base_url.clone(), true),
+                Err(_) => (String::new(), false),
+            };
         return Ok((
             ProxyTarget {
-                base_url: service.base_url.clone(),
+                base_url,
                 auth_method: service.auth_method.clone(),
                 auth_key_name: service.auth_key_name.clone(),
                 credential: String::new(),
                 service,
             },
-            true,
+            has_server_credential,
         ));
     }
 
@@ -1492,7 +1550,7 @@ pub async fn forward_request(
         if has_custom_ua && name_lower == "user-agent" {
             continue;
         }
-        if ALLOWED_FORWARD_HEADERS.contains(&name_lower.as_str()) {
+        if is_allowed_forward_header(&name_lower) {
             request = request.header(name, value);
         }
     }
@@ -1743,6 +1801,43 @@ mod tests {
     };
     use chrono::Utc;
     use tokio::{net::TcpListener, sync::mpsc};
+
+    // ---- forward header allowlist tests (NyxID#161) ----
+
+    #[test]
+    fn forward_allowlist_accepts_explicit_entries() {
+        assert!(is_allowed_forward_header("content-type"));
+        assert!(is_allowed_forward_header("user-agent"));
+        assert!(is_allowed_forward_header("range"));
+    }
+
+    #[test]
+    fn forward_allowlist_accepts_openclaw_scopes_header() {
+        // NyxID#161: the raw header name was dropped by the proxy because
+        // the allowlist did not include it.
+        assert!(
+            is_allowed_forward_header("x-openclaw-scopes"),
+            "x-openclaw-scopes must pass the direct-proxy allowlist (NyxID#161)",
+        );
+    }
+
+    #[test]
+    fn forward_allowlist_accepts_future_openclaw_prefixed_headers() {
+        assert!(is_allowed_forward_header("x-openclaw-tenant"));
+        assert!(is_allowed_forward_header("x-openclaw-trace-id"));
+        assert!(is_allowed_forward_header("x-openclaw-"));
+    }
+
+    #[test]
+    fn forward_allowlist_rejects_sensitive_and_unrelated_headers() {
+        // Guard: the prefix rule must not broaden leakage of NyxID or
+        // infrastructure headers.
+        assert!(!is_allowed_forward_header("authorization"));
+        assert!(!is_allowed_forward_header("cookie"));
+        assert!(!is_allowed_forward_header("x-nyxid-internal"));
+        assert!(!is_allowed_forward_header("x-forwarded-for"));
+        assert!(!is_allowed_forward_header("host"));
+    }
 
     #[derive(Debug)]
     struct CapturedRequest {

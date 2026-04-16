@@ -199,6 +199,19 @@ export interface AgentServiceBinding {
   readonly credential_label: string;
   readonly created_at: string;
   readonly updated_at: string;
+  /**
+   * True when the binding references a missing/inactive service or a
+   * deleted credential. The backend cascade-deletes bindings on delete
+   * of either side, so this should only ever be true for pre-existing
+   * orphan rows — the UI shows them as invalid and invites manual
+   * cleanup.
+   */
+  readonly is_invalid?: boolean;
+  /**
+   * Short reason when `is_invalid` is true. One of
+   * `missing_service`, `inactive_service`, or `missing_credential`.
+   */
+  readonly invalid_reason?: string;
 }
 
 export interface AgentServiceBindingListResponse {

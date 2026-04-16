@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
 };
 use crate::models::provider_config::{COLLECTION_NAME, ProviderConfig};
 use crate::models::service_provider_requirement::{
@@ -1434,6 +1434,36 @@ struct DefaultServiceSeed {
     description: Option<&'static str>,
 }
 
+/// Per-slug capability overrides for seeded services.
+///
+/// Returns explicit `ServiceCapabilities` and `streaming_supported` values
+/// for services whose WebSocket / streaming behavior is not
+/// auto-discoverable from an OpenAPI or AsyncAPI spec. Keeps the seed
+/// table declarative and lets the discovery endpoint surface accurate
+/// capability flags to clients.
+fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
+    match slug {
+        // OpenClaw Gateway speaks native WebSocket to its CLI/TUI
+        // clients. The HTTP proxy path is supported but not all
+        // downstream instances expose OpenAI-compatible HTTP endpoints,
+        // so advertise WS + streaming so clients pick the right
+        // transport. See ChronoAIProject/NyxID#160.
+        "llm-openclaw" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: false,
+                supports_websocket: true,
+                supports_streaming: true,
+            },
+            true,
+        )),
+        _ => None,
+    }
+}
+
 const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     DefaultServiceSeed {
         provider_slug: "openai",
@@ -1747,6 +1777,128 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     },
 ];
 
+/// Apply per-slug capability / streaming overrides to pre-existing seeded
+/// downstream services. Designed to be a one-shot migration that runs on
+/// every startup but only mutates rows that still carry the legacy
+/// "no capabilities declared" shape from before these overrides existed.
+///
+/// The filter is intentionally narrow to avoid two classes of bug:
+///
+///   1. **Thrashing `updated_at` on every boot.** We'd otherwise rewrite
+///      the row every startup (MongoDB treats `$set: {updated_at: ...}`
+///      as a modification even if the other fields are unchanged).
+///   2. **Overwriting admin customizations.** If an admin has explicitly
+///      edited `capabilities` via the frontend/API, the row already has
+///      a non-null `capabilities` document and we leave it alone.
+///
+/// No upsert, no `insert_one`. If the row doesn't exist yet, the seed
+/// loop below creates it with the correct capabilities -- this function
+/// is purely a forward-migration for already-seeded deployments. No
+/// duplicate rows are possible because `update_one` never inserts.
+///
+/// See ChronoAIProject/NyxID#160.
+async fn backfill_seeded_capability_overrides(
+    service_col: &mongodb::Collection<DownstreamService>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    // Slugs we upgrade in-place. Keep this short -- if the list grows,
+    // iterate DEFAULT_SERVICE_SEEDS instead.
+    const BACKFILL_SLUGS: &[&str] = &["llm-openclaw"];
+
+    for slug in BACKFILL_SLUGS {
+        let Some((caps, streaming)) = seed_capability_override(slug) else {
+            continue;
+        };
+
+        // Serialize ServiceCapabilities into a BSON document so MongoDB
+        // stores the nested object as-is instead of a serde wire format.
+        let caps_bson = match bson::to_bson(&caps) {
+            Ok(bson::Bson::Document(doc)) => doc,
+            Ok(other) => {
+                tracing::warn!(
+                    slug = %slug,
+                    actual = ?other,
+                    "Unexpected BSON shape for ServiceCapabilities; skipping backfill"
+                );
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    slug = %slug,
+                    error = %error,
+                    "Failed to encode ServiceCapabilities; skipping backfill"
+                );
+                continue;
+            }
+        };
+
+        // Only touch rows whose capabilities are effectively unset.
+        //
+        // Three legacy shapes exist in production:
+        //   1. `capabilities` missing entirely (pre-feature seed row).
+        //   2. `capabilities: null` (explicit null from early writers).
+        //   3. `capabilities: { all flags false }` -- the admin service
+        //      editor serializes `ServiceCapabilities::default()` into
+        //      the document whenever an admin saves an unrelated field
+        //      (description, base_url, ...) on a row that never had
+        //      capabilities authored. Skipping these would leave the
+        //      OpenClaw discovery fix unapplied for any deployment
+        //      where an admin ever touched the row.
+        //
+        // The third clause uses `$ne: true` on every flag, which matches
+        // both "field missing" and "field explicitly false". If any flag
+        // is `true`, the row is a deliberate admin customization and we
+        // leave it alone.
+        //
+        // `slug` has a partial unique index on `is_active: true`, so at
+        // most one active row per slug exists -- but soft-deleted or
+        // deactivated rows with the same slug can coexist. We use
+        // update_many (not update_one) so that both the active row and
+        // any inactive historical rows get backfilled; otherwise a
+        // single update_one could match an inactive row first, leaving
+        // the active row (the one `/api/v1/proxy/services` serves) with
+        // stale metadata.
+        let filter = doc! {
+            "slug": *slug,
+            "$or": [
+                { "capabilities": { "$exists": false } },
+                { "capabilities": null },
+                { "$and": [
+                    { "capabilities.supports_proxy_read": { "$ne": true } },
+                    { "capabilities.supports_proxy_write": { "$ne": true } },
+                    { "capabilities.supports_proxy_binary_upload": { "$ne": true } },
+                    { "capabilities.supports_direct_downstream_auth": { "$ne": true } },
+                    { "capabilities.supports_authoring_via_nyx": { "$ne": true } },
+                    { "capabilities.supports_websocket": { "$ne": true } },
+                    { "capabilities.supports_streaming": { "$ne": true } },
+                ]},
+            ],
+        };
+
+        let result = service_col
+            .update_many(
+                filter,
+                doc! { "$set": {
+                    "capabilities": caps_bson,
+                    "streaming_supported": streaming,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+
+        if result.matched_count > 0 {
+            tracing::info!(
+                slug = %slug,
+                matched = result.matched_count,
+                modified = result.modified_count,
+                "Backfilled catalog capability overrides"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Seed downstream services for each default provider (idempotent).
 ///
 /// Creates a `DownstreamService` and a `ServiceProviderRequirement` for each
@@ -1786,6 +1938,15 @@ pub async fn seed_default_services(
             "Updated existing downstream service base_url to chatgpt.com"
         );
     }
+
+    // Backfill capability + streaming flags for seeded services whose
+    // WebSocket / streaming support is known at the proxy layer but was
+    // not captured on the original seed row (e.g. llm-openclaw). The
+    // idempotent seed loop below skips rows that already exist, so
+    // without this step pre-existing deployments keep reporting
+    // `streaming_supported: false` even after the seed is upgraded.
+    // See ChronoAIProject/NyxID#160.
+    backfill_seeded_capability_overrides(&service_col, now).await?;
 
     for seed in DEFAULT_SERVICE_SEEDS {
         // Find the provider by slug
@@ -1846,6 +2007,12 @@ pub async fn seed_default_services(
                 None
             };
 
+        let (capabilities, streaming_supported) = match seed_capability_override(seed.service_slug)
+        {
+            Some((caps, streaming)) => (Some(caps), streaming),
+            None => (None, false),
+        };
+
         let service = DownstreamService {
             id: service_id.clone(),
             name: seed.service_name.to_string(),
@@ -1860,7 +2027,7 @@ pub async fn seed_default_services(
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
-            streaming_supported: false,
+            streaming_supported,
             ssh_config: None,
             oauth_client_id: None,
             service_category: "internal".to_string(),
@@ -1879,7 +2046,7 @@ pub async fn seed_default_services(
             homepage_url: None,
             repository_url: None,
             issues_url: None,
-            capabilities: None,
+            capabilities,
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,
@@ -2709,6 +2876,7 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 mod tests {
     use super::{
         DEFAULT_SERVICE_SEEDS, normalize_telegram_bot_token, normalize_telegram_bot_username,
+        seed_capability_override,
     };
     use crate::errors::AppError;
 
@@ -2721,6 +2889,31 @@ mod tests {
 
         assert_eq!(seed.service_auth_method, Some("path"));
         assert_eq!(seed.service_auth_key_name, Some("bot"));
+    }
+
+    #[test]
+    fn openclaw_seed_advertises_websocket_and_streaming() {
+        let (caps, streaming) = seed_capability_override("llm-openclaw")
+            .expect("llm-openclaw should have a capability override");
+
+        assert!(
+            caps.supports_websocket,
+            "llm-openclaw must advertise WebSocket passthrough (NyxID#160)"
+        );
+        assert!(
+            caps.supports_streaming,
+            "llm-openclaw must advertise streaming so clients pick the right transport"
+        );
+        assert!(
+            streaming,
+            "streaming_supported must be true so discovery stops returning false"
+        );
+    }
+
+    #[test]
+    fn seed_capability_override_returns_none_for_unknown_slug() {
+        assert!(seed_capability_override("llm-openai").is_none());
+        assert!(seed_capability_override("api-github").is_none());
     }
 
     #[test]

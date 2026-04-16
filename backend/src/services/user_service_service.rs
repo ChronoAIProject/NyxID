@@ -9,7 +9,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
 use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
 use crate::models::user_service::{COLLECTION_NAME, UserService};
-use crate::services::{node_service, org_service};
+use crate::services::{agent_binding_service, node_service, org_service};
 
 /// Valid auth methods for user services.
 ///
@@ -725,7 +725,14 @@ pub async fn deactivate_user_service(
         None,
         None,
     )
-    .await
+    .await?;
+
+    // Cascade-clean any agent service bindings that referenced this
+    // service. Without this, the Agent Key detail page keeps showing
+    // bindings pointing at a now-inactive service (issue #324).
+    agent_binding_service::cleanup_bindings_for_user_service(db, user_id, service_id).await?;
+
+    Ok(())
 }
 
 #[cfg(test)]

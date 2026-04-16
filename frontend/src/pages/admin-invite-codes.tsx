@@ -1,17 +1,18 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useAdminInviteCodes,
   useCreateInviteCode,
   useDeactivateInviteCode,
+  useUpdateInviteCode,
 } from "@/hooks/use-admin-invite-codes";
 import {
   createInviteCodeSchema,
   type CreateInviteCodeFormData,
 } from "@/schemas/admin";
 import { ApiError } from "@/lib/api-client";
-import { copyToClipboard, formatDate } from "@/lib/utils";
+import { cn, copyToClipboard, formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import {
   Form,
   FormControl,
@@ -51,6 +59,7 @@ export function AdminInviteCodesPage() {
   const { data, isLoading, error } = useAdminInviteCodes();
   const createMutation = useCreateInviteCode();
   const deactivateMutation = useDeactivateInviteCode();
+  const updateMutation = useUpdateInviteCode();
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createdCode, setCreatedCode] = useState<InviteCode | null>(null);
@@ -58,8 +67,40 @@ export function AdminInviteCodesPage() {
   const [deactivateTarget, setDeactivateTarget] = useState<InviteCode | null>(
     null,
   );
+  // Track the selected row by id (not the full object) so that the drawer
+  // always reflects the freshest data after query invalidations.
+  const [selectedCodeId, setSelectedCodeId] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
+  // The note value we last loaded into the draft. Compared against `noteDraft`
+  // to compute `noteHasChanges`, so the dirty signal reflects "the user typed
+  // something" rather than "the live persisted value moved out from under us
+  // due to a background refetch." Without this ref, a window-focus refetch
+  // could silently mark the drawer dirty and let the admin clobber another
+  // admin's update with a value they never typed.
+  const lastSyncedNoteRef = useRef<string>("");
 
   const inviteCodes = data?.invite_codes ?? [];
+  const selectedCode =
+    selectedCodeId !== null
+      ? (inviteCodes.find((ic) => ic.id === selectedCodeId) ?? null)
+      : null;
+  const noteHasChanges =
+    selectedCode !== null && noteDraft !== lastSyncedNoteRef.current;
+  // Single source of truth for "save in flight". Every interaction that could
+  // change `selectedCodeId` or submit another PATCH is gated on this flag, so
+  // the cross-row race and double-submit windows are closed at the UI level
+  // rather than defensively patched in the handler.
+  const isSaving = updateMutation.isPending;
+
+  // Reset the draft only when the user opens a different row — not on every
+  // background refetch, otherwise React Query's default refetchOnWindowFocus
+  // would wipe an in-progress edit when the user tabs away and back.
+  useEffect(() => {
+    const note = selectedCode?.note ?? "";
+    setNoteDraft(note);
+    lastSyncedNoteRef.current = note;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCodeId]);
 
   const createForm = useForm<CreateInviteCodeFormData>({
     resolver: zodResolver(createInviteCodeSchema),
@@ -122,6 +163,45 @@ export function AdminInviteCodesPage() {
     }
   }
 
+  async function handleSaveNote() {
+    if (!selectedCode || !noteHasChanges) return;
+    // Capture the id at call time. Even though the row-click / drawer-close
+    // guards below make `selectedCodeId` immutable while `isSaving === true`,
+    // keeping an explicit local + post-await equality check means a future
+    // refactor that relaxes those guards can't silently reintroduce the
+    // cross-row race (ref gets written for the wrong code after navigation).
+    const savingId = selectedCode.id;
+    try {
+      const updated = await updateMutation.mutateAsync({
+        id: savingId,
+        body: { note: noteDraft },
+      });
+      if (selectedCodeId === savingId) {
+        // Sync the ref so noteHasChanges flips false now that the saved value
+        // is the new baseline. Without this the Save button would stay enabled
+        // because the ref still points at the value we loaded when the drawer
+        // first opened.
+        lastSyncedNoteRef.current = updated.note ?? "";
+      }
+      toast.success("Note updated");
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        toast.error("Save timed out after 10 seconds. Try again.");
+      } else if (err instanceof ApiError) {
+        toast.error(err.message);
+      } else {
+        toast.error("Failed to update note");
+      }
+    }
+  }
+
+  function getStatusBadge(ic: InviteCode) {
+    const exhausted = ic.used_count >= ic.max_uses;
+    if (!ic.is_active) return <Badge variant="destructive">Deactivated</Badge>;
+    if (exhausted) return <Badge variant="warning">Exhausted</Badge>;
+    return <Badge variant="success">Active</Badge>;
+  }
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -173,75 +253,80 @@ export function AdminInviteCodesPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {inviteCodes.map((ic) => {
-                const exhausted = ic.used_count >= ic.max_uses;
-                return (
-                  <TableRow key={ic.id}>
-                    <TableCell>
-                      <span className="font-mono text-sm font-medium text-foreground">
-                        {ic.code}
+              {inviteCodes.map((ic) => (
+                <TableRow
+                  key={ic.id}
+                  onClick={() => {
+                    if (isSaving) return;
+                    setSelectedCodeId(ic.id);
+                  }}
+                  className={cn(
+                    "cursor-pointer",
+                    isSaving && "pointer-events-none opacity-60",
+                  )}
+                >
+                  <TableCell>
+                    <span className="font-mono text-sm font-medium text-foreground">
+                      {ic.code}
+                    </span>
+                  </TableCell>
+                  <TableCell>
+                    <span className="text-sm tabular-nums text-muted-foreground">
+                      {String(ic.used_count)}/{String(ic.max_uses)}
+                    </span>
+                  </TableCell>
+                  <TableCell>{getStatusBadge(ic)}</TableCell>
+                  <TableCell>
+                    {ic.note ? (
+                      <span className="text-sm text-muted-foreground">
+                        {ic.note}
                       </span>
-                    </TableCell>
-                    <TableCell>
-                      <span className="text-sm tabular-nums text-muted-foreground">
-                        {String(ic.used_count)}/{String(ic.max_uses)}
-                      </span>
-                    </TableCell>
-                    <TableCell>
-                      {!ic.is_active ? (
-                        <Badge variant="destructive">Deactivated</Badge>
-                      ) : exhausted ? (
-                        <Badge variant="warning">Exhausted</Badge>
-                      ) : (
-                        <Badge variant="success">Active</Badge>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {ic.note ? (
-                        <span className="text-sm text-muted-foreground">
-                          {ic.note}
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">--</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {formatDate(ic.created_at)}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1">
+                    ) : (
+                      <span className="text-muted-foreground">--</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {formatDate(ic.created_at)}
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleCopyCode(ic.code, ic.id);
+                        }}
+                        aria-label={`Copy ${ic.code} to clipboard`}
+                      >
+                        {copiedId === ic.id ? (
+                          <Check
+                            className="h-4 w-4 text-success"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <Copy className="h-4 w-4" aria-hidden="true" />
+                        )}
+                      </Button>
+                      {ic.is_active && (
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                          onClick={() => void handleCopyCode(ic.code, ic.id)}
-                          aria-label={`Copy ${ic.code} to clipboard`}
+                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeactivateTarget(ic);
+                          }}
+                          aria-label={`Deactivate ${ic.code}`}
                         >
-                          {copiedId === ic.id ? (
-                            <Check
-                              className="h-4 w-4 text-success"
-                              aria-hidden="true"
-                            />
-                          ) : (
-                            <Copy className="h-4 w-4" aria-hidden="true" />
-                          )}
+                          <Ban className="h-4 w-4" aria-hidden="true" />
                         </Button>
-                        {ic.is_active && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                            onClick={() => setDeactivateTarget(ic)}
-                            aria-label={`Deactivate ${ic.code}`}
-                          >
-                            <Ban className="h-4 w-4" aria-hidden="true" />
-                          </Button>
-                        )}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
+                      )}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
             </TableBody>
           </Table>
         </div>
@@ -424,6 +509,183 @@ export function AdminInviteCodesPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Invite Code Detail Drawer */}
+      <Sheet
+        open={selectedCode !== null}
+        onOpenChange={(open) => {
+          // Never let a close interaction land while a PATCH is in flight.
+          // Combined with the row-click guard above, this makes the cross-row
+          // save race structurally impossible: `selectedCodeId` cannot change
+          // between `mutateAsync` call and resolution.
+          if (!open && !isSaving) setSelectedCodeId(null);
+        }}
+      >
+        <SheetContent
+          className="flex w-full flex-col gap-6 overflow-y-auto sm:max-w-lg"
+          onPointerDownOutside={(e) => {
+            if (isSaving) e.preventDefault();
+          }}
+          onEscapeKeyDown={(e) => {
+            if (isSaving) e.preventDefault();
+          }}
+        >
+          {selectedCode && (
+            <>
+              <SheetHeader>
+                <div className="flex items-center gap-3">
+                  <SheetTitle className="font-mono">
+                    {selectedCode.code}
+                  </SheetTitle>
+                  {getStatusBadge(selectedCode)}
+                </div>
+                <SheetDescription>
+                  Detailed usage and editable note for this invite code.
+                </SheetDescription>
+              </SheetHeader>
+
+              <div className="grid grid-cols-2 gap-4 rounded-md border border-border bg-muted/20 p-4 text-sm">
+                <div>
+                  <p className="text-xs uppercase tracking-wider text-text-tertiary">
+                    Uses
+                  </p>
+                  <p className="mt-1 tabular-nums">
+                    {String(selectedCode.used_count)}/
+                    {String(selectedCode.max_uses)}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-wider text-text-tertiary">
+                    Created
+                  </p>
+                  <p className="mt-1 text-muted-foreground">
+                    {formatDate(selectedCode.created_at)}
+                  </p>
+                </div>
+                <div className="col-span-2">
+                  <p className="text-xs uppercase tracking-wider text-text-tertiary">
+                    Created by
+                  </p>
+                  {(() => {
+                    // Mirror the Redemptions list fallback chain: display_name →
+                    // email → UUID. Use truthy checks + optional chaining so a
+                    // legacy backend that omits the creator sidecar (null or
+                    // absent) degrades to the mono UUID rather than rendering
+                    // a blank line.
+                    const creator = selectedCode.creator;
+                    const primary =
+                      creator?.display_name ||
+                      creator?.email ||
+                      selectedCode.created_by;
+                    const showEmailLine =
+                      !!creator?.display_name && !!creator.email;
+                    const isUuidFallback = !creator;
+                    return (
+                      <>
+                        <p
+                          className={cn(
+                            "mt-1 truncate text-sm text-foreground",
+                            isUuidFallback &&
+                              "font-mono text-xs text-muted-foreground",
+                          )}
+                        >
+                          {primary}
+                        </p>
+                        {showEmailLine && (
+                          <p className="truncate text-xs text-muted-foreground">
+                            {creator.email}
+                          </p>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label
+                  htmlFor="invite-code-note"
+                  className="text-sm font-medium"
+                >
+                  Note
+                </label>
+                <Input
+                  id="invite-code-note"
+                  value={noteDraft}
+                  onChange={(e) => setNoteDraft(e.target.value)}
+                  placeholder="e.g. alice@corp"
+                  maxLength={512}
+                />
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-muted-foreground">
+                    Visible to admins only. Leave blank to clear.
+                  </p>
+                  <Button
+                    size="sm"
+                    onClick={() => void handleSaveNote()}
+                    disabled={!noteHasChanges || isSaving}
+                    isLoading={isSaving}
+                  >
+                    Save
+                  </Button>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-baseline justify-between">
+                  <h3 className="text-sm font-medium">Redemptions</h3>
+                  <span className="text-xs text-muted-foreground">
+                    {selectedCode.usages.length} total
+                  </span>
+                </div>
+                {selectedCode.usages.length === 0 ? (
+                  <div className="rounded-md border border-dashed border-border py-8 text-center text-sm text-muted-foreground">
+                    No redemptions yet.
+                  </div>
+                ) : (
+                  <ul className="divide-y divide-border rounded-md border border-border">
+                    {selectedCode.usages.map((usage) => {
+                      const primary =
+                        usage.user_display_name ??
+                        usage.user_email ??
+                        usage.user_id;
+                      const showEmailLine =
+                        usage.user_display_name !== null &&
+                        usage.user_email !== null;
+                      return (
+                        <li
+                          key={`${usage.user_id}-${usage.used_at}`}
+                          className="flex items-start justify-between gap-4 px-3 py-2"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm text-foreground">
+                              {primary}
+                            </p>
+                            {showEmailLine && (
+                              <p className="truncate text-xs text-muted-foreground">
+                                {usage.user_email}
+                              </p>
+                            )}
+                            {usage.user_email === null &&
+                              usage.user_display_name === null && (
+                                <p className="truncate font-mono text-xs text-muted-foreground">
+                                  account deleted
+                                </p>
+                              )}
+                          </div>
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            {formatDate(usage.used_at)}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            </>
+          )}
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }

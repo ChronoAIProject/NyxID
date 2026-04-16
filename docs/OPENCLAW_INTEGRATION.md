@@ -266,6 +266,34 @@ POST /api/v1/proxy/s/llm-openclaw/tools/invoke
 
 Each user's requests route to their own OpenClaw instance.
 
+### WebSocket passthrough (OpenClaw CLI / TUI)
+
+The OpenClaw CLI's native chat flow is a WebSocket upgrade against the
+gateway root. NyxID's proxy supports WebSocket passthrough on the same
+slug/UUID routes as HTTP, so point the CLI at the proxy URL with the
+`wss://` scheme and an `Authorization: Bearer <nyxid_access_token>`
+header:
+
+```text
+wss://<nyxid-host>/api/v1/proxy/s/llm-openclaw
+wss://<nyxid-host>/api/v1/proxy/<service-uuid>
+```
+
+The `GET /api/v1/proxy/services` discovery response now advertises this
+via `"websocket_supported": true` and `"streaming_supported": true` for
+`llm-openclaw`. Clients that see `websocket_supported: false` on other
+services should stay on the HTTP path.
+
+**Node-routed OpenClaw requires an up-to-date node agent.** Older agents
+do not respond to the server's `open_ws_proxy` frame, which surfaces as
+a `NodeProxyTimeout` on the first WS upgrade. If the CLI hangs on
+connect, upgrade the node agent and restart the daemon:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
+nyxid node daemon restart
+```
+
 ### Channel integration
 
 Map OpenClaw channel users (WhatsApp, Telegram, etc.) to NyxID identities:

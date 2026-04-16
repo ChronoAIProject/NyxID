@@ -160,35 +160,9 @@ nyxid --version                                   # verify
 
 ## Connect your AI tool
 
-Pick one of these:
+Once your stack is up and you've registered an account, the next step is to connect a real downstream AI Service (OpenAI, Anthropic, GitHub, etc.) and verify the proxy actually works. **Wiring MCP alone won't show real tools** — until a real service is connected and verified, your AI agent will only see NyxID's `nyx__...` meta-tools and you'll wonder why nothing's working.
 
-### Manual CLI
-
-```bash
-# Log in (opens browser for authentication)
-nyxid login --base-url http://localhost:3001
-
-# Add your first API credential (e.g. OpenAI — make sure OPENAI_API_KEY is set in your shell)
-nyxid service add llm-openai --credential-env OPENAI_API_KEY
-
-# Verify — you should see a JSON response listing models
-nyxid proxy request llm-openai models
-```
-
-If the proxy returns data, the full chain works: credential stored, injected, downstream accepted.
-
-To connect your AI tool to NyxID's MCP endpoint (`http://localhost:3001/mcp`):
-
-- **Claude Code** — `claude mcp add --transport http nyxid http://localhost:3001/mcp`
-- **Codex** — `codex mcp add nyxid --url http://localhost:3001/mcp`
-- **Cursor** — open **Settings > MCP** in the web console (`http://localhost:3000`) and click **Install to Cursor** for a one-click deeplink install
-
-### Web console
-
-Prefer a GUI (Graphical User Interface)? Everything above can also be done through the web console at `http://localhost:3000`:
-
-- **AI Services** — add API credentials (OpenAI, Anthropic, GitHub, etc.)
-- **Settings > MCP** — one-click install for Cursor, or grab the `claude mcp add` / `codex mcp add` command for Claude Code and Codex
+The full flow lives in **[docs/CONNECTING_SERVICES.md](CONNECTING_SERVICES.md)**. It's base-URL-agnostic and covers all four paths (AI-driven, CLI, web console, direct API). Use `http://localhost:3001` as your `<BASE_URL>` for self-host.
 
 ---
 

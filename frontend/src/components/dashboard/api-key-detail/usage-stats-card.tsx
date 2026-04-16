@@ -1,5 +1,6 @@
 import { useApiKeyUsage } from "@/hooks/use-api-keys";
 import { formatRelativeTime } from "@/lib/utils";
+import { formatBucketLabel } from "@/lib/usage-bucket";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Card,
@@ -9,12 +10,17 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Activity } from "lucide-react";
 
 function ActivityBars({
   buckets,
 }: {
-  readonly buckets: readonly { readonly date: string; readonly request_count: number }[];
+  readonly buckets: readonly {
+    readonly date: string;
+    readonly request_count: number;
+    readonly error_count: number;
+  }[];
 }) {
   if (buckets.length === 0) {
     return (
@@ -28,21 +34,37 @@ function ActivityBars({
 
   return (
     <div className="flex items-end gap-2">
-      {buckets.map((bucket) => (
-        <div key={bucket.date} className="flex min-w-0 flex-1 flex-col items-center gap-1">
-          <div className="flex h-16 w-full items-end rounded bg-muted/40 px-1">
-            <div
-              className="w-full rounded-sm bg-primary/80"
-              style={{
-                height: `${Math.max((bucket.request_count / maxCount) * 100, bucket.request_count > 0 ? 10 : 2)}%`,
-              }}
-            />
-          </div>
-          <span className="text-[10px] text-muted-foreground">
-            {bucket.date.slice(5)}
-          </span>
-        </div>
-      ))}
+      {buckets.map((bucket) => {
+        const label = formatBucketLabel(bucket);
+        return (
+          <Tooltip key={bucket.date}>
+            <TooltipTrigger asChild>
+              <div
+                tabIndex={0}
+                role="img"
+                aria-label={label}
+                className="flex min-w-0 flex-1 cursor-default flex-col items-center gap-1 rounded outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <span className="h-3.5 text-[10px] font-medium leading-none text-foreground tabular-nums">
+                  {bucket.request_count > 0 ? bucket.request_count : ""}
+                </span>
+                <div className="flex h-16 w-full items-end rounded bg-muted/40 px-1">
+                  <div
+                    className="w-full rounded-sm bg-primary/80"
+                    style={{
+                      height: `${Math.max((bucket.request_count / maxCount) * 100, bucket.request_count > 0 ? 10 : 2)}%`,
+                    }}
+                  />
+                </div>
+                <span className="text-[10px] text-muted-foreground">
+                  {bucket.date.slice(5)}
+                </span>
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="top">{label}</TooltipContent>
+          </Tooltip>
+        );
+      })}
     </div>
   );
 }

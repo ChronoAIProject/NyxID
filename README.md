@@ -1,5 +1,6 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/ChronoAIProject/NyxID)](https://github.com/ChronoAIProject/NyxID)
+[![Discord](https://img.shields.io/discord/1422500823925264438?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/fQw5Nep9)
 
 <p align="center">
   <img src="assets/banner.png" alt="NyxID — Connect AI agents to any API, anywhere. Securely." width="100%">
@@ -71,7 +72,7 @@ any REST API as MCP (Model Context Protocol) tools.
 - **Per-agent isolation** — each agent gets a scoped token. Agent A accesses Slack and Gmail. Agent B only accesses your internal API. Revoke any session without touching the underlying credentials.
 - **Full identity layer** — OIDC (OpenID Connect) / OAuth 2.0 with PKCE (Proof Key for Code Exchange), RBAC (Role-Based Access Control), service accounts, transaction approval (Telegram + mobile push), LLM (Large Language Model) gateway for 7 providers.
 
-## See it in action
+## See It in Action
 
 The end-to-end loop is short: connect a service to NyxID once, then any AI agent pointed at your NyxID MCP endpoint can use it — without ever seeing the raw API key.
 
@@ -97,6 +98,12 @@ Other tools solve parts of this — NyxID combines credential injection, NAT tra
 | Per-agent isolation | Yes | No | No | No |
 | OIDC / OAuth 2.0 | Yes | No | No | Yes |
 
+## Use Cases
+
+- Give Claude Code access to your private APIs without sharing keys
+- Expose internal microservices to AI agents through a single MCP endpoint
+- Secure AI agent access to self-hosted tools (Grafana, Jenkins, n8n) behind your firewall
+
 ## Quick Start
 
 There are two ways to use NyxID — pick the one that fits your situation:
@@ -107,26 +114,29 @@ There are two ways to use NyxID — pick the one that fits your situation:
 | **Best for** | Getting started quickly, no setup | Full control, private networks, offline use |
 | **Status** | Early access (invite code below) | Open — anyone can run it |
 
-### Option A: Hosted (recommended)
+### Option A: Hosted (Recommended)
 
 Start using NyxID in under a minute — no Docker, no setup:
 
 1. Go to **[nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register)**
 2. Enter invite code: **`NYX-FGNY85AF`**
 3. Sign in with Google, GitHub, or Apple
-4. Add your first service credential and connect your AI agent
+4. [Connect your first AI Service](#connecting-ai-services) and verify a proxy request
 
 Early access — limited to 20 users.
 
-### Option B: Self-host
+### Option B: Self-Host
 
 Run NyxID on your own machine. This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
 
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash-compatible terminal. The `nyxid` CLI is optional. Full prereqs and disk budgets in [docs/QUICKSTART.md](docs/QUICKSTART.md#prerequisites).
 
-#### AI-assisted (recommended)
+#### AI-Assisted (Recommended)
 
-If you have Claude Code, Cursor, or any AI coding assistant open, paste this prompt and it will drive the entire self-host flow for you — clone, env generation, Docker stack, health check, optional CLI install, login, first credential, and MCP config:
+If you have Claude Code, Cursor, or any AI coding assistant open, paste the prompt below into it and it will drive the entire self-host flow for you — preflight, clone, env generation, Docker stack, health check, optional CLI install, login, first credential, and MCP config.
+
+<details>
+<summary><strong>Click to expand the full AI-assisted self-host prompt</strong></summary>
 
 > I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full quickstart interactively. If anything fails or I'd prefer to follow the manual steps myself, the full step-by-step with troubleshooting is at https://github.com/ChronoAIProject/NyxID/blob/main/docs/QUICKSTART.md.
 > 1. Confirm Docker is installed and running before touching anything (check `git`, `docker`, `openssl`, `curl`, `docker compose` v2, and `docker info`).
@@ -136,21 +146,46 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste this pro
 > 5. **Ask me whether I want to install the `nyxid` CLI.** Explain that it's optional, that the installer will pull the Rust toolchain (~300 MB) if I don't have it, and that the first build takes 3–10 minutes and ~1.5 GB of disk. If I say yes, install it using https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh, then `source ~/.cargo/env`, log me in with `nyxid login --base-url http://localhost:3001`, add my OpenAI key with `nyxid service add llm-openai --credential-env OPENAI_API_KEY`, and verify with `nyxid proxy request llm-openai models`. If I say no, walk me through adding the same OpenAI credential in the web console instead.
 > 6. Finish by connecting my AI tool to NyxID's MCP endpoint at `http://localhost:3001/mcp`. For Claude Code: `claude mcp add --transport http nyxid http://localhost:3001/mcp`. For Codex: `codex mcp add nyxid --url http://localhost:3001/mcp`. For Cursor: open **Settings > MCP** in the web console and click **Install to Cursor**.
 
+</details>
+
 <!-- AI quickstart maintenance: validate this prompt against actual CLI + web console on each release -->
 
-#### Manual setup
+#### Manual Setup
 
 Prefer to run each step yourself, or need the full troubleshooting guide? The complete manual flow lives in **[docs/QUICKSTART.md](docs/QUICKSTART.md)**:
 
 - System preflight check — [Step 1](docs/QUICKSTART.md#step-1-of-3--check-your-system)
 - One paste-block install — [Step 2](docs/QUICKSTART.md#step-2-of-3--install-and-start)
 - Register your account — [Step 3](docs/QUICKSTART.md#step-3-of-3--register-and-connect)
-- Optional [CLI install](docs/QUICKSTART.md#optional-install-the-nyxid-cli) and [first credential / MCP wiring](docs/QUICKSTART.md#connect-your-ai-tool)
+- Optional [CLI install](docs/QUICKSTART.md#optional-install-the-nyxid-cli)
 - [Uninstall & reinstall](docs/QUICKSTART.md#uninstall--reinstall), [orphan volume recovery](docs/QUICKSTART.md#recovering-an-orphan-volume), and [SCRAM failure](docs/QUICKSTART.md#stuck-on-scram-failure) troubleshooting
+
+Once NyxID is running, jump to [Connecting AI Services](#connecting-ai-services) below to connect your first downstream API.
 
 For production deployment (TLS, custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-### Reach local services (optional)
+## Connecting AI Services
+
+After NyxID is running (hosted or self-host), the next step is to connect a downstream API — OpenAI, Anthropic, GitHub, your private API, anything — so your AI agents can call it through the proxy without ever seeing the raw key.
+
+> **Wiring MCP alone won't show real tools.** Until you also connect a real downstream service *and* verify the proxy works, your AI agent will only see NyxID's `nyx__...` meta-tools — that's the trap behind issue [#298](https://github.com/ChronoAIProject/NyxID/issues/298). The flow below does both steps in one paste; the manual paths in [docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md) make the connect-and-verify step explicit.
+
+The full walkthrough is at **[docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md)** — base-URL-agnostic, so the same guide works for hosted (`https://nyx.chrono-ai.fun`) and self-host (`http://localhost:3001`). It covers four paths in order of friction:
+
+- **AI-driven (recommended)** — paste a prompt into Claude Code / Codex / Cursor and let your agent use NyxID's MCP meta-tools (`nyx__discover_services`, `nyx__connect_service`, `nyx__call_tool`) to add and verify your first service end-to-end.
+- **CLI** — `nyxid service add llm-openai --credential-env OPENAI_API_KEY` then `nyxid proxy request llm-openai models` to verify.
+- **Web UI** — dashboard click-through with a "Test request" verify step.
+- **Direct API** — curl + `x-api-key` header for automation and CI.
+
+Whichever path you pick, the verification step (calling a real downstream tool and getting a real response back) is the gate everything hinges on. The doc also has an "Adding more services later" section, so the same guide covers your tenth service the same way it covers your first.
+
+For the AI-driven path: wire MCP first with `claude mcp add --transport http nyxid <BASE_URL>/mcp` (or `codex mcp add nyxid --url <BASE_URL>/mcp`, or Cursor's one-click install) — the first run opens your browser to authenticate. Then paste this into your AI agent:
+
+> Help me connect an AI Service in NyxID. Use `nyx__discover_services` to list what's available in the catalog and ask me which one I want (e.g. OpenAI, Anthropic, GitHub). Once I pick, ask me for the credential I want to use, then call `nyx__connect_service` with the `service_id` from discover results and my credential. After it returns success, call `nyx__search_tools` to confirm the new service's tools are now exposed, then call `nyx__call_tool` on one of them (e.g. list models, list repos) to verify the proxy works end-to-end. Report back with the actual response so I know it's working — not just "looks good." If anything errors, tell me whether it's a credential problem or a service config problem.
+
+<!-- Sync this prompt with docs/CONNECTING_SERVICES.md Path A on every release. -->
+
+## Reach Local Services (Optional)
 
 Services behind a firewall? Deploy a credential node to punch through NAT and expose them as MCP tools:
 
@@ -167,16 +202,11 @@ nyxid node credentials setup --service my-local-api --api-url http://localhost:8
 nyxid catalog endpoints my-local-api
 ```
 
-## Use Cases
-
-- Give Claude Code access to your private APIs without sharing keys
-- Expose internal microservices to AI agents through a single MCP endpoint
-- Secure AI agent access to self-hosted tools (Grafana, Jenkins, n8n) behind your firewall
-
 ## Resources
 
-| Topic | Link | |
-|-------|------|---|
+| Topic | Link | Description |
+|-------|------|-------------|
+| Connecting AI Services | [docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVICES.md) | Add your first (or Nth) AI Service — works for hosted + self-host |
 | Quickstart (manual) | [docs/QUICKSTART.md](docs/QUICKSTART.md) | Step-by-step self-host + troubleshooting |
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
@@ -184,10 +214,10 @@ nyxid catalog endpoints my-local-api
 | API Reference | [docs/API.md](docs/API.md) | Full endpoint documentation |
 | Credential Nodes | [docs/NODE_PROXY.md](docs/NODE_PROXY.md) | NAT traversal setup |
 | MCP Integration | [docs/MCP_DELEGATION_FLOW.md](docs/MCP_DELEGATION_FLOW.md) | MCP protocol details |
-| SSH Tunneling | [docs/SSH_TUNNELING.md](docs/SSH_TUNNELING.md) | |
-| Security | [docs/SECURITY.md](docs/SECURITY.md) | |
-| Environment Variables | [docs/ENV.md](docs/ENV.md) | |
-| Developer Guide | [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | |
+| SSH Tunneling | [docs/SSH_TUNNELING.md](docs/SSH_TUNNELING.md) | Remote host access over WebSocket |
+| Security | [docs/SECURITY.md](docs/SECURITY.md) | Threat model and hardening |
+| Environment Variables | [docs/ENV.md](docs/ENV.md) | Full config reference |
+| Developer Guide | [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | Local development setup |
 
 ## Contributing
 

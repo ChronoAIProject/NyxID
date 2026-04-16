@@ -1,6 +1,7 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::doc;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
@@ -194,4 +195,126 @@ pub async fn delete_binding(
     }
 
     Ok(())
+}
+
+/// Delete all bindings that reference a specific `UserService`. Called
+/// from `deactivate_user_service` so the Agent Key detail page does not
+/// show orphan bindings pointing at a missing/inactive service.
+///
+/// Also pulls the service id from `allowed_service_ids` on every
+/// affected scoped `ApiKey`, mirroring the single-binding delete path.
+/// Returns the number of bindings removed.
+pub async fn cleanup_bindings_for_user_service(
+    db: &mongodb::Database,
+    user_id: &str,
+    user_service_id: &str,
+) -> AppResult<u64> {
+    let bindings: Vec<AgentServiceBinding> = db
+        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .find(doc! {
+            "user_id": user_id,
+            "user_service_id": user_service_id,
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    if bindings.is_empty() {
+        return Ok(0);
+    }
+
+    let affected_keys: HashSet<String> = bindings.iter().map(|b| b.api_key_id.clone()).collect();
+
+    let result = db
+        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .delete_many(doc! {
+            "user_id": user_id,
+            "user_service_id": user_service_id,
+        })
+        .await?;
+
+    for key_id in affected_keys {
+        let api_key = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &key_id })
+            .await?;
+        if let Some(key) = api_key
+            && !key.allow_all_services
+        {
+            db.collection::<ApiKey>(API_KEYS)
+                .update_one(
+                    doc! { "_id": &key_id },
+                    doc! { "$pull": { "allowed_service_ids": user_service_id } },
+                )
+                .await?;
+        }
+    }
+
+    Ok(result.deleted_count)
+}
+
+/// Delete all bindings that reference a specific external credential
+/// (`UserApiKey`). Called from `delete_api_key` so the Agent Key detail
+/// page does not keep showing bindings pointing at a missing credential
+/// (which otherwise degrade `credential_label` to a raw UUID).
+///
+/// Pulls the corresponding service ids from `allowed_service_ids` on
+/// each affected scoped `ApiKey`, so the scoped allow-list stays in sync
+/// with the bindings. Returns the number of bindings removed.
+pub async fn cleanup_bindings_for_credential(
+    db: &mongodb::Database,
+    user_id: &str,
+    user_api_key_id: &str,
+) -> AppResult<u64> {
+    let bindings: Vec<AgentServiceBinding> = db
+        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .find(doc! {
+            "user_id": user_id,
+            "user_api_key_id": user_api_key_id,
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    if bindings.is_empty() {
+        return Ok(0);
+    }
+
+    // Group service ids per affected api key so each key gets a single
+    // `$pull` update rather than one per binding.
+    let mut per_key: HashMap<String, HashSet<String>> = HashMap::new();
+    for binding in &bindings {
+        per_key
+            .entry(binding.api_key_id.clone())
+            .or_default()
+            .insert(binding.user_service_id.clone());
+    }
+
+    let result = db
+        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .delete_many(doc! {
+            "user_id": user_id,
+            "user_api_key_id": user_api_key_id,
+        })
+        .await?;
+
+    for (key_id, service_ids) in per_key {
+        let api_key = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &key_id })
+            .await?;
+        if let Some(key) = api_key
+            && !key.allow_all_services
+        {
+            let ids: Vec<String> = service_ids.into_iter().collect();
+            db.collection::<ApiKey>(API_KEYS)
+                .update_one(
+                    doc! { "_id": &key_id },
+                    doc! { "$pull": { "allowed_service_ids": { "$in": ids } } },
+                )
+                .await?;
+        }
+    }
+
+    Ok(result.deleted_count)
 }

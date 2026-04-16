@@ -51,43 +51,64 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # ---------------------------------------------------------------------------
-  # Rust: build and test (backend + node-agent)
+  # Rust: backend build + test
+  # Tests are pure units; no MongoDB or env vars needed. If integration tests
+  # that hit a real DB are added later, re-introduce the mongodb service here.
   # ---------------------------------------------------------------------------
-  rust-test:
-    name: Rust Test
+  backend-test:
+    name: Backend Test
     runs-on: ubuntu-latest
-    services:
-      mongodb:
-        image: mongo:8.0
-        ports:
-          - 27017:27017
-        env:
-          MONGO_INITDB_ROOT_USERNAME: nyxid
-          MONGO_INITDB_ROOT_PASSWORD: nyxid_dev_password
-          MONGO_INITDB_DATABASE: nyxid
-        options: >-
-          --health-cmd "mongosh --eval 'db.runCommand({ ping: 1 })' --quiet"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      DATABASE_URL: mongodb://nyxid:nyxid_dev_password@localhost:27017/nyxid?authSource=admin
-      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
-      BASE_URL: http://localhost:3001
-      FRONTEND_URL: http://localhost:3000
-      JWT_ISSUER: nyxid-test
     steps:
       - uses: actions/checkout@v6
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend
+      - uses: taiki-e/install-action@nextest
 
-      - name: Build workspace
-        run: cargo build --workspace
+      - name: Build backend
+        run: cargo build -p nyxid
 
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Run backend tests
+        run: cargo nextest run -p nyxid --profile ci
+
+      - name: Publish test summary
+        if: always()
+        uses: test-summary/action@v2
+        with:
+          paths: target/nextest/ci/junit.xml
+          show: all
+
+  # ---------------------------------------------------------------------------
+  # Rust: CLI / node-agent build + test (no DB required)
+  # ---------------------------------------------------------------------------
+  cli-test:
+    name: CLI Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli
+      - uses: taiki-e/install-action@nextest
+
+      - name: Build CLI
+        run: cargo build -p nyxid-cli
+
+      - name: Run CLI tests
+        run: cargo nextest run -p nyxid-cli --profile ci
+
+      - name: Publish test summary
+        if: always()
+        uses: test-summary/action@v2
+        with:
+          paths: target/nextest/ci/junit.xml
+          show: all
 
   # ---------------------------------------------------------------------------
   # Rust: build with feature flags (KMS providers)
@@ -98,10 +119,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features:
-          - aws-kms
-          - gcp-kms
-          - aws-kms,gcp-kms
+        include:
+          - features: aws-kms
+            cache-suffix: aws-kms
+          - features: gcp-kms
+            cache-suffix: gcp-kms
+          - features: aws-kms,gcp-kms
+            cache-suffix: aws-and-gcp-kms
     steps:
       - uses: actions/checkout@v6
       - name: Install system dependencies
@@ -109,7 +133,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: features-${{ matrix.features }}
+          key: features-${{ matrix.cache-suffix }}
       - name: Build with --features ${{ matrix.features }}
         run: cargo build -p nyxid --features ${{ matrix.features }}
 
@@ -124,7 +148,7 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version-file: .node-version
           cache: npm
@@ -145,7 +169,7 @@ jobs:
         working-directory: sdk
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version-file: .node-version
           cache: npm

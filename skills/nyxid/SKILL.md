@@ -1094,6 +1094,8 @@ openclaw gateway start     # start the service
 
 Without this, restarting the gateway (`openclaw gateway restart`) will shut it down and it won't come back up on its own.
 
+**Transport selection.** `llm-openclaw` supports both HTTP proxy (`POST /v1/chat/completions`, etc.) and WebSocket passthrough (the OpenClaw CLI's native `connect` + `chat.send` flow). Check `nyxid proxy discover --output json` — the entry exposes `"streaming_supported": true` and `"websocket_supported": true`. Use `wss://<nyxid-host>/api/v1/proxy/s/llm-openclaw` with a `Bearer` token for the WebSocket path. If it's node-routed and the WS upgrade times out, update the node agent and restart its daemon (older agents pre-date WS proxy support).
+
 ## Account Management
 
 ```bash

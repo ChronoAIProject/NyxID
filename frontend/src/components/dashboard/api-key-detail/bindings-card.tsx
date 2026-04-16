@@ -33,7 +33,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Link2, Trash2 } from "lucide-react";
+import { AlertTriangle, Link2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { AgentServiceBinding } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
@@ -53,6 +53,19 @@ function sameOwner(
   if (aType !== bType) return false;
   if (aType === "personal") return true;
   return a?.type === "org" && b?.type === "org" && a.org_id === b.org_id;
+}
+
+function invalidReasonLabel(reason: string | undefined): string {
+  switch (reason) {
+    case "missing_service":
+      return "Bound service has been deleted.";
+    case "inactive_service":
+      return "Bound service is disabled.";
+    case "missing_credential":
+      return "Override credential has been deleted.";
+    default:
+      return "This binding is no longer valid.";
+  }
 }
 
 export function BindingsCard({
@@ -264,17 +277,35 @@ export function BindingsCard({
             {bindings.map((b) => (
               <div
                 key={b.id}
-                className="flex items-center justify-between rounded-lg border border-border p-3"
+                className={
+                  b.is_invalid
+                    ? "flex items-center justify-between rounded-lg border border-destructive/40 bg-destructive/5 p-3"
+                    : "flex items-center justify-between rounded-lg border border-border p-3"
+                }
               >
                 <div className="space-y-0.5">
-                  <p className="text-sm font-medium">
-                    {b.service_label}
-                    {b.service_slug !== b.service_label && (
-                      <span className="text-muted-foreground">
-                        {" "}({b.service_slug})
-                      </span>
+                  <p className="text-sm font-medium flex items-center gap-1.5">
+                    {b.is_invalid && (
+                      <AlertTriangle
+                        className="h-3.5 w-3.5 text-destructive shrink-0"
+                        aria-hidden="true"
+                      />
                     )}
+                    <span>
+                      {b.service_label}
+                      {b.service_slug !== b.service_label && (
+                        <span className="text-muted-foreground">
+                          {" "}({b.service_slug})
+                        </span>
+                      )}
+                    </span>
                   </p>
+                  {b.is_invalid && (
+                    <p className="text-xs text-destructive">
+                      {invalidReasonLabel(b.invalid_reason)} Remove this
+                      orphan binding to clean up.
+                    </p>
+                  )}
                 </div>
                 <Button
                   size="icon"

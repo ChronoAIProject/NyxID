@@ -10,6 +10,7 @@ use crate::models::user_provider_token::{
     COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
 };
 use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
+use crate::services::agent_binding_service;
 
 /// Maximum credential length in bytes to prevent abuse.
 const MAX_CREDENTIAL_LENGTH: usize = 8192;
@@ -519,6 +520,13 @@ pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str)
     db.collection::<UserApiKey>(COLLECTION_NAME)
         .delete_one(doc! { "_id": key_id, "user_id": user_id })
         .await?;
+
+    // Cascade-clean any agent service bindings that used this credential
+    // as an override. Without this, the Agent Key detail page keeps the
+    // row around with the credential label degraded to a raw UUID
+    // (issue #324). Safe to run after delete because bindings are keyed
+    // by `user_api_key_id` and don't need the credential row to exist.
+    agent_binding_service::cleanup_bindings_for_credential(db, user_id, key_id).await?;
 
     Ok(())
 }

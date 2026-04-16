@@ -1284,7 +1284,8 @@ async fn rollback_backend_service_registration(
             eprintln!("Removing node assignment for '{service_slug}'...");
             api.put::<serde_json::Value, _>(
                 &format!("/keys/{id}"),
-                &serde_json::json!({ "node_id": null }),
+                // Backend treats "" as clear, null as leave-unchanged.
+                &serde_json::json!({ "node_id": "" }),
             )
             .await
             .map_err(|e| {

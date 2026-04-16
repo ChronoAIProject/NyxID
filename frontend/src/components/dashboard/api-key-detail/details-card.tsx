@@ -1,7 +1,12 @@
 import { useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
-import { maskApiKey, formatDate, formatRelativeTime } from "@/lib/utils";
+import {
+  maskApiKey,
+  formatDate,
+  formatRelativeTime,
+  isPastTimestamp,
+} from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -71,6 +76,25 @@ export function DetailsCard({
   }
 
   const scopesList = scopes.trim().split(/\s+/).filter(Boolean);
+
+  const isExpired = isPastTimestamp(expiresAt);
+  const effectiveStatus: "active" | "expired" | "inactive" = isExpired
+    ? "expired"
+    : isActive
+      ? "active"
+      : "inactive";
+  const statusLabel =
+    effectiveStatus === "active"
+      ? "Active"
+      : effectiveStatus === "expired"
+        ? "Expired"
+        : "Inactive";
+  const statusVariant: "default" | "secondary" | "destructive" =
+    effectiveStatus === "active"
+      ? "default"
+      : effectiveStatus === "expired"
+        ? "destructive"
+        : "secondary";
 
   return (
     <Card>
@@ -147,11 +171,8 @@ export function DetailsCard({
           </div>
           <div>
             <span className="text-muted-foreground">Status: </span>
-            <Badge
-              variant={isActive ? "default" : "secondary"}
-              className="text-[10px]"
-            >
-              {isActive ? "Active" : "Inactive"}
+            <Badge variant={statusVariant} className="text-[10px]">
+              {statusLabel}
             </Badge>
           </div>
           <div>

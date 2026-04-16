@@ -78,6 +78,17 @@ pub struct BindingResponse {
     pub credential_label: String,
     pub created_at: String,
     pub updated_at: String,
+    /// True when the binding references a missing/inactive service or a
+    /// missing credential. Create/delete paths cascade-clean bindings
+    /// (see `agent_binding_service::cleanup_bindings_for_user_service`
+    /// and `cleanup_bindings_for_credential`), so new data should never
+    /// be invalid. This flag surfaces pre-existing orphans from earlier
+    /// versions so the frontend can let the user clean them up.
+    pub is_invalid: bool,
+    /// Short machine-readable reason when `is_invalid` is true:
+    /// `missing_service`, `inactive_service`, or `missing_credential`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
 }
 
 async fn enrich_bindings(
@@ -154,16 +165,27 @@ async fn enrich_bindings(
         .into_iter()
         .map(|binding| {
             let service = service_map.get(&binding.user_service_id);
+            let credential = credential_map.get(&binding.user_api_key_id);
             let service_slug = service
                 .map(|service| service.slug.clone())
                 .unwrap_or_else(|| binding.user_service_id.clone());
             let service_label = service
                 .and_then(|service| endpoint_labels.get(&service.endpoint_id).cloned())
                 .unwrap_or_else(|| service_slug.clone());
-            let credential_label = credential_map
-                .get(&binding.user_api_key_id)
+            let credential_label = credential
                 .map(|credential| credential.label.clone())
                 .unwrap_or_else(|| binding.user_api_key_id.clone());
+
+            // Priority: missing service > inactive service > missing
+            // credential. Missing service is the most surprising state
+            // since the row will render with a UUID where the name
+            // should be; flag it first.
+            let (is_invalid, invalid_reason) = match (service, credential) {
+                (None, _) => (true, Some("missing_service".to_string())),
+                (Some(s), _) if !s.is_active => (true, Some("inactive_service".to_string())),
+                (_, None) => (true, Some("missing_credential".to_string())),
+                _ => (false, None),
+            };
 
             BindingResponse {
                 id: binding.id,
@@ -175,6 +197,8 @@ async fn enrich_bindings(
                 credential_label,
                 created_at: binding.created_at.to_rfc3339(),
                 updated_at: binding.updated_at.to_rfc3339(),
+                is_invalid,
+                invalid_reason,
             }
         })
         .collect())

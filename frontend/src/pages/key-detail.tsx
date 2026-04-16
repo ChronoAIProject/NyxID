@@ -10,6 +10,7 @@ import {
 } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { ApiError } from "@/lib/api-client";
+import { deriveServiceBadge } from "@/lib/service-status";
 import { copyToClipboard } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { Breadcrumb } from "@/components/shared/breadcrumb";
@@ -423,6 +424,8 @@ function ServiceSection({
   authMethod,
   authKeyName,
   isActive,
+  credentialStatus,
+  hasCredential,
   serviceId,
   customUserAgent,
   readOnly = false,
@@ -431,6 +434,14 @@ function ServiceSection({
   readonly authMethod: string;
   readonly authKeyName: string;
   readonly isActive: boolean;
+  /** API key status ("active" | "pending_auth" | "expired" | "revoked" |
+   *  "refresh_failed"). When the service has no credential (e.g. auto-connected
+   *  downstreams) this is ignored. */
+  readonly credentialStatus: string;
+  /** Whether this service has an associated credential. Services without a
+   *  credential (e.g. auto-connected or no-auth downstreams) skip the
+   *  credential-readiness check entirely. */
+  readonly hasCredential: boolean;
   readonly serviceId: string;
   readonly customUserAgent?: string | null;
   readonly readOnly?: boolean;
@@ -438,6 +449,9 @@ function ServiceSection({
   const updateService = useUpdateUserService();
   const [editingUa, setEditingUa] = useState(false);
   const [uaDraft, setUaDraft] = useState(customUserAgent ?? "");
+
+  const { variant: badgeVariant, label: badgeLabel, credentialBlocked } =
+    deriveServiceBadge({ isActive, credentialStatus, hasCredential });
 
   function toggleActive() {
     updateService.mutate(
@@ -492,10 +506,18 @@ function ServiceSection({
           <code className="rounded bg-muted px-2 py-1 font-mono text-sm">
             /proxy/s/{slug}
           </code>
-          <Badge variant={isActive ? "default" : "secondary"}>
-            {isActive ? "Active" : "Inactive"}
-          </Badge>
+          <Badge variant={badgeVariant}>{badgeLabel}</Badge>
         </div>
+
+        {credentialBlocked && (
+          <p className="text-xs text-muted-foreground">
+            The service record is enabled, but its credential is{" "}
+            <span className="font-medium text-foreground">
+              {credentialStatus}
+            </span>
+            . Real requests will fail until the credential is restored.
+          </p>
+        )}
 
         <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
           <div>
@@ -1440,6 +1462,8 @@ export function KeyDetailPage() {
             authMethod={keyInfo.auth_method}
             authKeyName={keyInfo.auth_key_name}
             isActive={keyInfo.is_active}
+            credentialStatus={keyInfo.status}
+            hasCredential={keyInfo.api_key_id !== null && keyInfo.api_key_id !== undefined}
             serviceId={keyInfo.id}
             customUserAgent={keyInfo.custom_user_agent}
             readOnly={readOnly}

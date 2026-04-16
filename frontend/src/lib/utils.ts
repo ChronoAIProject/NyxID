@@ -38,6 +38,13 @@ export function maskApiKey(keyPrefix: string): string {
   return `${keyPrefix}${"*".repeat(24)}`;
 }
 
+export function isPastTimestamp(dateStr: string | null | undefined): boolean {
+  if (!dateStr) return false;
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return false;
+  return date.getTime() <= Date.now();
+}
+
 export async function copyToClipboard(text: string): Promise<void> {
   if (!navigator.clipboard) {
     throw new Error("Clipboard API is not available in this browser context");
