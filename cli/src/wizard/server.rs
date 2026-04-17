@@ -1,8 +1,9 @@
 //! Local axum server for the wizard.
 //!
-//! M1 scope: bind `127.0.0.1:0`, serve embedded `wizard.html`/`.js`/`.css`
-//! with a CSRF token substituted into the HTML template, handle
-//! `/api/proxy/complete` and `/api/proxy/cancel`, signal the CLI to exit.
+//! Serves an embedded SPA from `127.0.0.1:<ephemeral>`, handles the
+//! lifecycle endpoints (heartbeat / cancel / complete / status), and
+//! proxies a narrow allowlist of backend requests with the user's bearer
+//! token attached server-side.
 
 use std::{
     net::SocketAddr,
@@ -13,12 +14,14 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
-    extract::State,
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    body::Body,
+    extract::{Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use rand::RngCore;
+use reqwest::Client as ReqwestClient;
 use rust_embed::RustEmbed;
 use serde_json::{Value, json};
 use tokio::{
@@ -26,7 +29,14 @@ use tokio::{
     sync::{Notify, oneshot},
 };
 
-use super::WizardOutcome;
+use super::{ProxyContext, WizardOutcome};
+
+/// Which flow is running. Each flow gets its own allowlist and default
+/// page body. M2 only has `AiKey`.
+#[derive(Debug, Clone, Copy)]
+pub enum FlowKind {
+    AiKey,
+}
 
 /// Static assets live under `src/wizard/assets/` and are baked into the binary.
 #[derive(RustEmbed)]
@@ -45,6 +55,61 @@ const HEARTBEAT_STARTUP_GRACE: Duration = Duration::from_secs(8);
 /// How often the CLI checks the last-heartbeat timestamp.
 const HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
+/// A single entry in the proxy allowlist. `path_template` supports literal
+/// segments and `:param` placeholders (e.g. `/api/v1/catalog/:slug`). The
+/// request path must have the same segment count and every non-placeholder
+/// segment must match literally. Query strings are forwarded untouched.
+#[derive(Debug, Clone)]
+struct ProxyRoute {
+    method: Method,
+    path_template: &'static str,
+}
+
+impl ProxyRoute {
+    fn matches(&self, method: &Method, path: &str) -> bool {
+        if self.method != method {
+            return false;
+        }
+        let want: Vec<&str> = self
+            .path_template
+            .trim_start_matches('/')
+            .split('/')
+            .collect();
+        let got: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        if want.len() != got.len() {
+            return false;
+        }
+        for (w, g) in want.iter().zip(got.iter()) {
+            if w.starts_with(':') {
+                if g.is_empty() {
+                    return false;
+                }
+                continue;
+            }
+            if w != g {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
+    match kind {
+        // M2 scope: catalog read-only. Key creation + bindings land in M3/M4.
+        FlowKind::AiKey => vec![
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/catalog",
+            },
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/catalog/:slug",
+            },
+        ],
+    }
+}
+
 #[derive(Clone)]
 struct ServerState {
     csrf_token: Arc<String>,
@@ -52,6 +117,10 @@ struct ServerState {
     shutdown: Arc<Notify>,
     started_at: Instant,
     last_heartbeat: Arc<tokio::sync::Mutex<Option<Instant>>>,
+    proxy: Arc<ProxyContext>,
+    allowlist: Arc<Vec<ProxyRoute>>,
+    upstream: ReqwestClient,
+    flow: FlowKind,
 }
 
 /// Mint a 32-byte random CSRF token, hex-encoded.
@@ -95,9 +164,13 @@ async fn serve_index(State(state): State<ServerState>) -> Response {
             return (StatusCode::INTERNAL_SERVER_ERROR, "wizard.html missing").into_response();
         }
     };
+    let flow_name = match state.flow {
+        FlowKind::AiKey => "ai-key",
+    };
     let html = std::str::from_utf8(raw.data.as_ref())
         .unwrap_or("")
-        .replace("{{CSRF_TOKEN}}", &state.csrf_token);
+        .replace("{{CSRF_TOKEN}}", &state.csrf_token)
+        .replace("{{FLOW}}", flow_name);
 
     let mut headers = base_security_headers();
     headers.insert(
@@ -175,10 +248,7 @@ async fn handle_cancel_unload(State(state): State<ServerState>, headers: HeaderM
     if !check_origin(&headers) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
-    // Only honour unload cancels in the first 30 min of the server's life —
-    // this prevents a crashed-and-stale tab from lingering past the overall
-    // ceiling.
-    if state.started_at.elapsed() > Duration::from_secs(1800) {
+    if state.started_at.elapsed() > WIZARD_MAX_DURATION {
         return (StatusCode::GONE, "too old").into_response();
     }
     signal_and_shutdown(state, WizardOutcome::Cancelled).await;
@@ -212,6 +282,120 @@ async fn handle_status(State(state): State<ServerState>, headers: HeaderMap) -> 
     (StatusCode::OK, h, body.to_string()).into_response()
 }
 
+/// Proxy handler. The browser hits `/api/proxy/api/v1/...`; we strip the
+/// `/api/proxy` prefix, check the allowlist, attach the bearer token, and
+/// forward to the NyxID backend. The response body + content-type are
+/// returned to the browser. Other response headers (set-cookie, auth
+/// hints) are deliberately not forwarded.
+async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let headers = req.headers().clone();
+
+    if !check_origin(&headers) {
+        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    }
+    if !csrf_ok(&headers, &state.csrf_token) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+
+    // Strip `/api/proxy` to get the backend-relative path.
+    let full_path = uri.path();
+    let Some(backend_path) = full_path.strip_prefix("/api/proxy") else {
+        return (StatusCode::NOT_FOUND, "not a proxy path").into_response();
+    };
+    if backend_path.is_empty() {
+        return (StatusCode::NOT_FOUND, "empty proxy path").into_response();
+    }
+
+    // Allowlist check.
+    let allowed = state
+        .allowlist
+        .iter()
+        .any(|r| r.matches(&method, backend_path));
+    if !allowed {
+        return (
+            StatusCode::FORBIDDEN,
+            format!("proxy: {} {} not allowed", method, backend_path),
+        )
+            .into_response();
+    }
+
+    // Build the upstream URL. `base_url_root` has no trailing slash.
+    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let upstream_url = format!("{}{}{}", state.proxy.base_url_root, backend_path, query);
+
+    // Forward the body verbatim (M2 only has GETs so body is usually empty,
+    // but the plumbing is generic).
+    let body_bytes = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("reading request body: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let mut upstream_req = state
+        .upstream
+        .request(method.clone(), &upstream_url)
+        .bearer_auth(&state.proxy.access_token);
+    if let Some(ct) = headers.get(header::CONTENT_TYPE)
+        && let Ok(ct) = ct.to_str()
+    {
+        upstream_req = upstream_req.header(header::CONTENT_TYPE, ct);
+    }
+    if !body_bytes.is_empty() {
+        upstream_req = upstream_req.body(body_bytes.to_vec());
+    }
+
+    let upstream_resp = match upstream_req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("  proxy error ({method} {upstream_url}): {e}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": "upstream unreachable", "detail": e.to_string() }).to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    let status = upstream_resp.status();
+    let upstream_ct = upstream_resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let body = match upstream_resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": "upstream body read failed", "detail": e.to_string() })
+                    .to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    let mut out_headers = base_security_headers();
+    out_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&upstream_ct)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    (
+        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+        out_headers,
+        body,
+    )
+        .into_response()
+}
+
 async fn signal_and_shutdown(state: ServerState, outcome: WizardOutcome) {
     let mut guard = state.done_tx.lock().await;
     if let Some(tx) = guard.take() {
@@ -220,11 +404,17 @@ async fn signal_and_shutdown(state: ServerState, outcome: WizardOutcome) {
     state.shutdown.notify_waiters();
 }
 
-/// M1 skeleton runner. Binds, serves, opens the browser, waits for exit.
-pub async fn run_skeleton() -> Result<WizardOutcome> {
+/// Flow runner. Binds, serves, opens the browser, waits for exit.
+pub async fn run_flow(kind: FlowKind, proxy: ProxyContext) -> Result<WizardOutcome> {
     let csrf = mint_csrf();
     let (done_tx, done_rx) = oneshot::channel::<WizardOutcome>();
     let shutdown = Arc::new(Notify::new());
+
+    let upstream = reqwest::Client::builder()
+        .user_agent(crate::api::CLI_USER_AGENT)
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .context("building upstream HTTP client for wizard proxy")?;
 
     let state = ServerState {
         csrf_token: Arc::new(csrf),
@@ -232,6 +422,10 @@ pub async fn run_skeleton() -> Result<WizardOutcome> {
         shutdown: shutdown.clone(),
         started_at: Instant::now(),
         last_heartbeat: Arc::new(tokio::sync::Mutex::new(None)),
+        proxy: Arc::new(proxy),
+        allowlist: Arc::new(allowlist_for(kind)),
+        upstream,
+        flow: kind,
     };
 
     let app = Router::new()
@@ -243,6 +437,9 @@ pub async fn run_skeleton() -> Result<WizardOutcome> {
         .route("/api/proxy/cancel-unload", post(handle_cancel_unload))
         .route("/api/proxy/heartbeat", post(handle_heartbeat))
         .route("/api/proxy/status", get(handle_status))
+        // Catch-all proxy: /api/proxy/<anything>. The path here MUST come
+        // after the lifecycle routes so exact matches win.
+        .route("/api/proxy/{*rest}", any(handle_proxy))
         .with_state(state.clone());
 
     // Bind first (port is resolved before we spawn or open the browser) to
@@ -255,7 +452,6 @@ pub async fn run_skeleton() -> Result<WizardOutcome> {
         .context("reading wizard server local addr")?;
     let url = format!("http://127.0.0.1:{}/wizard", addr.port());
 
-    // Spawn the server. Await a first-accept signal via readiness channel.
     let shutdown_rx = shutdown.clone();
     let server_handle = tokio::spawn(async move {
         axum::serve(listener, app)

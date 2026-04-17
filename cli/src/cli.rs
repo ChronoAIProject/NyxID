@@ -141,6 +141,8 @@ pub struct WizardArgs {
     /// Flow to launch. v2.0 supports: ai-key.
     #[arg(value_name = "FLOW", default_value = "ai-key")]
     pub flow: String,
+    #[command(flatten)]
+    pub auth: AuthArgs,
 }
 
 #[derive(Subcommand)]

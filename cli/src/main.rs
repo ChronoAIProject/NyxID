@@ -97,7 +97,18 @@ async fn run() -> Result<()> {
 }
 
 async fn run_wizard(args: cli::WizardArgs) -> Result<()> {
-    match wizard::run_flow(&args.flow).await? {
+    // Resolve base URL + bearer from the shared AuthArgs so the wizard's
+    // proxy can forward allowlisted requests to the NyxID backend. If the
+    // user isn't logged in, this surfaces the usual "run nyxid login" error.
+    let base_url = args.auth.resolved_base_url()?;
+    let access_token = auth::resolve_access_token(&args.auth)?;
+    let base_url_root = base_url.trim_end_matches('/').to_string();
+    let proxy = wizard::ProxyContext {
+        base_url_root,
+        access_token,
+    };
+
+    match wizard::run_flow(&args.flow, proxy).await? {
         wizard::WizardOutcome::Completed(body) => {
             eprintln!("✓ Wizard completed.");
             if !body.is_null() {

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="wizard-csrf" content="{{CSRF_TOKEN}}">
+<meta name="wizard-flow" content="{{FLOW}}">
 <title>NyxID Wizard</title>
 <link rel="stylesheet" href="/assets/wizard.css">
 </head>
@@ -11,24 +12,72 @@
 <div class="wizard-shell">
   <header class="wizard-header">
     <div class="wizard-brand">NyxID</div>
-    <div class="wizard-step">Step 1 placeholder — M1 skeleton</div>
+    <div class="wizard-step" id="wizard-step-label">Step 1 · pick a service</div>
   </header>
+
   <main class="wizard-main">
-    <h1 class="wizard-title">Wizard skeleton</h1>
-    <p class="wizard-body">
-      This is the M1 placeholder page. It proves the CLI can bind a local
-      HTTP server, embed static assets, open your browser, and round-trip
-      a completion signal back to the terminal.
-    </p>
-    <p class="wizard-body wizard-muted">
-      Real UI lands in M2 (catalog) and M3 (credential form).
-    </p>
-    <div class="wizard-status" id="wizard-status" aria-live="polite"></div>
-    <div class="wizard-actions">
-      <button type="button" id="wizard-cancel" class="wizard-btn wizard-btn-ghost">Cancel</button>
-      <button type="button" id="wizard-done" class="wizard-btn wizard-btn-primary">Done — return to terminal</button>
-    </div>
+    <!-- Step 1 — catalog -->
+    <section class="wizard-step-panel" id="step-catalog" data-step="1">
+      <h1 class="wizard-title">Add an AI service</h1>
+      <p class="wizard-body wizard-muted">
+        Pick a service to connect. Simple-bearer APIs (OpenAI, Anthropic,
+        Gemini) land in the guided form. Anything else — self-hosted,
+        OAuth, device code, custom endpoint — goes to the power-user form.
+      </p>
+
+      <div class="wizard-search">
+        <input type="search" id="catalog-search" placeholder="search services…"
+               autocomplete="off" autocapitalize="off" spellcheck="false">
+      </div>
+
+      <div class="wizard-section-label">Simple setup</div>
+      <div class="wizard-catalog-grid" id="catalog-simple" role="list">
+        <div class="wizard-catalog-empty" id="catalog-simple-empty" hidden>
+          No matches.
+        </div>
+      </div>
+
+      <div class="wizard-section-label">Advanced</div>
+      <div class="wizard-catalog-grid" id="catalog-advanced" role="list">
+        <button type="button" class="wizard-card wizard-card-custom"
+                data-slug="__custom__" role="listitem">
+          <div class="wizard-card-title">Custom / self-hosted…</div>
+          <div class="wizard-card-sub">
+            For OAuth flows, device code, self-hosted gateways, or any
+            endpoint that isn't a simple bearer-token API.
+          </div>
+        </button>
+      </div>
+
+      <div class="wizard-status" id="catalog-status" aria-live="polite">
+        Loading catalog…
+      </div>
+
+      <div class="wizard-actions">
+        <button type="button" id="wizard-cancel" class="wizard-btn wizard-btn-ghost">Cancel</button>
+        <button type="button" id="wizard-next" class="wizard-btn wizard-btn-primary" disabled>Next</button>
+      </div>
+    </section>
+
+    <!-- Step 2+ placeholder (M3 fills this in) -->
+    <section class="wizard-step-panel" id="step-placeholder" data-step="2" hidden>
+      <h1 class="wizard-title">Step 2 placeholder</h1>
+      <p class="wizard-body">
+        You picked: <strong id="picked-slug">?</strong>
+      </p>
+      <p class="wizard-body wizard-muted">
+        The credential form lands in M3. For now this is a round-trip proof
+        that Step 1 → Step 2 transitions work and the selection is carried
+        forward.
+      </p>
+      <div class="wizard-status" id="placeholder-status" aria-live="polite"></div>
+      <div class="wizard-actions">
+        <button type="button" id="step2-back" class="wizard-btn wizard-btn-ghost">← Back</button>
+        <button type="button" id="wizard-done" class="wizard-btn wizard-btn-primary">Done — return to terminal</button>
+      </div>
+    </section>
   </main>
+
   <footer class="wizard-footer">
     <span>Served locally from <code id="wizard-origin"></code></span>
     <span>· Nothing leaves your machine</span>
