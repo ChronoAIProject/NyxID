@@ -822,6 +822,18 @@
       const keyId = placeholder?.id;
       if (!keyId) throw new Error("placeholder key has no id");
 
+      // Short-circuit: when credential_mode=admin, the backend inherits
+      // the admin's already-authorized credentials and returns the key
+      // as status=active immediately — no device-code or OAuth needed.
+      // Skip straight to confirmation. Without this, the wizard would
+      // try to initiate a device-code that the backend isn't expecting.
+      if (placeholder?.status === "active") {
+        createdKey = placeholder;
+        renderConfirm(createdKey);
+        showPanel("confirm");
+        return;
+      }
+
       // Stage 3 — initiate + poll.
       if (shape === "oauth") {
         await runOauthFlow(providerId, keyId);
