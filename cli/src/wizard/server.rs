@@ -219,16 +219,27 @@ async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> 
     (StatusCode::OK, headers, asset.data.into_owned()).into_response()
 }
 
-/// Check a same-origin POST: CSRF header + origin must match `127.0.0.1`.
-fn check_origin(headers: &HeaderMap) -> bool {
-    let Some(origin) = headers.get(header::ORIGIN) else {
-        // Missing Origin on a browser POST is unusual. Reject for defense
-        // in depth — curl from a local process would still succeed if we
-        // accepted missing Origin.
-        return false;
-    };
-    let origin = origin.to_str().unwrap_or("");
-    origin.starts_with("http://127.0.0.1:") || origin.starts_with("http://localhost:")
+/// Validate the `Origin` header. When present it must point at loopback.
+///
+/// Browsers frequently omit `Origin` on *same-origin GET* requests even when
+/// custom headers are present (the main CSRF-defence path is the X-Wizard-CSRF
+/// header, which browsers send faithfully). So we accept missing Origin on
+/// GETs. On mutating methods we still require Origin + CSRF.
+fn origin_matches(headers: &HeaderMap) -> Option<bool> {
+    headers.get(header::ORIGIN).map(|v| {
+        let s = v.to_str().unwrap_or("");
+        s.starts_with("http://127.0.0.1:") || s.starts_with("http://localhost:")
+    })
+}
+
+/// Strict origin check for mutators: must be present AND match.
+fn check_origin_strict(headers: &HeaderMap) -> bool {
+    origin_matches(headers).unwrap_or(false)
+}
+
+/// Relaxed origin check for reads: absent → allow, present → must match.
+fn check_origin_relaxed(headers: &HeaderMap) -> bool {
+    origin_matches(headers).unwrap_or(true)
 }
 
 async fn handle_complete(
@@ -236,7 +247,7 @@ async fn handle_complete(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if !check_origin(&headers) {
+    if !check_origin_strict(&headers) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
     if !csrf_ok(&headers, &state.csrf_token) {
@@ -247,7 +258,7 @@ async fn handle_complete(
 }
 
 async fn handle_cancel(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    if !check_origin(&headers) {
+    if !check_origin_strict(&headers) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
     if !csrf_ok(&headers, &state.csrf_token) {
@@ -261,7 +272,7 @@ async fn handle_cancel(State(state): State<ServerState>, headers: HeaderMap) -> 
 /// treated as a soft cancel guarded only by Origin + short age. This is
 /// intentionally weaker than the button-click cancel.
 async fn handle_cancel_unload(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    if !check_origin(&headers) {
+    if !check_origin_strict(&headers) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
     if state.started_at.elapsed() > WIZARD_MAX_DURATION {
@@ -285,7 +296,7 @@ async fn handle_cancel_unload(State(state): State<ServerState>, headers: HeaderM
 }
 
 async fn handle_heartbeat(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    if !check_origin(&headers) {
+    if !check_origin_strict(&headers) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
     if !csrf_ok(&headers, &state.csrf_token) {
@@ -296,7 +307,8 @@ async fn handle_heartbeat(State(state): State<ServerState>, headers: HeaderMap) 
 }
 
 async fn handle_status(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    if !check_origin(&headers) {
+    // GET: Origin may be omitted by the browser on same-origin requests.
+    if !check_origin_relaxed(&headers) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
     let body = json!({
@@ -321,7 +333,15 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
     let uri = req.uri().clone();
     let headers = req.headers().clone();
 
-    if !check_origin(&headers) {
+    // Per-method origin enforcement: browsers omit Origin on same-origin GET
+    // so we relax for reads. Mutations keep the strict check as a second
+    // layer on top of CSRF.
+    let origin_ok = if matches!(method, Method::GET | Method::HEAD) {
+        check_origin_relaxed(&headers)
+    } else {
+        check_origin_strict(&headers)
+    };
+    if !origin_ok {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
     if !csrf_ok(&headers, &state.csrf_token) {
