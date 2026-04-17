@@ -1168,18 +1168,23 @@
     }
   }
 
-  // Best-effort DELETE of an in-flight OAuth / device-code placeholder
-  // key. Fire-and-forget: the user is already bailing out, so a failure
-  // here shouldn't block cancel. Leaves `pendingPlaceholderKeyId = null`
-  // on return so repeated calls are cheap no-ops.
+  // Best-effort conditional cleanup of an in-flight OAuth / device-code
+  // placeholder key. Routed through the wizard-server-local abandon
+  // endpoint, which does a server-side GET-then-DELETE so a key that
+  // just transitioned to `active` while the user was bailing out can't
+  // be revoked by mistake. Fire-and-forget — a failure here shouldn't
+  // block cancel. Leaves `pendingPlaceholderKeyId = null` on return so
+  // repeated calls are cheap no-ops. The server ALSO tracks observed
+  // pending keys and drains them on shutdown, so this path is a nice-
+  // to-have rather than the only line of defense.
   async function cleanupPendingPlaceholder() {
     const keyId = pendingPlaceholderKeyId;
     if (!keyId) return;
     pendingPlaceholderKeyId = null;
     try {
-      await proxyFetch("DELETE",
-        `/api/proxy/api/v1/keys/${encodeURIComponent(keyId)}`);
-    } catch (_) { /* best-effort; server-side TTL is the backstop */ }
+      await proxyFetch("POST", "/api/proxy/abandon-placeholder",
+        { key_id: keyId });
+    } catch (_) { /* best-effort; shutdown drain is the backstop */ }
   }
 
   async function onCancel() {
@@ -1224,15 +1229,23 @@
   window.addEventListener("beforeunload", () => {
     // Placeholder cleanup fires independently of the cancel-unload path
     // below — we want the stale `pending_auth` row gone even when a POST
-    // is in flight, since that's the state most likely to orphan a key.
-    // `keepalive: true` lets the DELETE complete after the page unloads.
+    // is in flight. Route through the abandon-placeholder endpoint so
+    // the server does the GET-then-conditional-DELETE (can't accidentally
+    // revoke a key that just became active). `keepalive: true` lets the
+    // POST complete after the page unloads. If the client-known keyId
+    // is null because tab-close raced with the POST response, the
+    // server's own pending-keys drain on shutdown is the backstop.
     if (pendingPlaceholderKeyId) {
       const keyId = pendingPlaceholderKeyId;
       pendingPlaceholderKeyId = null;
       try {
-        fetch(`/api/proxy/api/v1/keys/${encodeURIComponent(keyId)}`, {
-          method: "DELETE",
-          headers: { "x-wizard-csrf": CSRF },
+        fetch("/api/proxy/abandon-placeholder", {
+          method: "POST",
+          headers: {
+            "x-wizard-csrf": CSRF,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ key_id: keyId }),
           keepalive: true,
           credentials: "omit",
         }).catch(() => {});

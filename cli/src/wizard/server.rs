@@ -6,6 +6,7 @@
 //! token attached server-side.
 
 use std::{
+    collections::HashSet,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
@@ -143,15 +144,12 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                 path_template: "/api/v1/keys/:key_id",
                 body_fields: &[],
             },
-            // Used to clean up placeholder `pending_auth` keys when the
-            // user cancels or abandons the wizard mid-flow. Without this,
-            // every abandoned OAuth / device-code attempt leaves a stale
-            // row in the user's `nyxid service list`.
-            ProxyRoute {
-                method: Method::DELETE,
-                path_template: "/api/v1/keys/:key_id",
-                body_fields: &[],
-            },
+            // NOTE: DELETE /api/v1/keys/:key_id is intentionally NOT in
+            // the allowlist. Placeholder cleanup now routes through the
+            // wizard-server-local `POST /api/proxy/abandon-placeholder`
+            // endpoint, which performs a conditional GET-then-DELETE
+            // server-side so a key that just flipped to `active` while
+            // the user was abandoning can't be revoked accidentally.
             // OAuth app credentials (client_id, client_secret) stored on the
             // provider entry. Required up-front for providers whose
             // credential_mode is "user" or "both".
@@ -204,6 +202,13 @@ struct ServerState {
     /// another local process on a different port can't bounce through
     /// our proxy even if it passes CSRF.
     bound_port: u16,
+    /// IDs of placeholder keys that the proxy has observed transitioning
+    /// into `pending_auth` status. Populated by sniffing successful
+    /// `POST /api/v1/keys` responses; drained on shutdown so abandoned
+    /// OAuth / device-code attempts don't leave stale rows even when
+    /// the browser never got a chance to fire a cleanup request
+    /// (e.g. tab closed while POST /keys was still in flight).
+    pending_keys: Arc<tokio::sync::Mutex<HashSet<String>>>,
 }
 
 /// Mint a 32-byte random CSRF token, hex-encoded.
@@ -600,6 +605,37 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
         }
     };
 
+    // Sniff key-lifecycle responses so the server can reliably clean up
+    // abandoned `pending_auth` placeholders even when the browser never
+    // gets the key_id back (e.g. tab closed between POST and response).
+    //   - POST /api/v1/keys 2xx with status=="pending_auth" → track id.
+    //   - GET /api/v1/keys/:id  2xx with status!="pending_auth" → untrack
+    //     (the key is now active, failed, or revoked — cleanup no longer
+    //     applies, and we must not delete an active key later).
+    if status.is_success()
+        && upstream_ct.starts_with("application/json")
+        && let Ok(v) = serde_json::from_slice::<Value>(&body)
+    {
+        if method == Method::POST && backend_path == "/api/v1/keys" {
+            if let (Some(id), Some("pending_auth")) = (
+                v.get("id").and_then(|x| x.as_str()),
+                v.get("status").and_then(|x| x.as_str()),
+            ) {
+                state.pending_keys.lock().await.insert(id.to_string());
+            }
+        } else if method == Method::GET
+            && backend_path.starts_with("/api/v1/keys/")
+            && !backend_path.contains("/bindings")
+            && let (Some(id), Some(s)) = (
+                v.get("id").and_then(|x| x.as_str()),
+                v.get("status").and_then(|x| x.as_str()),
+            )
+            && s != "pending_auth"
+        {
+            state.pending_keys.lock().await.remove(id);
+        }
+    }
+
     let mut out_headers = base_security_headers();
     out_headers.insert(
         header::CONTENT_TYPE,
@@ -614,7 +650,97 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
         .into_response()
 }
 
+/// Conditional abandon for a single placeholder key: `GET /keys/:id`, and
+/// only issue `DELETE /keys/:id` if status is still `pending_auth`. Closes
+/// the race where the user finished authorizing on the provider moments
+/// before cancelling the wizard — an unconditional DELETE would revoke a
+/// legitimately-active key. All errors are swallowed: this is best-effort
+/// cleanup, and the backend TTL is the backstop.
+async fn conditional_abandon_key(state: &ServerState, key_id: &str) {
+    let base = state.proxy.base_url_root.trim_end_matches('/');
+    let url = format!("{}/api/v1/keys/{}", base, key_id);
+    let key = match state
+        .upstream
+        .get(&url)
+        .bearer_auth(&state.proxy.access_token)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+        _ => None,
+    };
+    let still_pending = key
+        .as_ref()
+        .and_then(|v| v.get("status"))
+        .and_then(|s| s.as_str())
+        == Some("pending_auth");
+    if still_pending {
+        let _ = state
+            .upstream
+            .delete(&url)
+            .bearer_auth(&state.proxy.access_token)
+            .send()
+            .await;
+    }
+    state.pending_keys.lock().await.remove(key_id);
+}
+
+/// `POST /api/proxy/abandon-placeholder` — client-triggered cleanup of a
+/// pending OAuth / device-code placeholder. Replaces the direct
+/// `DELETE /api/v1/keys/:id` path so the GET-then-conditional-DELETE
+/// sequence runs server-side, eliminating the client-side race window
+/// where the key transitions to `active` between the check and the delete.
+async fn handle_abandon_placeholder(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_caller_strict(&headers, state.bound_port) {
+        return (StatusCode::FORBIDDEN, "bad origin/host").into_response();
+    }
+    if !csrf_ok(&headers, &state.csrf_token) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    let key_id = match body.get("key_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() && s.len() <= 64 && is_uuid_like(s) => s.to_string(),
+        _ => {
+            return (StatusCode::BAD_REQUEST, "invalid key_id").into_response();
+        }
+    };
+    conditional_abandon_key(&state, &key_id).await;
+    (StatusCode::NO_CONTENT, base_security_headers()).into_response()
+}
+
+/// Cheap format gate on the key_id we'll shove into a backend URL. Backend
+/// uses UUID v4 strings for key IDs, so restrict to hex + dashes. Not a
+/// security boundary on its own — the bearer is attached upstream — but it
+/// prevents silly inputs (path traversal, `/..`, `;`, spaces).
+fn is_uuid_like(s: &str) -> bool {
+    s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+}
+
 async fn signal_and_shutdown(state: ServerState, outcome: WizardOutcome) {
+    // Drain tracked placeholder keys before the CLI exits. Closes the
+    // tab-close-before-POST-response race: even if the browser never
+    // learned the key_id, we observed it in the proxy response and can
+    // still best-effort clean it up. Bounded timeout so a slow backend
+    // can't hold the CLI open indefinitely after the user cancels.
+    let drained: Vec<String> = {
+        let mut set = state.pending_keys.lock().await;
+        set.drain().collect()
+    };
+    if !drained.is_empty() {
+        let cleanup = {
+            let state = state.clone();
+            async move {
+                for key_id in drained {
+                    conditional_abandon_key(&state, &key_id).await;
+                }
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(5), cleanup).await;
+    }
+
     let mut guard = state.done_tx.lock().await;
     if let Some(tx) = guard.take() {
         let _ = tx.send(outcome);
@@ -688,6 +814,7 @@ pub async fn run_flow(
         flow: kind,
         in_flight_mutations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         bound_port: addr.port(),
+        pending_keys: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
     };
 
     let app = Router::new()
@@ -699,6 +826,10 @@ pub async fn run_flow(
         .route("/api/proxy/cancel-unload", post(handle_cancel_unload))
         .route("/api/proxy/heartbeat", post(handle_heartbeat))
         .route("/api/proxy/status", get(handle_status))
+        .route(
+            "/api/proxy/abandon-placeholder",
+            post(handle_abandon_placeholder),
+        )
         // Catch-all proxy: /api/proxy/<anything>. The path here MUST come
         // after the lifecycle routes so exact matches win.
         .route("/api/proxy/{*rest}", any(handle_proxy))
