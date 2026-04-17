@@ -59,6 +59,10 @@
   let createdKey = null;  // result of POST /keys
   let finished = false;   // once Done/Cancel clicked, don't fire again
   let oauthCredentialsSet = false; // flipped after PUT /providers/:id/credentials succeeds
+  // Tracks an in-flight OAuth / device-code placeholder key so we can
+  // DELETE it if the user cancels, hits Back, or closes the tab before
+  // authorization completes. Cleared once the key transitions to active.
+  let pendingPlaceholderKeyId = null;
 
   // ---- helpers ----
 
@@ -297,11 +301,18 @@
   function renderCredentialFormFields(entry, shape) {
     credentialFieldsEl.innerHTML = "";
 
+    // The purple accent wraps only the inputs the user has to fill.
+    // Info panels and instructional blocks (OAuth intro, device-code
+    // panel, no-auth notice, unsupported fallback) are appended to
+    // `credentialFieldsEl` directly so they sit outside the accent.
+    const inputGroup = document.createElement("div");
+    inputGroup.className = "wizard-input-group";
+
     // Label is required on every shape (backend enforces). If the CLI
     // passed a --label, prefer that over the slug-derived default. For
     // the Custom form the synthetic `__custom__` slug isn't a useful
     // default — leave the field blank so the user picks their own.
-    credentialFieldsEl.appendChild(fieldEl({
+    inputGroup.appendChild(fieldEl({
       id: "f-label", label: "Label", type: "text",
       value: PREFILL.label || (shape === "custom" ? "" : defaultLabelFor(entry)),
       hint: "Shown everywhere in the CLI and web UI.",
@@ -309,6 +320,7 @@
 
     // Fallback UI for shapes the wizard can't drive end-to-end yet.
     if (!isWizardSupported(shape)) {
+      credentialFieldsEl.appendChild(inputGroup);
       credentialFieldsEl.appendChild(unsupportedNotice(entry, shape));
       credentialSubmitWrap.hidden = true;
       return;
@@ -318,47 +330,61 @@
     if (shape === "oauth") {
       const mode = (selectionDetail?.credential_mode || "system").toLowerCase();
       if ((mode === "user" || mode === "both") && !oauthCredentialsSet) {
-        credentialFieldsEl.appendChild(oauthCredentialsSubStep(entry, selectionDetail));
+        // Intro panel sits outside the accent; the two credential
+        // fields sit inside so the accent covers both.
+        credentialFieldsEl.appendChild(oauthCredentialsIntro(entry, selectionDetail));
+        appendOauthCredentialFields(inputGroup);
+        credentialFieldsEl.appendChild(inputGroup);
       } else {
+        credentialFieldsEl.appendChild(inputGroup);
         credentialFieldsEl.appendChild(oauthInstructions(entry, selectionDetail));
       }
-    } else if (shape === "device-code") {
-      credentialFieldsEl.appendChild(deviceCodeInstructions(entry));
-    } else if (shape === "gateway-url") {
-      credentialFieldsEl.appendChild(fieldEl({
+      return;
+    }
+    if (shape === "device-code") {
+      // Device-code panel is where the user actually acts (copy code,
+      // click Open) so it sits INSIDE the accent group alongside the
+      // label — the purple bar stretches to cover the whole authorize
+      // step. `renderDeviceCodePanel` / `renderDeviceCodeExpired` still
+      // locate it via getElementById regardless of parent.
+      inputGroup.appendChild(deviceCodeInstructions(entry));
+      credentialFieldsEl.appendChild(inputGroup);
+      return;
+    }
+    if (shape === "gateway-url") {
+      inputGroup.appendChild(fieldEl({
         id: "f-endpoint-url", label: "Gateway URL", type: "text",
         value: PREFILL.endpointUrl || "",
         required: true,
         hint: "The URL of your self-hosted instance (e.g. https://openclaw.mycompany.com).",
       }));
-      credentialFieldsEl.appendChild(pasteKeyField(entry));
+      inputGroup.appendChild(pasteKeyField(entry));
     } else if (shape === "token-exchange") {
       const fields = entry.token_exchange_credential_fields || [];
-      // Mark the LAST secret field as primary — typically that's the
-      // payload-carrying secret (e.g. app_secret after app_id in Lark/Feishu).
-      const lastSecretIdx = fields.map(f => !!f.secret).lastIndexOf(true);
       for (let i = 0; i < fields.length; i++) {
         const f = fields[i];
-        credentialFieldsEl.appendChild(fieldEl({
+        inputGroup.appendChild(fieldEl({
           id: `f-tx-${i}`,
           label: f.label || f.name,
           type: f.secret ? "password" : "text",
           placeholder: f.placeholder || "",
           required: true,
-          primary: i === lastSecretIdx,
           hint: f.description || "",
           secret: !!f.secret,
           name: f.name,
         }));
       }
     } else if (shape === "no-auth") {
+      credentialFieldsEl.appendChild(inputGroup);
       credentialFieldsEl.appendChild(noCredentialNotice());
+      return;
     } else if (shape === "custom") {
-      appendCustomFormFields(credentialFieldsEl);
+      appendCustomFormFields(inputGroup);
     } else {
       // "paste-key" — simple bearer/header/path/query/bot_bearer
-      credentialFieldsEl.appendChild(pasteKeyField(entry));
+      inputGroup.appendChild(pasteKeyField(entry));
     }
+    credentialFieldsEl.appendChild(inputGroup);
   }
 
   // Custom / self-hosted form. Exposes the flag surface of
@@ -530,10 +556,11 @@
   }
 
   // OAuth credentials sub-step (for providers whose `credential_mode`
-  // is "user" or "both"). Mirrors frontend `OAuthCredentialsStep` in
+  // is "user" or "both"). Split into an info panel (rendered outside
+  // the input-group accent) and the two credential fields (rendered
+  // inside the accent). Mirrors frontend `OAuthCredentialsStep` in
   // add-key-dialog.tsx:1561-1667.
-  function oauthCredentialsSubStep(entry, detail) {
-    const wrap = document.createElement("div");
+  function oauthCredentialsIntro(entry, detail) {
     const intro = document.createElement("div");
     intro.className = "wizard-info-panel";
     const docsUrl = detail?.documentation_url || entry.documentation_url;
@@ -548,16 +575,18 @@
       </p>
       ${docsUrl ? `<p style="margin:0"><a href="${escapeAttr(docsUrl)}" target="_blank" rel="noopener noreferrer" class="wizard-link">📖 How to create an OAuth app ↗</a></p>` : ""}
     `;
-    wrap.appendChild(intro);
+    return intro;
+  }
 
-    wrap.appendChild(fieldEl({
+  function appendOauthCredentialFields(root) {
+    root.appendChild(fieldEl({
       id: "f-client-id",
       label: "Client ID",
       type: "text",
       required: true,
       hint: "From the OAuth app you just created on the provider.",
     }));
-    wrap.appendChild(fieldEl({
+    root.appendChild(fieldEl({
       id: "f-client-secret",
       label: "Client Secret",
       type: "password",
@@ -565,7 +594,6 @@
       required: true,
       hint: "Never leaves your machine until Connect is clicked. Encrypted at rest on NyxID.",
     }));
-    return wrap;
   }
 
   function escapeAttr(s) {
@@ -822,12 +850,18 @@
       const keyId = placeholder?.id;
       if (!keyId) throw new Error("placeholder key has no id");
 
+      // Track for cleanup on cancel/back/unload. Cleared on success below.
+      pendingPlaceholderKeyId = keyId;
+
       // Short-circuit: when credential_mode=admin, the backend inherits
       // the admin's already-authorized credentials and returns the key
-      // as status=active immediately — no device-code or OAuth needed.
-      // Skip straight to confirmation. Without this, the wizard would
-      // try to initiate a device-code that the backend isn't expecting.
-      if (placeholder?.status === "active") {
+      // as status=active immediately — no OAuth round-trip needed.
+      // Only skip for OAuth here. For device-code we always run the
+      // initiate+poll dance even when a prior token exists, so the user
+      // sees the code + verification URL and can re-authorize on the
+      // provider (matches what they clicked "Connect" expecting).
+      if (shape === "oauth" && placeholder?.status === "active") {
+        pendingPlaceholderKeyId = null; // key is already valid; don't delete.
         createdKey = placeholder;
         renderConfirm(createdKey);
         showPanel("confirm");
@@ -843,6 +877,7 @@
 
       // Stage 4 — fetch final key, confirm.
       const finalKey = await proxyJson("GET", `/api/proxy/api/v1/keys/${encodeURIComponent(keyId)}`);
+      pendingPlaceholderKeyId = null; // flow completed; key is active.
       createdKey = finalKey || {};
       renderConfirm(createdKey);
       showPanel("confirm");
@@ -1133,12 +1168,29 @@
     }
   }
 
+  // Best-effort DELETE of an in-flight OAuth / device-code placeholder
+  // key. Fire-and-forget: the user is already bailing out, so a failure
+  // here shouldn't block cancel. Leaves `pendingPlaceholderKeyId = null`
+  // on return so repeated calls are cheap no-ops.
+  async function cleanupPendingPlaceholder() {
+    const keyId = pendingPlaceholderKeyId;
+    if (!keyId) return;
+    pendingPlaceholderKeyId = null;
+    try {
+      await proxyFetch("DELETE",
+        `/api/proxy/api/v1/keys/${encodeURIComponent(keyId)}`);
+    } catch (_) { /* best-effort; server-side TTL is the backstop */ }
+  }
+
   async function onCancel() {
     if (finished) return;
     finished = true;
     cancelBtn.disabled = true;
     setStatus(catalogStatus, "Cancelling…");
     try {
+      // Delete the placeholder BEFORE telling the CLI to shut down —
+      // once shutdown runs, the local proxy stops accepting requests.
+      await cleanupPendingPlaceholder();
       await proxyFetch("POST", "/api/proxy/cancel", {});
       showOverlay({
         cancel: true,
@@ -1170,6 +1222,22 @@
     if (document.hidden) stopHeartbeats(); else startHeartbeats();
   });
   window.addEventListener("beforeunload", () => {
+    // Placeholder cleanup fires independently of the cancel-unload path
+    // below — we want the stale `pending_auth` row gone even when a POST
+    // is in flight, since that's the state most likely to orphan a key.
+    // `keepalive: true` lets the DELETE complete after the page unloads.
+    if (pendingPlaceholderKeyId) {
+      const keyId = pendingPlaceholderKeyId;
+      pendingPlaceholderKeyId = null;
+      try {
+        fetch(`/api/proxy/api/v1/keys/${encodeURIComponent(keyId)}`, {
+          method: "DELETE",
+          headers: { "x-wizard-csrf": CSRF },
+          keepalive: true,
+          credentials: "omit",
+        }).catch(() => {});
+      } catch (_) { /* ignore */ }
+    }
     // Do NOT fire cancel-unload if a mutating POST is mid-flight. Tab close
     // after Connect-click but before response can race with upstream
     // /api/v1/keys, creating a real service while the CLI reports cancel.
@@ -1240,7 +1308,10 @@
         if (first) first.focus();
         return;
       }
-      // Otherwise: back to Step 1.
+      // Otherwise: back to Step 1. If we created a placeholder key for
+      // an abandoned OAuth / device-code flow, delete it so the user
+      // doesn't accumulate half-authorized rows in `nyxid service list`.
+      void cleanupPendingPlaceholder();
       wipeCredentialInputs();
       hideErrorBanner();
       setStatus(credentialStatus, "");

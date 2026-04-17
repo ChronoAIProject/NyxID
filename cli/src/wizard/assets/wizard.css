@@ -96,7 +96,7 @@ html, body {
   flex: 1 1 auto;
   min-height: 0;
   background: var(--panel);
-  border: 1px solid var(--primary);
+  border: 1px solid var(--border);
   border-radius: 12px;
   padding: 2rem;
   overflow-y: auto;
@@ -295,6 +295,29 @@ html, body {
   display: block;
   margin: 1rem 0;
 }
+
+/* Wraps the fields the user actually needs to fill on step 2. A single
+   3px purple bar runs down the left of the whole group, visually
+   pulling the eye to the inputs (and naturally stretches to cover
+   whatever number of fields the current shape renders). Info panels
+   and instructional blocks are rendered outside this wrapper so the
+   accent stays scoped to user input. */
+.wizard-input-group {
+  position: relative;
+  padding-left: 0.75rem;
+}
+.wizard-input-group::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 1rem;
+  bottom: 1rem;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--primary);
+}
+.wizard-input-group > .wizard-field:first-child { margin-top: 0; }
+.wizard-input-group > .wizard-field:last-child { margin-bottom: 0; }
 .wizard-field-label {
   display: block;
   font-weight: 600;
@@ -474,6 +497,7 @@ html, body {
 
 .wizard-footer {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 1.5rem;
   padding-top: 1rem;
