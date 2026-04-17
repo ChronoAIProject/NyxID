@@ -170,6 +170,14 @@ html, body {
 }
 .wizard-card-custom .wizard-card-title::after { content: " →"; }
 
+.wizard-card-disabled {
+  opacity: 0.55;
+}
+.wizard-card-disabled .wizard-card-meta {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .wizard-status {
   margin: 1rem 0;
   min-height: 1.5rem;

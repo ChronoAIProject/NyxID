@@ -26,10 +26,6 @@
   const stepCredential = document.getElementById("step-credential");
   const credentialTitle = document.getElementById("credential-title");
   const credentialSubtitle = document.getElementById("credential-subtitle");
-  const credentialLabelInput = document.getElementById("credential-label");
-  const credentialValueInput = document.getElementById("credential-value");
-  const credentialReveal = document.getElementById("credential-reveal");
-  const credentialHint = document.getElementById("credential-hint");
   const credentialStatus = document.getElementById("credential-status");
   const credentialBack = document.getElementById("credential-back");
   const credentialSubmit = document.getElementById("credential-submit");
@@ -82,21 +78,43 @@
     el.className = "wizard-status" + (cls ? " " + cls : "");
   }
 
-  function isSimpleBearer(entry) {
-    // Per docs/CLI_WIZARD_V2.md §3.3 — "Simple setup" includes catalog
-    // entries that the SimpleKey form can fully handle: bearer/header
-    // api_key auth with no gateway-URL requirement, no OAuth/device-code,
-    // and no token-exchange multi-field setup.
+  // Match the frontend `AddKeyDialog` catalog grid: show ALL catalog
+  // entries, badge by flow shape, and route to the right sub-flow at
+  // the form step. No hidden section.
+  function flowShapeOf(entry) {
+    if ((entry.service_type || "http") === "ssh") return "ssh";
     const pt = entry.provider_type || null;
-    const allowedPT = pt === null || pt === "api_key";
-    const isHttp = (entry.service_type || "http") === "http";
-    const needsGateway = !!entry.requires_gateway_url;
-    const authMethod = (entry.auth_method || "bearer").toLowerCase();
-    const okAuth = authMethod === "bearer" || authMethod === "header";
-    const hasMultiField = Array.isArray(entry.token_exchange_credential_fields)
-      && entry.token_exchange_credential_fields.length > 0;
-    return allowedPT && isHttp && !needsGateway && okAuth && !hasMultiField
-      && (entry.requires_credential !== false);
+    if (pt === "oauth2") return "oauth";
+    if (pt === "device_code") return "device-code";
+    if (entry.requires_credential === false) return "no-auth";
+    if (Array.isArray(entry.token_exchange_credential_fields)
+        && entry.token_exchange_credential_fields.length > 0) {
+      return "token-exchange";
+    }
+    if (entry.requires_gateway_url) return "gateway-url";
+    return "paste-key";
+  }
+
+  function shapeLabel(shape, entry) {
+    switch (shape) {
+      case "no-auth": return "1-click connect";
+      case "gateway-url": return "URL + API key";
+      case "token-exchange":
+        return `${(entry.token_exchange_credential_fields || []).length} fields`;
+      case "oauth": return "OAuth sign-in";
+      case "device-code": return "device code";
+      case "ssh": return "SSH cert";
+      default: return "paste API key";
+    }
+  }
+
+  function isWizardSupported(shape) {
+    // Shapes the wizard form can fully complete today. Others get a
+    // "use the scripted CLI for now" fallback in Step 2 (with a
+    // copyable command) — they still show in Step 1 so the user sees
+    // what's available.
+    return shape === "paste-key" || shape === "gateway-url"
+        || shape === "no-auth" || shape === "token-exchange";
   }
 
   function cardEl(entry) {
@@ -118,8 +136,12 @@
 
     const meta = document.createElement("div");
     meta.className = "wizard-card-meta";
-    const hint = entry.auth_method === "header" ? "header auth" : "paste API key";
-    meta.textContent = hint;
+    const shape = flowShapeOf(entry);
+    meta.textContent = shapeLabel(shape, entry);
+    if (!isWizardSupported(shape)) {
+      btn.classList.add("wizard-card-disabled");
+      btn.title = "Wizard support coming in a later PR — clickable to see the command you can use today.";
+    }
     btn.appendChild(meta);
 
     btn.addEventListener("click", () => selectCard(entry));
@@ -130,8 +152,10 @@
     const f = (filter || "").trim().toLowerCase();
     simpleGrid.innerHTML = "";
     let shown = 0;
+    // Show every catalog entry; the card's meta badge tells the user
+    // what flow shape the service uses. Matches the frontend's
+    // AddKeyDialog CatalogGrid behaviour.
     for (const entry of entries) {
-      if (!isSimpleBearer(entry)) continue;
       if (f && !(entry.slug.toLowerCase().includes(f) || (entry.name || "").toLowerCase().includes(f))) continue;
       simpleGrid.appendChild(cardEl(entry));
       shown += 1;
@@ -172,67 +196,253 @@
     if (!selection) return;
     if (selection.slug === "__custom__") {
       setStatus(catalogStatus,
-        "Custom / self-hosted form lands in M5. For now, use: nyxid service add <slug> --custom --endpoint-url <URL> --credential-env <VAR>",
+        "Custom / self-hosted form lands in M5. For now, use: nyxid service add --custom --endpoint-url <URL> --credential-env <VAR> --label <LABEL>",
         "error");
       return;
     }
+    const shape = flowShapeOf(selection);
     credentialTitle.textContent = `Connect ${selection.name || selection.slug}`;
     credentialSubtitle.textContent = (selection.description || "").slice(0, 200);
-    credentialLabelInput.value = defaultLabelFor(selection);
-    credentialValueInput.value = "";
-    credentialValueInput.type = "password";
-    credentialReveal.textContent = "show";
     setStatus(credentialStatus, "");
-    const docsUrl = selection.api_key_url || selection.documentation_url;
-    const instr = selection.api_key_instructions;
-    if (instr) {
-      credentialHint.textContent = instr;
-    } else if (docsUrl) {
-      credentialHint.textContent = `Paste the API key from ${docsUrl}`;
-    } else {
-      credentialHint.textContent = "Paste the key from the provider's dashboard.";
-    }
+
+    // Build the form body dynamically from the catalog entry's shape.
+    renderCredentialFormFields(selection, shape);
     showPanel("credential");
-    credentialLabelInput.focus();
+    // focus first real input
+    const first = credentialFieldsEl.querySelector("input,textarea");
+    if (first) first.focus();
+  }
+
+  // Container for dynamically rendered credential fields (varies per
+  // flow shape). Replaces the old hard-coded label+password row.
+  const credentialFieldsEl = document.getElementById("credential-fields");
+  const credentialSubmitWrap = document.getElementById("credential-submit-wrap");
+
+  function renderCredentialFormFields(entry, shape) {
+    credentialFieldsEl.innerHTML = "";
+
+    // Label is required on every shape (backend enforces).
+    credentialFieldsEl.appendChild(fieldEl({
+      id: "f-label", label: "Label", type: "text",
+      value: defaultLabelFor(entry),
+      hint: "Shown everywhere in the CLI and web UI.",
+    }));
+
+    // Fallback UI for shapes the wizard can't drive end-to-end yet.
+    if (!isWizardSupported(shape)) {
+      credentialFieldsEl.appendChild(unsupportedNotice(entry, shape));
+      credentialSubmitWrap.hidden = true;
+      return;
+    }
+    credentialSubmitWrap.hidden = false;
+
+    if (shape === "gateway-url") {
+      credentialFieldsEl.appendChild(fieldEl({
+        id: "f-endpoint-url", label: "Gateway URL", type: "text",
+        required: true,
+        hint: "The URL of your self-hosted instance (e.g. https://openclaw.mycompany.com).",
+      }));
+      credentialFieldsEl.appendChild(pasteKeyField(entry));
+    } else if (shape === "token-exchange") {
+      const fields = entry.token_exchange_credential_fields || [];
+      for (let i = 0; i < fields.length; i++) {
+        const f = fields[i];
+        credentialFieldsEl.appendChild(fieldEl({
+          id: `f-tx-${i}`,
+          label: f.label || f.name,
+          type: f.secret ? "password" : "text",
+          placeholder: f.placeholder || "",
+          required: true,
+          hint: f.description || "",
+          secret: !!f.secret,
+          name: f.name,
+        }));
+      }
+    } else if (shape === "no-auth") {
+      credentialFieldsEl.appendChild(noCredentialNotice());
+    } else {
+      // "paste-key" — simple bearer/header/path/query/bot_bearer
+      credentialFieldsEl.appendChild(pasteKeyField(entry));
+    }
+  }
+
+  function fieldEl(spec) {
+    const wrap = document.createElement("label");
+    wrap.className = "wizard-field";
+    const lbl = document.createElement("span");
+    lbl.className = "wizard-field-label";
+    lbl.textContent = spec.label + (spec.required === false ? " (optional)" : "");
+    wrap.appendChild(lbl);
+
+    if (spec.secret) {
+      const row = document.createElement("div");
+      row.className = "wizard-input-row";
+      const input = document.createElement("input");
+      input.id = spec.id;
+      input.type = "password";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      if (spec.placeholder) input.placeholder = spec.placeholder;
+      if (spec.value) input.value = spec.value;
+      if (spec.required !== false) input.required = true;
+      if (spec.name) input.dataset.name = spec.name;
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "wizard-input-toggle";
+      toggle.textContent = "show";
+      toggle.setAttribute("aria-label", "show/hide");
+      toggle.addEventListener("click", () => {
+        if (input.type === "password") { input.type = "text"; toggle.textContent = "hide"; }
+        else { input.type = "password"; toggle.textContent = "show"; }
+      });
+      row.appendChild(input); row.appendChild(toggle);
+      wrap.appendChild(row);
+    } else {
+      const input = document.createElement("input");
+      input.id = spec.id;
+      input.type = spec.type || "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      if (spec.placeholder) input.placeholder = spec.placeholder;
+      if (spec.value) input.value = spec.value;
+      if (spec.required !== false) input.required = true;
+      if (spec.name) input.dataset.name = spec.name;
+      wrap.appendChild(input);
+    }
+    if (spec.hint) {
+      const hint = document.createElement("span");
+      hint.className = "wizard-field-hint";
+      hint.textContent = spec.hint;
+      wrap.appendChild(hint);
+    }
+    return wrap;
+  }
+
+  function pasteKeyField(entry) {
+    const docsUrl = entry.api_key_url || entry.documentation_url;
+    const instr = entry.api_key_instructions;
+    const hint = instr || (docsUrl ? `Paste the API key from ${docsUrl}` : "Paste the key from the provider's dashboard.");
+    return fieldEl({
+      id: "f-credential",
+      label: "API key",
+      type: "password",
+      secret: true,
+      required: true,
+      hint,
+    });
+  }
+
+  function noCredentialNotice() {
+    const panel = document.createElement("div");
+    panel.className = "wizard-info-panel";
+    panel.textContent = "This service doesn't require a credential. "
+      + "Click Connect to wire up the routing and you're done.";
+    return panel;
+  }
+
+  function unsupportedNotice(entry, shape) {
+    const msg = {
+      "oauth": `${entry.name} uses OAuth sign-in — wizard support lands in a later PR. For now, run:`,
+      "device-code": `${entry.name} uses device code — wizard support lands in a later PR. For now, run:`,
+      "ssh": `${entry.name} is an SSH service — use \`nyxid service add-ssh\` instead. For now, run:`,
+    }[shape] || "Wizard support coming. For now, run:";
+    const cmd = shape === "ssh"
+      ? `nyxid service add-ssh --label <LABEL> --host <HOST> --via-node <NODE>`
+      : shape === "oauth"
+      ? `nyxid service add ${entry.slug} --oauth`
+      : shape === "device-code"
+      ? `nyxid service add ${entry.slug} --device-code`
+      : `nyxid service add ${entry.slug} --credential-env VAR --label <LABEL>`;
+
+    const wrap = document.createElement("div");
+    wrap.className = "wizard-info-panel";
+    const p = document.createElement("p");
+    p.textContent = msg;
+    p.style.margin = "0 0 0.5rem";
+    wrap.appendChild(p);
+    const pre = document.createElement("pre");
+    pre.className = "wizard-code";
+    pre.style.margin = "0";
+    pre.textContent = cmd;
+    wrap.appendChild(pre);
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "wizard-btn-tiny";
+    copy.textContent = "Copy command";
+    copy.style.marginTop = "0.5rem";
+    copy.addEventListener("click", () => copyText(cmd, copy));
+    wrap.appendChild(copy);
+    return wrap;
+  }
+
+  function readField(id) {
+    const el = document.getElementById(id);
+    return el ? el.value.trim() : "";
+  }
+
+  function buildCreateBody() {
+    if (!selection) return null;
+    const shape = flowShapeOf(selection);
+    const label = readField("f-label");
+    if (!label) return { error: "Label is required." };
+    const body = { service_slug: selection.slug, label };
+
+    if (shape === "no-auth") {
+      return { body };
+    }
+    if (shape === "gateway-url") {
+      const endpointUrl = readField("f-endpoint-url");
+      const credential = readField("f-credential");
+      if (!endpointUrl) return { error: "Gateway URL is required." };
+      if (!credential) return { error: "API key is required." };
+      return { body: { ...body, endpoint_url: endpointUrl, credential } };
+    }
+    if (shape === "token-exchange") {
+      const fields = selection.token_exchange_credential_fields || [];
+      const creds = {};
+      for (let i = 0; i < fields.length; i++) {
+        const val = readField(`f-tx-${i}`);
+        if (!val) return { error: `${fields[i].label || fields[i].name} is required.` };
+        creds[fields[i].name] = val;
+      }
+      // Backend's /keys accepts the multi-field token-exchange as a
+      // JSON-encoded credential string. See service.rs for the same
+      // pattern used by the existing CLI.
+      return { body: { ...body, credential: JSON.stringify(creds) } };
+    }
+    // default "paste-key"
+    const credential = readField("f-credential");
+    if (!credential) return { error: "API key is required." };
+    return { body: { ...body, credential } };
+  }
+
+  function wipeCredentialInputs() {
+    // Defence in depth: clear all inputs after submit so the pasted key
+    // isn't sitting in the DOM until page unload.
+    credentialFieldsEl.querySelectorAll("input").forEach(el => { el.value = ""; });
   }
 
   async function submitCredential() {
     if (!selection) return;
-    if (postInFlight) return;   // guard against double-click / Enter-spam
-    const label = credentialLabelInput.value.trim();
-    const credential = credentialValueInput.value.trim();
-    if (!label) {
-      setStatus(credentialStatus, "Label is required.", "error");
-      credentialLabelInput.focus();
-      return;
-    }
-    if (!credential) {
-      setStatus(credentialStatus, "API key is required.", "error");
-      credentialValueInput.focus();
+    if (postInFlight) return;
+    const built = buildCreateBody();
+    if (!built) return;
+    if (built.error) {
+      setStatus(credentialStatus, built.error, "error");
       return;
     }
     postInFlight = true;
     credentialSubmit.disabled = true;
     credentialBack.disabled = true;
-    setStatus(credentialStatus, `Creating '${label}'…`);
-
+    setStatus(credentialStatus, `Creating '${built.body.label}'…`);
     try {
-      const body = {
-        service_slug: selection.slug,
-        label,
-        credential,
-      };
-      const data = await proxyJson("POST", "/api/proxy/api/v1/keys", body);
+      const data = await proxyJson("POST", "/api/proxy/api/v1/keys", built.body);
       createdKey = data || {};
-      // Clear the raw credential from memory ASAP. The DOM input still
-      // technically holds it until the page unloads; we clear that too.
-      credentialValueInput.value = "";
+      wipeCredentialInputs();
       renderConfirm(createdKey);
       showPanel("confirm");
     } catch (err) {
-      setStatus(credentialStatus,
-        `Couldn't create service: ${err.message}`,
-        "error");
+      setStatus(credentialStatus, `Couldn't create service: ${err.message}`, "error");
     } finally {
       postInFlight = false;
       credentialSubmit.disabled = false;
@@ -375,20 +585,11 @@
     nextBtn.addEventListener("click", enterCredentialStep);
     cancelBtn.addEventListener("click", onCancel);
     credentialBack.addEventListener("click", () => {
-      credentialValueInput.value = "";
+      wipeCredentialInputs();
       setStatus(credentialStatus, "");
       showPanel("catalog");
     });
     credentialSubmit.addEventListener("click", (e) => { e.preventDefault(); submitCredential(); });
-    credentialReveal.addEventListener("click", () => {
-      if (credentialValueInput.type === "password") {
-        credentialValueInput.type = "text";
-        credentialReveal.textContent = "hide";
-      } else {
-        credentialValueInput.type = "password";
-        credentialReveal.textContent = "show";
-      }
-    });
     // Enter on the form submits.
     document.getElementById("credential-form").addEventListener("submit", (e) => {
       e.preventDefault();

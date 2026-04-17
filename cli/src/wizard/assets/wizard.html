@@ -60,31 +60,15 @@
       </div>
     </section>
 
-    <!-- Step 2 — SimpleKey credential form -->
+    <!-- Step 2 — credential form (fields rendered dynamically from the
+         catalog entry's flow shape: paste-key / gateway-url /
+         token-exchange / no-auth / [unsupported-fallback]) -->
     <section class="wizard-step-panel" id="step-credential" data-step="2" hidden>
       <h1 class="wizard-title" id="credential-title">Connect service</h1>
       <p class="wizard-body wizard-muted" id="credential-subtitle"></p>
 
       <form id="credential-form" autocomplete="off">
-        <label class="wizard-field">
-          <span class="wizard-field-label">Label</span>
-          <input type="text" id="credential-label" name="label" required
-                 autocomplete="off" spellcheck="false">
-          <span class="wizard-field-hint">Shown everywhere in the CLI and web UI.</span>
-        </label>
-
-        <label class="wizard-field">
-          <span class="wizard-field-label">API key</span>
-          <div class="wizard-input-row">
-            <input type="password" id="credential-value" name="credential" required
-                   autocomplete="off" spellcheck="false">
-            <button type="button" class="wizard-input-toggle" id="credential-reveal"
-                    aria-label="show/hide">show</button>
-          </div>
-          <span class="wizard-field-hint" id="credential-hint">
-            Paste the key from the provider's dashboard.
-          </span>
-        </label>
+        <div id="credential-fields"></div>
 
         <div class="wizard-info-panel">
           This will create:
@@ -100,7 +84,9 @@
 
       <div class="wizard-actions">
         <button type="button" id="credential-back" class="wizard-btn wizard-btn-ghost">← Back</button>
-        <button type="button" id="credential-submit" class="wizard-btn wizard-btn-primary">Connect</button>
+        <span id="credential-submit-wrap">
+          <button type="button" id="credential-submit" class="wizard-btn wizard-btn-primary">Connect</button>
+        </span>
       </div>
     </section>
 
