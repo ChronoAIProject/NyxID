@@ -55,8 +55,10 @@
 
   let catalog = [];       // raw catalog entries from backend
   let selection = null;   // catalog entry currently highlighted
+  let selectionDetail = null; // full catalog-detail fetch (credential_mode, provider_config_id, docs)
   let createdKey = null;  // result of POST /keys
   let finished = false;   // once Done/Cancel clicked, don't fire again
+  let oauthCredentialsSet = false; // flipped after PUT /providers/:id/credentials succeeds
 
   // ---- helpers ----
 
@@ -89,6 +91,14 @@
     el.textContent = msg || "";
     el.className = "wizard-status" + (cls ? " " + cls : "");
   }
+
+  function showErrorBanner(msg) {
+    const el = document.getElementById("credential-error");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.hidden = !msg;
+  }
+  function hideErrorBanner() { showErrorBanner(""); }
 
   // Match the frontend `AddKeyDialog` catalog grid: show ALL catalog
   // entries, badge by flow shape, and route to the right sub-flow at
@@ -219,7 +229,7 @@
     return entry.slug;
   }
 
-  function enterCredentialStep() {
+  async function enterCredentialStep() {
     if (!selection) return;
     if (selection.slug === "__custom__") {
       setStatus(catalogStatus,
@@ -231,11 +241,29 @@
     credentialTitle.textContent = `Connect ${selection.name || selection.slug}`;
     credentialSubtitle.textContent = (selection.description || "").slice(0, 200);
     setStatus(credentialStatus, "");
+    hideErrorBanner();
+    oauthCredentialsSet = false;
+    selectionDetail = null;
+
+    // For OAuth we need the full catalog entry (credential_mode,
+    // documentation_url, provider_config_id) to decide whether to show
+    // the client_id/secret sub-step first.
+    if (shape === "oauth") {
+      showPanel("credential");
+      setStatus(credentialStatus, "Loading provider details…");
+      try {
+        selectionDetail = await proxyJson("GET",
+          `/api/proxy/api/v1/catalog/${encodeURIComponent(selection.slug)}`);
+      } catch (err) {
+        showErrorBanner(`Couldn't load provider details: ${err.message}`);
+        return;
+      }
+      setStatus(credentialStatus, "");
+    }
 
     // Build the form body dynamically from the catalog entry's shape.
     renderCredentialFormFields(selection, shape);
     showPanel("credential");
-    // focus first real input
     const first = credentialFieldsEl.querySelector("input,textarea");
     if (first) first.focus();
   }
@@ -265,7 +293,12 @@
     credentialSubmitWrap.hidden = false;
 
     if (shape === "oauth") {
-      credentialFieldsEl.appendChild(oauthInstructions(entry));
+      const mode = (selectionDetail?.credential_mode || "system").toLowerCase();
+      if ((mode === "user" || mode === "both") && !oauthCredentialsSet) {
+        credentialFieldsEl.appendChild(oauthCredentialsSubStep(entry, selectionDetail));
+      } else {
+        credentialFieldsEl.appendChild(oauthInstructions(entry, selectionDetail));
+      }
     } else if (shape === "device-code") {
       credentialFieldsEl.appendChild(deviceCodeInstructions(entry));
     } else if (shape === "gateway-url") {
@@ -373,9 +406,10 @@
     return panel;
   }
 
-  function oauthInstructions(entry) {
+  function oauthInstructions(entry, detail) {
     const panel = document.createElement("div");
     panel.className = "wizard-info-panel";
+    const docsUrl = detail?.documentation_url || entry.documentation_url;
     panel.innerHTML = `
       <p style="margin:0 0 0.5rem"><strong>Sign in with ${escapeHTML(entry.name || entry.slug)}</strong></p>
       <p style="margin:0 0 0.5rem">
@@ -384,8 +418,54 @@
         automatically complete in the background.
       </p>
       <p style="margin:0" class="wizard-muted">Keep this tab open while the authorization runs.</p>
+      ${docsUrl ? `<p style="margin:0.75rem 0 0"><a href="${escapeAttr(docsUrl)}" target="_blank" rel="noopener noreferrer" class="wizard-link">📖 How to set up ${escapeHTML(entry.name || entry.slug)} OAuth ↗</a></p>` : ""}
     `;
     return panel;
+  }
+
+  // OAuth credentials sub-step (for providers whose `credential_mode`
+  // is "user" or "both"). Mirrors frontend `OAuthCredentialsStep` in
+  // add-key-dialog.tsx:1561-1667.
+  function oauthCredentialsSubStep(entry, detail) {
+    const wrap = document.createElement("div");
+    const intro = document.createElement("div");
+    intro.className = "wizard-info-panel";
+    const docsUrl = detail?.documentation_url || entry.documentation_url;
+    intro.innerHTML = `
+      <p style="margin:0 0 0.5rem">
+        <strong>${escapeHTML(entry.name || entry.slug)} needs your OAuth app credentials first.</strong>
+      </p>
+      <p style="margin:0 0 0.5rem" class="wizard-muted">
+        Register an OAuth app on ${escapeHTML(entry.name || entry.slug)} (Developer
+        Settings → OAuth Apps), then paste its Client ID and Client Secret
+        below. The credentials are encrypted at rest on NyxID.
+      </p>
+      ${docsUrl ? `<p style="margin:0"><a href="${escapeAttr(docsUrl)}" target="_blank" rel="noopener noreferrer" class="wizard-link">📖 How to create an OAuth app ↗</a></p>` : ""}
+    `;
+    wrap.appendChild(intro);
+
+    wrap.appendChild(fieldEl({
+      id: "f-client-id",
+      label: "Client ID",
+      type: "text",
+      required: true,
+      hint: "From the OAuth app you just created on the provider.",
+    }));
+    wrap.appendChild(fieldEl({
+      id: "f-client-secret",
+      label: "Client Secret",
+      type: "password",
+      secret: true,
+      required: true,
+      hint: "Never leaves your machine until Connect is clicked. Encrypted at rest on NyxID.",
+    }));
+    return wrap;
+  }
+
+  function escapeAttr(s) {
+    return (s || "").replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
   }
 
   function deviceCodeInstructions(entry) {
@@ -495,7 +575,20 @@
     if (!selection) return;
     if (postInFlight) return;
     const shape = flowShapeOf(selection);
-    if (shape === "oauth" || shape === "device-code") {
+    hideErrorBanner();
+    if (shape === "oauth") {
+      const mode = (selectionDetail?.credential_mode || "system").toLowerCase();
+      // Sub-step A: persist the user's OAuth app credentials, then
+      // re-render Step 2 with the sign-in panel.
+      if ((mode === "user" || mode === "both") && !oauthCredentialsSet) {
+        await submitOauthCredentials();
+        return;
+      }
+      // Sub-step B: kick off the real OAuth sign-in + poll.
+      await submitAuthFlow("oauth");
+      return;
+    }
+    if (shape === "device-code") {
       await submitAuthFlow(shape);
       return;
     }
@@ -517,6 +610,43 @@
       showPanel("confirm");
     } catch (err) {
       setStatus(credentialStatus, `Couldn't create service: ${err.message}`, "error");
+    } finally {
+      postInFlight = false;
+      credentialSubmit.disabled = false;
+      credentialBack.disabled = false;
+    }
+  }
+
+  // Sub-step A for OAuth with user-configured OAuth apps: PUT the
+  // client_id + client_secret onto the provider entry, then re-render
+  // the form as the sign-in panel. Mirrors the frontend's
+  // OAuthCredentialsStep → OAuthStep transition.
+  async function submitOauthCredentials() {
+    const label = readField("f-label");
+    const clientId = readField("f-client-id");
+    const clientSecret = readField("f-client-secret");
+    if (!label) { showErrorBanner("Label is required."); return; }
+    if (!clientId) { showErrorBanner("Client ID is required."); return; }
+    if (!clientSecret) { showErrorBanner("Client Secret is required."); return; }
+    const providerId = selectionDetail?.provider_config_id;
+    if (!providerId) { showErrorBanner("Catalog is missing provider_config_id for this service."); return; }
+
+    postInFlight = true;
+    credentialSubmit.disabled = true;
+    credentialBack.disabled = true;
+    setStatus(credentialStatus, "Saving OAuth app credentials…");
+
+    try {
+      await proxyJson("PUT",
+        `/api/proxy/api/v1/providers/${encodeURIComponent(providerId)}/credentials`,
+        { client_id: clientId, client_secret: clientSecret, label });
+      oauthCredentialsSet = true;
+      setStatus(credentialStatus, "");
+      // Re-render Step 2 — now shows the sign-in panel with docs link.
+      renderCredentialFormFields(selection, "oauth");
+    } catch (err) {
+      showErrorBanner(`Couldn't save OAuth app credentials: ${err.message}`);
+      setStatus(credentialStatus, "");
     } finally {
       postInFlight = false;
       credentialSubmit.disabled = false;
@@ -575,7 +705,8 @@
       renderConfirm(createdKey);
       showPanel("confirm");
     } catch (err) {
-      setStatus(credentialStatus, err.message || String(err), "error");
+      showErrorBanner(err.message || String(err));
+      setStatus(credentialStatus, "");
     } finally {
       postInFlight = false;
       credentialSubmit.disabled = false;
@@ -872,8 +1003,26 @@
     nextBtn.addEventListener("click", enterCredentialStep);
     cancelBtn.addEventListener("click", onCancel);
     credentialBack.addEventListener("click", () => {
+      // For OAuth user/both mode: after credentials are saved we're on
+      // sub-step B (sign-in). Back should return to sub-step A (edit
+      // credentials), not bail to the catalog.
+      if (selection
+          && flowShapeOf(selection) === "oauth"
+          && oauthCredentialsSet) {
+        oauthCredentialsSet = false;
+        hideErrorBanner();
+        setStatus(credentialStatus, "");
+        renderCredentialFormFields(selection, "oauth");
+        const first = credentialFieldsEl.querySelector("input,textarea");
+        if (first) first.focus();
+        return;
+      }
+      // Otherwise: back to Step 1.
       wipeCredentialInputs();
+      hideErrorBanner();
       setStatus(credentialStatus, "");
+      selectionDetail = null;
+      oauthCredentialsSet = false;
       showPanel("catalog");
     });
     credentialSubmit.addEventListener("click", (e) => { e.preventDefault(); submitCredential(); });

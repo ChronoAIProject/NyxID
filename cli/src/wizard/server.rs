@@ -117,6 +117,13 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                 method: Method::GET,
                 path_template: "/api/v1/keys/:key_id",
             },
+            // OAuth app credentials (client_id, client_secret) stored on the
+            // provider entry. Required up-front for providers whose
+            // credential_mode is "user" or "both".
+            ProxyRoute {
+                method: Method::PUT,
+                path_template: "/api/v1/providers/:provider_id/credentials",
+            },
             // OAuth: GET returns { authorization_url }.
             ProxyRoute {
                 method: Method::GET,

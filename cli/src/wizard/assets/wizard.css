@@ -55,7 +55,7 @@ html, body {
 }
 
 .wizard-shell {
-  max-width: 880px;
+  max-width: 1040px;
   margin: 0 auto;
   /* Cap the whole shell at the viewport so the page doesn't grow past
      one screen. The main content area handles its own scroll when the
@@ -159,12 +159,12 @@ html, body {
   text-align: center;
 }
 
-/* Simple setup: exactly 2 columns, max 2 rows visible (= 4 cards).
+/* Simple setup: exactly 3 columns, max 2 rows visible (= 6 cards).
    Card height shrinks on short viewports via min(). Extra cards scroll
    inside this container so the page itself never grows. */
 #catalog-simple {
   --row-h: min(var(--wizard-card-h), 18vh);
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   grid-auto-rows: var(--row-h);
   max-height: calc(var(--row-h) * 2 + 0.625rem);
   overflow-y: auto;
@@ -266,6 +266,28 @@ html, body {
 }
 .wizard-status.success { color: #37b24d; }
 .wizard-status.error { color: #e03131; }
+
+/* Prominent error banner for OAuth credential / initiate failures.
+   Replaces the tiny status-line error for high-stakes form failures. */
+.wizard-error-banner {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  border: 1px solid #e03131;
+  background: color-mix(in srgb, #e03131 12%, var(--panel));
+  color: #ff6b6b;
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+.wizard-error-banner[hidden] { display: none; }
+
+/* Docs link inside info panels (OAuth help, provider setup guides). */
+.wizard-link {
+  color: var(--primary);
+  text-decoration: none;
+  font-weight: 500;
+}
+.wizard-link:hover { text-decoration: underline; }
 
 /* ---- M3: credential form fields ---- */
 
