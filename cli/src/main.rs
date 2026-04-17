@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod commands;
 pub mod node;
+mod wizard;
 
 use anyhow::Result;
 use clap::Parser;
@@ -89,5 +90,33 @@ async fn run() -> Result<()> {
 
         // Admin-only operations
         Commands::Admin { command } => commands::admin::run(command).await,
+
+        // Wizard v2 (experimental, see docs/CLI_WIZARD_V2.md)
+        Commands::Wizard(args) => run_wizard(args).await,
+    }
+}
+
+async fn run_wizard(args: cli::WizardArgs) -> Result<()> {
+    match wizard::run_flow(&args.flow).await? {
+        wizard::WizardOutcome::Completed(body) => {
+            eprintln!("✓ Wizard completed.");
+            if !body.is_null() {
+                eprintln!(
+                    "  Result: {}",
+                    serde_json::to_string(&body).unwrap_or_default()
+                );
+            }
+            Ok(())
+        }
+        wizard::WizardOutcome::Cancelled => {
+            eprintln!("✗ Wizard cancelled. No service was created.");
+            std::process::exit(1);
+        }
+        wizard::WizardOutcome::TimedOut => {
+            eprintln!("✗ Wizard timed out. No service was created.");
+            eprintln!("  Tip: for scripted use, pass a slug and --credential-env:");
+            eprintln!("       nyxid service add <slug> --credential-env VAR --label <label>");
+            std::process::exit(1);
+        }
     }
 }

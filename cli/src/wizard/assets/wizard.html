@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="wizard-csrf" content="{{CSRF_TOKEN}}">
+<title>NyxID Wizard</title>
+<link rel="stylesheet" href="/assets/wizard.css">
+</head>
+<body>
+<div class="wizard-shell">
+  <header class="wizard-header">
+    <div class="wizard-brand">NyxID</div>
+    <div class="wizard-step">Step 1 placeholder — M1 skeleton</div>
+  </header>
+  <main class="wizard-main">
+    <h1 class="wizard-title">Wizard skeleton</h1>
+    <p class="wizard-body">
+      This is the M1 placeholder page. It proves the CLI can bind a local
+      HTTP server, embed static assets, open your browser, and round-trip
+      a completion signal back to the terminal.
+    </p>
+    <p class="wizard-body wizard-muted">
+      Real UI lands in M2 (catalog) and M3 (credential form).
+    </p>
+    <div class="wizard-status" id="wizard-status" aria-live="polite"></div>
+    <div class="wizard-actions">
+      <button type="button" id="wizard-cancel" class="wizard-btn wizard-btn-ghost">Cancel</button>
+      <button type="button" id="wizard-done" class="wizard-btn wizard-btn-primary">Done — return to terminal</button>
+    </div>
+  </main>
+  <footer class="wizard-footer">
+    <span>Served locally from <code id="wizard-origin"></code></span>
+    <span>· Nothing leaves your machine</span>
+  </footer>
+</div>
+<script src="/assets/wizard.js"></script>
+</body>
+</html>

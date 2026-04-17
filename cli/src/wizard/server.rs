@@ -1,0 +1,337 @@
+//! Local axum server for the wizard.
+//!
+//! M1 scope: bind `127.0.0.1:0`, serve embedded `wizard.html`/`.js`/`.css`
+//! with a CSRF token substituted into the HTML template, handle
+//! `/api/proxy/complete` and `/api/proxy/cancel`, signal the CLI to exit.
+
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context, Result, anyhow};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use rand::RngCore;
+use rust_embed::RustEmbed;
+use serde_json::{Value, json};
+use tokio::{
+    net::TcpListener,
+    sync::{Notify, oneshot},
+};
+
+use super::WizardOutcome;
+
+/// Static assets live under `src/wizard/assets/` and are baked into the binary.
+#[derive(RustEmbed)]
+#[folder = "src/wizard/assets/"]
+struct Assets;
+
+/// Overall ceiling. If a heartbeat is never missed but the user never
+/// completes, this kills the session so a walked-away tab eventually frees.
+const WIZARD_MAX_DURATION: Duration = Duration::from_secs(1800); // 30 min
+/// Browser pings `/api/proxy/heartbeat` every 10 s; miss two in a row
+/// and the CLI treats the tab as dead. Grace: 22 s (2 × 10 + jitter).
+const HEARTBEAT_DEAD_AFTER: Duration = Duration::from_secs(22);
+/// Grace period at startup before we start enforcing the heartbeat dead
+/// line. Lets the browser actually load the page.
+const HEARTBEAT_STARTUP_GRACE: Duration = Duration::from_secs(8);
+/// How often the CLI checks the last-heartbeat timestamp.
+const HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Clone)]
+struct ServerState {
+    csrf_token: Arc<String>,
+    done_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<WizardOutcome>>>>,
+    shutdown: Arc<Notify>,
+    started_at: Instant,
+    last_heartbeat: Arc<tokio::sync::Mutex<Option<Instant>>>,
+}
+
+/// Mint a 32-byte random CSRF token, hex-encoded.
+fn mint_csrf() -> String {
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
+/// Constant-time compare of the CSRF header against the minted token.
+fn csrf_ok(headers: &HeaderMap, expected: &str) -> bool {
+    let provided = match headers.get("x-wizard-csrf") {
+        Some(v) => v.as_bytes(),
+        None => return false,
+    };
+    constant_time_eq::constant_time_eq(provided, expected.as_bytes())
+}
+
+/// Strict CSP: self only, no remote anything, no eval, no framing.
+const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
+                   img-src 'self' data:; connect-src 'self'; font-src 'self'; \
+                   form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
+
+fn base_security_headers() -> HeaderMap {
+    let mut h = HeaderMap::new();
+    h.insert("content-security-policy", HeaderValue::from_static(CSP));
+    h.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    h.insert("cache-control", HeaderValue::from_static("no-store"));
+    h
+}
+
+async fn serve_index(State(state): State<ServerState>) -> Response {
+    let raw = match Assets::get("wizard.html") {
+        Some(a) => a,
+        None => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "wizard.html missing").into_response();
+        }
+    };
+    let html = std::str::from_utf8(raw.data.as_ref())
+        .unwrap_or("")
+        .replace("{{CSRF_TOKEN}}", &state.csrf_token);
+
+    let mut headers = base_security_headers();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    (StatusCode::OK, headers, html).into_response()
+}
+
+async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+    // Only allow plain filenames, no path traversal.
+    if name.contains('/') || name.contains("..") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let asset = match Assets::get(&name) {
+        Some(a) => a,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let ct = if name.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if name.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if name.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    };
+    let mut headers = base_security_headers();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(ct).unwrap());
+    (StatusCode::OK, headers, asset.data.into_owned()).into_response()
+}
+
+/// Check a same-origin POST: CSRF header + origin must match `127.0.0.1`.
+fn check_origin(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        // Missing Origin on a browser POST is unusual. Reject for defense
+        // in depth — curl from a local process would still succeed if we
+        // accepted missing Origin.
+        return false;
+    };
+    let origin = origin.to_str().unwrap_or("");
+    origin.starts_with("http://127.0.0.1:") || origin.starts_with("http://localhost:")
+}
+
+async fn handle_complete(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_origin(&headers) {
+        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    }
+    if !csrf_ok(&headers, &state.csrf_token) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    signal_and_shutdown(state, WizardOutcome::Completed(body)).await;
+    (StatusCode::NO_CONTENT, base_security_headers()).into_response()
+}
+
+async fn handle_cancel(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    if !check_origin(&headers) {
+        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    }
+    if !csrf_ok(&headers, &state.csrf_token) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    signal_and_shutdown(state, WizardOutcome::Cancelled).await;
+    (StatusCode::NO_CONTENT, base_security_headers()).into_response()
+}
+
+/// `navigator.sendBeacon` can't set custom headers, so the unload path is
+/// treated as a soft cancel guarded only by Origin + short age. This is
+/// intentionally weaker than the button-click cancel.
+async fn handle_cancel_unload(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    if !check_origin(&headers) {
+        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    }
+    // Only honour unload cancels in the first 30 min of the server's life —
+    // this prevents a crashed-and-stale tab from lingering past the overall
+    // ceiling.
+    if state.started_at.elapsed() > Duration::from_secs(1800) {
+        return (StatusCode::GONE, "too old").into_response();
+    }
+    signal_and_shutdown(state, WizardOutcome::Cancelled).await;
+    (StatusCode::NO_CONTENT, base_security_headers()).into_response()
+}
+
+async fn handle_heartbeat(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    if !check_origin(&headers) {
+        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    }
+    if !csrf_ok(&headers, &state.csrf_token) {
+        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
+    }
+    *state.last_heartbeat.lock().await = Some(Instant::now());
+    (StatusCode::NO_CONTENT, base_security_headers()).into_response()
+}
+
+async fn handle_status(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    if !check_origin(&headers) {
+        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    }
+    let body = json!({
+        "state": "running",
+        "uptime_s": state.started_at.elapsed().as_secs(),
+    });
+    let mut h = base_security_headers();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    (StatusCode::OK, h, body.to_string()).into_response()
+}
+
+async fn signal_and_shutdown(state: ServerState, outcome: WizardOutcome) {
+    let mut guard = state.done_tx.lock().await;
+    if let Some(tx) = guard.take() {
+        let _ = tx.send(outcome);
+    }
+    state.shutdown.notify_waiters();
+}
+
+/// M1 skeleton runner. Binds, serves, opens the browser, waits for exit.
+pub async fn run_skeleton() -> Result<WizardOutcome> {
+    let csrf = mint_csrf();
+    let (done_tx, done_rx) = oneshot::channel::<WizardOutcome>();
+    let shutdown = Arc::new(Notify::new());
+
+    let state = ServerState {
+        csrf_token: Arc::new(csrf),
+        done_tx: Arc::new(tokio::sync::Mutex::new(Some(done_tx))),
+        shutdown: shutdown.clone(),
+        started_at: Instant::now(),
+        last_heartbeat: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    let app = Router::new()
+        .route("/wizard", get(serve_index))
+        .route("/", get(serve_index))
+        .route("/assets/{name}", get(serve_asset))
+        .route("/api/proxy/complete", post(handle_complete))
+        .route("/api/proxy/cancel", post(handle_cancel))
+        .route("/api/proxy/cancel-unload", post(handle_cancel_unload))
+        .route("/api/proxy/heartbeat", post(handle_heartbeat))
+        .route("/api/proxy/status", get(handle_status))
+        .with_state(state.clone());
+
+    // Bind first (port is resolved before we spawn or open the browser) to
+    // fix v1 gap #1 (server-spawn race).
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .context("binding wizard server to 127.0.0.1:0")?;
+    let addr = listener
+        .local_addr()
+        .context("reading wizard server local addr")?;
+    let url = format!("http://127.0.0.1:{}/wizard", addr.port());
+
+    // Spawn the server. Await a first-accept signal via readiness channel.
+    let shutdown_rx = shutdown.clone();
+    let server_handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown_rx.notified().await;
+            })
+            .await
+    });
+
+    // Tell the user what we're doing and open the browser.
+    // `NYXID_WIZARD_NO_OPEN=1` skips the browser launch (used by
+    // automated validation and CI smoke tests).
+    eprintln!("→ Opening {url} … (Ctrl-C to cancel)");
+    eprintln!("  Waiting for browser …");
+    if std::env::var_os("NYXID_WIZARD_NO_OPEN").is_none() {
+        if let Err(e) = open::that(&url) {
+            eprintln!("  Couldn't auto-open browser: {e}");
+            eprintln!("  Visit the URL above manually.");
+        }
+    } else {
+        eprintln!("  (NYXID_WIZARD_NO_OPEN set — not opening a browser)");
+    }
+
+    // Heartbeat watchdog: if the browser stops pinging /api/proxy/heartbeat
+    // for longer than HEARTBEAT_DEAD_AFTER (after a startup grace window),
+    // we treat the tab as closed and cancel.
+    let watchdog_state = state.clone();
+    let watchdog_shutdown = shutdown.clone();
+    let (watchdog_tx, watchdog_rx) = oneshot::channel::<()>();
+    let watchdog_handle = tokio::spawn(async move {
+        let tx = watchdog_tx;
+        loop {
+            tokio::select! {
+                _ = watchdog_shutdown.notified() => return,
+                _ = tokio::time::sleep(HEARTBEAT_CHECK_INTERVAL) => {}
+            }
+            if watchdog_state.started_at.elapsed() < HEARTBEAT_STARTUP_GRACE {
+                continue;
+            }
+            let last = *watchdog_state.last_heartbeat.lock().await;
+            let dead = match last {
+                Some(t) => t.elapsed() > HEARTBEAT_DEAD_AFTER,
+                None => {
+                    watchdog_state.started_at.elapsed()
+                        > HEARTBEAT_STARTUP_GRACE + HEARTBEAT_DEAD_AFTER
+                }
+            };
+            if dead {
+                let _ = tx.send(());
+                return;
+            }
+        }
+    });
+
+    // Wait for: completion signal, OR overall ceiling, OR watchdog (dead
+    // heartbeat), OR Ctrl-C.
+    let outcome = tokio::select! {
+        v = done_rx => {
+            v.map_err(|_| anyhow!("wizard completion channel closed unexpectedly"))?
+        }
+        _ = watchdog_rx => {
+            eprintln!("  Browser stopped responding (tab closed?) — cancelling.");
+            WizardOutcome::Cancelled
+        }
+        _ = tokio::time::sleep(WIZARD_MAX_DURATION) => {
+            WizardOutcome::TimedOut
+        }
+        _ = tokio::signal::ctrl_c() => {
+            WizardOutcome::Cancelled
+        }
+    };
+    watchdog_handle.abort();
+
+    // Ensure graceful shutdown fires even if we hit the timeout/ctrl-c paths.
+    shutdown.notify_waiters();
+    let _ = server_handle.await;
+
+    Ok(outcome)
+}

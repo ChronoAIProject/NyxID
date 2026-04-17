@@ -49,5 +49,12 @@ libc = "0.2"
 nix = { version = "0.29", features = ["term", "process", "signal"] }
 tempfile = "3"
 
+# Wizard v2 (CLI-served local browser UI). See docs/CLI_WIZARD_V2.md
+axum = { workspace = true }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["set-header", "cors"] }
+rust-embed = { version = "8", features = ["include-exclude"] }
+constant_time_eq = "0.4"
+
 [dev-dependencies]
 tempfile = "3"
