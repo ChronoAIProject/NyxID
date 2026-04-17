@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="wizard-csrf" content="{{CSRF_TOKEN}}">
 <meta name="wizard-flow" content="{{FLOW}}">
+<meta name="wizard-base-url" content="{{BASE_URL}}">
 <title>NyxID Wizard</title>
 <link rel="stylesheet" href="/assets/wizard.css">
 </head>
@@ -44,7 +45,7 @@
           <div class="wizard-card-title">Custom / self-hosted…</div>
           <div class="wizard-card-sub">
             For OAuth flows, device code, self-hosted gateways, or any
-            endpoint that isn't a simple bearer-token API.
+            endpoint that isn't a simple bearer-token API. (Lands in M5 — for now use <code>nyxid service add</code> with flags.)
           </div>
         </button>
       </div>
@@ -59,20 +60,73 @@
       </div>
     </section>
 
-    <!-- Step 2+ placeholder (M3 fills this in) -->
-    <section class="wizard-step-panel" id="step-placeholder" data-step="2" hidden>
-      <h1 class="wizard-title">Step 2 placeholder</h1>
-      <p class="wizard-body">
-        You picked: <strong id="picked-slug">?</strong>
-      </p>
-      <p class="wizard-body wizard-muted">
-        The credential form lands in M3. For now this is a round-trip proof
-        that Step 1 → Step 2 transitions work and the selection is carried
-        forward.
-      </p>
-      <div class="wizard-status" id="placeholder-status" aria-live="polite"></div>
+    <!-- Step 2 — SimpleKey credential form -->
+    <section class="wizard-step-panel" id="step-credential" data-step="2" hidden>
+      <h1 class="wizard-title" id="credential-title">Connect service</h1>
+      <p class="wizard-body wizard-muted" id="credential-subtitle"></p>
+
+      <form id="credential-form" autocomplete="off">
+        <label class="wizard-field">
+          <span class="wizard-field-label">Label</span>
+          <input type="text" id="credential-label" name="label" required
+                 autocomplete="off" spellcheck="false">
+          <span class="wizard-field-hint">Shown everywhere in the CLI and web UI.</span>
+        </label>
+
+        <label class="wizard-field">
+          <span class="wizard-field-label">API key</span>
+          <div class="wizard-input-row">
+            <input type="password" id="credential-value" name="credential" required
+                   autocomplete="off" spellcheck="false">
+            <button type="button" class="wizard-input-toggle" id="credential-reveal"
+                    aria-label="show/hide">show</button>
+          </div>
+          <span class="wizard-field-hint" id="credential-hint">
+            Paste the key from the provider's dashboard.
+          </span>
+        </label>
+
+        <div class="wizard-info-panel">
+          This will create:
+          <ul>
+            <li>an endpoint — where NyxID sends requests</li>
+            <li>a stored key — encrypted at rest</li>
+            <li>a routing rule — reachable at <code>/proxy/s/&lt;slug&gt;/…</code></li>
+          </ul>
+        </div>
+      </form>
+
+      <div class="wizard-status" id="credential-status" aria-live="polite"></div>
+
       <div class="wizard-actions">
-        <button type="button" id="step2-back" class="wizard-btn wizard-btn-ghost">← Back</button>
+        <button type="button" id="credential-back" class="wizard-btn wizard-btn-ghost">← Back</button>
+        <button type="button" id="credential-submit" class="wizard-btn wizard-btn-primary">Connect</button>
+      </div>
+    </section>
+
+    <!-- Step 3 — confirmation -->
+    <section class="wizard-step-panel" id="step-confirm" data-step="3" hidden>
+      <h1 class="wizard-title"><span aria-hidden="true">✓</span> Service created</h1>
+
+      <dl class="wizard-detail-list">
+        <dt>Slug</dt><dd id="confirm-slug">—</dd>
+        <dt>Label</dt><dd id="confirm-label">—</dd>
+        <dt>Proxy URL</dt>
+        <dd>
+          <code id="confirm-proxy-url">—</code>
+          <button type="button" class="wizard-btn-tiny" id="copy-proxy-url">Copy</button>
+        </dd>
+      </dl>
+
+      <p class="wizard-body wizard-muted">Try it:</p>
+      <pre class="wizard-code" id="confirm-curl">curl …</pre>
+      <div class="wizard-actions wizard-actions-left">
+        <button type="button" class="wizard-btn-tiny" id="copy-curl">Copy curl</button>
+      </div>
+
+      <div class="wizard-status" id="confirm-status" aria-live="polite"></div>
+
+      <div class="wizard-actions">
         <button type="button" id="wizard-done" class="wizard-btn wizard-btn-primary">Done — return to terminal</button>
       </div>
     </section>

@@ -110,13 +110,7 @@ async fn run_wizard(args: cli::WizardArgs) -> Result<()> {
 
     match wizard::run_flow(&args.flow, proxy).await? {
         wizard::WizardOutcome::Completed(body) => {
-            eprintln!("✓ Wizard completed.");
-            if !body.is_null() {
-                eprintln!(
-                    "  Result: {}",
-                    serde_json::to_string(&body).unwrap_or_default()
-                );
-            }
+            print_wizard_summary(&body, &base_url);
             Ok(())
         }
         wizard::WizardOutcome::Cancelled => {
@@ -128,6 +122,53 @@ async fn run_wizard(args: cli::WizardArgs) -> Result<()> {
             eprintln!("  Tip: for scripted use, pass a slug and --credential-env:");
             eprintln!("       nyxid service add <slug> --credential-env VAR --label <label>");
             std::process::exit(1);
+        }
+    }
+}
+
+/// Format the happy-path completion summary per docs/CLI_WIZARD_V2.md §3.2.
+///
+/// The body is whatever the browser posted to `/api/proxy/complete`. For the
+/// `ai-key` flow it looks like: { flow, milestone, slug, label, proxy_url }.
+/// `proxy_url` may be null if the backend didn't echo one; we synthesize a
+/// sensible default from the CLI's own base_url.
+fn print_wizard_summary(body: &serde_json::Value, base_url: &str) {
+    let slug = body.get("slug").and_then(|v| v.as_str());
+    let label = body.get("label").and_then(|v| v.as_str());
+    let proxy_url = body.get("proxy_url").and_then(|v| v.as_str());
+
+    match slug {
+        Some(slug) => {
+            let display_label = label.unwrap_or(slug);
+            eprintln!("✓ Service '{display_label}' created.");
+            eprintln!("  Slug:      {slug}");
+            let rendered_url = match proxy_url {
+                Some(u) => u.to_string(),
+                None => format!(
+                    "{}/api/v1/proxy/s/{}/",
+                    base_url.trim_end_matches('/'),
+                    slug
+                ),
+            };
+            eprintln!("  Proxy URL: {rendered_url}");
+            eprintln!();
+            eprintln!("  Next:");
+            eprintln!(
+                "    curl {}<api-path> -H \"Authorization: Bearer $NYX_KEY\"",
+                if rendered_url.ends_with('/') {
+                    rendered_url.clone()
+                } else {
+                    format!("{rendered_url}/")
+                }
+            );
+            eprintln!("  Example: append /v1/models for OpenAI-compatible providers.");
+        }
+        None => {
+            // Wizard completed but didn't produce a slug. Could be a
+            // placeholder-only flow (early-milestone builds) or the user
+            // pressed Done on Step 1 with nothing selected. Print a minimal
+            // acknowledgement so the exit isn't silent.
+            eprintln!("✓ Wizard completed (no service created).");
         }
     }
 }

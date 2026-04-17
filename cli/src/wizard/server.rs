@@ -96,7 +96,7 @@ impl ProxyRoute {
 
 fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
     match kind {
-        // M2 scope: catalog read-only. Key creation + bindings land in M3/M4.
+        // M2-M3 scope: catalog read + SimpleKey create. Bindings land in M4.
         FlowKind::AiKey => vec![
             ProxyRoute {
                 method: Method::GET,
@@ -105,6 +105,10 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
             ProxyRoute {
                 method: Method::GET,
                 path_template: "/api/v1/catalog/:slug",
+            },
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/keys",
             },
         ],
     }
@@ -121,6 +125,12 @@ struct ServerState {
     allowlist: Arc<Vec<ProxyRoute>>,
     upstream: ReqwestClient,
     flow: FlowKind,
+    /// Count of in-flight mutating proxy requests (POST/PUT/PATCH/DELETE).
+    /// Incremented when we enter the proxy handler for a mutator, decremented
+    /// when the upstream response resolves. `handle_cancel_unload` refuses
+    /// to shut the server down while this is non-zero, closing the
+    /// tab-close-mid-POST race Codex flagged.
+    in_flight_mutations: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Mint a 32-byte random CSRF token, hex-encoded.
@@ -167,10 +177,16 @@ async fn serve_index(State(state): State<ServerState>) -> Response {
     let flow_name = match state.flow {
         FlowKind::AiKey => "ai-key",
     };
+    // base_url_root is the NyxID origin (e.g. https://nyx-api.chrono-ai.fun).
+    // It's not secret — the user already knows what backend they logged into
+    // — and the browser needs it to render a real proxy URL on Step 3
+    // instead of a placeholder. We do NOT expose the bearer token here;
+    // that stays in CLI process memory.
     let html = std::str::from_utf8(raw.data.as_ref())
         .unwrap_or("")
         .replace("{{CSRF_TOKEN}}", &state.csrf_token)
-        .replace("{{FLOW}}", flow_name);
+        .replace("{{FLOW}}", flow_name)
+        .replace("{{BASE_URL}}", &state.proxy.base_url_root);
 
     let mut headers = base_security_headers();
     headers.insert(
@@ -250,6 +266,19 @@ async fn handle_cancel_unload(State(state): State<ServerState>, headers: HeaderM
     }
     if state.started_at.elapsed() > WIZARD_MAX_DURATION {
         return (StatusCode::GONE, "too old").into_response();
+    }
+    // Don't kill the server if a mutating upstream request is currently in
+    // flight. sendBeacon fires at tab-unload but an already-dispatched POST
+    // to the backend will still complete server-side regardless of what we
+    // do here; exiting the CLI with "cancelled" in that window creates an
+    // orphan. Swallow the unload and let the in-flight request resolve
+    // normally — the heartbeat watchdog will catch a truly dead tab.
+    if state
+        .in_flight_mutations
+        .load(std::sync::atomic::Ordering::Acquire)
+        > 0
+    {
+        return (StatusCode::CONFLICT, "busy").into_response();
     }
     signal_and_shutdown(state, WizardOutcome::Cancelled).await;
     (StatusCode::NO_CONTENT, base_security_headers()).into_response()
@@ -338,6 +367,27 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
         }
     };
 
+    // Track in-flight mutating requests so handle_cancel_unload can refuse
+    // to shut the server down while a POST/PUT/PATCH/DELETE is mid-flight.
+    let is_mutator = matches!(
+        method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    struct InFlightGuard(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for InFlightGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let _guard = if is_mutator {
+        state
+            .in_flight_mutations
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Some(InFlightGuard(state.in_flight_mutations.clone()))
+    } else {
+        None
+    };
+
     let mut upstream_req = state
         .upstream
         .request(method.clone(), &upstream_url)
@@ -410,9 +460,15 @@ pub async fn run_flow(kind: FlowKind, proxy: ProxyContext) -> Result<WizardOutco
     let (done_tx, done_rx) = oneshot::channel::<WizardOutcome>();
     let shutdown = Arc::new(Notify::new());
 
+    // connect_timeout caps initial TCP+TLS handshake. timeout caps the full
+    // request including response body read, which was a Codex-surfaced bug:
+    // without a total timeout, a slow backend strands the browser with
+    // disabled buttons and the only escape is tab-close (which then races
+    // with the in-flight POST — see handle_cancel_unload + busy_flag below).
     let upstream = reqwest::Client::builder()
         .user_agent(crate::api::CLI_USER_AGENT)
         .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
         .build()
         .context("building upstream HTTP client for wizard proxy")?;
 
@@ -426,6 +482,7 @@ pub async fn run_flow(kind: FlowKind, proxy: ProxyContext) -> Result<WizardOutco
         allowlist: Arc::new(allowlist_for(kind)),
         upstream,
         flow: kind,
+        in_flight_mutations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
 
     let app = Router::new()
