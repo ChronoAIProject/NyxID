@@ -119,10 +119,6 @@
   function selectCard(entry) {
     selection = entry;
     for (const el of document.querySelectorAll(".wizard-card")) {
-      el.classList.toggle("is-selected", el.dataset.slug === entry.slug || el.dataset.slug === (entry.slug === "__custom__" ? "__custom__" : null));
-    }
-    // More reliable: iterate manually.
-    for (const el of document.querySelectorAll(".wizard-card")) {
       el.classList.toggle("is-selected", el.dataset.slug === entry.slug);
     }
     nextBtn.disabled = false;
@@ -140,7 +136,11 @@
 
   function onNext() {
     if (!selection) return;
-    if (pickedSlugEl) pickedSlugEl.textContent = selection.slug;
+    if (pickedSlugEl) {
+      pickedSlugEl.textContent = selection.slug === "__custom__"
+        ? "Custom / self-hosted"
+        : (selection.name ? `${selection.name} (${selection.slug})` : selection.slug);
+    }
     goToStep(2);
   }
 
@@ -238,8 +238,13 @@
       setStatus(catalogStatus,
         `${catalog.length} services in catalog · ${simpleCount} simple-bearer shown`);
     } catch (err) {
+      // If we reached this page, base_url + token resolution already
+      // succeeded in the CLI. A failure here means the backend itself
+      // returned an error (network blip, 401 token expired, 5xx).
       setStatus(catalogStatus,
-        "Couldn't load catalog: " + err.message + ". Are you logged in? (`nyxid login --base-url …`)",
+        "Couldn't load catalog: " + err.message
+          + ". If this keeps happening, check your session with `nyxid whoami` "
+          + "or re-login with `nyxid login --base-url <URL>`.",
         "error");
     }
   }
