@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "Playfair Display";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/assets/fonts/playfair-display-400.woff2") format("woff2");
+}
+
 :root {
   color-scheme: light dark;
   --bg: #0b0d11;
@@ -6,12 +14,16 @@
   --panel: #14171c;
   --border: #23262c;
   --border-strong: #2e3138;
-  --primary: #9775fa;
-  --primary-hover: #845ef7;
+  /* Void 500 / 400 — matches frontend --color-primary */
+  --primary: #8b5cf6;
+  --primary-hover: #7c3aed;
   --primary-fg: #ffffff;
+  /* Void 300 — wordmark color, matches frontend auth-layout */
+  --wordmark: #c4b5fd;
   --ghost-hover: #1b1f25;
   --card-hover: #1a1e25;
-  --selected-ring: #9775fa;
+  --selected-ring: #8b5cf6;
+  --wizard-card-h: 132px;
 }
 @media (prefers-color-scheme: light) {
   :root {
@@ -21,11 +33,12 @@
     --panel: #ffffff;
     --border: #e4e6ea;
     --border-strong: #cbced4;
-    --primary: #845ef7;
-    --primary-hover: #7048e8;
+    --primary: #7c3aed;
+    --primary-hover: #6d28d9;
+    --wordmark: #7c3aed;
     --ghost-hover: #f1f2f4;
     --card-hover: #f7f8fa;
-    --selected-ring: #845ef7;
+    --selected-ring: #7c3aed;
   }
 }
 
@@ -53,10 +66,27 @@ html, body {
 .wizard-header {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   margin-bottom: 1.5rem;
 }
-.wizard-brand { font-weight: 600; letter-spacing: -0.01em; }
+.wizard-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.wizard-brand-mark {
+  display: block;
+  width: 36px;
+  height: 36px;
+}
+.wizard-brand-wordmark {
+  font-family: "Playfair Display", Georgia, "Times New Roman", serif;
+  font-weight: 400;
+  font-size: 22px;
+  letter-spacing: 1px;
+  color: var(--wordmark);
+  line-height: 1;
+}
 .wizard-step { color: var(--muted); font-size: 0.875rem; }
 
 .wizard-main {
@@ -108,6 +138,7 @@ html, body {
 .wizard-catalog-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-auto-rows: var(--wizard-card-h);
   gap: 0.625rem;
 }
 .wizard-catalog-empty {
@@ -116,6 +147,25 @@ html, body {
   font-size: 0.875rem;
   padding: 1rem;
   text-align: center;
+}
+
+/* Viewport constraint: only the first 4 rows fit; rest scrolls inside. */
+.wizard-grid-scroll {
+  max-height: calc(var(--wizard-card-h) * 4 + 0.625rem * 3);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Leave room for the scrollbar so cards don't twitch when it appears. */
+  padding-right: 4px;
+  margin-right: -4px;
+}
+.wizard-grid-scroll::-webkit-scrollbar { width: 8px; }
+.wizard-grid-scroll::-webkit-scrollbar-track { background: transparent; }
+.wizard-grid-scroll::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.wizard-grid-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
 }
 
 .wizard-card {
@@ -170,12 +220,22 @@ html, body {
 }
 .wizard-card-custom .wizard-card-title::after { content: " →"; }
 
-.wizard-card-disabled {
-  opacity: 0.55;
-}
-.wizard-card-disabled .wizard-card-meta {
+/* Flow-type badge, top-right of the card. Signals OAuth / device-code /
+   SSH without making the card look disabled. */
+.wizard-card { position: relative; }
+.wizard-card-badge {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  background: var(--ghost-hover);
   color: var(--muted);
-  font-style: italic;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  pointer-events: none;
 }
 
 .wizard-status {

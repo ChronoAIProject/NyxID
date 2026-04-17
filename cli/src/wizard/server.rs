@@ -197,8 +197,8 @@ async fn serve_index(State(state): State<ServerState>) -> Response {
 }
 
 async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
-    // Only allow plain filenames, no path traversal.
-    if name.contains('/') || name.contains("..") {
+    // Block path traversal but allow subdirectories (e.g. fonts/x.woff2).
+    if name.split('/').any(|seg| seg == ".." || seg.is_empty()) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let asset = match Assets::get(&name) {
@@ -211,6 +211,12 @@ async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> 
         "application/javascript; charset=utf-8"
     } else if name.ends_with(".html") {
         "text/html; charset=utf-8"
+    } else if name.ends_with(".svg") {
+        "image/svg+xml"
+    } else if name.ends_with(".woff2") {
+        "font/woff2"
+    } else if name.ends_with(".woff") {
+        "font/woff"
     } else {
         "application/octet-stream"
     };
@@ -508,7 +514,7 @@ pub async fn run_flow(kind: FlowKind, proxy: ProxyContext) -> Result<WizardOutco
     let app = Router::new()
         .route("/wizard", get(serve_index))
         .route("/", get(serve_index))
-        .route("/assets/{name}", get(serve_asset))
+        .route("/assets/{*name}", get(serve_asset))
         .route("/api/proxy/complete", post(handle_complete))
         .route("/api/proxy/cancel", post(handle_cancel))
         .route("/api/proxy/cancel-unload", post(handle_cancel_unload))

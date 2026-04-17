@@ -124,6 +124,23 @@
     btn.setAttribute("role", "listitem");
     btn.dataset.slug = entry.slug;
 
+    const shape = flowShapeOf(entry);
+
+    // Type badge for flows the wizard can't drive end-to-end yet.
+    // Cards remain fully interactive — the badge is a visual tag, not
+    // a disabled marker. Matches the frontend's AddKeyDialog catalog.
+    if (!isWizardSupported(shape)) {
+      const badge = document.createElement("span");
+      badge.className = "wizard-card-badge";
+      badge.dataset.shape = shape;
+      badge.textContent = {
+        "oauth": "OAuth",
+        "device-code": "Device code",
+        "ssh": "SSH",
+      }[shape] || shape;
+      btn.appendChild(badge);
+    }
+
     const title = document.createElement("div");
     title.className = "wizard-card-title";
     title.textContent = entry.name || entry.slug;
@@ -136,12 +153,7 @@
 
     const meta = document.createElement("div");
     meta.className = "wizard-card-meta";
-    const shape = flowShapeOf(entry);
     meta.textContent = shapeLabel(shape, entry);
-    if (!isWizardSupported(shape)) {
-      btn.classList.add("wizard-card-disabled");
-      btn.title = "Wizard support coming in a later PR — clickable to see the command you can use today.";
-    }
     btn.appendChild(meta);
 
     btn.addEventListener("click", () => selectCard(entry));
@@ -173,16 +185,21 @@
 
   // ---- step transitions ----
 
+  // Total step count. Keep consistent across panels so the progress
+  // indicator doesn't wiggle when the form branches into a fallback.
+  const STEP_TOTAL = 3;
+  const STEP_LABELS = {
+    catalog:    `Step 1 of ${STEP_TOTAL} · pick a service`,
+    credential: `Step 2 of ${STEP_TOTAL} · enter credential`,
+    confirm:    `Step 3 of ${STEP_TOTAL} · done`,
+  };
+
   function showPanel(name) {
     stepCatalog.hidden = name !== "catalog";
     stepCredential.hidden = name !== "credential";
     stepConfirm.hidden = name !== "confirm";
     if (stepLabel) {
-      stepLabel.textContent = {
-        catalog: "Step 1 · pick a service",
-        credential: "Step 2 · enter credential",
-        confirm: "Step 3 · done",
-      }[name] || "";
+      stepLabel.textContent = STEP_LABELS[name] || "";
     }
   }
 

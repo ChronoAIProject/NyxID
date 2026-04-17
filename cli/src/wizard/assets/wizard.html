@@ -12,8 +12,11 @@
 <body>
 <div class="wizard-shell">
   <header class="wizard-header">
-    <div class="wizard-brand">NyxID</div>
-    <div class="wizard-step" id="wizard-step-label">Step 1 · pick a service</div>
+    <div class="wizard-brand">
+      <img class="wizard-brand-mark" src="/assets/nyxid-logo.svg" alt="" width="36" height="36" aria-hidden="true">
+      <span class="wizard-brand-wordmark">NyxID</span>
+    </div>
+    <div class="wizard-step" id="wizard-step-label">Step 1 of 3 · pick a service</div>
   </header>
 
   <main class="wizard-main">
@@ -32,9 +35,11 @@
       </div>
 
       <div class="wizard-section-label">Simple setup</div>
-      <div class="wizard-catalog-grid" id="catalog-simple" role="list">
-        <div class="wizard-catalog-empty" id="catalog-simple-empty" hidden>
-          No matches.
+      <div class="wizard-grid-scroll">
+        <div class="wizard-catalog-grid" id="catalog-simple" role="list">
+          <div class="wizard-catalog-empty" id="catalog-simple-empty" hidden>
+            No matches.
+          </div>
         </div>
       </div>
 
@@ -44,8 +49,8 @@
                 data-slug="__custom__" role="listitem">
           <div class="wizard-card-title">Custom / self-hosted…</div>
           <div class="wizard-card-sub">
-            For OAuth flows, device code, self-hosted gateways, or any
-            endpoint that isn't a simple bearer-token API. (Lands in M5 — for now use <code>nyxid service add</code> with flags.)
+            For anything that isn't in the catalog above — paste your own
+            endpoint URL + credential. (Lands in M5 — for now use <code>nyxid service add</code> with flags.)
           </div>
         </button>
       </div>
