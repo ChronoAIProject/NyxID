@@ -1,9 +1,9 @@
 @font-face {
-  font-family: "Space Grotesk";
+  font-family: "DM Serif Display";
   font-style: normal;
-  font-weight: 600;
+  font-weight: 400;
   font-display: swap;
-  src: url("/assets/fonts/space-grotesk-600.woff2") format("woff2");
+  src: url("/assets/fonts/dm-serif-display-400.woff2") format("woff2");
 }
 
 :root {
@@ -83,10 +83,10 @@ html, body {
   height: 36px;
 }
 .wizard-brand-wordmark {
-  font-family: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  font-weight: 600;
-  font-size: 20px;
-  letter-spacing: -0.02em;
+  font-family: "DM Serif Display", Georgia, "Times New Roman", serif;
+  font-weight: 400;
+  font-size: 24px;
+  letter-spacing: 0.5px;
   color: var(--wordmark);
   line-height: 1;
 }
@@ -141,6 +141,9 @@ html, body {
   color: var(--muted);
 }
 
+/* Shared grid defaults. The Simple grid overrides with a 2x2 constraint
+   (see below); the Advanced grid stays single-column since it only holds
+   the Custom card. */
 .wizard-catalog-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -155,22 +158,27 @@ html, body {
   text-align: center;
 }
 
-/* Viewport constraint: only the first 4 rows fit; rest scrolls inside. */
-.wizard-grid-scroll {
-  max-height: calc(var(--wizard-card-h) * 4 + 0.625rem * 3);
+/* Simple setup: exactly 2 columns, max 2 rows visible (= 4 cards).
+   Card height shrinks on short viewports via min(). Extra cards scroll
+   inside this container so the page itself never grows. */
+#catalog-simple {
+  --row-h: min(var(--wizard-card-h), 18vh);
+  grid-template-columns: repeat(2, 1fr);
+  grid-auto-rows: var(--row-h);
+  max-height: calc(var(--row-h) * 2 + 0.625rem);
   overflow-y: auto;
   overscroll-behavior: contain;
   /* Leave room for the scrollbar so cards don't twitch when it appears. */
   padding-right: 4px;
   margin-right: -4px;
 }
-.wizard-grid-scroll::-webkit-scrollbar { width: 8px; }
-.wizard-grid-scroll::-webkit-scrollbar-track { background: transparent; }
-.wizard-grid-scroll::-webkit-scrollbar-thumb {
+#catalog-simple::-webkit-scrollbar { width: 8px; }
+#catalog-simple::-webkit-scrollbar-track { background: transparent; }
+#catalog-simple::-webkit-scrollbar-thumb {
   background: var(--border);
   border-radius: 4px;
 }
-.wizard-grid-scroll::-webkit-scrollbar-thumb:hover {
+#catalog-simple::-webkit-scrollbar-thumb:hover {
   background: var(--border-strong);
 }
 
@@ -181,7 +189,7 @@ html, body {
   justify-content: flex-start;
   gap: 0.25rem;
   text-align: left;
-  padding: 0.875rem 1rem;
+  padding: 0.75rem 0.875rem;
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--border);
@@ -190,6 +198,11 @@ html, body {
   font-family: inherit;
   font-size: inherit;
   transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+  /* Let the card shrink to fit its grid row; hide overflow so content
+     never bleeds past the card's rounded border. */
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 .wizard-card:hover {
   background: var(--card-hover);
