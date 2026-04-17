@@ -73,7 +73,23 @@
   }
 
   async function proxyJson(method, path, body) {
-    const res = await proxyFetch(method, path, body);
+    let res;
+    try {
+      res = await proxyFetch(method, path, body);
+    } catch (networkErr) {
+      // fetch() throws TypeError ("failed to fetch") only when the
+      // request can't complete at all. On same-origin loopback the
+      // realistic cause is the wizard server died (CLI Ctrl-C'd or
+      // exited). Translate into something the user can act on.
+      // eslint-disable-next-line no-console
+      console.error(`[wizard] ${method} ${path} — network failure`, networkErr);
+      const msg = "Can't reach the wizard server. Is the `nyxid` CLI still "
+        + "running? Close this tab and re-run `nyxid service add`.";
+      const err = new Error(msg);
+      err.cause = networkErr;
+      err.network = true;
+      throw err;
+    }
     const text = await res.text().catch(() => "");
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch (_) { data = text; }
@@ -424,7 +440,7 @@
 
   function fieldEl(spec) {
     const wrap = document.createElement("label");
-    wrap.className = "wizard-field" + (spec.primary ? " wizard-field-primary" : "");
+    wrap.className = "wizard-field";
     const lbl = document.createElement("span");
     lbl.className = "wizard-field-label";
     lbl.textContent = spec.label + (spec.required === false ? " (optional)" : "");
@@ -484,7 +500,6 @@
       type: "password",
       secret: true,
       required: true,
-      primary: true,
       hint,
     });
   }
@@ -548,7 +563,6 @@
       type: "password",
       secret: true,
       required: true,
-      primary: true,
       hint: "Never leaves your machine until Connect is clicked. Encrypted at rest on NyxID.",
     }));
     return wrap;
@@ -877,6 +891,8 @@
     try {
       init = await proxyJson("POST", initiatePath, {});
     } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[wizard] device-code initiate failed", err);
       if (myGen === deviceCodeGen) deviceCodeOuterReject(err);
       return;
     }
@@ -942,7 +958,6 @@
   function renderDeviceCodePanel({ userCode, verificationUri, onRefresh }) {
     const panel = document.getElementById("device-code-panel");
     if (!panel) return;
-    panel.classList.add("wizard-info-panel-primary");
     panel.innerHTML = `
       <p style="margin:0 0 0.75rem"><strong>Device code authorization</strong></p>
       <div style="display:grid;grid-template-columns:max-content 1fr;gap:0.5rem 1rem;margin:0 0 0.75rem">
@@ -979,7 +994,6 @@
   function renderDeviceCodeExpired({ onRefresh }) {
     const panel = document.getElementById("device-code-panel");
     if (!panel) return;
-    panel.classList.add("wizard-info-panel-primary");
     panel.innerHTML = `
       <p style="margin:0 0 0.5rem"><strong>Code expired</strong></p>
       <p style="margin:0 0 0.75rem" class="wizard-muted">
