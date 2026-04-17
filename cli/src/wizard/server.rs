@@ -59,10 +59,17 @@ const HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// segments and `:param` placeholders (e.g. `/api/v1/catalog/:slug`). The
 /// request path must have the same segment count and every non-placeholder
 /// segment must match literally. Query strings are forwarded untouched.
+///
+/// `body_fields` is the whitelist of permitted top-level JSON keys in the
+/// request body. An empty slice means "body must be empty". Any key not
+/// in the whitelist causes a 400 — a second layer on top of CSP/CSRF so
+/// a compromised wizard page can't smuggle extra fields (e.g. `target_org_id`,
+/// `identity_propagation_mode`) through to `POST /keys`.
 #[derive(Debug, Clone)]
 struct ProxyRoute {
     method: Method,
     path_template: &'static str,
+    body_fields: &'static [&'static str],
 }
 
 impl ProxyRoute {
@@ -103,19 +110,47 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
             ProxyRoute {
                 method: Method::GET,
                 path_template: "/api/v1/catalog",
+                body_fields: &[],
             },
             ProxyRoute {
                 method: Method::GET,
                 path_template: "/api/v1/catalog/:slug",
+                body_fields: &[],
             },
+            // Unified key creation. Fields are the intersection of what
+            // the wizard UI actually sends (see `buildCreateBody` in
+            // wizard.js) — NOT the full `CreateKeyRequest` surface. Keeps
+            // privileged fields like `target_org_id`, `identity_*`,
+            // `forward_access_token`, `inject_delegation_token`, and SSH
+            // flags out of reach of a compromised wizard page.
             ProxyRoute {
                 method: Method::POST,
                 path_template: "/api/v1/keys",
+                body_fields: &[
+                    "service_slug",
+                    "credential",
+                    "label",
+                    "endpoint_url",
+                    "slug",
+                    "auth_method",
+                    "auth_key_name",
+                    "openapi_spec_url",
+                ],
             },
             // Needed to poll placeholder key status during OAuth/device-code.
             ProxyRoute {
                 method: Method::GET,
                 path_template: "/api/v1/keys/:key_id",
+                body_fields: &[],
+            },
+            // Used to clean up placeholder `pending_auth` keys when the
+            // user cancels or abandons the wizard mid-flow. Without this,
+            // every abandoned OAuth / device-code attempt leaves a stale
+            // row in the user's `nyxid service list`.
+            ProxyRoute {
+                method: Method::DELETE,
+                path_template: "/api/v1/keys/:key_id",
+                body_fields: &[],
             },
             // OAuth app credentials (client_id, client_secret) stored on the
             // provider entry. Required up-front for providers whose
@@ -123,21 +158,25 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
             ProxyRoute {
                 method: Method::PUT,
                 path_template: "/api/v1/providers/:provider_id/credentials",
+                body_fields: &["client_id", "client_secret", "label"],
             },
             // OAuth: GET returns { authorization_url }.
             ProxyRoute {
                 method: Method::GET,
                 path_template: "/api/v1/providers/:provider_id/connect/oauth",
+                body_fields: &[],
             },
             // Device code: initiate returns { user_code, verification_uri,
             // state, interval }; poll returns status and/or access_token.
             ProxyRoute {
                 method: Method::POST,
                 path_template: "/api/v1/providers/:provider_id/connect/device-code/initiate",
+                body_fields: &[],
             },
             ProxyRoute {
                 method: Method::POST,
                 path_template: "/api/v1/providers/:provider_id/connect/device-code/poll",
+                body_fields: &["state"],
             },
         ],
     }
@@ -160,6 +199,11 @@ struct ServerState {
     /// to shut the server down while this is non-zero, closing the
     /// tab-close-mid-POST race Codex flagged.
     in_flight_mutations: Arc<std::sync::atomic::AtomicUsize>,
+    /// Ephemeral TCP port bound on 127.0.0.1. Used to verify the
+    /// `Origin` and `Host` headers match *this* server exactly, so
+    /// another local process on a different port can't bounce through
+    /// our proxy even if it passes CSRF.
+    bound_port: u16,
 }
 
 /// Mint a 32-byte random CSRF token, hex-encoded.
@@ -254,27 +298,55 @@ async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> 
     (StatusCode::OK, headers, asset.data.into_owned()).into_response()
 }
 
-/// Validate the `Origin` header. When present it must point at loopback.
+/// Validate the `Origin` header. When present it must point at *this*
+/// server's exact loopback origin — not just any `127.0.0.1:*`. A
+/// compromised neighbouring local process on a different port should
+/// not pass the check.
 ///
 /// Browsers frequently omit `Origin` on *same-origin GET* requests even when
 /// custom headers are present (the main CSRF-defence path is the X-Wizard-CSRF
 /// header, which browsers send faithfully). So we accept missing Origin on
 /// GETs. On mutating methods we still require Origin + CSRF.
-fn origin_matches(headers: &HeaderMap) -> Option<bool> {
+fn origin_matches(headers: &HeaderMap, port: u16) -> Option<bool> {
     headers.get(header::ORIGIN).map(|v| {
         let s = v.to_str().unwrap_or("");
-        s.starts_with("http://127.0.0.1:") || s.starts_with("http://localhost:")
+        s == format!("http://127.0.0.1:{port}") || s == format!("http://localhost:{port}")
     })
 }
 
-/// Strict origin check for mutators: must be present AND match.
-fn check_origin_strict(headers: &HeaderMap) -> bool {
-    origin_matches(headers).unwrap_or(false)
+/// Strict origin check for mutators: must be present AND match this port.
+fn check_origin_strict(headers: &HeaderMap, port: u16) -> bool {
+    origin_matches(headers, port).unwrap_or(false)
 }
 
 /// Relaxed origin check for reads: absent → allow, present → must match.
-fn check_origin_relaxed(headers: &HeaderMap) -> bool {
-    origin_matches(headers).unwrap_or(true)
+fn check_origin_relaxed(headers: &HeaderMap, port: u16) -> bool {
+    origin_matches(headers, port).unwrap_or(true)
+}
+
+/// Every HTTP/1.1 browser request carries a `Host` header. Reject if
+/// missing or not pointing at our exact bound port. Complements the
+/// Origin check as a second layer against DNS-rebind attacks that
+/// might pass Origin by forging the referring page.
+fn check_host_exact(headers: &HeaderMap, port: u16) -> bool {
+    let host = match headers.get(header::HOST).and_then(|v| v.to_str().ok()) {
+        Some(h) => h,
+        None => return false,
+    };
+    host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}")
+}
+
+/// Combined Origin + Host check for mutating endpoints. Both must
+/// match *this* server's exact loopback origin.
+fn check_caller_strict(headers: &HeaderMap, port: u16) -> bool {
+    check_origin_strict(headers, port) && check_host_exact(headers, port)
+}
+
+/// Combined check for read-only endpoints. Host is always required
+/// and must match; Origin is optional (browsers omit on same-origin
+/// GET) but when present must match.
+fn check_caller_relaxed(headers: &HeaderMap, port: u16) -> bool {
+    check_origin_relaxed(headers, port) && check_host_exact(headers, port)
 }
 
 async fn handle_complete(
@@ -282,8 +354,8 @@ async fn handle_complete(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if !check_origin_strict(&headers) {
-        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    if !check_caller_strict(&headers, state.bound_port) {
+        return (StatusCode::FORBIDDEN, "bad origin/host").into_response();
     }
     if !csrf_ok(&headers, &state.csrf_token) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
@@ -293,8 +365,8 @@ async fn handle_complete(
 }
 
 async fn handle_cancel(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    if !check_origin_strict(&headers) {
-        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    if !check_caller_strict(&headers, state.bound_port) {
+        return (StatusCode::FORBIDDEN, "bad origin/host").into_response();
     }
     if !csrf_ok(&headers, &state.csrf_token) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
@@ -307,8 +379,8 @@ async fn handle_cancel(State(state): State<ServerState>, headers: HeaderMap) -> 
 /// treated as a soft cancel guarded only by Origin + short age. This is
 /// intentionally weaker than the button-click cancel.
 async fn handle_cancel_unload(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    if !check_origin_strict(&headers) {
-        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    if !check_caller_strict(&headers, state.bound_port) {
+        return (StatusCode::FORBIDDEN, "bad origin/host").into_response();
     }
     if state.started_at.elapsed() > WIZARD_MAX_DURATION {
         return (StatusCode::GONE, "too old").into_response();
@@ -331,8 +403,8 @@ async fn handle_cancel_unload(State(state): State<ServerState>, headers: HeaderM
 }
 
 async fn handle_heartbeat(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    if !check_origin_strict(&headers) {
-        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    if !check_caller_strict(&headers, state.bound_port) {
+        return (StatusCode::FORBIDDEN, "bad origin/host").into_response();
     }
     if !csrf_ok(&headers, &state.csrf_token) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
@@ -343,8 +415,8 @@ async fn handle_heartbeat(State(state): State<ServerState>, headers: HeaderMap) 
 
 async fn handle_status(State(state): State<ServerState>, headers: HeaderMap) -> Response {
     // GET: Origin may be omitted by the browser on same-origin requests.
-    if !check_origin_relaxed(&headers) {
-        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    if !check_caller_relaxed(&headers, state.bound_port) {
+        return (StatusCode::FORBIDDEN, "bad origin/host").into_response();
     }
     let body = json!({
         "state": "running",
@@ -370,14 +442,14 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
 
     // Per-method origin enforcement: browsers omit Origin on same-origin GET
     // so we relax for reads. Mutations keep the strict check as a second
-    // layer on top of CSRF.
-    let origin_ok = if matches!(method, Method::GET | Method::HEAD) {
-        check_origin_relaxed(&headers)
+    // layer on top of CSRF. Host is always required and must match exactly.
+    let caller_ok = if matches!(method, Method::GET | Method::HEAD) {
+        check_caller_relaxed(&headers, state.bound_port)
     } else {
-        check_origin_strict(&headers)
+        check_caller_strict(&headers, state.bound_port)
     };
-    if !origin_ok {
-        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    if !caller_ok {
+        return (StatusCode::FORBIDDEN, "bad origin/host").into_response();
     }
     if !csrf_ok(&headers, &state.csrf_token) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
@@ -392,18 +464,22 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
         return (StatusCode::NOT_FOUND, "empty proxy path").into_response();
     }
 
-    // Allowlist check.
-    let allowed = state
+    // Allowlist check. Resolve the matching route so we can apply its
+    // body-field whitelist below.
+    let route = match state
         .allowlist
         .iter()
-        .any(|r| r.matches(&method, backend_path));
-    if !allowed {
-        return (
-            StatusCode::FORBIDDEN,
-            format!("proxy: {} {} not allowed", method, backend_path),
-        )
-            .into_response();
-    }
+        .find(|r| r.matches(&method, backend_path))
+    {
+        Some(r) => r.clone(),
+        None => {
+            return (
+                StatusCode::FORBIDDEN,
+                format!("proxy: {} {} not allowed", method, backend_path),
+            )
+                .into_response();
+        }
+    };
 
     // Build the upstream URL. `base_url_root` has no trailing slash.
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
@@ -421,6 +497,43 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
                 .into_response();
         }
     };
+
+    // Per-route body whitelist. Defense-in-depth: CSP + CSRF already block
+    // cross-origin callers, but if the wizard page itself were
+    // compromised we don't want it smuggling extra JSON keys into
+    // privileged endpoints (e.g. `target_org_id` on `POST /keys`). Body
+    // must be empty or a JSON object whose keys are all in `body_fields`.
+    if !body_bytes.is_empty() {
+        let parsed: Value = match serde_json::from_slice(&body_bytes) {
+            Ok(v) => v,
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, "body is not valid JSON").into_response();
+            }
+        };
+        match parsed {
+            Value::Object(obj) => {
+                if route.body_fields.is_empty() && !obj.is_empty() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("proxy: {method} {backend_path} does not accept a body"),
+                    )
+                        .into_response();
+                }
+                for key in obj.keys() {
+                    if !route.body_fields.contains(&key.as_str()) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("proxy: unexpected field '{key}' for {method} {backend_path}"),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            _ => {
+                return (StatusCode::BAD_REQUEST, "body must be a JSON object").into_response();
+            }
+        }
+    }
 
     // Track in-flight mutating requests so handle_cancel_unload can refuse
     // to shut the server down while a POST/PUT/PATCH/DELETE is mid-flight.
@@ -553,6 +666,16 @@ pub async fn run_flow(
         .build()
         .context("building upstream HTTP client for wizard proxy")?;
 
+    // Bind first (port is resolved before we spawn or open the browser) to
+    // fix v1 gap #1 (server-spawn race). We also need the bound port inside
+    // ServerState so the Origin/Host checks can validate an *exact* match.
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .context("binding wizard server to 127.0.0.1:0")?;
+    let addr = listener
+        .local_addr()
+        .context("reading wizard server local addr")?;
+
     let state = ServerState {
         csrf_token: Arc::new(csrf),
         done_tx: Arc::new(tokio::sync::Mutex::new(Some(done_tx))),
@@ -564,6 +687,7 @@ pub async fn run_flow(
         upstream,
         flow: kind,
         in_flight_mutations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        bound_port: addr.port(),
     };
 
     let app = Router::new()
@@ -579,15 +703,6 @@ pub async fn run_flow(
         // after the lifecycle routes so exact matches win.
         .route("/api/proxy/{*rest}", any(handle_proxy))
         .with_state(state.clone());
-
-    // Bind first (port is resolved before we spawn or open the browser) to
-    // fix v1 gap #1 (server-spawn race).
-    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .await
-        .context("binding wizard server to 127.0.0.1:0")?;
-    let addr = listener
-        .local_addr()
-        .context("reading wizard server local addr")?;
     let url = format!(
         "http://127.0.0.1:{}/wizard{}",
         addr.port(),
