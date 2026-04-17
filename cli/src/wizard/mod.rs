@@ -40,3 +40,74 @@ pub async fn run_flow(flow_id: &str, proxy: ProxyContext) -> Result<WizardOutcom
         )),
     }
 }
+
+/// Shared entry point for the `ai-key` wizard: resolves auth from the
+/// standard `AuthArgs`, runs the flow, prints the §3.2 terminal summary
+/// on success, and `process::exit(1)` on cancel/timeout.
+///
+/// Called by both `nyxid service add` (bare, interactive) and the
+/// discoverability alias `nyxid wizard ai-key`.
+pub async fn run_ai_key_wizard(auth: &crate::cli::AuthArgs) -> Result<()> {
+    let base_url = auth.resolved_base_url()?;
+    let access_token = crate::auth::resolve_access_token(auth)?;
+    let base_url_root = base_url.trim_end_matches('/').to_string();
+    let proxy = ProxyContext {
+        base_url_root,
+        access_token,
+    };
+
+    match run_flow("ai-key", proxy).await? {
+        WizardOutcome::Completed(body) => {
+            print_wizard_summary(&body, &base_url);
+            Ok(())
+        }
+        WizardOutcome::Cancelled => {
+            eprintln!("✗ Wizard cancelled. No service was created.");
+            std::process::exit(1);
+        }
+        WizardOutcome::TimedOut => {
+            eprintln!("✗ Wizard timed out. No service was created.");
+            eprintln!("  Tip: for scripted use, pass a slug and --credential-env:");
+            eprintln!("       nyxid service add <slug> --credential-env VAR --label <label>");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Format the happy-path completion summary per docs/CLI_WIZARD_V2.md §3.2.
+fn print_wizard_summary(body: &serde_json::Value, base_url: &str) {
+    let slug = body.get("slug").and_then(|v| v.as_str());
+    let label = body.get("label").and_then(|v| v.as_str());
+    let proxy_url = body.get("proxy_url").and_then(|v| v.as_str());
+
+    match slug {
+        Some(slug) => {
+            let display_label = label.unwrap_or(slug);
+            eprintln!("✓ Service '{display_label}' created.");
+            eprintln!("  Slug:      {slug}");
+            let rendered_url = match proxy_url {
+                Some(u) => u.to_string(),
+                None => format!(
+                    "{}/api/v1/proxy/s/{}/",
+                    base_url.trim_end_matches('/'),
+                    slug
+                ),
+            };
+            eprintln!("  Proxy URL: {rendered_url}");
+            eprintln!();
+            eprintln!("  Next:");
+            eprintln!(
+                "    curl {}<api-path> -H \"Authorization: Bearer $NYX_KEY\"",
+                if rendered_url.ends_with('/') {
+                    rendered_url.clone()
+                } else {
+                    format!("{rendered_url}/")
+                }
+            );
+            eprintln!("  Example: append /v1/models for OpenAI-compatible providers.");
+        }
+        None => {
+            eprintln!("✓ Wizard completed (no service created).");
+        }
+    }
+}

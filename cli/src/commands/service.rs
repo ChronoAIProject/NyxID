@@ -42,6 +42,30 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             openapi_spec_url,
             auth,
         } => {
+            // Wizard dispatch (docs/CLI_WIZARD_V2.md §3.1): bare
+            // `nyxid service add` in a TTY opens the browser wizard.
+            // Any flag / positional / --output json falls through to
+            // the existing non-interactive path below.
+            use std::io::IsTerminal;
+            let bare = slug.is_none()
+                && !custom
+                && !oauth
+                && !device_code
+                && via_node.is_none()
+                && endpoint_url.is_none()
+                && label.is_none()
+                && auth_method.is_none()
+                && auth_key_name.is_none()
+                && credential.is_none()
+                && credential_env.is_none()
+                && scopes.is_empty()
+                && org.is_none()
+                && openapi_spec_url.is_none();
+            let interactive_output = matches!(auth.output, OutputFormat::Table);
+            if bare && interactive_output && std::io::stdout().is_terminal() {
+                return crate::wizard::run_ai_key_wizard(&auth).await;
+            }
+
             let mut api = ApiClient::from_auth(&auth)?;
 
             // Normalize --scope inputs: split each entry on comma/whitespace so

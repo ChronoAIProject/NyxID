@@ -130,19 +130,6 @@ pub enum Commands {
         #[command(subcommand)]
         command: AdminCommands,
     },
-    /// Launch a guided wizard flow in your browser (v2, experimental)
-    ///
-    /// See docs/CLI_WIZARD_V2.md. v2.0 supports only the `ai-key` flow.
-    Wizard(WizardArgs),
-}
-
-#[derive(Args)]
-pub struct WizardArgs {
-    /// Flow to launch. v2.0 supports: ai-key.
-    #[arg(value_name = "FLOW", default_value = "ai-key")]
-    pub flow: String,
-    #[command(flatten)]
-    pub auth: AuthArgs,
 }
 
 #[derive(Subcommand)]
