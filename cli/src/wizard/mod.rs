@@ -21,6 +21,18 @@ pub struct ProxyContext {
     pub access_token: String,
 }
 
+/// CLI-supplied prefill for the wizard form. Any field set here is
+/// encoded into the browser URL as a query parameter and picked up by
+/// `wizard.js` on page load — it pre-selects the catalog card, jumps
+/// to Step 2, and fills matching inputs.
+#[derive(Debug, Clone, Default)]
+pub struct WizardPrefill {
+    pub slug: Option<String>,
+    pub label: Option<String>,
+    pub via_node: Option<String>,
+    pub endpoint_url: Option<String>,
+}
+
 /// Outcome of a wizard run, returned to the caller for shaping terminal output.
 #[derive(Debug, Clone)]
 pub enum WizardOutcome {
@@ -32,9 +44,14 @@ pub enum WizardOutcome {
 /// Run the named wizard flow. In v2.0 only `ai-key` is accepted. The
 /// `proxy` argument carries the NyxID origin + bearer token so the wizard
 /// can attach auth to the narrow allowlist of forwarded endpoints.
-pub async fn run_flow(flow_id: &str, proxy: ProxyContext) -> Result<WizardOutcome> {
+/// `prefill` seeds the browser UI with CLI-supplied values.
+pub async fn run_flow(
+    flow_id: &str,
+    proxy: ProxyContext,
+    prefill: WizardPrefill,
+) -> Result<WizardOutcome> {
     match flow_id {
-        "ai-key" => server::run_flow(server::FlowKind::AiKey, proxy).await,
+        "ai-key" => server::run_flow(server::FlowKind::AiKey, proxy, prefill).await,
         other => Err(anyhow!(
             "unknown wizard flow '{other}'. In v2.0 only 'ai-key' is supported."
         )),
@@ -45,9 +62,10 @@ pub async fn run_flow(flow_id: &str, proxy: ProxyContext) -> Result<WizardOutcom
 /// standard `AuthArgs`, runs the flow, prints the §3.2 terminal summary
 /// on success, and `process::exit(1)` on cancel/timeout.
 ///
-/// Called by both `nyxid service add` (bare, interactive) and the
-/// discoverability alias `nyxid wizard ai-key`.
-pub async fn run_ai_key_wizard(auth: &crate::cli::AuthArgs) -> Result<()> {
+/// `prefill` carries any CLI-supplied values the user typed on the
+/// command line (slug, label, via-node, endpoint-url) — the wizard
+/// opens with those pre-selected/pre-filled.
+pub async fn run_ai_key_wizard(auth: &crate::cli::AuthArgs, prefill: WizardPrefill) -> Result<()> {
     let base_url = auth.resolved_base_url()?;
     let access_token = crate::auth::resolve_access_token(auth)?;
     let base_url_root = base_url.trim_end_matches('/').to_string();
@@ -56,7 +74,7 @@ pub async fn run_ai_key_wizard(auth: &crate::cli::AuthArgs) -> Result<()> {
         access_token,
     };
 
-    match run_flow("ai-key", proxy).await? {
+    match run_flow("ai-key", proxy, prefill).await? {
         WizardOutcome::Completed(body) => {
             attract_terminal("NyxID wizard complete");
             print_wizard_summary(&body, &base_url);

@@ -42,28 +42,35 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             openapi_spec_url,
             auth,
         } => {
-            // Wizard dispatch (docs/CLI_WIZARD_V2.md §3.1): bare
-            // `nyxid service add` in a TTY opens the browser wizard.
-            // Any flag / positional / --output json falls through to
-            // the existing non-interactive path below.
+            // Wizard dispatch (docs/CLI_WIZARD_V2.md §3.1): open the
+            // browser wizard when the invocation isn't "scripted-complete"
+            // and stdout is a TTY. Flags compatible with prefill (slug,
+            // label, via-node, endpoint-url) just seed the form; flags
+            // that declare a specific scripted flow (--credential,
+            // --credential-env, --oauth, --device-code, --custom,
+            // --auth-method, --auth-key-name, --output json) fall through
+            // to the existing non-interactive path so we don't change
+            // scripted behavior for existing users.
             use std::io::IsTerminal;
-            let bare = slug.is_none()
-                && !custom
-                && !oauth
-                && !device_code
-                && via_node.is_none()
-                && endpoint_url.is_none()
-                && label.is_none()
-                && auth_method.is_none()
-                && auth_key_name.is_none()
-                && credential.is_none()
-                && credential_env.is_none()
-                && scopes.is_empty()
-                && org.is_none()
-                && openapi_spec_url.is_none();
             let interactive_output = matches!(auth.output, OutputFormat::Table);
-            if bare && interactive_output && std::io::stdout().is_terminal() {
-                return crate::wizard::run_ai_key_wizard(&auth).await;
+            let explicit_scripted = credential.is_some()
+                || credential_env.is_some()
+                || oauth
+                || device_code
+                || custom
+                || auth_method.is_some()
+                || auth_key_name.is_some()
+                || !scopes.is_empty()
+                || org.is_some()
+                || openapi_spec_url.is_some();
+            if !explicit_scripted && interactive_output && std::io::stdout().is_terminal() {
+                let prefill = crate::wizard::WizardPrefill {
+                    slug: slug.clone(),
+                    label: label.clone(),
+                    via_node: via_node.clone(),
+                    endpoint_url: endpoint_url.clone(),
+                };
+                return crate::wizard::run_ai_key_wizard(&auth, prefill).await;
             }
 
             let mut api = ApiClient::from_auth(&auth)?;

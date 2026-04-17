@@ -6,6 +6,18 @@
   const CSRF = document.querySelector('meta[name="wizard-csrf"]')?.getAttribute("content") || "";
   const FLOW = document.querySelector('meta[name="wizard-flow"]')?.getAttribute("content") || "ai-key";
   const BASE_URL = (document.querySelector('meta[name="wizard-base-url"]')?.getAttribute("content") || "").replace(/\/+$/, "");
+
+  // Prefill from URL query — CLI passed these via `nyxid service add <slug>
+  // --label X --via-node Y` etc. Missing values are normal; the form falls
+  // back to its own defaults.
+  const PARAMS = new URLSearchParams(window.location.search);
+  const PREFILL = {
+    slug: PARAMS.get("slug") || null,
+    label: PARAMS.get("label") || null,
+    viaNode: PARAMS.get("via_node") || null,
+    endpointUrl: PARAMS.get("endpoint_url") || null,
+  };
+
   let postInFlight = false;   // swallow beforeunload cancel while a POST is open
 
   const originEl = document.getElementById("wizard-origin");
@@ -236,10 +248,11 @@
   function renderCredentialFormFields(entry, shape) {
     credentialFieldsEl.innerHTML = "";
 
-    // Label is required on every shape (backend enforces).
+    // Label is required on every shape (backend enforces). If the CLI
+    // passed a --label, prefer that over the slug-derived default.
     credentialFieldsEl.appendChild(fieldEl({
       id: "f-label", label: "Label", type: "text",
-      value: defaultLabelFor(entry),
+      value: PREFILL.label || defaultLabelFor(entry),
       hint: "Shown everywhere in the CLI and web UI.",
     }));
 
@@ -258,6 +271,7 @@
     } else if (shape === "gateway-url") {
       credentialFieldsEl.appendChild(fieldEl({
         id: "f-endpoint-url", label: "Gateway URL", type: "text",
+        value: PREFILL.endpointUrl || "",
         required: true,
         hint: "The URL of your self-hosted instance (e.g. https://openclaw.mycompany.com).",
       }));
@@ -833,6 +847,19 @@
       const supportedCount = catalog.filter(e => isWizardSupported(flowShapeOf(e))).length;
       setStatus(catalogStatus,
         `${catalog.length} services · ${supportedCount} wizard-driven, ${catalog.length - supportedCount} copy-command fallback`);
+
+      // Apply prefill from CLI flags: auto-select slug, auto-advance to Step 2.
+      if (PREFILL.slug) {
+        const match = catalog.find(e => e.slug === PREFILL.slug);
+        if (match) {
+          selectCard(match);
+          enterCredentialStep();
+        } else {
+          setStatus(catalogStatus,
+            `No catalog entry matches slug "${PREFILL.slug}". Pick one manually.`,
+            "error");
+        }
+      }
     } catch (err) {
       setStatus(catalogStatus,
         "Couldn't load catalog: " + err.message

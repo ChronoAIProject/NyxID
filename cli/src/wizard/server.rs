@@ -29,7 +29,7 @@ use tokio::{
     sync::{Notify, oneshot},
 };
 
-use super::{ProxyContext, WizardOutcome};
+use super::{ProxyContext, WizardOutcome, WizardPrefill};
 
 /// Which flow is running. Each flow gets its own allowlist and default
 /// page body. M2 only has `AiKey`.
@@ -502,8 +502,34 @@ async fn signal_and_shutdown(state: ServerState, outcome: WizardOutcome) {
     state.shutdown.notify_waiters();
 }
 
+/// Build the query string for the initial browser URL so prefill values
+/// are present on page load. Only non-empty fields are emitted.
+fn prefill_query(prefill: &WizardPrefill) -> String {
+    let mut parts = Vec::new();
+    let push = |parts: &mut Vec<String>, k: &str, v: &Option<String>| {
+        if let Some(val) = v.as_deref()
+            && !val.is_empty()
+        {
+            parts.push(format!("{}={}", k, urlencoding::encode(val)));
+        }
+    };
+    push(&mut parts, "slug", &prefill.slug);
+    push(&mut parts, "label", &prefill.label);
+    push(&mut parts, "via_node", &prefill.via_node);
+    push(&mut parts, "endpoint_url", &prefill.endpoint_url);
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
+}
+
 /// Flow runner. Binds, serves, opens the browser, waits for exit.
-pub async fn run_flow(kind: FlowKind, proxy: ProxyContext) -> Result<WizardOutcome> {
+pub async fn run_flow(
+    kind: FlowKind,
+    proxy: ProxyContext,
+    prefill: WizardPrefill,
+) -> Result<WizardOutcome> {
     let csrf = mint_csrf();
     let (done_tx, done_rx) = oneshot::channel::<WizardOutcome>();
     let shutdown = Arc::new(Notify::new());
@@ -555,7 +581,11 @@ pub async fn run_flow(kind: FlowKind, proxy: ProxyContext) -> Result<WizardOutco
     let addr = listener
         .local_addr()
         .context("reading wizard server local addr")?;
-    let url = format!("http://127.0.0.1:{}/wizard", addr.port());
+    let url = format!(
+        "http://127.0.0.1:{}/wizard{}",
+        addr.port(),
+        prefill_query(&prefill),
+    );
 
     let shutdown_rx = shutdown.clone();
     let server_handle = tokio::spawn(async move {

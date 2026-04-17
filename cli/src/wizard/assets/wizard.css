@@ -106,9 +106,10 @@ html, body {
 
 .wizard-title {
   margin: 0 0 0.75rem;
-  font-size: 1.375rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-family: "DM Serif Display", Georgia, "Times New Roman", serif;
+  font-size: 1.75rem;
+  font-weight: 400;
+  letter-spacing: 0;
 }
 .wizard-body { margin: 0.5rem 0; color: var(--fg); }
 .wizard-muted { color: var(--muted); font-size: 0.9375rem; }
