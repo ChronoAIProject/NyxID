@@ -58,20 +58,44 @@ pub async fn run_ai_key_wizard(auth: &crate::cli::AuthArgs) -> Result<()> {
 
     match run_flow("ai-key", proxy).await? {
         WizardOutcome::Completed(body) => {
+            attract_terminal("NyxID wizard complete");
             print_wizard_summary(&body, &base_url);
             Ok(())
         }
         WizardOutcome::Cancelled => {
+            attract_terminal("NyxID wizard cancelled");
             eprintln!("✗ Wizard cancelled. No service was created.");
             std::process::exit(1);
         }
         WizardOutcome::TimedOut => {
+            attract_terminal("NyxID wizard timed out");
             eprintln!("✗ Wizard timed out. No service was created.");
             eprintln!("  Tip: for scripted use, pass a slug and --credential-env:");
             eprintln!("       nyxid service add <slug> --credential-env VAR --label <label>");
             std::process::exit(1);
         }
     }
+}
+
+/// Ring a terminal bell + emit the OSC-9 notification sequence so the
+/// terminal app (iTerm2, WezTerm, Kitty, and many others) pops a user
+/// attention cue when the user's browser-side wizard completes. No-op
+/// where the terminal ignores either sequence.
+///
+/// - `\x07`           BEL — dock/tab bounce, notification badge in most apps
+/// - `ESC ] 9 ; … \x07` OSC-9 growl-style notification with the given title
+///
+/// We emit both unconditionally; the escape is short and harmless even on
+/// terminals that don't recognise it.
+fn attract_terminal(msg: &str) {
+    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        return;
+    }
+    use std::io::Write;
+    let mut err = std::io::stderr().lock();
+    // BEL + OSC-9 notification + trailing BEL to close the OSC sequence.
+    let _ = write!(err, "\x07\x1b]9;{msg}\x07");
+    let _ = err.flush();
 }
 
 /// Format the happy-path completion summary per docs/CLI_WIZARD_V2.md §3.2.

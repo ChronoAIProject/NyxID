@@ -96,7 +96,9 @@ impl ProxyRoute {
 
 fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
     match kind {
-        // M2-M3 scope: catalog read + SimpleKey create. Bindings land in M4.
+        // AI-key flow: catalog read, SimpleKey create, plus OAuth and
+        // device-code authorization + poll. Mirrors what the scripted
+        // `nyxid service add` uses via cli/src/commands/service.rs.
         FlowKind::AiKey => vec![
             ProxyRoute {
                 method: Method::GET,
@@ -109,6 +111,26 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
             ProxyRoute {
                 method: Method::POST,
                 path_template: "/api/v1/keys",
+            },
+            // Needed to poll placeholder key status during OAuth/device-code.
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/keys/:key_id",
+            },
+            // OAuth: GET returns { authorization_url }.
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/providers/:provider_id/connect/oauth",
+            },
+            // Device code: initiate returns { user_code, verification_uri,
+            // state, interval }; poll returns status and/or access_token.
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/providers/:provider_id/connect/device-code/initiate",
+            },
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/providers/:provider_id/connect/device-code/poll",
             },
         ],
     }

@@ -1,9 +1,9 @@
 @font-face {
-  font-family: "Playfair Display";
+  font-family: "Space Grotesk";
   font-style: normal;
-  font-weight: 400;
+  font-weight: 600;
   font-display: swap;
-  src: url("/assets/fonts/playfair-display-400.woff2") format("woff2");
+  src: url("/assets/fonts/space-grotesk-600.woff2") format("woff2");
 }
 
 :root {
@@ -57,7 +57,10 @@ html, body {
 .wizard-shell {
   max-width: 880px;
   margin: 0 auto;
-  min-height: 100vh;
+  /* Cap the whole shell at the viewport so the page doesn't grow past
+     one screen. The main content area handles its own scroll when the
+     catalog or form exceed that budget. */
+  max-height: 100vh;
   display: flex;
   flex-direction: column;
   padding: 2.5rem 1.5rem 1.5rem;
@@ -80,21 +83,24 @@ html, body {
   height: 36px;
 }
 .wizard-brand-wordmark {
-  font-family: "Playfair Display", Georgia, "Times New Roman", serif;
-  font-weight: 400;
-  font-size: 22px;
-  letter-spacing: 1px;
+  font-family: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 20px;
+  letter-spacing: -0.02em;
   color: var(--wordmark);
   line-height: 1;
 }
 .wizard-step { color: var(--muted); font-size: 0.875rem; }
 
 .wizard-main {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 2rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .wizard-step-panel[hidden] { display: none; }
 
@@ -428,4 +434,53 @@ html, body {
   background: var(--ghost-hover);
   padding: 0.0625rem 0.375rem;
   border-radius: 4px;
+}
+
+/* Completion overlay — shown on Done / Cancel instead of inline status */
+.wizard-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  backdrop-filter: blur(4px);
+  animation: wizardFade 160ms ease-out;
+}
+.wizard-overlay[hidden] { display: none; }
+@keyframes wizardFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.wizard-overlay-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 2rem 2.25rem;
+  max-width: 440px;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.wizard-overlay-icon {
+  font-size: 2.5rem;
+  line-height: 1;
+  margin-bottom: 0.75rem;
+  color: var(--primary);
+}
+.wizard-overlay-card.wizard-overlay-cancel .wizard-overlay-icon { color: #e03131; }
+.wizard-overlay-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.wizard-overlay-body {
+  margin: 0 0 0.5rem;
+  color: var(--fg);
+}
+.wizard-overlay-sub {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.875rem;
 }

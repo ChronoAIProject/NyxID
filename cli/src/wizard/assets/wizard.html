@@ -35,11 +35,9 @@
       </div>
 
       <div class="wizard-section-label">Simple setup</div>
-      <div class="wizard-grid-scroll">
-        <div class="wizard-catalog-grid" id="catalog-simple" role="list">
-          <div class="wizard-catalog-empty" id="catalog-simple-empty" hidden>
-            No matches.
-          </div>
+      <div class="wizard-catalog-grid" id="catalog-simple" role="list">
+        <div class="wizard-catalog-empty" id="catalog-simple-empty" hidden>
+          No matches.
         </div>
       </div>
 
@@ -127,6 +125,17 @@
     <span>Served locally from <code id="wizard-origin"></code></span>
     <span>· Nothing leaves your machine</span>
   </footer>
+</div>
+
+<div class="wizard-overlay" id="wizard-overlay" hidden aria-hidden="true">
+  <div class="wizard-overlay-card" role="alertdialog" aria-labelledby="overlay-title">
+    <div class="wizard-overlay-icon" id="overlay-icon">✓</div>
+    <h2 class="wizard-overlay-title" id="overlay-title">Done</h2>
+    <p class="wizard-overlay-body" id="overlay-body">
+      You can close this tab and return to your terminal.
+    </p>
+    <p class="wizard-overlay-sub" id="overlay-sub"></p>
+  </div>
 </div>
 <script src="/assets/wizard.js"></script>
 </body>

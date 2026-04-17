@@ -109,12 +109,10 @@
   }
 
   function isWizardSupported(shape) {
-    // Shapes the wizard form can fully complete today. Others get a
-    // "use the scripted CLI for now" fallback in Step 2 (with a
-    // copyable command) — they still show in Step 1 so the user sees
-    // what's available.
-    return shape === "paste-key" || shape === "gateway-url"
-        || shape === "no-auth" || shape === "token-exchange";
+    // All non-SSH flows are wizard-supported. SSH needs certificate
+    // issuance (different command: `nyxid service add-ssh`) and isn't
+    // part of this wizard scope.
+    return shape !== "ssh";
   }
 
   function cardEl(entry) {
@@ -253,7 +251,11 @@
     }
     credentialSubmitWrap.hidden = false;
 
-    if (shape === "gateway-url") {
+    if (shape === "oauth") {
+      credentialFieldsEl.appendChild(oauthInstructions(entry));
+    } else if (shape === "device-code") {
+      credentialFieldsEl.appendChild(deviceCodeInstructions(entry));
+    } else if (shape === "gateway-url") {
       credentialFieldsEl.appendChild(fieldEl({
         id: "f-endpoint-url", label: "Gateway URL", type: "text",
         required: true,
@@ -357,6 +359,42 @@
     return panel;
   }
 
+  function oauthInstructions(entry) {
+    const panel = document.createElement("div");
+    panel.className = "wizard-info-panel";
+    panel.innerHTML = `
+      <p style="margin:0 0 0.5rem"><strong>Sign in with ${escapeHTML(entry.name || entry.slug)}</strong></p>
+      <p style="margin:0 0 0.5rem">
+        Click <strong>Connect</strong>. A new browser tab will open at the
+        provider's sign-in page. After you authorize, this wizard will
+        automatically complete in the background.
+      </p>
+      <p style="margin:0" class="wizard-muted">Keep this tab open while the authorization runs.</p>
+    `;
+    return panel;
+  }
+
+  function deviceCodeInstructions(entry) {
+    const panel = document.createElement("div");
+    panel.className = "wizard-info-panel";
+    panel.id = "device-code-panel";
+    panel.innerHTML = `
+      <p style="margin:0 0 0.5rem"><strong>Device code authorization</strong></p>
+      <p style="margin:0" class="wizard-muted">
+        Click <strong>Connect</strong>. You'll get a short code to enter on
+        ${escapeHTML(entry.name || entry.slug)}'s device-authorization page.
+        The wizard polls automatically.
+      </p>
+    `;
+    return panel;
+  }
+
+  function escapeHTML(s) {
+    return (s || "").replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
   function unsupportedNotice(entry, shape) {
     const msg = {
       "oauth": `${entry.name} uses OAuth sign-in — wizard support lands in a later PR. For now, run:`,
@@ -442,6 +480,11 @@
   async function submitCredential() {
     if (!selection) return;
     if (postInFlight) return;
+    const shape = flowShapeOf(selection);
+    if (shape === "oauth" || shape === "device-code") {
+      await submitAuthFlow(shape);
+      return;
+    }
     const built = buildCreateBody();
     if (!built) return;
     if (built.error) {
@@ -465,6 +508,179 @@
       credentialSubmit.disabled = false;
       credentialBack.disabled = false;
     }
+  }
+
+  // ---- OAuth + device-code flows ----
+  //
+  // Ported from cli/src/commands/service.rs::run_oauth_add and
+  // run_device_code_add. Three stages:
+  //   1. Create placeholder /keys (status=pending_auth)
+  //   2. Initiate auth (OAuth: GET /providers/:id/connect/oauth;
+  //      device-code: POST /providers/:id/connect/device-code/initiate)
+  //   3. Poll until the backend reports the credential is active
+
+  async function submitAuthFlow(shape) {
+    const label = readField("f-label");
+    if (!label) {
+      setStatus(credentialStatus, "Label is required.", "error");
+      return;
+    }
+    postInFlight = true;
+    credentialSubmit.disabled = true;
+    credentialBack.disabled = true;
+    setStatus(credentialStatus, "Fetching provider details…");
+
+    try {
+      // Stage 1 — catalog for provider_config_id.
+      const catalog = await proxyJson("GET",
+        `/api/proxy/api/v1/catalog/${encodeURIComponent(selection.slug)}`);
+      const providerId = catalog?.provider_config_id;
+      if (!providerId) {
+        throw new Error("catalog entry has no provider_config_id");
+      }
+
+      // Stage 2 — placeholder key.
+      setStatus(credentialStatus, `Creating placeholder '${label}'…`);
+      const placeholder = await proxyJson("POST", "/api/proxy/api/v1/keys", {
+        service_slug: selection.slug,
+        label,
+      });
+      const keyId = placeholder?.id;
+      if (!keyId) throw new Error("placeholder key has no id");
+
+      // Stage 3 — initiate + poll.
+      if (shape === "oauth") {
+        await runOauthFlow(providerId, keyId);
+      } else {
+        await runDeviceCodeFlow(providerId, keyId);
+      }
+
+      // Stage 4 — fetch final key, confirm.
+      const finalKey = await proxyJson("GET", `/api/proxy/api/v1/keys/${encodeURIComponent(keyId)}`);
+      createdKey = finalKey || {};
+      renderConfirm(createdKey);
+      showPanel("confirm");
+    } catch (err) {
+      setStatus(credentialStatus, err.message || String(err), "error");
+    } finally {
+      postInFlight = false;
+      credentialSubmit.disabled = false;
+      credentialBack.disabled = false;
+    }
+  }
+
+  async function runOauthFlow(providerId, keyId) {
+    setStatus(credentialStatus, "Opening provider sign-in in a new tab…");
+    // Ask the backend for the authorization URL. `redirect_path` is
+    // where NyxID's frontend sends the user *after* the OAuth callback
+    // completes — nothing to do with the wizard tab, which polls
+    // independently.
+    const redirectPath = encodeURIComponent(`/keys/${keyId}`);
+    const initiate = await proxyJson("GET",
+      `/api/proxy/api/v1/providers/${encodeURIComponent(providerId)}/connect/oauth?redirect_path=${redirectPath}`);
+    const authUrl = initiate?.authorization_url;
+    if (!authUrl) throw new Error("provider did not return an authorization_url");
+
+    // New tab so the wizard stays alive to poll.
+    const w = window.open(authUrl, "_blank", "noopener,noreferrer");
+    if (!w) {
+      throw new Error("Browser blocked the popup. Copy this URL manually:\n" + authUrl);
+    }
+    await pollKeyUntilActive(keyId);
+  }
+
+  async function runDeviceCodeFlow(providerId, keyId) {
+    setStatus(credentialStatus, "Requesting device code…");
+    const initiate = await proxyJson("POST",
+      `/api/proxy/api/v1/providers/${encodeURIComponent(providerId)}/connect/device-code/initiate`,
+      {});
+    const userCode = initiate?.user_code || "-";
+    const verificationUri = initiate?.verification_uri || initiate?.verification_url || "";
+    const state = initiate?.state;
+    let interval = Number(initiate?.interval) || 5;
+    if (!state) throw new Error("device-code initiate did not return state");
+
+    // Replace instructions panel with the live code + URL.
+    const panel = document.getElementById("device-code-panel");
+    if (panel) {
+      panel.innerHTML = `
+        <p style="margin:0 0 0.75rem"><strong>Device code authorization</strong></p>
+        <div style="display:grid;grid-template-columns:max-content 1fr;gap:0.5rem 1rem;margin:0 0 0.75rem">
+          <span class="wizard-muted">Code</span>
+          <div style="display:flex;gap:0.5rem;align-items:center">
+            <code style="font-size:1.125rem;padding:0.25rem 0.625rem;background:var(--ghost-hover);border-radius:6px">${escapeHTML(userCode)}</code>
+            <button type="button" class="wizard-btn-tiny" id="dc-copy-code">Copy</button>
+          </div>
+          <span class="wizard-muted">Visit</span>
+          <div style="display:flex;gap:0.5rem;align-items:center">
+            <code style="word-break:break-all">${escapeHTML(verificationUri)}</code>
+            <button type="button" class="wizard-btn-tiny" id="dc-open-url">Open</button>
+          </div>
+        </div>
+        <p style="margin:0" class="wizard-muted">
+          Open the URL, enter the code, and the wizard will complete
+          automatically.
+        </p>
+      `;
+      document.getElementById("dc-copy-code")?.addEventListener("click", (e) =>
+        copyText(userCode, e.currentTarget));
+      document.getElementById("dc-open-url")?.addEventListener("click", () => {
+        const w = window.open(verificationUri, "_blank", "noopener,noreferrer");
+        if (!w) copyText(verificationUri, document.getElementById("dc-open-url"));
+      });
+    }
+    // Open immediately so the user sees the provider page right away.
+    window.open(verificationUri, "_blank", "noopener,noreferrer");
+
+    setStatus(credentialStatus, "Waiting for authorization (poll every " + interval + "s)…");
+
+    const pollPath = `/api/proxy/api/v1/providers/${encodeURIComponent(providerId)}/connect/device-code/poll`;
+    const deadline = Date.now() + 10 * 60 * 1000; // 10 min ceiling
+    while (Date.now() < deadline) {
+      await sleep(interval * 1000);
+      let result;
+      try {
+        result = await proxyJson("POST", pollPath, { state });
+      } catch (_) {
+        continue; // transient — keep polling
+      }
+      const status = result?.status || "";
+      if (status === "complete" || status === "authorized" || result?.access_token) {
+        return;
+      }
+      if (status === "expired") throw new Error("Device code expired before authorization.");
+      if (status === "denied") throw new Error("Authorization denied.");
+      if (status === "slow_down") {
+        interval = Number(result?.interval) || (interval + 5);
+        setStatus(credentialStatus, `Provider asked us to slow down; polling every ${interval}s.`);
+      }
+    }
+    throw new Error("Device code timed out after 10 minutes.");
+  }
+
+  async function pollKeyUntilActive(keyId) {
+    const deadline = Date.now() + 5 * 60 * 1000; // 5 min, mirrors CLI's 150*2s
+    while (Date.now() < deadline) {
+      await sleep(2000);
+      let key;
+      try {
+        key = await proxyJson("GET", `/api/proxy/api/v1/keys/${encodeURIComponent(keyId)}`);
+      } catch (_) {
+        continue; // transient
+      }
+      const status = key?.status || "";
+      if (status === "active") return;
+      if (status === "pending_auth") {
+        setStatus(credentialStatus, "Waiting for you to complete authorization…");
+        continue;
+      }
+      throw new Error(`Unexpected key status: ${status}`);
+    }
+    throw new Error("Timed out waiting for authorization. You can run `nyxid service list` later to check if it completed.");
+  }
+
+  function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
   }
 
   function renderConfirm(key) {
@@ -501,6 +717,22 @@
 
   // ---- lifecycle ----
 
+  function showOverlay(opts) {
+    const overlay = document.getElementById("wizard-overlay");
+    const card = overlay.querySelector(".wizard-overlay-card");
+    const title = document.getElementById("overlay-title");
+    const body = document.getElementById("overlay-body");
+    const sub = document.getElementById("overlay-sub");
+    const icon = document.getElementById("overlay-icon");
+    title.textContent = opts.title;
+    body.textContent = opts.body;
+    sub.textContent = opts.sub || "";
+    icon.textContent = opts.icon || "✓";
+    card.classList.toggle("wizard-overlay-cancel", !!opts.cancel);
+    overlay.hidden = false;
+    overlay.setAttribute("aria-hidden", "false");
+  }
+
   async function onDone() {
     if (finished) return;
     finished = true;
@@ -524,7 +756,13 @@
         finished = false; doneBtn.disabled = false;
         return;
       }
-      setStatus(confirmStatus, "Done. You can close this tab.", "success");
+      const displayLabel = label || slug || "Service";
+      showOverlay({
+        icon: "✓",
+        title: `${displayLabel} complete`,
+        body: "It is safe to close the browser now.",
+        sub: "Your terminal has the details — switch back to it.",
+      });
     } catch (err) {
       setStatus(confirmStatus, "Couldn't reach the CLI: " + err.message, "error");
       finished = false; doneBtn.disabled = false;
@@ -538,7 +776,12 @@
     setStatus(catalogStatus, "Cancelling…");
     try {
       await proxyFetch("POST", "/api/proxy/cancel", {});
-      setStatus(catalogStatus, "Cancelled. You can close this tab.", "success");
+      showOverlay({
+        cancel: true,
+        icon: "✗",
+        title: "Wizard cancelled",
+        body: "No service was created. It is safe to close the browser now.",
+      });
     } catch (err) {
       setStatus(catalogStatus, "Couldn't reach the CLI: " + err.message, "error");
     }
