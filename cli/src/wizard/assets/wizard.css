@@ -96,7 +96,7 @@ html, body {
   flex: 1 1 auto;
   min-height: 0;
   background: var(--panel);
-  border: 1px solid var(--border);
+  border: 1px solid var(--primary);
   border-radius: 12px;
   padding: 2rem;
   overflow-y: auto;

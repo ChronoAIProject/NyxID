@@ -850,78 +850,150 @@
     await pollKeyUntilActive(keyId);
   }
 
+  // Device-code flow with refresh support. Each time the user clicks
+  // "Refresh code" (or the current code expires and they click the big
+  // refresh button), we bump `deviceCodeGen`, kill the in-flight poll,
+  // re-initiate, and restart polling. Only the latest generation's
+  // success/failure resolves the outer promise.
+  let deviceCodeGen = 0;
+  let deviceCodeOuterResolve = null;
+  let deviceCodeOuterReject = null;
+
   async function runDeviceCodeFlow(providerId, keyId) {
-    setStatus(credentialStatus, "Requesting device code…");
-    const initiate = await proxyJson("POST",
-      `/api/proxy/api/v1/providers/${encodeURIComponent(providerId)}/connect/device-code/initiate`,
-      {});
-    const userCode = initiate?.user_code || "-";
-    const verificationUri = initiate?.verification_uri || initiate?.verification_url || "";
-    const state = initiate?.state;
-    let interval = Number(initiate?.interval) || 5;
-    if (!state) throw new Error("device-code initiate did not return state");
+    return new Promise((resolve, reject) => {
+      deviceCodeOuterResolve = resolve;
+      deviceCodeOuterReject = reject;
+      startDeviceCodeSession(providerId, keyId);
+    });
+  }
 
-    // Replace instructions panel with the live code + URL.
-    const panel = document.getElementById("device-code-panel");
-    if (panel) {
-      // Promote the panel to "primary" so it gets the purple left-bar
-      // accent — this is the one bit of UI the user has to act on.
-      panel.classList.add("wizard-info-panel-primary");
-      panel.innerHTML = `
-        <p style="margin:0 0 0.75rem"><strong>Device code authorization</strong></p>
-        <div style="display:grid;grid-template-columns:max-content 1fr;gap:0.5rem 1rem;margin:0 0 0.75rem">
-          <span class="wizard-muted">Code</span>
-          <div style="display:flex;gap:0.5rem;align-items:center">
-            <code style="font-size:1.125rem;padding:0.25rem 0.625rem;background:var(--ghost-hover);border-radius:6px">${escapeHTML(userCode)}</code>
-            <button type="button" class="wizard-btn-tiny" id="dc-copy-code">Copy</button>
-          </div>
-          <span class="wizard-muted">Visit</span>
-          <div style="display:flex;gap:0.5rem;align-items:center">
-            <code style="word-break:break-all">${escapeHTML(verificationUri)}</code>
-            <button type="button" class="wizard-btn-tiny" id="dc-open-url">Open</button>
-          </div>
-        </div>
-        <p style="margin:0" class="wizard-muted">
-          Click <strong>Open</strong>, enter the code, and the wizard will
-          complete automatically. We don't auto-open the tab — copy first
-          if you want.
-        </p>
-      `;
-      document.getElementById("dc-copy-code")?.addEventListener("click", (e) =>
-        copyText(userCode, e.currentTarget));
-      document.getElementById("dc-open-url")?.addEventListener("click", () => {
-        const w = window.open(verificationUri, "_blank", "noopener,noreferrer");
-        if (!w) copyText(verificationUri, document.getElementById("dc-open-url"));
-      });
-    }
-    // Do NOT auto-open the verification URL. The user clicks the Open
-    // button when they're ready — prevents surprise popups and lets them
-    // copy the code first if they prefer.
-
-    setStatus(credentialStatus, "Waiting for authorization (poll every " + interval + "s)…");
-
+  async function startDeviceCodeSession(providerId, keyId) {
+    const myGen = ++deviceCodeGen;
     const pollPath = `/api/proxy/api/v1/providers/${encodeURIComponent(providerId)}/connect/device-code/poll`;
-    const deadline = Date.now() + 10 * 60 * 1000; // 10 min ceiling
+    const initiatePath = `/api/proxy/api/v1/providers/${encodeURIComponent(providerId)}/connect/device-code/initiate`;
+
+    setStatus(credentialStatus, "Requesting device code…");
+    let init;
+    try {
+      init = await proxyJson("POST", initiatePath, {});
+    } catch (err) {
+      if (myGen === deviceCodeGen) deviceCodeOuterReject(err);
+      return;
+    }
+    if (myGen !== deviceCodeGen) return; // superseded by refresh
+
+    const userCode = init?.user_code || "-";
+    const verificationUri = init?.verification_uri || init?.verification_url || "";
+    const state = init?.state;
+    let interval = Number(init?.interval) || 5;
+    if (!state) {
+      deviceCodeOuterReject(new Error("device-code initiate did not return state"));
+      return;
+    }
+
+    renderDeviceCodePanel({
+      userCode, verificationUri,
+      onRefresh: () => startDeviceCodeSession(providerId, keyId),
+    });
+    // We're entering a long-polling state — release the Back button so
+    // the user can bail if they change their mind. Submit stays disabled
+    // (nothing to submit; Refresh handles re-entry).
+    credentialBack.disabled = false;
+    setStatus(credentialStatus, `Waiting for authorization (polling every ${interval}s)…`);
+
+    const deadline = Date.now() + 10 * 60 * 1000; // 10 min per code
     while (Date.now() < deadline) {
       await sleep(interval * 1000);
+      if (myGen !== deviceCodeGen) return; // refreshed — stop this loop
+
       let result;
-      try {
-        result = await proxyJson("POST", pollPath, { state });
-      } catch (_) {
-        continue; // transient — keep polling
-      }
+      try { result = await proxyJson("POST", pollPath, { state }); }
+      catch (_) { continue; /* transient; keep polling */ }
+      if (myGen !== deviceCodeGen) return;
+
       const status = result?.status || "";
       if (status === "complete" || status === "authorized" || result?.access_token) {
+        deviceCodeOuterResolve();
         return;
       }
-      if (status === "expired") throw new Error("Device code expired before authorization.");
-      if (status === "denied") throw new Error("Authorization denied.");
+      if (status === "expired") {
+        renderDeviceCodeExpired({
+          onRefresh: () => startDeviceCodeSession(providerId, keyId),
+        });
+        // Leave the outer promise unresolved — user can refresh for a
+        // new code without leaving Step 2. They can also Cancel to bail.
+        return;
+      }
+      if (status === "denied") {
+        deviceCodeOuterReject(new Error("Authorization denied on the provider side."));
+        return;
+      }
       if (status === "slow_down") {
         interval = Number(result?.interval) || (interval + 5);
-        setStatus(credentialStatus, `Provider asked us to slow down; polling every ${interval}s.`);
+        setStatus(credentialStatus,
+          `Provider asked us to slow down; polling every ${interval}s.`);
       }
     }
-    throw new Error("Device code timed out after 10 minutes.");
+    if (myGen === deviceCodeGen) {
+      deviceCodeOuterReject(new Error("Device code timed out after 10 minutes. Click Refresh to get a new code."));
+    }
+  }
+
+  function renderDeviceCodePanel({ userCode, verificationUri, onRefresh }) {
+    const panel = document.getElementById("device-code-panel");
+    if (!panel) return;
+    panel.classList.add("wizard-info-panel-primary");
+    panel.innerHTML = `
+      <p style="margin:0 0 0.75rem"><strong>Device code authorization</strong></p>
+      <div style="display:grid;grid-template-columns:max-content 1fr;gap:0.5rem 1rem;margin:0 0 0.75rem">
+        <span class="wizard-muted">Code</span>
+        <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+          <code style="font-size:1.125rem;padding:0.25rem 0.625rem;background:var(--ghost-hover);border-radius:6px">${escapeHTML(userCode)}</code>
+          <button type="button" class="wizard-btn-tiny" id="dc-copy-code">Copy</button>
+          <button type="button" class="wizard-btn-tiny" id="dc-refresh">↻ Refresh code</button>
+        </div>
+        <span class="wizard-muted">Visit</span>
+        <div style="display:flex;gap:0.5rem;align-items:center">
+          <code style="word-break:break-all">${escapeHTML(verificationUri)}</code>
+          <button type="button" class="wizard-btn-tiny" id="dc-open-url">Open</button>
+        </div>
+      </div>
+      <p style="margin:0" class="wizard-muted">
+        Click <strong>Open</strong>, enter the code, and the wizard will
+        complete automatically. Use <strong>Refresh code</strong> if the
+        code expires or you want a fresh one.
+      </p>
+    `;
+    document.getElementById("dc-copy-code")?.addEventListener("click", (e) =>
+      copyText(userCode, e.currentTarget));
+    document.getElementById("dc-open-url")?.addEventListener("click", () => {
+      const w = window.open(verificationUri, "_blank", "noopener,noreferrer");
+      if (!w) copyText(verificationUri, document.getElementById("dc-open-url"));
+    });
+    document.getElementById("dc-refresh")?.addEventListener("click", () => {
+      setStatus(credentialStatus, "Refreshing device code…");
+      onRefresh();
+    });
+  }
+
+  function renderDeviceCodeExpired({ onRefresh }) {
+    const panel = document.getElementById("device-code-panel");
+    if (!panel) return;
+    panel.classList.add("wizard-info-panel-primary");
+    panel.innerHTML = `
+      <p style="margin:0 0 0.5rem"><strong>Code expired</strong></p>
+      <p style="margin:0 0 0.75rem" class="wizard-muted">
+        The device code timed out before authorization completed. Click
+        below to request a fresh code, or ← Back to pick a different
+        service.
+      </p>
+      <button type="button" class="wizard-btn wizard-btn-primary" id="dc-refresh-big">
+        ↻ Get a new code
+      </button>
+    `;
+    setStatus(credentialStatus, "");
+    credentialBack.disabled = false;  // user can bail from the expired state
+    document.getElementById("dc-refresh-big")?.addEventListener("click", onRefresh);
   }
 
   async function pollKeyUntilActive(keyId) {
@@ -1124,6 +1196,10 @@
     nextBtn.addEventListener("click", enterCredentialStep);
     cancelBtn.addEventListener("click", onCancel);
     credentialBack.addEventListener("click", () => {
+      // Stop any in-flight device-code poll + invalidate its generation
+      // so late-arriving poll responses can't fire outer resolve/reject.
+      deviceCodeGen++;
+
       // For OAuth user/both mode: after credentials are saved we're on
       // sub-step B (sign-in). Back should return to sub-step A (edit
       // credentials), not bail to the catalog.
@@ -1144,6 +1220,8 @@
       setStatus(credentialStatus, "");
       selectionDetail = null;
       oauthCredentialsSet = false;
+      postInFlight = false;
+      credentialSubmit.disabled = false;
       showPanel("catalog");
     });
     credentialSubmit.addEventListener("click", (e) => { e.preventDefault(); submitCredential(); });
