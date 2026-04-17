@@ -570,9 +570,9 @@
             ? data
             : [];
       renderCatalog(catalog, searchInput.value);
-      const simpleCount = catalog.filter(isSimpleBearer).length;
+      const supportedCount = catalog.filter(e => isWizardSupported(flowShapeOf(e))).length;
       setStatus(catalogStatus,
-        `${catalog.length} services in catalog · ${simpleCount} simple-bearer shown`);
+        `${catalog.length} services · ${supportedCount} wizard-driven, ${catalog.length - supportedCount} copy-command fallback`);
     } catch (err) {
       setStatus(catalogStatus,
         "Couldn't load catalog: " + err.message
