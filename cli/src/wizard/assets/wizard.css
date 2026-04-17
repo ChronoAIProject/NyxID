@@ -295,6 +295,36 @@ html, body {
   display: block;
   margin: 1rem 0;
 }
+
+/* "Primary" field = the one the user actually has to fill to proceed.
+   Mirrors the vertical purple accent from the frontend's key-pair
+   credential dialog (see docs/CLI_WIZARD_V2.md §3.4a reference mock).
+   Adds a 3px purple left bar that extends slightly outside the label/hint
+   so the eye is pulled to the one input that matters. */
+.wizard-field-primary {
+  position: relative;
+  padding-left: 0.75rem;
+  margin-left: 0;
+}
+.wizard-field-primary::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.125rem;
+  bottom: 0.125rem;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--primary);
+}
+
+/* Info panel variant: the "this is what you need to do" block. Same
+   purple left bar as primary fields so the visual vocabulary stays
+   consistent across paste-key, OAuth credentials, and device-code. */
+.wizard-info-panel-primary {
+  position: relative;
+  padding-left: calc(1rem + 3px);
+  border-left: 3px solid var(--primary);
+}
 .wizard-field-label {
   display: block;
   font-weight: 600;
@@ -313,6 +343,22 @@ html, body {
   font-family: inherit;
 }
 .wizard-field input:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: 0;
+  border-color: transparent;
+}
+.wizard-field select.wizard-select {
+  width: 100%;
+  padding: 0.625rem 0.875rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.9375rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+.wizard-field select.wizard-select:focus {
   outline: 2px solid var(--primary);
   outline-offset: 0;
   border-color: transparent;

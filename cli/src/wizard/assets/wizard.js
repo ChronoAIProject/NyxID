@@ -104,6 +104,10 @@
   // entries, badge by flow shape, and route to the right sub-flow at
   // the form step. No hidden section.
   function flowShapeOf(entry) {
+    // The "Custom / self-hosted" card is synthesised client-side, not a
+    // real catalog entry — treat its slug as a dedicated shape so the
+    // form renderer and submit builder can branch on it.
+    if (entry.slug === "__custom__") return "custom";
     if ((entry.service_type || "http") === "ssh") return "ssh";
     const pt = entry.provider_type || null;
     if (pt === "oauth2") return "oauth";
@@ -231,15 +235,16 @@
 
   async function enterCredentialStep() {
     if (!selection) return;
-    if (selection.slug === "__custom__") {
-      setStatus(catalogStatus,
-        "Custom / self-hosted form lands in M5. For now, use: nyxid service add --custom --endpoint-url <URL> --credential-env <VAR> --label <LABEL>",
-        "error");
-      return;
-    }
     const shape = flowShapeOf(selection);
-    credentialTitle.textContent = `Connect ${selection.name || selection.slug}`;
-    credentialSubtitle.textContent = (selection.description || "").slice(0, 200);
+    if (shape === "custom") {
+      credentialTitle.textContent = "Custom service";
+      credentialSubtitle.textContent =
+        "Paste your endpoint URL and credential. This creates a service that "
+        + "proxies to anything you can hit over HTTP.";
+    } else {
+      credentialTitle.textContent = `Connect ${selection.name || selection.slug}`;
+      credentialSubtitle.textContent = (selection.description || "").slice(0, 200);
+    }
     setStatus(credentialStatus, "");
     hideErrorBanner();
     oauthCredentialsSet = false;
@@ -277,10 +282,12 @@
     credentialFieldsEl.innerHTML = "";
 
     // Label is required on every shape (backend enforces). If the CLI
-    // passed a --label, prefer that over the slug-derived default.
+    // passed a --label, prefer that over the slug-derived default. For
+    // the Custom form the synthetic `__custom__` slug isn't a useful
+    // default — leave the field blank so the user picks their own.
     credentialFieldsEl.appendChild(fieldEl({
       id: "f-label", label: "Label", type: "text",
-      value: PREFILL.label || defaultLabelFor(entry),
+      value: PREFILL.label || (shape === "custom" ? "" : defaultLabelFor(entry)),
       hint: "Shown everywhere in the CLI and web UI.",
     }));
 
@@ -311,6 +318,9 @@
       credentialFieldsEl.appendChild(pasteKeyField(entry));
     } else if (shape === "token-exchange") {
       const fields = entry.token_exchange_credential_fields || [];
+      // Mark the LAST secret field as primary — typically that's the
+      // payload-carrying secret (e.g. app_secret after app_id in Lark/Feishu).
+      const lastSecretIdx = fields.map(f => !!f.secret).lastIndexOf(true);
       for (let i = 0; i < fields.length; i++) {
         const f = fields[i];
         credentialFieldsEl.appendChild(fieldEl({
@@ -319,6 +329,7 @@
           type: f.secret ? "password" : "text",
           placeholder: f.placeholder || "",
           required: true,
+          primary: i === lastSecretIdx,
           hint: f.description || "",
           secret: !!f.secret,
           name: f.name,
@@ -326,15 +337,94 @@
       }
     } else if (shape === "no-auth") {
       credentialFieldsEl.appendChild(noCredentialNotice());
+    } else if (shape === "custom") {
+      appendCustomFormFields(credentialFieldsEl);
     } else {
       // "paste-key" — simple bearer/header/path/query/bot_bearer
       credentialFieldsEl.appendChild(pasteKeyField(entry));
     }
   }
 
-  function fieldEl(spec) {
+  // Custom / self-hosted form. Exposes the flag surface of
+  // `nyxid service add --custom` as inputs. Intentionally rough per
+  // CLI_WIZARD_V2.md §3.4b — polish is follow-up work.
+  function appendCustomFormFields(root) {
+    root.appendChild(fieldEl({
+      id: "f-endpoint-url", label: "Endpoint URL", type: "text",
+      value: PREFILL.endpointUrl || "",
+      required: true,
+      placeholder: "https://api.example.com",
+      hint: "The base URL NyxID will proxy to.",
+    }));
+    root.appendChild(fieldEl({
+      id: "f-credential", label: "API key / credential",
+      type: "password", secret: true, required: true,
+      hint: "Pasted once, encrypted at rest. Use 'user:pass' for basic auth.",
+    }));
+    root.appendChild(selectEl({
+      id: "f-auth-method", label: "Auth method",
+      value: "bearer",
+      options: [
+        { value: "bearer", label: "bearer (Authorization: Bearer …)" },
+        { value: "header", label: "header (custom header)" },
+        { value: "query",  label: "query (?key=…)" },
+        { value: "basic",  label: "basic (Authorization: Basic …)" },
+        { value: "none",   label: "none (no auth injection)" },
+      ],
+      hint: "How NyxID attaches the credential to outgoing requests.",
+    }));
+    root.appendChild(fieldEl({
+      id: "f-auth-key-name", label: "Auth key name", type: "text",
+      value: "Authorization", required: false,
+      hint: "Header name for 'header', query parameter for 'query'. "
+        + "Ignored for 'none'.",
+    }));
+    root.appendChild(fieldEl({
+      id: "f-slug", label: "Custom slug", type: "text",
+      required: false,
+      placeholder: "auto-generated from label",
+      hint: "URL segment at /proxy/s/<slug>/…. Leave blank to let "
+        + "NyxID derive it from the label.",
+    }));
+    root.appendChild(fieldEl({
+      id: "f-openapi-spec-url", label: "OpenAPI spec URL", type: "text",
+      required: false,
+      placeholder: "https://api.example.com/openapi.json",
+      hint: "Optional. If provided, agents can discover individual "
+        + "endpoints instead of only the generic proxy tool.",
+    }));
+  }
+
+  function selectEl(spec) {
     const wrap = document.createElement("label");
     wrap.className = "wizard-field";
+    const lbl = document.createElement("span");
+    lbl.className = "wizard-field-label";
+    lbl.textContent = spec.label;
+    wrap.appendChild(lbl);
+    const select = document.createElement("select");
+    select.id = spec.id;
+    select.className = "wizard-select";
+    for (const opt of spec.options) {
+      const o = document.createElement("option");
+      o.value = opt.value;
+      o.textContent = opt.label;
+      if (opt.value === spec.value) o.selected = true;
+      select.appendChild(o);
+    }
+    wrap.appendChild(select);
+    if (spec.hint) {
+      const hint = document.createElement("span");
+      hint.className = "wizard-field-hint";
+      hint.textContent = spec.hint;
+      wrap.appendChild(hint);
+    }
+    return wrap;
+  }
+
+  function fieldEl(spec) {
+    const wrap = document.createElement("label");
+    wrap.className = "wizard-field" + (spec.primary ? " wizard-field-primary" : "");
     const lbl = document.createElement("span");
     lbl.className = "wizard-field-label";
     lbl.textContent = spec.label + (spec.required === false ? " (optional)" : "");
@@ -394,6 +484,7 @@
       type: "password",
       secret: true,
       required: true,
+      primary: true,
       hint,
     });
   }
@@ -457,6 +548,7 @@
       type: "password",
       secret: true,
       required: true,
+      primary: true,
       hint: "Never leaves your machine until Connect is clicked. Encrypted at rest on NyxID.",
     }));
     return wrap;
@@ -534,6 +626,30 @@
     const shape = flowShapeOf(selection);
     const label = readField("f-label");
     if (!label) return { error: "Label is required." };
+
+    if (shape === "custom") {
+      const endpointUrl = readField("f-endpoint-url");
+      const credential = readField("f-credential");
+      const authMethod = readField("f-auth-method") || "bearer";
+      const authKeyName = readField("f-auth-key-name");
+      const customSlug = readField("f-slug");
+      const openapi = readField("f-openapi-spec-url");
+      if (!endpointUrl) return { error: "Endpoint URL is required." };
+      if (authMethod !== "none" && !credential) {
+        return { error: "Credential is required for this auth method." };
+      }
+      const customBody = {
+        label,
+        endpoint_url: endpointUrl,
+        auth_method: authMethod,
+      };
+      if (credential) customBody.credential = credential;
+      if (authKeyName) customBody.auth_key_name = authKeyName;
+      if (customSlug) customBody.slug = customSlug;
+      if (openapi) customBody.openapi_spec_url = openapi;
+      return { body: customBody };
+    }
+
     const body = { service_slug: selection.slug, label };
 
     if (shape === "no-auth") {
@@ -748,6 +864,9 @@
     // Replace instructions panel with the live code + URL.
     const panel = document.getElementById("device-code-panel");
     if (panel) {
+      // Promote the panel to "primary" so it gets the purple left-bar
+      // accent — this is the one bit of UI the user has to act on.
+      panel.classList.add("wizard-info-panel-primary");
       panel.innerHTML = `
         <p style="margin:0 0 0.75rem"><strong>Device code authorization</strong></p>
         <div style="display:grid;grid-template-columns:max-content 1fr;gap:0.5rem 1rem;margin:0 0 0.75rem">
@@ -763,8 +882,9 @@
           </div>
         </div>
         <p style="margin:0" class="wizard-muted">
-          Open the URL, enter the code, and the wizard will complete
-          automatically.
+          Click <strong>Open</strong>, enter the code, and the wizard will
+          complete automatically. We don't auto-open the tab — copy first
+          if you want.
         </p>
       `;
       document.getElementById("dc-copy-code")?.addEventListener("click", (e) =>
@@ -774,8 +894,9 @@
         if (!w) copyText(verificationUri, document.getElementById("dc-open-url"));
       });
     }
-    // Open immediately so the user sees the provider page right away.
-    window.open(verificationUri, "_blank", "noopener,noreferrer");
+    // Do NOT auto-open the verification URL. The user clicks the Open
+    // button when they're ready — prevents surprise popups and lets them
+    // copy the code first if they prefer.
 
     setStatus(credentialStatus, "Waiting for authorization (poll every " + interval + "s)…");
 
