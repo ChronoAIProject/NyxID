@@ -4,13 +4,11 @@ import {
   useCreateBinding,
   useDeleteBinding,
 } from "@/hooks/use-agent-bindings";
-import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { ApiError } from "@/lib/api-client";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import {
   Card,
   CardContent,
@@ -70,18 +68,15 @@ function invalidReasonLabel(reason: string | undefined): string {
 
 export function BindingsCard({
   keyId,
-  allowAllServices,
   apiKeySource,
 }: {
   readonly keyId: string;
-  readonly allowAllServices: boolean;
   readonly apiKeySource?: CredentialSource;
 }) {
   const { data: bindings, isLoading } = useAgentBindings(keyId);
   const { data: allKeys } = useKeys();
   const createBinding = useCreateBinding();
   const deleteBinding = useDeleteBinding();
-  const updateApiKey = useUpdateApiKey();
   const [adding, setAdding] = useState(false);
   const [selectedServiceId, setSelectedServiceId] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<AgentServiceBinding | null>(
@@ -161,7 +156,7 @@ export function BindingsCard({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Link2 className="h-4 w-4 text-primary" />
-            <CardTitle className="text-sm">Service Bindings</CardTitle>
+            <CardTitle className="text-sm">Credential Overrides</CardTitle>
           </div>
           <Button
             size="sm"
@@ -169,61 +164,16 @@ export function BindingsCard({
             onClick={() => setAdding(true)}
             disabled={adding || availableServices.length === 0}
           >
-            Add Service
+            Add Override
           </Button>
         </div>
         <CardDescription>
-          {allowAllServices
-            ? "This agent can access all services. Add bindings to override credentials for specific services."
-            : "This agent can only access services listed below."}
+          Override the default credentials for specific services. Services
+          without an override use the default credential configured on the
+          service itself.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="flex items-center justify-between rounded-lg border border-border p-3">
-          <div className="space-y-0.5">
-            <Label htmlFor="allow-all-toggle" className="text-sm font-medium">
-              Allow all services
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              {allowAllServices
-                ? "Agent uses default credentials; bindings are overrides"
-                : "Agent can only access services with bindings below"}
-            </p>
-          </div>
-          <Switch
-            id="allow-all-toggle"
-            checked={allowAllServices}
-            disabled={updateApiKey.isPending}
-            onCheckedChange={(checked) => {
-              // When restricting, seed allowed_service_ids from current bindings
-              // so the agent doesn't lose access to already-bound services.
-              const boundIds = checked
-                ? undefined
-                : (bindings ?? []).map((b) => b.user_service_id);
-              updateApiKey.mutate(
-                {
-                  keyId,
-                  allow_all_services: checked,
-                  allowed_service_ids: boundIds,
-                },
-                {
-                  onSuccess: () =>
-                    toast.success(
-                      checked
-                        ? "Agent can now access all services"
-                        : "Agent restricted to bound services only",
-                    ),
-                  onError: (err) =>
-                    toast.error(
-                      err instanceof ApiError
-                        ? err.message
-                        : "Failed to update",
-                    ),
-                },
-              );
-            }}
-          />
-        </div>
         {adding && (
           <div className="rounded-lg border border-border p-3 space-y-3">
             <div className="space-y-1.5">
@@ -320,8 +270,8 @@ export function BindingsCard({
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">
-            No credential overrides. This agent uses default credentials for
-            all services.
+            No overrides. This agent uses the default credential configured on
+            each allowed service.
           </p>
         )}
       </CardContent>

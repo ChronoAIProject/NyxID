@@ -111,14 +111,6 @@ export function ApiKeyDetailPage() {
         <PlatformCard keyId={apiKey.id} platform={apiKey.platform} />
         <CallbackUrlCard keyId={apiKey.id} callbackUrl={apiKey.callback_url} />
 
-        <ServiceScopeCard
-          keyId={apiKey.id}
-          allowAllServices={apiKey.allow_all_services}
-          allowedServiceIds={apiKey.allowed_service_ids}
-          allowedServices={apiKey.allowed_services}
-          apiKeySource={apiKey.credential_source}
-        />
-
         <NodeScopeCard
           keyId={apiKey.id}
           allowAllNodes={apiKey.allow_all_nodes}
@@ -132,12 +124,20 @@ export function ApiKeyDetailPage() {
           rateLimitBurst={apiKey.rate_limit_burst}
         />
 
-        <BindingsCard
+        <UsageStatsCard keyId={apiKey.id} />
+
+        <ServiceScopeCard
           keyId={apiKey.id}
           allowAllServices={apiKey.allow_all_services}
+          allowedServiceIds={apiKey.allowed_service_ids}
+          allowedServices={apiKey.allowed_services}
           apiKeySource={apiKey.credential_source}
         />
-        <UsageStatsCard keyId={apiKey.id} />
+
+        <BindingsCard
+          keyId={apiKey.id}
+          apiKeySource={apiKey.credential_source}
+        />
       </div>
 
       <RotateKeyDialog
