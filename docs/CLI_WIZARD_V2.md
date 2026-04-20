@@ -48,13 +48,17 @@ v2.0 ships `service add` only. The remaining rows are later PRs that reuse the f
 
 The wizard fires only when **all** of these are true:
 
-- no `slug` positional argument
-- no `--credential` or `--credential-env` flag
+- none of the scripted-flow flags are set: `--credential`, `--credential-env`, `--oauth`, `--device-code`, `--custom`, `--auth-method`, `--auth-key-name`, `--scope`, `--org`, `--openapi-spec-url`
 - stdout is a TTY
 - `--output` is not `json`
-- `--terminal` is not set
+- the environment is not headless — none of:
+  - `NYXID_NO_WIZARD` set to any value (explicit opt-out)
+  - `SSH_CONNECTION` or `SSH_TTY` set (SSH session — no local browser)
+  - on Linux: both `DISPLAY` and `WAYLAND_DISPLAY` unset (no X/Wayland)
 
-Any other invocation runs the existing non-interactive path **unchanged**. Scripted and CI users see no behavior change.
+The `slug`, `--label`, `--via-node`, and `--endpoint-url` flags are **prefill-compatible** — they pre-populate the wizard form instead of disabling it.
+
+Any other invocation runs the existing non-interactive path **unchanged**. Scripted, CI, and SSH users see no behavior change from the pre-wizard CLI.
 
 ### 3.2 Terminal output
 

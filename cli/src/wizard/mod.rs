@@ -14,11 +14,14 @@ use anyhow::{Result, anyhow};
 /// The `base_url_root` is the user-facing NyxID origin (e.g.
 /// `https://auth.nyxid.dev`) with no trailing slash and no `/api/v1`
 /// suffix. `access_token` is the user's session bearer, loaded from
-/// `~/.nyxid/` by `ApiClient::from_auth` and handed in here.
+/// `~/.nyxid/` by `ApiClient::from_auth` and handed in here. `profile`
+/// is needed so the proxy can refresh the access token on 401 using
+/// the saved refresh token for the correct profile.
 #[derive(Debug, Clone)]
 pub struct ProxyContext {
     pub base_url_root: String,
     pub access_token: String,
+    pub profile: Option<String>,
 }
 
 /// CLI-supplied prefill for the wizard form. Any field set here is
@@ -72,6 +75,7 @@ pub async fn run_ai_key_wizard(auth: &crate::cli::AuthArgs, prefill: WizardPrefi
     let proxy = ProxyContext {
         base_url_root,
         access_token,
+        profile: auth.profile.clone(),
     };
 
     match run_flow("ai-key", proxy, prefill).await? {

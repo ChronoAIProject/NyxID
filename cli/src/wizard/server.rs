@@ -191,6 +191,12 @@ struct ServerState {
     allowlist: Arc<Vec<ProxyRoute>>,
     upstream: ReqwestClient,
     flow: FlowKind,
+    /// Current access token. Starts as `proxy.access_token`, but gets
+    /// replaced in-place when the backend returns 401 and we refresh
+    /// via the saved refresh_token (mirrors ApiClient::try_refresh_token
+    /// in cli/src/api.rs). Held under a Mutex so concurrent 401s from
+    /// parallel proxy requests don't race the /auth/refresh call.
+    access_token: Arc<tokio::sync::Mutex<String>>,
     /// Count of in-flight mutating proxy requests (POST/PUT/PATCH/DELETE).
     /// Incremented when we enter the proxy handler for a mutator, decremented
     /// when the upstream response resolves. `handle_cancel_unload` refuses
@@ -561,20 +567,34 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
         None
     };
 
-    let mut upstream_req = state
-        .upstream
-        .request(method.clone(), &upstream_url)
-        .bearer_auth(&state.proxy.access_token);
-    if let Some(ct) = headers.get(header::CONTENT_TYPE)
-        && let Ok(ct) = ct.to_str()
-    {
-        upstream_req = upstream_req.header(header::CONTENT_TYPE, ct);
-    }
-    if !body_bytes.is_empty() {
-        upstream_req = upstream_req.body(body_bytes.to_vec());
-    }
+    // Small helper so we can rebuild the upstream request with a fresh
+    // token on 401 retry. Closure captures the shared pieces (method,
+    // URL, CT header, body) and just takes the bearer.
+    let ct_hdr = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let body_vec = if body_bytes.is_empty() {
+        None
+    } else {
+        Some(body_bytes.to_vec())
+    };
+    let build_req = |token: &str| -> reqwest::RequestBuilder {
+        let mut r = state
+            .upstream
+            .request(method.clone(), &upstream_url)
+            .bearer_auth(token);
+        if let Some(ct) = ct_hdr.as_deref() {
+            r = r.header(header::CONTENT_TYPE, ct);
+        }
+        if let Some(b) = body_vec.as_ref() {
+            r = r.body(b.clone());
+        }
+        r
+    };
 
-    let upstream_resp = match upstream_req.send().await {
+    let current_token = { state.access_token.lock().await.clone() };
+    let first_resp = match build_req(&current_token).send().await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("  proxy error ({method} {upstream_url}): {e}");
@@ -584,6 +604,23 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
             )
                 .into_response();
         }
+    };
+
+    // 401 → refresh access token via the saved refresh_token and retry
+    // once. Mirrors ApiClient::try_refresh_token + retry pattern in
+    // cli/src/api.rs::{get,post,put,patch,delete_empty}. Skipping refresh
+    // (or on refresh failure) falls through to the original 401 so the
+    // browser gets a real error instead of hanging.
+    let upstream_resp = if first_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        match try_refresh_access_token(&state).await {
+            Some(new_token) => match build_req(&new_token).send().await {
+                Ok(retry) => retry,
+                Err(_) => first_resp,
+            },
+            None => first_resp,
+        }
+    } else {
+        first_resp
     };
 
     let status = upstream_resp.status();
@@ -659,13 +696,8 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
 async fn conditional_abandon_key(state: &ServerState, key_id: &str) {
     let base = state.proxy.base_url_root.trim_end_matches('/');
     let url = format!("{}/api/v1/keys/{}", base, key_id);
-    let key = match state
-        .upstream
-        .get(&url)
-        .bearer_auth(&state.proxy.access_token)
-        .send()
-        .await
-    {
+    let token = { state.access_token.lock().await.clone() };
+    let key = match state.upstream.get(&url).bearer_auth(&token).send().await {
         Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
         _ => None,
     };
@@ -675,14 +707,43 @@ async fn conditional_abandon_key(state: &ServerState, key_id: &str) {
         .and_then(|s| s.as_str())
         == Some("pending_auth");
     if still_pending {
-        let _ = state
-            .upstream
-            .delete(&url)
-            .bearer_auth(&state.proxy.access_token)
-            .send()
-            .await;
+        let _ = state.upstream.delete(&url).bearer_auth(&token).send().await;
     }
     state.pending_keys.lock().await.remove(key_id);
+}
+
+/// Best-effort access-token refresh via the saved refresh_token for this
+/// profile. Mirrors `ApiClient::try_refresh_token` in `cli/src/api.rs`:
+/// POST `{base}/api/v1/auth/refresh` → `{access_token, refresh_token}`,
+/// persist via `crate::auth::save_tokens_for` (so subsequent CLI
+/// commands also benefit), then update this server's mutex. Returns the
+/// new access token on success, or `None` on any failure (no saved
+/// refresh token, refresh endpoint 4xx/5xx, network error, malformed
+/// body). Callers should treat `None` as "keep the original 401".
+async fn try_refresh_access_token(state: &ServerState) -> Option<String> {
+    let profile = state.proxy.profile.as_deref();
+    let refresh_token = crate::auth::read_saved_refresh_token_for(profile)?;
+    let url = format!(
+        "{}/api/v1/auth/refresh",
+        state.proxy.base_url_root.trim_end_matches('/')
+    );
+    let resp = state
+        .upstream
+        .post(&url)
+        .json(&json!({ "refresh_token": refresh_token }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let tokens: Value = resp.json().await.ok()?;
+    let new_access = tokens.get("access_token")?.as_str()?.to_string();
+    let new_refresh = tokens.get("refresh_token")?.as_str()?.to_string();
+    crate::auth::save_tokens_for(profile, &new_access, Some(&new_refresh)).ok()?;
+    *state.access_token.lock().await = new_access.clone();
+    eprintln!("  [wizard] refreshed expired access token for profile {profile:?}");
+    Some(new_access)
 }
 
 /// `POST /api/proxy/abandon-placeholder` — client-triggered cleanup of a
@@ -802,6 +863,7 @@ pub async fn run_flow(
         .local_addr()
         .context("reading wizard server local addr")?;
 
+    let initial_token = proxy.access_token.clone();
     let state = ServerState {
         csrf_token: Arc::new(csrf),
         done_tx: Arc::new(tokio::sync::Mutex::new(Some(done_tx))),
@@ -812,6 +874,7 @@ pub async fn run_flow(
         allowlist: Arc::new(allowlist_for(kind)),
         upstream,
         flow: kind,
+        access_token: Arc::new(tokio::sync::Mutex::new(initial_token)),
         in_flight_mutations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         bound_port: addr.port(),
         pending_keys: Arc::new(tokio::sync::Mutex::new(HashSet::new())),

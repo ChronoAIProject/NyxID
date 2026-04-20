@@ -51,6 +51,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // --auth-method, --auth-key-name, --output json) fall through
             // to the existing non-interactive path so we don't change
             // scripted behavior for existing users.
+            //
+            // Headless contexts (SSH sessions, explicit opt-out, no local
+            // display on Linux) also fall through — on those boxes we
+            // can't reliably open a browser, so we preserve the pre-wizard
+            // rpassword prompt path. Set `NYXID_NO_WIZARD=1` to force the
+            // scripted path from any interactive invocation.
             use std::io::IsTerminal;
             let interactive_output = matches!(auth.output, OutputFormat::Table);
             let explicit_scripted = credential.is_some()
@@ -63,7 +69,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 || !scopes.is_empty()
                 || org.is_some()
                 || openapi_spec_url.is_some();
-            if !explicit_scripted && interactive_output && std::io::stdout().is_terminal() {
+            let headless = is_headless_environment();
+            if !explicit_scripted
+                && interactive_output
+                && std::io::stdout().is_terminal()
+                && !headless
+            {
                 let prefill = crate::wizard::WizardPrefill {
                     slug: slug.clone(),
                     label: label.clone(),
@@ -1039,6 +1050,34 @@ fn prompt_line_default(prompt: &str, default: &str) -> Result<String> {
     }
 }
 
+/// Returns true when the CLI is running somewhere we can't reasonably
+/// open a local browser for the wizard. In those cases `service add`
+/// falls through to the pre-wizard rpassword path so SSH / CI / remote
+/// dev users keep the old in-terminal credential prompt.
+///
+/// Checks, in order:
+/// - `NYXID_NO_WIZARD` set to anything → explicit opt-out
+/// - `SSH_CONNECTION` / `SSH_TTY` set → SSH session (no local display)
+/// - Linux-only: both `DISPLAY` and `WAYLAND_DISPLAY` unset → no X/Wayland
+///
+/// We intentionally skip this detection on macOS / Windows when not in
+/// SSH — there's always a GUI available, so the wizard should run.
+fn is_headless_environment() -> bool {
+    if std::env::var_os("NYXID_NO_WIZARD").is_some() {
+        return true;
+    }
+    if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Default auth key name for a given auth method. Mirrors the frontend
 /// defaults in `add-key-dialog.tsx` so CLI and UI stay in sync.
 fn default_auth_key_name(method: &str) -> &'static str {
@@ -1270,5 +1309,96 @@ mod tests {
     #[test]
     fn route_without_node_or_direct_errors() {
         assert!(build_route_body(false, None).is_err());
+    }
+
+    // Headless detection is env-sensitive, so these tests stash and
+    // restore the relevant variables. We can't run them in parallel with
+    // other env-touching tests, but the helper is pure enough that
+    // serialising inside a single test is fine.
+    #[test]
+    fn headless_env_flags_recognised() {
+        struct Guard {
+            keys: Vec<&'static str>,
+            original: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        }
+        impl Guard {
+            fn new(keys: &[&'static str]) -> Self {
+                let original = keys
+                    .iter()
+                    .map(|k| (*k, std::env::var_os(k)))
+                    .collect::<Vec<_>>();
+                for k in keys {
+                    // SAFETY: tests run single-threaded via the helper
+                    // itself calling is_headless_environment(); we
+                    // restore originals on drop.
+                    unsafe {
+                        std::env::remove_var(k);
+                    }
+                }
+                Guard {
+                    keys: keys.to_vec(),
+                    original,
+                }
+            }
+            fn set(&self, k: &str, v: &str) {
+                unsafe {
+                    std::env::set_var(k, v);
+                }
+            }
+            fn unset(&self, k: &str) {
+                unsafe {
+                    std::env::remove_var(k);
+                }
+            }
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                for (k, v) in &self.original {
+                    unsafe {
+                        match v {
+                            Some(val) => std::env::set_var(k, val),
+                            None => std::env::remove_var(k),
+                        }
+                    }
+                }
+                let _ = &self.keys;
+            }
+        }
+
+        let guard = Guard::new(&[
+            "NYXID_NO_WIZARD",
+            "SSH_CONNECTION",
+            "SSH_TTY",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+        ]);
+
+        // Explicit opt-out wins.
+        guard.set("NYXID_NO_WIZARD", "1");
+        assert!(is_headless_environment());
+        guard.unset("NYXID_NO_WIZARD");
+
+        // SSH session markers.
+        guard.set("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 34567");
+        assert!(is_headless_environment());
+        guard.unset("SSH_CONNECTION");
+
+        guard.set("SSH_TTY", "/dev/pts/0");
+        assert!(is_headless_environment());
+        guard.unset("SSH_TTY");
+
+        // Linux-only: no display at all means headless. On non-Linux
+        // we don't gate on display vars (macOS always has a GUI, Windows
+        // similar), so just assert the fallback.
+        #[cfg(target_os = "linux")]
+        {
+            assert!(is_headless_environment());
+            guard.set("DISPLAY", ":0");
+            assert!(!is_headless_environment());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(!is_headless_environment());
+        }
     }
 }
