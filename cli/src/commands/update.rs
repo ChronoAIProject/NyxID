@@ -20,7 +20,14 @@ async fn update_cli() -> Result<()> {
     eprintln!("Updating NyxID CLI...");
 
     let status = tokio::process::Command::new("cargo")
-        .args(["install", "--git", REPO_URL, "nyxid-cli", "--force"])
+        .args([
+            "install",
+            "--git",
+            REPO_URL,
+            "nyxid-cli",
+            "--force",
+            "--locked",
+        ])
         .status()
         .await
         .context("Failed to run cargo install. Is cargo available?")?;

@@ -2,6 +2,7 @@
 name = "nyxid"
 version = "0.2.0"
 edition = "2024"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

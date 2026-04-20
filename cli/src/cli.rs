@@ -493,11 +493,10 @@ pub enum ServiceCommands {
         /// the catalog entry's default spec URL.
         #[arg(long, value_name = "URL")]
         openapi_spec_url: Option<String>,
-        /// Skip the browser wizard and use the in-terminal flow even when
-        /// stdout is a TTY. Equivalent to setting `NYXID_NO_WIZARD=1`.
-        /// Useful when you'd rather paste a credential at the prompt than
-        /// open a browser tab.
-        #[arg(long)]
+        /// Force the terminal (rpassword) flow and skip the browser wizard
+        /// even when a local display is available. Equivalent to setting
+        /// `NYXID_NO_WIZARD=1` for a single invocation.
+        #[arg(long, alias = "no-wizard")]
         terminal: bool,
         #[command(flatten)]
         auth: AuthArgs,
@@ -704,8 +703,8 @@ pub enum ApiKeyCommands {
         id: String,
         /// Skip the browser wizard and print the new key to the terminal.
         /// The new key is shown ONCE — copy it before scrolling away.
-        /// Equivalent to setting `NYXID_NO_WIZARD=1`.
-        #[arg(long)]
+        /// Equivalent to setting `NYXID_NO_WIZARD=1` for a single invocation.
+        #[arg(long, alias = "no-wizard")]
         terminal: bool,
         #[command(flatten)]
         auth: AuthArgs,
@@ -971,8 +970,8 @@ pub enum NodeCommands {
         /// Skip the browser wizard and print the new auth token + signing
         /// secret to the terminal. The new values are shown ONCE — copy
         /// them before scrolling away. Equivalent to setting
-        /// `NYXID_NO_WIZARD=1`.
-        #[arg(long)]
+        /// `NYXID_NO_WIZARD=1` for a single invocation.
+        #[arg(long, alias = "no-wizard")]
         terminal: bool,
         #[command(flatten)]
         auth: AuthArgs,
@@ -1213,6 +1212,30 @@ mod tests {
                             },
                     },
             } => assert_eq!(config.as_deref(), Some("/tmp")),
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn service_add_accepts_terminal_flag() {
+        for flag in ["--terminal", "--no-wizard"] {
+            let cli = Cli::try_parse_from(["nyxid", "service", "add", "llm-openai", flag])
+                .unwrap_or_else(|e| panic!("service add should accept {flag}: {e}"));
+
+            match cli.command {
+                Commands::Service {
+                    command: ServiceCommands::Add { terminal, .. },
+                } => assert!(terminal, "{flag} should set terminal=true"),
+                _ => panic!("unexpected parse result for {flag}"),
+            }
+        }
+
+        let cli = Cli::try_parse_from(["nyxid", "service", "add", "llm-openai"])
+            .expect("service add without flag should parse");
+        match cli.command {
+            Commands::Service {
+                command: ServiceCommands::Add { terminal, .. },
+            } => assert!(!terminal, "terminal should default to false"),
             _ => panic!("unexpected parse result"),
         }
     }
