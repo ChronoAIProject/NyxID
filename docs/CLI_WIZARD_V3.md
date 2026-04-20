@@ -33,18 +33,28 @@ This document is also honest about what v3 does NOT promise (see §3.5).
 
 ## 2. Commands Affected
 
-| Credential                | Existing command               | Backend API                                    | v3.0  |
-|---------------------------|--------------------------------|------------------------------------------------|:-----:|
-| API key rotation          | `nyxid api-key rotate <id>`    | `POST /api/v1/api-keys/{id}/rotate`            |  ✅   |
-| Node token rotation       | `nyxid node rotate-token <id>` | `POST /api/v1/nodes/{id}/rotate-token`         |  ✅   |
-| NyxID agent API key       | `nyxid api-key create`         | `POST /api/v1/api-keys`                        |       |
-| Node registration         | `nyxid node register-token`    | `POST /api/v1/nodes/register-token`            |       |
-| Channel bot               | `nyxid channel-bot register`   | `POST /api/v1/channel-bots`                    |       |
-| MFA / TOTP                | `nyxid mfa setup` + `verify`   | `POST /api/v1/mfa/setup` + `.../verify-setup`  |       |
+| Credential                | Existing command               | Backend API                                    | v3.0  | v3.1  |
+|---------------------------|--------------------------------|------------------------------------------------|:-----:|:-----:|
+| API key rotation          | `nyxid api-key rotate <id>`    | `POST /api/v1/api-keys/{id}/rotate`            |  ✅   |       |
+| Node token rotation       | `nyxid node rotate-token <id>` | `POST /api/v1/nodes/{id}/rotate-token`         |  ✅   |       |
+| NyxID agent API key       | `nyxid api-key create`         | `POST /api/v1/api-keys`                        |       |  ✅   |
+| Node registration         | `nyxid node register-token`    | `POST /api/v1/nodes/register-token`            |       |  ✅   |
+| Channel bot               | `nyxid channel-bot register`   | `POST /api/v1/channel-bots`                    |       |       |
+| MFA / TOTP                | `nyxid mfa setup` + `verify`   | `POST /api/v1/mfa/setup` + `.../verify-setup`  |       |       |
 
-v3.0 ships the two rotation flows. The other rows are follow-up PRs:
+v3.0 shipped the two rotation flows. v3.1 adds the create-side pair
+(`nyxid api-key create` with scope picker + `nyxid node register-token`).
 
-- **v3.1:** `api-key create` (needs a scope picker — see [v3.0 follow-up notes](#10-known-debt--follow-up-prs)) + `node register-token` + `channel-bot register`.
+- **v3.1:** `api-key create` + `node register-token` — ✅ shipped.
+- **Deferred:** `channel-bot register` does not emit a one-time secret
+  today (`CreateChannelBotResponse` in `backend/src/handlers/channel_bots.rs`
+  returns only `id`/`platform`/`platform_bot_username`/`status`; the
+  webhook secret is generated, used to register with the platform, then
+  discarded from the response). That's a v2-style *input-collection*
+  problem, not a DisplayOnce problem, and it needs its own design
+  conversation — either add a backend change that reveals the webhook
+  secret on creation + a rotate endpoint, or ship a v2-style bot-token
+  input flow. Tracked for a follow-up PR.
 - **v3.2:** `mfa setup` (also needs the §10.3 QR-code work flagged in v2).
 
 ---
@@ -334,19 +344,23 @@ v3.0 deliberately excludes:
 
 ### 10.1 Pty test harness extraction (v2 §10.5)
 
-Still unextracted. v3 ships without expanded automated coverage. Should land before v3.1 to catch regressions in the rotation flows + the ai-key flow simultaneously.
+Still unextracted. v3 and v3.1 both shipped without expanded automated coverage. The cost of skipping has grown: four DisplayOnce flows (api-key rotate, node rotate-token, node register-token, api-key create) + the ai-key flow all share the same machinery now, so a regression in one of them bleeds into all. Should land before v3.2 (MFA setup).
 
 ### 10.2 Browser-level test (Playwright)
 
 Mask-on-blur, visibility-driven remask, and rotation-flow heartbeat behavior need a real browser to test. Standalone PR.
 
-### 10.3 api-key create + scope picker (v3.1)
+### 10.3 api-key create + scope picker (v3.1) — ✅ shipped
 
-The next DisplayOnce flow. Step 2 needs a multi-select against the user's services + nodes with allow-all toggles. Treat the picker as its own design exercise.
+Scope picker lives in `#step-scope-picker` (wizard.html) with `initApiKeyCreateFlow` in wizard.js. Layout: name, owner (personal or org, hidden when no orgs), platform, read/write scopes, expiry in days, service-access radio + multi-select, node-access radio + multi-select, rate-limit pair, callback URL. Multi-select lists fetched lazily on "Select specific". Proxy allowlist at `server.rs::allowlist_for(FlowKind::ApiKeyCreate)` covers `GET /orgs`, `GET /user-services`, `GET /nodes`, `POST /api-keys` (body allowlist: 12 fields including `target_org_id`).
 
-### 10.4 node register-token + channel-bot register (v3.1)
+### 10.4 node register-token (v3.1) — ✅ shipped
 
-Same DisplayOnce panel; per-flow Step 2 forms.
+`FlowKind::NodeRegisterToken` allowlist: just `POST /api/v1/nodes/register-token` with body_fields `["name"]`. Reuses `step-confirm-rotate` (panel copy overridden at init) + `step-display-once` verbatim. Typed ack payload `NodeRegisterAckPayload { acknowledged, token_id }` with the same `deny_unknown_fields` guard as rotation flows. Heartbeat dead-after window widened to 60 s via the generalized `FlowKind::is_display_once()` (previously `is_rotation()`).
+
+### 10.4.1 channel-bot register — deferred
+
+Not a DisplayOnce flow today: `CreateChannelBotResponse` returns only `id`/`platform`/`platform_bot_username`/`status`; the webhook secret is generated server-side, used to register the webhook with the external platform, then discarded. The right shape is either (a) a backend change to reveal the webhook secret + add a rotate-secret endpoint, or (b) a v2-style input flow that hides the platform bot token on entry. Design conversation pending.
 
 ### 10.5 mfa setup (v3.2)
 

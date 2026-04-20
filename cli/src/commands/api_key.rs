@@ -20,8 +20,36 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             platform,
             callback_url,
             org,
+            terminal,
             auth,
         } => {
+            use std::io::IsTerminal;
+            // Wizard gate — mirrors Rotate. Any of --terminal,
+            // --output json, piped stdout, SSH, or NYXID_NO_WIZARD
+            // falls through to the scripted path below with
+            // byte-identical behavior to pre-wizard.
+            let interactive_output = matches!(auth.output, OutputFormat::Table);
+            let wizard_eligible = !terminal
+                && interactive_output
+                && std::io::stdout().is_terminal()
+                && crate::wizard::is_wizard_eligible();
+
+            if wizard_eligible {
+                let prefill = crate::wizard::ApiKeyCreatePrefill {
+                    name: name.clone(),
+                    platform: platform.clone(),
+                    scopes: scopes.clone(),
+                    expires_in_days,
+                    allow_all_services,
+                    allow_all_nodes,
+                    allowed_services_csv: allowed_services.clone(),
+                    allowed_nodes_csv: allowed_nodes.clone(),
+                    callback_url: callback_url.clone(),
+                    org_id: org.clone(),
+                };
+                return crate::wizard::run_api_key_create_wizard(&auth, prefill).await;
+            }
+
             let mut api = ApiClient::from_auth(&auth)?;
 
             let key_name = match name {

@@ -93,6 +93,167 @@
       </div>
     </section>
 
+    <!-- v3.1: api-key create scope picker. Separate panel (rather than
+         reusing step-credential) because the field set, validation
+         rules, and data sources are unrelated to the ai-key catalog
+         form. Shown when FLOW=api-key-create. Title + owner row are
+         populated by wizard.js at init. -->
+    <section class="wizard-step-panel" id="step-scope-picker" data-step="scope-picker" hidden>
+      <h1 class="wizard-title">Create API key</h1>
+      <p class="wizard-body wizard-muted">
+        The key value will be minted on submit and shown once on the next
+        screen. Before that, pick a name and the scope — what this key is
+        allowed to do.
+      </p>
+
+      <div class="wizard-error-banner" id="scope-picker-error" role="alert" hidden></div>
+
+      <form id="scope-picker-form" autocomplete="off">
+        <div class="wizard-field">
+          <label for="scope-name">Name</label>
+          <input type="text" id="scope-name" class="wizard-text-input"
+                 placeholder="e.g. coding-agent" maxlength="128" required>
+          <span class="wizard-field-hint">
+            A short label so you can find this key in `nyxid api-key list`.
+          </span>
+        </div>
+
+        <div class="wizard-field" id="scope-owner-field" hidden>
+          <label for="scope-owner">Owner</label>
+          <select id="scope-owner" class="wizard-select">
+            <option value="">Personal (your account)</option>
+          </select>
+          <span class="wizard-field-hint">
+            Org-owned keys authenticate as the org — every org admin can
+            rotate or delete them. Services and nodes below filter to what
+            the chosen owner can see.
+          </span>
+        </div>
+
+        <div class="wizard-field">
+          <label for="scope-platform">Platform</label>
+          <select id="scope-platform" class="wizard-select">
+            <option value="">— none —</option>
+            <option value="claude-code">claude-code</option>
+            <option value="codex">codex</option>
+            <option value="openclaw">openclaw</option>
+            <option value="cursor">cursor</option>
+            <option value="generic">generic</option>
+          </select>
+          <span class="wizard-field-hint">
+            Tags this key with the AI agent it belongs to, for audit
+            attribution and per-agent rate limits.
+          </span>
+        </div>
+
+        <div class="wizard-field">
+          <label for="scope-scopes">Scopes</label>
+          <div class="wizard-checkbox-row">
+            <label class="wizard-checkbox">
+              <input type="checkbox" id="scope-read" checked> read
+            </label>
+            <label class="wizard-checkbox">
+              <input type="checkbox" id="scope-write" checked> write
+            </label>
+          </div>
+        </div>
+
+        <div class="wizard-field">
+          <label for="scope-expiry">Expiry</label>
+          <div class="wizard-input-row">
+            <input type="number" id="scope-expiry" class="wizard-text-input"
+                   placeholder="never" min="1" max="3650">
+            <span class="wizard-input-toggle" aria-hidden="true">days</span>
+          </div>
+          <span class="wizard-field-hint">
+            Leave blank for no expiry. After this many days, the key stops
+            authenticating.
+          </span>
+        </div>
+
+        <fieldset class="wizard-scope-group">
+          <legend>Service access</legend>
+          <label class="wizard-radio">
+            <input type="radio" name="scope-service-mode" value="all" checked>
+            All services
+          </label>
+          <label class="wizard-radio">
+            <input type="radio" name="scope-service-mode" value="specific">
+            Select specific services
+          </label>
+          <div class="wizard-multi-wrap" id="scope-services-wrap" hidden>
+            <div class="wizard-multi-toolbar">
+              <button type="button" class="wizard-btn-tiny" id="scope-services-all">select all</button>
+              <button type="button" class="wizard-btn-tiny" id="scope-services-none">clear</button>
+              <span class="wizard-field-hint" id="scope-services-count">0 selected</span>
+            </div>
+            <div class="wizard-multi-list" id="scope-services-list" role="list">
+              <div class="wizard-field-hint">Loading…</div>
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset class="wizard-scope-group">
+          <legend>Node access</legend>
+          <label class="wizard-radio">
+            <input type="radio" name="scope-node-mode" value="all" checked>
+            All nodes
+          </label>
+          <label class="wizard-radio">
+            <input type="radio" name="scope-node-mode" value="specific">
+            Select specific nodes
+          </label>
+          <div class="wizard-multi-wrap" id="scope-nodes-wrap" hidden>
+            <div class="wizard-multi-toolbar">
+              <button type="button" class="wizard-btn-tiny" id="scope-nodes-all">select all</button>
+              <button type="button" class="wizard-btn-tiny" id="scope-nodes-none">clear</button>
+              <span class="wizard-field-hint" id="scope-nodes-count">0 selected</span>
+            </div>
+            <div class="wizard-multi-list" id="scope-nodes-list" role="list">
+              <div class="wizard-field-hint">Loading…</div>
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset class="wizard-scope-group">
+          <legend>Rate limit (optional)</legend>
+          <div class="wizard-rate-row">
+            <div class="wizard-field wizard-field-inline">
+              <label for="scope-rate-per-second">Per second</label>
+              <input type="number" id="scope-rate-per-second" class="wizard-text-input"
+                     placeholder="server default" min="1" max="10000">
+            </div>
+            <div class="wizard-field wizard-field-inline">
+              <label for="scope-rate-burst">Burst</label>
+              <input type="number" id="scope-rate-burst" class="wizard-text-input"
+                     placeholder="server default" min="1" max="10000">
+            </div>
+          </div>
+          <span class="wizard-field-hint">
+            Leave blank to use the server defaults.
+          </span>
+        </fieldset>
+
+        <div class="wizard-field">
+          <label for="scope-callback-url">Callback URL (optional)</label>
+          <input type="text" id="scope-callback-url" class="wizard-text-input"
+                 placeholder="https://…" maxlength="2048">
+          <span class="wizard-field-hint">
+            Webhook URL for channel-bot relay. Most keys don't need this.
+          </span>
+        </div>
+      </form>
+
+      <div class="wizard-status" id="scope-picker-status" aria-live="polite"></div>
+
+      <div class="wizard-actions">
+        <button type="button" id="scope-cancel" class="wizard-btn wizard-btn-ghost">Cancel</button>
+        <button type="button" id="scope-submit" class="wizard-btn wizard-btn-primary">
+          Create key
+        </button>
+      </div>
+    </section>
+
     <!-- Step 3 — confirmation -->
     <section class="wizard-step-panel" id="step-confirm" data-step="3" hidden>
       <h1 class="wizard-title"><span aria-hidden="true">✓</span> Service created</h1>

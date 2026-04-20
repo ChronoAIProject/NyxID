@@ -451,9 +451,11 @@ Each AI agent or integration should use its own NyxID API key (agent key). This 
 
 ```bash
 # CRUD
+nyxid api-key create                                       # interactive: opens scope-picker wizard (v3.1)
 nyxid api-key create --name "My Key" --scopes "proxy read"
-nyxid api-key create --name "coding-agent" --platform claude-code  # optional platform label
+nyxid api-key create --name "coding-agent" --platform claude-code  # any prefill flag is picked up by the wizard
 nyxid api-key create --name "relay-agent" --callback-url "https://..."  # for channel bot relay
+nyxid api-key create --name "My Key" --output json         # scripted: prints raw key to stdout (legacy shape)
 nyxid api-key list --output json
 nyxid api-key show <ID_OR_NAME> --output json
 nyxid api-key rotate <ID_OR_NAME>                          # interactive: opens browser wizard
@@ -498,20 +500,27 @@ export NYXID_ACCESS_TOKEN="nyxid_ag_..."
 
 Agent keys need `write` or `admin` scope to call management endpoints via REST (create/update/delete/rotate API keys, services, endpoints, bindings, etc.). `proxy read` is sufficient for proxy traffic only -- paths under `/proxy`, `/llm`, `/ssh`, `/channel-events`, `/channel-relay`, and `/delegation` do not require write scope. The `nyxid` CLI uses session auth (not API keys) and is unaffected.
 
-### Browser wizard for one-time secrets (v3.0)
+### Browser wizard for one-time secrets (v3.0 + v3.1)
 
-`nyxid api-key rotate` and `nyxid node rotate-token` open a local browser-based wizard for interactive use, so the new secret value lands in the user's browser tab instead of the terminal / agent context. The CLI prints `→ Opening http://127.0.0.1:…/wizard …` and a no-secret success line on exit. Full spec: [`docs/CLI_WIZARD_V3.md`](../../docs/CLI_WIZARD_V3.md).
+Four commands now open a local browser-based wizard for interactive use, so the new secret lands in the user's browser tab instead of the terminal / agent context:
+
+- `nyxid api-key rotate` — v3.0
+- `nyxid node rotate-token` — v3.0
+- `nyxid node register-token` — v3.1
+- `nyxid api-key create` — v3.1 (scope picker collects name + owner + platform + scopes + expiry + allowed services/nodes + rate limits; the key is minted on submit and shown once in the same DisplayOnce panel)
+
+The CLI prints `→ Opening http://127.0.0.1:…/wizard …` and a no-secret success line on exit. Full spec: [`docs/CLI_WIZARD_V3.md`](../../docs/CLI_WIZARD_V3.md).
 
 For scripted / agent use, the wizard is **bypassed automatically** when ANY of these is true:
 
-- `--terminal` (alias `--no-wizard`) is passed -- per-invocation override, mirrors the same flag on `nyxid service add`
+- `--terminal` (alias `--no-wizard`) is passed -- per-invocation override, available on all four wizard commands + `nyxid service add`
 - `--output json` is passed (output is machine-readable)
 - stdout is not a TTY (piped, captured, redirected)
 - `NYXID_NO_WIZARD=1` is set in the environment
 - `SSH_CONNECTION` or `SSH_TTY` is set (SSH session, no local browser)
 - on Linux: both `DISPLAY` and `WAYLAND_DISPLAY` are unset
 
-In any of these cases, the rotate commands print the raw secret to stdout exactly as before (legacy shape, byte-identical). Agents calling these commands programmatically should always use `--output json` to be explicit and to make the response machine-parseable.
+In any of these cases, the commands print the raw secret to stdout exactly as before (legacy shape, byte-identical). Agents calling these commands programmatically should always use `--output json` to be explicit and to make the response machine-parseable.
 
 Behavior change to be aware of: `nyxid api-key rotate <name>` now **refuses ambiguous names** — if multiple keys share the same name, the command exits with `Name 'X' matches N keys. Pass the ID instead.` Previously it silently rotated the first match (which could rotate the wrong key). Always prefer ID over name for scripted rotation.
 
@@ -799,7 +808,8 @@ nyxid node daemon uninstall                             # remove service (stops 
 # nyxid CLI (manage nodes from user side)
 nyxid node list --output json                          # list nodes (includes IDs)
 nyxid node show <ID_OR_NAME> --output json             # show node details + metrics
-nyxid node register-token                              # generate registration token
+nyxid node register-token                              # interactive: opens browser wizard (v3.1)
+nyxid node register-token --name "edge-tokyo" --output json  # scripted: prints raw nyx_nreg_... (legacy shape)
 nyxid node delete <ID_OR_NAME> --yes                   # delete node
 nyxid node rotate-token <ID_OR_NAME>                   # interactive: opens browser wizard (shows new auth_token + signing_secret)
 nyxid node rotate-token <ID_OR_NAME> --output json     # scripted: prints raw secret to stdout (legacy shape)

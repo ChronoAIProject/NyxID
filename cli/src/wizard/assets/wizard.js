@@ -20,6 +20,18 @@
     // v3 rotation flows (api-key-rotate / node-rotate-token)
     resourceId: PARAMS.get("resource_id") || null,
     displayName: PARAMS.get("display_name") || null,
+    // v3.1 node-register-token
+    name: PARAMS.get("name") || null,
+    // v3.1 api-key-create (reuses `name` above)
+    platform: PARAMS.get("platform") || null,
+    scopes: PARAMS.get("scopes") || null,
+    expiresInDays: PARAMS.get("expires_in_days") || null,
+    allowAllServices: PARAMS.get("allow_all_services") === "1",
+    allowAllNodes: PARAMS.get("allow_all_nodes") === "1",
+    allowedServicesCsv: PARAMS.get("allowed_services") || null,
+    allowedNodesCsv: PARAMS.get("allowed_nodes") || null,
+    callbackUrl: PARAMS.get("callback_url") || null,
+    orgId: PARAMS.get("org_id") || null,
   };
 
   let postInFlight = false;   // swallow beforeunload cancel while a POST is open
@@ -1478,6 +1490,89 @@
     + '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'
     + '</svg>';
 
+  // Secret values for display-once rows NEVER leave their row's
+  // closure — this module-level array just tracks "remask me" callbacks
+  // the blur / visibilitychange listeners can fan out to. Cleared
+  // per-flow by renderSecretRow's caller (which recreates the array
+  // implicitly by calling installRemaskHandlers before the first row).
+  let remaskCallbacks = [];
+
+  // Render a single "label · masked value · show · copy" row inside
+  // `containerEl`. Extracted out of renderDisplayOnce so v3.1 flows
+  // (node-register-token, api-key-create) share the identical masked
+  // UX — click to reveal, auto-remask on blur, copy button with a
+  // "copied!" flash — without reimplementing any of it. The secret
+  // `value` lives in the per-row closure (setRevealed) and never
+  // escapes. Caller MUST call `installRemaskHandlers` exactly once
+  // after all rows are rendered.
+  function renderSecretRow(containerEl, { label, value }) {
+    const row = document.createElement("div");
+    row.className = "wizard-secret-row";
+
+    const labelEl = document.createElement("span");
+    labelEl.className = "wizard-secret-row-label";
+    labelEl.textContent = label;
+    row.appendChild(labelEl);
+
+    const valueWrap = document.createElement("div");
+    valueWrap.className = "wizard-secret-row-value";
+
+    const code = document.createElement("code");
+    const maskLen = Math.min(48, Math.max(8, value.length));
+    const masked = "•".repeat(maskLen);
+    code.textContent = masked;
+    valueWrap.appendChild(code);
+
+    const reveal = document.createElement("button");
+    reveal.type = "button";
+    reveal.className = "wizard-btn-tiny";
+    reveal.textContent = "show";
+    let revealed = false;
+    const setRevealed = (v) => {
+      revealed = v;
+      if (v) {
+        code.textContent = value;
+        code.classList.add("is-revealed");
+        reveal.textContent = "hide";
+      } else {
+        code.textContent = masked;
+        code.classList.remove("is-revealed");
+        reveal.textContent = "show";
+      }
+    };
+    reveal.addEventListener("click", () => setRevealed(!revealed));
+    valueWrap.appendChild(reveal);
+    remaskCallbacks.push(() => { if (revealed) setRevealed(false); });
+
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "wizard-btn-tiny wizard-btn-tiny-icon";
+    copy.setAttribute("aria-label", `copy ${label}`);
+    copy.innerHTML = COPY_ICON_SVG + '<span class="wizard-btn-label">copy</span>';
+    copy.addEventListener("click", () => copyText(value, copy));
+    valueWrap.appendChild(copy);
+
+    row.appendChild(valueWrap);
+    containerEl.appendChild(row);
+  }
+
+  // Attach visibilitychange + blur remask listeners. Call once per
+  // DisplayOnce render, AFTER all rows have been appended via
+  // renderSecretRow. Listeners stay attached for the life of the page
+  // — we never transition back out of display-once — so redundant
+  // calls would stack duplicate handlers. Protect against that.
+  let remaskHandlersInstalled = false;
+  function installRemaskHandlers() {
+    if (remaskHandlersInstalled) return;
+    remaskHandlersInstalled = true;
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) remaskCallbacks.forEach(fn => fn());
+    });
+    window.addEventListener("blur", () => {
+      remaskCallbacks.forEach(fn => fn());
+    });
+  }
+
   function renderDisplayOnce(flow, resourceId, displayName, secrets) {
     const isApiKey = flow === "api-key-rotate";
     document.getElementById("display-once-title").textContent =
@@ -1485,82 +1580,14 @@
 
     const rowsEl = document.getElementById("display-once-rows");
     rowsEl.innerHTML = "";
-
-    // Track all reveal-toggle setters so visibility/blur can flip them
-    // all at once. Each setter is created per-row in its own closure
-    // so the secret value never escapes the row's scope.
-    const remaskAll = [];
-
+    // Reset the shared remask list for this flow's rows, then render
+    // each one via the shared helper. See renderSecretRow's doc comment
+    // for why the secret value never escapes the row's closure.
+    remaskCallbacks = [];
     for (const secret of secrets) {
-      const row = document.createElement("div");
-      row.className = "wizard-secret-row";
-
-      const label = document.createElement("span");
-      label.className = "wizard-secret-row-label";
-      label.textContent = secret.label;
-      row.appendChild(label);
-
-      const valueWrap = document.createElement("div");
-      valueWrap.className = "wizard-secret-row-value";
-
-      const code = document.createElement("code");
-      // Mask string is ALWAYS dots — never the real value, never a
-      // truncated prefix. Length capped so very long secrets don't
-      // produce a ridiculous mask.
-      const maskLen = Math.min(48, Math.max(8, secret.value.length));
-      const masked = "•".repeat(maskLen);
-      code.textContent = masked;
-      valueWrap.appendChild(code);
-
-      // Lowercase "show" / "hide" to match the v2 wizard-input-toggle
-      // password-field convention (keeps muscle memory consistent
-      // across both flows).
-      const reveal = document.createElement("button");
-      reveal.type = "button";
-      reveal.className = "wizard-btn-tiny";
-      reveal.textContent = "show";
-      let revealed = false;
-      const setRevealed = (v) => {
-        revealed = v;
-        if (v) {
-          code.textContent = secret.value;
-          code.classList.add("is-revealed");
-          reveal.textContent = "hide";
-        } else {
-          code.textContent = masked;
-          code.classList.remove("is-revealed");
-          reveal.textContent = "show";
-        }
-      };
-      reveal.addEventListener("click", () => setRevealed(!revealed));
-      valueWrap.appendChild(reveal);
-      remaskAll.push(() => { if (revealed) setRevealed(false); });
-
-      // Copy: SVG clipboard icon + label span. The label span lets
-      // copyText flip just the text ("copy" → "copied!") without
-      // nuking the icon.
-      const copy = document.createElement("button");
-      copy.type = "button";
-      copy.className = "wizard-btn-tiny wizard-btn-tiny-icon";
-      copy.setAttribute("aria-label", `copy ${secret.label}`);
-      copy.innerHTML = COPY_ICON_SVG + '<span class="wizard-btn-label">copy</span>';
-      copy.addEventListener("click", () => copyText(secret.value, copy));
-      valueWrap.appendChild(copy);
-
-      row.appendChild(valueWrap);
-      rowsEl.appendChild(row);
+      renderSecretRow(rowsEl, { label: secret.label, value: secret.value });
     }
-
-    // Auto-remask on visibility/blur. Codex P2: 60s timer was
-    // mis-targeted (annoying when present, too long when away).
-    // Remask immediately on the events that mean "user can't see
-    // the page anyway."
-    document.addEventListener("visibilitychange", () => {
-      if (document.hidden) remaskAll.forEach(fn => fn());
-    });
-    window.addEventListener("blur", () => {
-      remaskAll.forEach(fn => fn());
-    });
+    installRemaskHandlers();
 
     // (Download as .txt removed in this iteration — copy + reveal cover
     // the api-key case. If the node-rotate flow's two-secret + rekey
@@ -1696,17 +1723,637 @@
     });
   }
 
+  // ---- v3.1: nyxid node register-token ----
+  //
+  // Generate-and-display twin of `node rotate-token`. The backend mints
+  // a fresh `nyx_nreg_...` on confirm; the wizard renders it in the
+  // reusable DisplayOnce panel. Differs from rotation flows in three
+  // ways: (1) there is no existing resource to resolve — the CLI either
+  // prefills `name` or we collect it here; (2) the ack payload carries
+  // `token_id` instead of `resource_id`; (3) the confirm panel's "are
+  // you sure" copy is about creation, not destruction.
+  function initNodeRegisterFlow() {
+    const prefillName = (PREFILL.name || "").trim();
+    let nodeName = prefillName;
+
+    const titleEl = document.getElementById("rotate-confirm-title");
+    const bodyEl = document.getElementById("rotate-confirm-body");
+    const metaEl = document.getElementById("rotate-confirm-meta");
+    const goBtn = document.getElementById("rotate-go");
+    const cancelBtnLocal = document.getElementById("rotate-cancel");
+    const errBanner = document.getElementById("rotate-confirm-error");
+
+    if (stepLabel) stepLabel.textContent = "Step 1 of 2 · name this node";
+
+    titleEl.textContent = "Generate registration token";
+    bodyEl.textContent =
+      "A one-time registration token will be minted. The token value is shown "
+      + "once on the next screen — make sure you have somewhere to save it "
+      + "(password manager, vault, or the target host's clipboard) before "
+      + "continuing.";
+    goBtn.textContent = "Generate token";
+
+    // Replace the "ID" meta row with either a read-only name echo (when
+    // prefill is set) or an editable text input (when it isn't). Either
+    // way the DOM stays simple and the dispatcher reads the resolved
+    // name from the `nodeName` closure variable.
+    metaEl.innerHTML = "";
+    const dt = document.createElement("dt");
+    dt.textContent = "Node name";
+    metaEl.appendChild(dt);
+    const dd = document.createElement("dd");
+
+    let nameInput = null;
+    if (prefillName) {
+      const code = document.createElement("code");
+      code.textContent = prefillName;
+      dd.appendChild(code);
+    } else {
+      nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.className = "wizard-text-input";
+      nameInput.placeholder = "e.g. edge-tokyo";
+      nameInput.autocomplete = "off";
+      nameInput.spellcheck = false;
+      nameInput.maxLength = 128;
+      dd.appendChild(nameInput);
+    }
+    metaEl.appendChild(dd);
+
+    showRotationPanel("step-confirm-rotate");
+    if (nameInput) nameInput.focus();
+
+    cancelBtnLocal.addEventListener("click", () => onCancelRotation());
+
+    goBtn.addEventListener("click", async () => {
+      if (postInFlight) return;
+      if (nameInput) {
+        const typed = nameInput.value.trim();
+        if (!typed) {
+          errBanner.textContent = "Node name is required.";
+          errBanner.hidden = false;
+          nameInput.focus();
+          return;
+        }
+        nodeName = typed;
+      }
+      errBanner.hidden = true;
+      postInFlight = true;
+      goBtn.disabled = true;
+      cancelBtnLocal.disabled = true;
+      setRotationStatus("rotate-confirm-status", "Minting registration token…");
+      try {
+        const resp = await proxyJson(
+          "POST",
+          "/api/proxy/api/v1/nodes/register-token",
+          { name: nodeName },
+        );
+        const token = resp?.token || "";
+        const tokenId = resp?.token_id || "";
+        if (!token || !tokenId) {
+          throw new Error(
+            "Backend returned an empty token. Check the server logs and re-run "
+              + "`nyxid node register-token`.",
+          );
+        }
+        renderNodeRegisterDisplayOnce(tokenId, nodeName, token);
+        showRotationPanel("step-display-once");
+        if (stepLabel) stepLabel.textContent = "Step 2 of 2 · save the value";
+      } catch (err) {
+        errBanner.textContent = err.message || String(err);
+        errBanner.hidden = false;
+        goBtn.disabled = false;
+        cancelBtnLocal.disabled = false;
+        setRotationStatus("rotate-confirm-status", "");
+      } finally {
+        postInFlight = false;
+      }
+    });
+  }
+
+  // Thin wrapper around the DisplayOnce panel for the node-register
+  // flow. Reuses the masked-code + reveal + copy + blur-remask
+  // machinery from renderDisplayOnce (rotation path), but posts a
+  // different typed ack payload (`{ acknowledged, token_id }` rather
+  // than `{ acknowledged, resource_id }`).
+  function renderNodeRegisterDisplayOnce(tokenId, nodeName, token) {
+    document.getElementById("display-once-title").textContent =
+      `Save the registration token for '${nodeName}'`;
+
+    const rowsEl = document.getElementById("display-once-rows");
+    rowsEl.innerHTML = "";
+    remaskCallbacks = [];
+    renderSecretRow(rowsEl, {
+      label: "Registration token",
+      value: token,
+    });
+
+    installRemaskHandlers();
+
+    const ackBtn = document.getElementById("display-once-ack");
+    ackBtn.onclick = async () => {
+      if (finished) return;
+      finished = true;
+      ackBtn.disabled = true;
+      const statusEl = document.getElementById("display-once-status");
+      if (statusEl) {
+        statusEl.textContent = "Signalling CLI…";
+        statusEl.className = "wizard-status";
+      }
+      try {
+        const res = await proxyFetch("POST", "/api/proxy/complete", {
+          acknowledged: true,
+          token_id: tokenId,
+        });
+        if (!res.ok) {
+          if (statusEl) {
+            statusEl.textContent = `CLI rejected the ack (HTTP ${res.status}).`;
+            statusEl.className = "wizard-status error";
+          }
+          finished = false;
+          ackBtn.disabled = false;
+          return;
+        }
+        showOverlay({
+          icon: "✓",
+          title: "Saved",
+          body: "It is safe to close the browser now.",
+          sub: "Your terminal has the post-creation summary.",
+        });
+      } catch (err) {
+        if (statusEl) {
+          statusEl.textContent =
+            "Couldn't reach the CLI: " + (err.message || String(err));
+          statusEl.className = "wizard-status error";
+        }
+        finished = false;
+        ackBtn.disabled = false;
+      }
+    };
+  }
+
+  // ---- v3.1: nyxid api-key create ----
+  //
+  // Unlike node-register-token (which has nothing to configure beyond
+  // a name) the api-key-create flow owns a full scope picker:
+  // name + owner + platform + scopes + expiry + per-service multi-
+  // select + per-node multi-select + rate limits + callback URL. The
+  // wizard.html #step-scope-picker panel holds the markup; this
+  // function wires prefill, list fetching, validation, and submission.
+  //
+  // Secret leak surface mirrors the other DisplayOnce flows: the
+  // server-issued `full_key` is rendered in the reusable
+  // renderSecretRow helper, and the ack payload on `/api/proxy/complete`
+  // carries only `{ acknowledged, api_key_id }` (typed
+  // `ApiKeyCreateAckPayload` with `deny_unknown_fields` on the Rust
+  // side). The browser NEVER round-trips `full_key` back to the CLI.
+  function initApiKeyCreateFlow() {
+    const form = document.getElementById("scope-picker-form");
+    const errBanner = document.getElementById("scope-picker-error");
+    const nameInput = document.getElementById("scope-name");
+    const ownerField = document.getElementById("scope-owner-field");
+    const ownerSelect = document.getElementById("scope-owner");
+    const platformSelect = document.getElementById("scope-platform");
+    const readChk = document.getElementById("scope-read");
+    const writeChk = document.getElementById("scope-write");
+    const expiryInput = document.getElementById("scope-expiry");
+    const callbackInput = document.getElementById("scope-callback-url");
+    const ratePerSecondInput = document.getElementById("scope-rate-per-second");
+    const rateBurstInput = document.getElementById("scope-rate-burst");
+    const cancelBtn2 = document.getElementById("scope-cancel");
+    const submitBtn = document.getElementById("scope-submit");
+    const statusEl = document.getElementById("scope-picker-status");
+
+    if (stepLabel) stepLabel.textContent = "Step 1 of 2 · configure scope";
+
+    // --- Prefill: any CLI-supplied flag goes straight into the form.
+    if (PREFILL.name) nameInput.value = PREFILL.name;
+    if (PREFILL.platform) platformSelect.value = PREFILL.platform;
+    if (PREFILL.scopes) {
+      const parts = PREFILL.scopes.split(/\s+/).filter(Boolean);
+      readChk.checked = parts.includes("read");
+      writeChk.checked = parts.includes("write");
+    }
+    if (PREFILL.expiresInDays) expiryInput.value = PREFILL.expiresInDays;
+    if (PREFILL.callbackUrl) callbackInput.value = PREFILL.callbackUrl;
+
+    // --- Scope-specific state for multi-selects.
+    let availableServices = [];
+    let availableNodes = [];
+    let servicesFetched = false;
+    let nodesFetched = false;
+
+    const serviceWrap = document.getElementById("scope-services-wrap");
+    const serviceList = document.getElementById("scope-services-list");
+    const serviceCount = document.getElementById("scope-services-count");
+    const nodeWrap = document.getElementById("scope-nodes-wrap");
+    const nodeList = document.getElementById("scope-nodes-list");
+    const nodeCount = document.getElementById("scope-nodes-count");
+
+    // --- Owner picker: fetch orgs once, populate selector if any.
+    // List is best-effort — failure hides the field entirely so the
+    // user still gets the personal-account default. Always safe to fail
+    // closed on an optional UI element.
+    (async () => {
+      try {
+        const resp = await proxyJson("GET", "/api/proxy/api/v1/orgs");
+        const orgs = Array.isArray(resp?.orgs)
+          ? resp.orgs
+          : Array.isArray(resp?.items)
+            ? resp.items
+            : Array.isArray(resp)
+              ? resp
+              : [];
+        if (orgs.length === 0) {
+          ownerField.hidden = true;
+          return;
+        }
+        for (const org of orgs) {
+          const opt = document.createElement("option");
+          opt.value = org.id || org._id || "";
+          const display = org.display_name || org.name || opt.value;
+          opt.textContent = `Org · ${display}`;
+          ownerSelect.appendChild(opt);
+        }
+        if (PREFILL.orgId) ownerSelect.value = PREFILL.orgId;
+        ownerField.hidden = false;
+      } catch (_) {
+        // Hide on any failure. The user keeps the personal-account
+        // default and can still submit without an owner.
+        ownerField.hidden = true;
+      }
+    })();
+
+    // --- Service / node multi-select machinery.
+    function updateSelectionCount(listEl, countEl) {
+      const checked = listEl.querySelectorAll('input[type="checkbox"]:checked').length;
+      const total = listEl.querySelectorAll('input[type="checkbox"]').length;
+      countEl.textContent = `${checked} of ${total} selected`;
+    }
+
+    function renderMultiList(listEl, items, idKey, labelFn, preselectCsv) {
+      listEl.innerHTML = "";
+      if (items.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "wizard-field-hint";
+        empty.textContent = "Nothing to select.";
+        listEl.appendChild(empty);
+        return;
+      }
+      const preselect = new Set(
+        (preselectCsv || "").split(",").map(s => s.trim()).filter(Boolean),
+      );
+      for (const item of items) {
+        const id = item[idKey] || item.id || item._id || "";
+        if (!id) continue;
+        const label = document.createElement("label");
+        label.className = "wizard-checkbox";
+        label.setAttribute("role", "listitem");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.value = id;
+        if (preselect.has(id)) cb.checked = true;
+        label.appendChild(cb);
+        const text = document.createElement("span");
+        text.textContent = labelFn(item);
+        label.appendChild(text);
+        listEl.appendChild(label);
+      }
+    }
+
+    async function fetchServicesOnce() {
+      if (servicesFetched) return;
+      servicesFetched = true;
+      try {
+        const resp = await proxyJson("GET", "/api/proxy/api/v1/user-services");
+        availableServices = Array.isArray(resp?.services)
+          ? resp.services
+          : Array.isArray(resp)
+            ? resp
+            : [];
+        renderMultiList(
+          serviceList,
+          availableServices,
+          "id",
+          (s) => s.slug ? `${s.slug}${s.label ? " · " + s.label : ""}` : (s.label || s.id || ""),
+          PREFILL.allowedServicesCsv,
+        );
+        updateSelectionCount(serviceList, serviceCount);
+      } catch (err) {
+        serviceList.innerHTML = "";
+        const e = document.createElement("div");
+        e.className = "wizard-field-hint";
+        e.textContent = "Couldn't load services: " + (err.message || String(err));
+        serviceList.appendChild(e);
+      }
+    }
+
+    async function fetchNodesOnce() {
+      if (nodesFetched) return;
+      nodesFetched = true;
+      try {
+        const resp = await proxyJson("GET", "/api/proxy/api/v1/nodes");
+        availableNodes = Array.isArray(resp?.nodes)
+          ? resp.nodes
+          : Array.isArray(resp)
+            ? resp
+            : [];
+        renderMultiList(
+          nodeList,
+          availableNodes,
+          "id",
+          (n) => n.name ? `${n.name}${n.status ? " · " + n.status : ""}` : (n.id || ""),
+          PREFILL.allowedNodesCsv,
+        );
+        updateSelectionCount(nodeList, nodeCount);
+      } catch (err) {
+        nodeList.innerHTML = "";
+        const e = document.createElement("div");
+        e.className = "wizard-field-hint";
+        e.textContent = "Couldn't load nodes: " + (err.message || String(err));
+        nodeList.appendChild(e);
+      }
+    }
+
+    // Wire service/node mode radios. "Select specific" toggles the
+    // list visibility and triggers a one-shot fetch (subsequent toggles
+    // don't refetch — the data rarely changes mid-flow).
+    function wireScopeRadios(name, wrap, fetcher, listEl, countEl) {
+      const radios = form.querySelectorAll(`input[name="${name}"]`);
+      radios.forEach(r => r.addEventListener("change", async () => {
+        if (r.value === "specific" && r.checked) {
+          wrap.hidden = false;
+          await fetcher();
+        } else if (r.value === "all" && r.checked) {
+          wrap.hidden = true;
+        }
+      }));
+      listEl.addEventListener("change", (e) => {
+        if (e.target.matches('input[type="checkbox"]')) {
+          updateSelectionCount(listEl, countEl);
+        }
+      });
+    }
+    wireScopeRadios("scope-service-mode", serviceWrap, fetchServicesOnce, serviceList, serviceCount);
+    wireScopeRadios("scope-node-mode", nodeWrap, fetchNodesOnce, nodeList, nodeCount);
+
+    // "select all" / "clear" buttons for each multi-select.
+    function wireMultiToolbar(allBtn, noneBtn, listEl, countEl) {
+      allBtn.addEventListener("click", () => {
+        listEl.querySelectorAll('input[type="checkbox"]').forEach(c => { c.checked = true; });
+        updateSelectionCount(listEl, countEl);
+      });
+      noneBtn.addEventListener("click", () => {
+        listEl.querySelectorAll('input[type="checkbox"]').forEach(c => { c.checked = false; });
+        updateSelectionCount(listEl, countEl);
+      });
+    }
+    wireMultiToolbar(
+      document.getElementById("scope-services-all"),
+      document.getElementById("scope-services-none"),
+      serviceList, serviceCount,
+    );
+    wireMultiToolbar(
+      document.getElementById("scope-nodes-all"),
+      document.getElementById("scope-nodes-none"),
+      nodeList, nodeCount,
+    );
+
+    // Apply CLI-supplied allow-all / specific prefill AFTER the radios
+    // are wired so the change event fires and the list loads when
+    // "specific" is prefilled.
+    if (PREFILL.allowedServicesCsv) {
+      const specific = form.querySelector('input[name="scope-service-mode"][value="specific"]');
+      specific.checked = true;
+      specific.dispatchEvent(new Event("change"));
+    }
+    if (PREFILL.allowedNodesCsv) {
+      const specific = form.querySelector('input[name="scope-node-mode"][value="specific"]');
+      specific.checked = true;
+      specific.dispatchEvent(new Event("change"));
+    }
+    // `allowAll*` prefill is implicit: the default radio is already
+    // "all", so there's nothing to do beyond not overriding.
+
+    // --- Show the panel.
+    document.querySelectorAll(".wizard-step-panel").forEach(p => {
+      p.hidden = p.id !== "step-scope-picker";
+    });
+    nameInput.focus();
+
+    // --- Submit.
+    async function submitScopePicker() {
+      if (postInFlight) return;
+      errBanner.hidden = true;
+
+      // Validation. Backend enforces again but catching client-side
+      // avoids the round-trip on obvious mistakes.
+      const name = nameInput.value.trim();
+      if (!name) {
+        errBanner.textContent = "Name is required.";
+        errBanner.hidden = false;
+        nameInput.focus();
+        return;
+      }
+      const scopeParts = [];
+      if (readChk.checked) scopeParts.push("read");
+      if (writeChk.checked) scopeParts.push("write");
+      if (scopeParts.length === 0) {
+        errBanner.textContent = "Pick at least one of read / write.";
+        errBanner.hidden = false;
+        return;
+      }
+
+      // Build request body. Only keys in the wizard/server.rs
+      // allowlist for POST /api-keys are ever included; values
+      // follow the backend's CreateApiKeyRequest shape.
+      const body = {
+        name,
+        scopes: scopeParts.join(" "),
+      };
+
+      const expiry = expiryInput.value.trim();
+      if (expiry) {
+        const days = parseInt(expiry, 10);
+        if (!Number.isFinite(days) || days < 1 || days > 3650) {
+          errBanner.textContent = "Expiry must be a positive number of days.";
+          errBanner.hidden = false;
+          return;
+        }
+        // Same rfc3339 format the CLI emits — CLI-side calls chrono
+        // Duration::days and to_rfc3339; JS Date.toISOString produces
+        // the same shape.
+        const ts = new Date(Date.now() + days * 24 * 3600 * 1000);
+        body.expires_at = ts.toISOString();
+      }
+
+      const platform = platformSelect.value;
+      if (platform) body.platform = platform;
+
+      const callback = callbackInput.value.trim();
+      if (callback) body.callback_url = callback;
+
+      const rps = ratePerSecondInput.value.trim();
+      if (rps) {
+        const n = parseInt(rps, 10);
+        if (!Number.isFinite(n) || n < 1) {
+          errBanner.textContent = "Rate per second must be a positive integer.";
+          errBanner.hidden = false;
+          return;
+        }
+        body.rate_limit_per_second = n;
+      }
+      const burst = rateBurstInput.value.trim();
+      if (burst) {
+        const n = parseInt(burst, 10);
+        if (!Number.isFinite(n) || n < 1) {
+          errBanner.textContent = "Rate burst must be a positive integer.";
+          errBanner.hidden = false;
+          return;
+        }
+        body.rate_limit_burst = n;
+      }
+
+      const serviceMode = form.querySelector('input[name="scope-service-mode"]:checked').value;
+      if (serviceMode === "all") {
+        body.allow_all_services = true;
+      } else {
+        const ids = Array.from(
+          serviceList.querySelectorAll('input[type="checkbox"]:checked'),
+        ).map(c => c.value);
+        body.allow_all_services = false;
+        body.allowed_service_ids = ids;
+      }
+      const nodeMode = form.querySelector('input[name="scope-node-mode"]:checked').value;
+      if (nodeMode === "all") {
+        body.allow_all_nodes = true;
+      } else {
+        const ids = Array.from(
+          nodeList.querySelectorAll('input[type="checkbox"]:checked'),
+        ).map(c => c.value);
+        body.allow_all_nodes = false;
+        body.allowed_node_ids = ids;
+      }
+
+      const ownerId = ownerSelect?.value || "";
+      if (ownerId) body.target_org_id = ownerId;
+
+      postInFlight = true;
+      submitBtn.disabled = true;
+      cancelBtn2.disabled = true;
+      setStatus(statusEl, "Creating API key…");
+      try {
+        const resp = await proxyJson("POST", "/api/proxy/api/v1/api-keys", body);
+        const fullKey = resp?.full_key || "";
+        const apiKeyId = resp?.id || resp?._id || "";
+        if (!fullKey || !apiKeyId) {
+          throw new Error(
+            "Backend returned an empty key. Check the server logs and re-run `nyxid api-key create`.",
+          );
+        }
+        renderApiKeyCreateDisplayOnce(apiKeyId, name, fullKey);
+        document.querySelectorAll(".wizard-step-panel").forEach(p => {
+          p.hidden = p.id !== "step-display-once";
+        });
+        if (stepLabel) stepLabel.textContent = "Step 2 of 2 · save the value";
+      } catch (err) {
+        errBanner.textContent = err.message || String(err);
+        errBanner.hidden = false;
+        submitBtn.disabled = false;
+        cancelBtn2.disabled = false;
+        setStatus(statusEl, "");
+      } finally {
+        postInFlight = false;
+      }
+    }
+
+    cancelBtn2.addEventListener("click", () => onCancelRotation(
+      "No API key was created. It is safe to close the browser now.",
+    ));
+    submitBtn.addEventListener("click", submitScopePicker);
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      submitScopePicker();
+    });
+  }
+
+  // Thin wrapper around the DisplayOnce panel for the api-key-create
+  // flow. Same pattern as renderNodeRegisterDisplayOnce: resets the
+  // shared `remaskCallbacks` list, renders one row, installs the
+  // visibility/blur remask handlers, and binds ack → POST /complete
+  // with the typed `{ acknowledged, api_key_id }` payload.
+  function renderApiKeyCreateDisplayOnce(apiKeyId, keyName, fullKey) {
+    document.getElementById("display-once-title").textContent =
+      `Save the API key for '${keyName}'`;
+
+    const rowsEl = document.getElementById("display-once-rows");
+    rowsEl.innerHTML = "";
+    remaskCallbacks = [];
+    renderSecretRow(rowsEl, {
+      label: "API key",
+      value: fullKey,
+    });
+    installRemaskHandlers();
+
+    const ackBtn = document.getElementById("display-once-ack");
+    ackBtn.onclick = async () => {
+      if (finished) return;
+      finished = true;
+      ackBtn.disabled = true;
+      const statusEl = document.getElementById("display-once-status");
+      if (statusEl) {
+        statusEl.textContent = "Signalling CLI…";
+        statusEl.className = "wizard-status";
+      }
+      try {
+        const res = await proxyFetch("POST", "/api/proxy/complete", {
+          acknowledged: true,
+          api_key_id: apiKeyId,
+        });
+        if (!res.ok) {
+          if (statusEl) {
+            statusEl.textContent = `CLI rejected the ack (HTTP ${res.status}).`;
+            statusEl.className = "wizard-status error";
+          }
+          finished = false;
+          ackBtn.disabled = false;
+          return;
+        }
+        showOverlay({
+          icon: "✓",
+          title: "Saved",
+          body: "It is safe to close the browser now.",
+          sub: "Your terminal has the post-creation summary.",
+        });
+      } catch (err) {
+        if (statusEl) {
+          statusEl.textContent =
+            "Couldn't reach the CLI: " + (err.message || String(err));
+          statusEl.className = "wizard-status error";
+        }
+        finished = false;
+        ackBtn.disabled = false;
+      }
+    };
+  }
+
   // ---- init ----
   //
   // Per-flow dispatch. ai-key keeps the v2 boot sequence verbatim;
-  // rotation flows (v3) skip the catalog/credential machinery and
-  // jump straight into the confirm-rotate panel.
+  // DisplayOnce flows (v3 rotate + v3.1 create) skip the catalog/
+  // credential machinery and jump straight into the confirm panel.
   if (FLOW === "ai-key") {
     wire();
     if (!document.hidden) startHeartbeats();
     loadCatalog();
   } else if (FLOW === "api-key-rotate" || FLOW === "node-rotate-token") {
     initRotationFlow(FLOW);
+    if (!document.hidden) startHeartbeats();
+  } else if (FLOW === "node-register-token") {
+    initNodeRegisterFlow();
+    if (!document.hidden) startHeartbeats();
+  } else if (FLOW === "api-key-create") {
+    initApiKeyCreateFlow();
     if (!document.hidden) startHeartbeats();
   } else {
     // Unknown flow — show a minimal error and do nothing else.

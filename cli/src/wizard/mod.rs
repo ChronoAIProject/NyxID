@@ -16,6 +16,15 @@
 //!     reads `id` / `name` / `message`,
 //!   - longer heartbeat-dead window for rotation flows so the user has
 //!     time to copy the secret into a password manager.
+//!
+//! v3.1 (`docs/CLI_WIZARD_V3.md` §2) adds the create-side of DisplayOnce:
+//! `nyxid node register-token` and `nyxid api-key create`. The backend
+//! still generates the one-time secret, but the trigger is a *create*
+//! call rather than a *rotate* call. The same narrow machinery applies:
+//! per-flow typed ack payloads (`NodeRegisterAckPayload`,
+//! `ApiKeyCreateAckPayload`), per-flow field-allowlist printer closures,
+//! and the same 60 s heartbeat-dead window (generalized from
+//! `is_rotation` → `is_display_once` on `FlowKind`).
 
 mod server;
 
@@ -60,6 +69,35 @@ pub struct RotatePrefill {
     pub display_name: String,
 }
 
+/// CLI-supplied prefill for `nyxid node register-token`. No resource to
+/// resolve up front — the backend mints a fresh token on confirm — so
+/// the only field is the optional node name. When the user didn't pass
+/// `--name` on the CLI, the wizard collects it in the browser instead
+/// of via an opaque stdin prompt.
+#[derive(Debug, Clone, Default)]
+pub struct NodeRegisterPrefill {
+    pub name: Option<String>,
+}
+
+/// CLI-supplied prefill for `nyxid api-key create`. Any field set here
+/// is encoded into the browser URL so the wizard opens with those
+/// values pre-populated. A user who types `nyxid api-key create --name
+/// coding-agent --platform claude-code` gets a wizard pre-filled with
+/// those two fields and the cursor on the "Create" button.
+#[derive(Debug, Clone, Default)]
+pub struct ApiKeyCreatePrefill {
+    pub name: Option<String>,
+    pub platform: Option<String>,
+    pub scopes: Option<String>,
+    pub expires_in_days: Option<u32>,
+    pub allow_all_services: bool,
+    pub allow_all_nodes: bool,
+    pub allowed_services_csv: Option<String>,
+    pub allowed_nodes_csv: Option<String>,
+    pub callback_url: Option<String>,
+    pub org_id: Option<String>,
+}
+
 /// Typed completion payload posted by the browser when the user clicks
 /// "I have saved this — close" on the DisplayOnce panel. Two guards live
 /// in this struct:
@@ -76,16 +114,43 @@ pub struct RotationAckPayload {
     pub resource_id: String,
 }
 
+/// Typed completion payload for `nyxid node register-token`. Same
+/// `deny_unknown_fields` guard as `RotationAckPayload`: the browser
+/// CANNOT smuggle the raw `nyx_nreg_...` token back through this path.
+/// `token_id` is the server-issued UUID for the registration token
+/// record (already visible to the user in the audit log and list
+/// endpoint); echoing it is safe and lets the CLI summary reference
+/// the row the user just created.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeRegisterAckPayload {
+    pub acknowledged: bool,
+    pub token_id: String,
+}
+
+/// Typed completion payload for `nyxid api-key create`. Shape and
+/// guards mirror the other ack payloads. `api_key_id` is the server-
+/// issued UUID for the created `ApiKey` record — non-secret, visible
+/// via `GET /api/v1/api-keys`, safe to print.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiKeyCreateAckPayload {
+    pub acknowledged: bool,
+    pub api_key_id: String,
+}
+
 /// Outcome of a wizard run, returned to the caller for shaping terminal
 /// output. Variants are flow-specific so the leak surface stays narrow:
 /// the ai-key flow keeps its existing untyped body (a slug+label+url
-/// summary nobody calls a secret); rotation flows MUST go through the
-/// typed `RotationAckPayload` so the printer never sees raw bytes from
+/// summary nobody calls a secret); DisplayOnce flows MUST go through a
+/// typed per-flow ack payload so the printer never sees raw bytes from
 /// the browser.
 #[derive(Debug, Clone)]
 pub enum WizardOutcome {
     AiKeyCompleted(serde_json::Value),
     RotationAcknowledged(RotationAckPayload),
+    NodeRegisterAcknowledged(NodeRegisterAckPayload),
+    ApiKeyCreateAcknowledged(ApiKeyCreateAckPayload),
     Cancelled,
     TimedOut,
 }
@@ -137,12 +202,14 @@ pub async fn run_ai_key_wizard(auth: &crate::cli::AuthArgs, prefill: WizardPrefi
             print_wizard_summary(&body, &base_url);
             Ok(())
         }
-        WizardOutcome::RotationAcknowledged(_) => {
-            // Defensive: rotation outcome can't reach the ai-key handler
-            // (server::handle_complete dispatches by FlowKind), but if it
-            // ever did we'd refuse to print anything from it.
+        WizardOutcome::RotationAcknowledged(_)
+        | WizardOutcome::NodeRegisterAcknowledged(_)
+        | WizardOutcome::ApiKeyCreateAcknowledged(_) => {
+            // Defensive: a DisplayOnce outcome can't reach the ai-key
+            // handler (server::handle_complete dispatches by FlowKind),
+            // but if it ever did we'd refuse to print anything from it.
             Err(anyhow!(
-                "internal: ai-key wizard returned a rotation outcome (flow dispatch broken)"
+                "internal: ai-key wizard returned a display-once outcome (flow dispatch broken)"
             ))
         }
         WizardOutcome::Cancelled => {
@@ -157,6 +224,122 @@ pub async fn run_ai_key_wizard(auth: &crate::cli::AuthArgs, prefill: WizardPrefi
             eprintln!("       nyxid service add <slug> --credential-env VAR --label <label>");
             std::process::exit(1);
         }
+    }
+}
+
+/// Shared entry point for the `nyxid node register-token` wizard.
+/// Scripted / headless path lives in `commands::node` and stays
+/// byte-identical to pre-wizard behavior.
+pub async fn run_node_register_token_wizard(
+    auth: &crate::cli::AuthArgs,
+    prefill: NodeRegisterPrefill,
+) -> Result<()> {
+    let base_url = auth.resolved_base_url()?;
+    let access_token = crate::auth::resolve_access_token(auth)?;
+    let base_url_root = base_url.trim_end_matches('/').to_string();
+    let proxy = ProxyContext {
+        base_url_root,
+        access_token,
+        profile: auth.profile.clone(),
+    };
+
+    let outcome = server::run_flow(
+        server::FlowKind::NodeRegisterToken,
+        proxy,
+        server::PrefillData::NodeRegister(prefill),
+    )
+    .await?;
+
+    match outcome {
+        WizardOutcome::NodeRegisterAcknowledged(ack) => {
+            attract_terminal("NyxID wizard complete");
+            // Field allowlist: only `ack.token_id` (echoed from the
+            // browser, validated UUID-ish server-side). Never
+            // `format!("{ack:?}")`, never `serde_json::to_string(&ack)`.
+            eprintln!("✓ Registration token generated. New value was shown in the browser.");
+            eprintln!("  Token ID: {}", ack.token_id);
+            eprintln!("  Register a node with:");
+            eprintln!(
+                "    nyxid node register --token <token-from-browser> --url ws://<server>/api/v1/nodes/ws"
+            );
+            Ok(())
+        }
+        WizardOutcome::Cancelled => {
+            attract_terminal("NyxID wizard cancelled");
+            eprintln!("✗ Registration token wizard cancelled.");
+            eprintln!("  If the new token was shown in the browser, it was minted on the server.");
+            eprintln!(
+                "  If you saved it, you're done. If not, run `nyxid node register-token` again."
+            );
+            std::process::exit(1);
+        }
+        WizardOutcome::TimedOut => {
+            attract_terminal("NyxID wizard timed out");
+            eprintln!("✗ Registration token wizard timed out.");
+            eprintln!("  If the new token was shown in the browser, it was minted on the server.");
+            eprintln!(
+                "  If you didn't save it, run `nyxid node register-token` again to issue a fresh token."
+            );
+            std::process::exit(1);
+        }
+        _ => Err(anyhow!(
+            "internal: node-register-token wizard returned unexpected outcome"
+        )),
+    }
+}
+
+/// Shared entry point for the `nyxid api-key create` wizard. All CLI
+/// flags are plumbed through as `prefill` so a user who typed values on
+/// the command line sees them pre-selected in the browser.
+pub async fn run_api_key_create_wizard(
+    auth: &crate::cli::AuthArgs,
+    prefill: ApiKeyCreatePrefill,
+) -> Result<()> {
+    let base_url = auth.resolved_base_url()?;
+    let access_token = crate::auth::resolve_access_token(auth)?;
+    let base_url_root = base_url.trim_end_matches('/').to_string();
+    let proxy = ProxyContext {
+        base_url_root,
+        access_token,
+        profile: auth.profile.clone(),
+    };
+
+    let outcome = server::run_flow(
+        server::FlowKind::ApiKeyCreate,
+        proxy,
+        server::PrefillData::ApiKeyCreate(prefill),
+    )
+    .await?;
+
+    match outcome {
+        WizardOutcome::ApiKeyCreateAcknowledged(ack) => {
+            attract_terminal("NyxID wizard complete");
+            // Field allowlist: only `ack.api_key_id` (validated UUID-ish).
+            eprintln!("✓ API key created. New value was shown in the browser.");
+            eprintln!("  ID: {}", ack.api_key_id);
+            eprintln!("  Set as environment variable:");
+            eprintln!("    export NYXID_API_KEY=\"<value-from-browser>\"");
+            Ok(())
+        }
+        WizardOutcome::Cancelled => {
+            attract_terminal("NyxID wizard cancelled");
+            eprintln!("✗ API key wizard cancelled.");
+            eprintln!("  If the new key was shown in the browser, it was created on the server.");
+            eprintln!("  If you saved it, you're done. If not, run `nyxid api-key create` again.");
+            std::process::exit(1);
+        }
+        WizardOutcome::TimedOut => {
+            attract_terminal("NyxID wizard timed out");
+            eprintln!("✗ API key wizard timed out.");
+            eprintln!("  If the new key was shown in the browser, it was created on the server.");
+            eprintln!(
+                "  If you didn't save it, run `nyxid api-key create` again to issue a fresh key."
+            );
+            std::process::exit(1);
+        }
+        _ => Err(anyhow!(
+            "internal: api-key-create wizard returned unexpected outcome"
+        )),
     }
 }
 
@@ -250,11 +433,13 @@ async fn run_rotation_wizard(
             success_summary(&display_name_for_summary, &ack.resource_id);
             Ok(())
         }
-        WizardOutcome::AiKeyCompleted(_) => {
-            // Defensive: server dispatch shouldn't produce this for a
+        WizardOutcome::AiKeyCompleted(_)
+        | WizardOutcome::NodeRegisterAcknowledged(_)
+        | WizardOutcome::ApiKeyCreateAcknowledged(_) => {
+            // Defensive: server dispatch shouldn't produce these for a
             // rotation flow.
             Err(anyhow!(
-                "internal: rotation wizard returned an ai-key outcome (flow dispatch broken)"
+                "internal: rotation wizard returned a non-rotation outcome (flow dispatch broken)"
             ))
         }
         WizardOutcome::Cancelled => {

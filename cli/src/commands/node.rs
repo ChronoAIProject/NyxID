@@ -113,18 +113,47 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             Ok(())
         }
 
-        NodeCommands::RegisterToken { auth } => {
+        NodeCommands::RegisterToken {
+            name,
+            terminal,
+            auth,
+        } => {
+            use std::io::IsTerminal;
+            // Wizard gate — mirrors RotateToken / api-key Rotate. Any of
+            // --terminal, --output json, piped stdout, SSH, or
+            // NYXID_NO_WIZARD falls through to the scripted path below
+            // with byte-identical behavior to pre-wizard.
+            let interactive_output = matches!(auth.output, OutputFormat::Table);
+            let wizard_eligible = !terminal
+                && interactive_output
+                && std::io::stdout().is_terminal()
+                && crate::wizard::is_wizard_eligible();
+
+            if wizard_eligible {
+                let prefill = crate::wizard::NodeRegisterPrefill { name: name.clone() };
+                return crate::wizard::run_node_register_token_wizard(&auth, prefill).await;
+            }
+
+            // Scripted / headless path — UNCHANGED from pre-wizard
+            // behavior. Still prompts from stdin when --name is absent
+            // so existing interactive-but-not-wizardable sessions (SSH)
+            // keep working the same way they always did.
             let mut api = ApiClient::from_auth(&auth)?;
 
-            eprint!("Node name: ");
-            std::io::stderr().flush()?;
-            let mut name_input = String::new();
-            std::io::stdin().read_line(&mut name_input)?;
-            let node_name = name_input.trim();
-            let node_name = if node_name.is_empty() {
-                "my-node"
-            } else {
-                node_name
+            let node_name = match name {
+                Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+                _ => {
+                    eprint!("Node name: ");
+                    std::io::stderr().flush()?;
+                    let mut name_input = String::new();
+                    std::io::stdin().read_line(&mut name_input)?;
+                    let trimmed = name_input.trim();
+                    if trimmed.is_empty() {
+                        "my-node".to_string()
+                    } else {
+                        trimmed.to_string()
+                    }
+                }
             };
 
             let result: Value = api

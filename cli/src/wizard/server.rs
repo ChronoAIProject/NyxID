@@ -30,25 +30,39 @@ use tokio::{
     sync::{Notify, oneshot},
 };
 
-use super::{ProxyContext, RotatePrefill, RotationAckPayload, WizardOutcome, WizardPrefill};
+use super::{
+    ApiKeyCreateAckPayload, ApiKeyCreatePrefill, NodeRegisterAckPayload, NodeRegisterPrefill,
+    ProxyContext, RotatePrefill, RotationAckPayload, WizardOutcome, WizardPrefill,
+};
 
 /// Which flow is running. Each flow gets its own allowlist and default
 /// page body. v2 shipped only `AiKey`; v3 added the two rotation
-/// (DisplayOnce-shaped) flows.
+/// (DisplayOnce-shaped) flows; v3.1 adds the create-side pair.
 #[derive(Debug, Clone, Copy)]
 pub enum FlowKind {
     AiKey,
     ApiKeyRotate,
     NodeRotateToken,
+    NodeRegisterToken,
+    ApiKeyCreate,
 }
 
 impl FlowKind {
-    /// True for flows whose Step 3 panel renders a one-time secret. The
-    /// heartbeat watchdog uses a longer dead-after window for these so
-    /// users have time to alt-tab into a password manager without the
-    /// CLI killing itself mid-save.
-    fn is_rotation(&self) -> bool {
-        matches!(self, FlowKind::ApiKeyRotate | FlowKind::NodeRotateToken)
+    /// True for flows whose terminal panel renders a one-time secret.
+    /// The heartbeat watchdog uses a longer dead-after window for these
+    /// so users have time to alt-tab into a password manager without
+    /// the CLI killing itself mid-save. (Previously named
+    /// `is_rotation`; v3.1 generalized since `register-token` and
+    /// `api-key create` have the same alt-tab risk despite not being
+    /// rotations.)
+    fn is_display_once(&self) -> bool {
+        matches!(
+            self,
+            FlowKind::ApiKeyRotate
+                | FlowKind::NodeRotateToken
+                | FlowKind::NodeRegisterToken
+                | FlowKind::ApiKeyCreate
+        )
     }
 
     /// String slug embedded in the served HTML's `<meta name="wizard-flow">`
@@ -58,18 +72,23 @@ impl FlowKind {
             FlowKind::AiKey => "ai-key",
             FlowKind::ApiKeyRotate => "api-key-rotate",
             FlowKind::NodeRotateToken => "node-rotate-token",
+            FlowKind::NodeRegisterToken => "node-register-token",
+            FlowKind::ApiKeyCreate => "api-key-create",
         }
     }
 }
 
 /// Prefill data routed into the wizard's URL query string. Per-flow
-/// shapes — `WizardPrefill` for ai-key (slug/label/via_node/endpoint_url),
-/// `RotatePrefill` for the two rotation flows (resource_id/display_name).
-/// Kept as an enum so server::run_flow's signature stays single-typed
-/// while each flow's prefill can grow independently.
+/// shapes — `WizardPrefill` for ai-key, `RotatePrefill` for the two
+/// rotation flows, `NodeRegisterPrefill` for `node register-token`,
+/// `ApiKeyCreatePrefill` for `api-key create`. Kept as an enum so
+/// `server::run_flow`'s signature stays single-typed while each flow's
+/// prefill can grow independently.
 pub enum PrefillData {
     AiKey(WizardPrefill),
     Rotate(RotatePrefill),
+    NodeRegister(NodeRegisterPrefill),
+    ApiKeyCreate(ApiKeyCreatePrefill),
 }
 
 /// Static assets live under `src/wizard/assets/` and are baked into the binary.
@@ -255,6 +274,59 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                 method: Method::POST,
                 path_template: "/api/v1/nodes/:node_id/rotate-token",
                 body_fields: &[],
+            },
+        ],
+        // Node registration-token creation (v3.1). One route: POST with
+        // just the node `name`. Body allowlist is tight — no metadata,
+        // no target_org_id, no TTL override. The response carries the
+        // one-time `token` (nyx_nreg_...) which the wizard renders in
+        // the DisplayOnce panel; the browser then posts back only
+        // `{ acknowledged, token_id }` to `/api/proxy/complete`.
+        FlowKind::NodeRegisterToken => vec![ProxyRoute {
+            method: Method::POST,
+            path_template: "/api/v1/nodes/register-token",
+            body_fields: &["name"],
+        }],
+        // API key creation (v3.1). Fields mirror what the wizard's
+        // scope-picker panel can emit — not the full
+        // `CreateApiKeyRequest` surface. Keeps privileged extras off
+        // the wire even if the wizard page were compromised. Extra
+        // reads: `/orgs` for the owner picker, `/user-services` and
+        // `/nodes` to populate the scope multi-selects lazily (only
+        // fetched when the user picks "Select specific").
+        FlowKind::ApiKeyCreate => vec![
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/orgs",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/user-services",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/nodes",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/api-keys",
+                body_fields: &[
+                    "name",
+                    "scopes",
+                    "expires_at",
+                    "allowed_service_ids",
+                    "allowed_node_ids",
+                    "allow_all_services",
+                    "allow_all_nodes",
+                    "rate_limit_per_second",
+                    "rate_limit_burst",
+                    "platform",
+                    "callback_url",
+                    "target_org_id",
+                ],
             },
         ],
     }
@@ -527,6 +599,58 @@ async fn handle_complete(
                     .into_response();
             }
             WizardOutcome::RotationAcknowledged(payload)
+        }
+        FlowKind::NodeRegisterToken => {
+            let payload: NodeRegisterAckPayload = match serde_json::from_slice(&body) {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("complete: invalid node-register ack payload: {e}"),
+                    )
+                        .into_response();
+                }
+            };
+            if payload.token_id.is_empty()
+                || payload.token_id.len() > 64
+                || !is_uuid_like(&payload.token_id)
+            {
+                return (StatusCode::BAD_REQUEST, "complete: bad token_id").into_response();
+            }
+            if !payload.acknowledged {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "complete: acknowledged must be true",
+                )
+                    .into_response();
+            }
+            WizardOutcome::NodeRegisterAcknowledged(payload)
+        }
+        FlowKind::ApiKeyCreate => {
+            let payload: ApiKeyCreateAckPayload = match serde_json::from_slice(&body) {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("complete: invalid api-key-create ack payload: {e}"),
+                    )
+                        .into_response();
+                }
+            };
+            if payload.api_key_id.is_empty()
+                || payload.api_key_id.len() > 64
+                || !is_uuid_like(&payload.api_key_id)
+            {
+                return (StatusCode::BAD_REQUEST, "complete: bad api_key_id").into_response();
+            }
+            if !payload.acknowledged {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "complete: acknowledged must be true",
+                )
+                    .into_response();
+            }
+            WizardOutcome::ApiKeyCreateAcknowledged(payload)
         }
     };
     signal_and_shutdown(state, outcome).await;
@@ -996,6 +1120,27 @@ fn prefill_query(prefill: &PrefillData) -> String {
             push(&mut parts, "resource_id", &p.resource_id);
             push(&mut parts, "display_name", &p.display_name);
         }
+        PrefillData::NodeRegister(p) => {
+            push_opt(&mut parts, "name", &p.name);
+        }
+        PrefillData::ApiKeyCreate(p) => {
+            push_opt(&mut parts, "name", &p.name);
+            push_opt(&mut parts, "platform", &p.platform);
+            push_opt(&mut parts, "scopes", &p.scopes);
+            if let Some(d) = p.expires_in_days {
+                parts.push(format!("expires_in_days={d}"));
+            }
+            if p.allow_all_services {
+                parts.push("allow_all_services=1".to_string());
+            }
+            if p.allow_all_nodes {
+                parts.push("allow_all_nodes=1".to_string());
+            }
+            push_opt(&mut parts, "allowed_services", &p.allowed_services_csv);
+            push_opt(&mut parts, "allowed_nodes", &p.allowed_nodes_csv);
+            push_opt(&mut parts, "callback_url", &p.callback_url);
+            push_opt(&mut parts, "org_id", &p.org_id);
+        }
     }
     if parts.is_empty() {
         String::new()
@@ -1107,11 +1252,11 @@ pub async fn run_flow(
     let watchdog_state = state.clone();
     let watchdog_shutdown = shutdown.clone();
     let (watchdog_tx, watchdog_rx) = oneshot::channel::<()>();
-    // Per-flow dead-after window. Rotation flows render a one-time
+    // Per-flow dead-after window. DisplayOnce flows render a one-time
     // secret; users may alt-tab into a password manager mid-save and
     // browsers throttle hidden-tab `setInterval` heartbeats. Cap is
     // still bounded (60s) so a truly-dead tab still gets cleaned up.
-    let dead_after = if kind.is_rotation() {
+    let dead_after = if kind.is_display_once() {
         HEARTBEAT_DEAD_AFTER_ROTATION
     } else {
         HEARTBEAT_DEAD_AFTER

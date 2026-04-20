@@ -680,6 +680,11 @@ pub enum ApiKeyCommands {
         /// directly, and every org admin can rotate / delete it via this same CLI.
         #[arg(long, value_name = "ORG_ID")]
         org: Option<String>,
+        /// Skip the browser wizard and print the new key to the terminal.
+        /// The new key is shown ONCE — copy it before scrolling away.
+        /// Equivalent to setting `NYXID_NO_WIZARD=1` for a single invocation.
+        #[arg(long, alias = "no-wizard")]
+        terminal: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -950,6 +955,16 @@ pub enum NodeCommands {
     },
     /// Generate a registration token
     RegisterToken {
+        /// Node name (defaults to `my-node` if neither flag nor browser
+        /// wizard input is provided).
+        #[arg(long)]
+        name: Option<String>,
+        /// Skip the browser wizard and print the new token to the
+        /// terminal. The new token is shown ONCE — copy it before
+        /// scrolling away. Equivalent to setting `NYXID_NO_WIZARD=1`
+        /// for a single invocation.
+        #[arg(long, alias = "no-wizard")]
+        terminal: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
