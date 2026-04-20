@@ -91,6 +91,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             scopes,
             org,
             openapi_spec_url,
+            terminal,
             auth,
         } => {
             // Wizard dispatch (docs/CLI_WIZARD_V2.md §3.1): open the
@@ -122,6 +123,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 || openapi_spec_url.is_some();
             let headless = is_headless_environment();
             if !explicit_scripted
+                && !terminal
                 && interactive_output
                 && std::io::stdout().is_terminal()
                 && !headless
