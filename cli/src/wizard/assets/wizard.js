@@ -1128,8 +1128,31 @@
     sub.textContent = opts.sub || "";
     icon.textContent = opts.icon || "✓";
     card.classList.toggle("wizard-overlay-cancel", !!opts.cancel);
+    card.classList.toggle("wizard-overlay-disconnect", !!opts.disconnect);
     overlay.hidden = false;
     overlay.setAttribute("aria-hidden", "false");
+  }
+
+  function hideOverlay() {
+    const overlay = document.getElementById("wizard-overlay");
+    if (!overlay) return;
+    overlay.hidden = true;
+    overlay.setAttribute("aria-hidden", "true");
+  }
+
+  function showDisconnectedOverlay() {
+    showOverlay({
+      disconnect: true,
+      icon: "⚠",
+      title: "Wizard disconnected",
+      body: "The nyxid CLI is no longer running. Close this tab and re-run nyxid service add.",
+      sub: "Your terminal has any partial state that was saved.",
+    });
+    // Kill any in-flight device-code poll or other long-running work so
+    // their next tick exits silently instead of throwing into the UI.
+    deviceCodeGen++;
+    postInFlight = false;
+    finished = true;
   }
 
   async function onDone() {
@@ -1208,15 +1231,38 @@
     }
   }
 
-  // ---- heartbeat ----
+  // ---- heartbeat + connection health ----
+  //
+  // Browser pings the CLI every 3 s. Two consecutive failures (~6 s) mean
+  // the wizard server is gone — CLI exited, Ctrl-C'd, or crashed. We
+  // show a full-screen disconnected overlay and stop polling; an
+  // ephemeral port doesn't come back, so the only useful action is
+  // "close this tab and re-run `nyxid service add`".
 
-  const HEARTBEAT_INTERVAL_MS = 10_000;
+  const HEARTBEAT_INTERVAL_MS = 3_000;
+  const DISCONNECT_AFTER_FAILURES = 2;
   let heartbeatTimer = null;
+  let consecutiveHeartbeatFailures = 0;
+  let disconnectedShown = false;
+
   async function sendHeartbeat() {
-    try { await proxyFetch("POST", "/api/proxy/heartbeat", {}); } catch (_) { /* tab teardown */ }
+    if (disconnectedShown) return; // already gave up
+    try {
+      const res = await proxyFetch("POST", "/api/proxy/heartbeat", {});
+      if (!res.ok) throw new Error(`heartbeat ${res.status}`);
+      consecutiveHeartbeatFailures = 0;
+    } catch (_) {
+      consecutiveHeartbeatFailures += 1;
+      if (consecutiveHeartbeatFailures >= DISCONNECT_AFTER_FAILURES) {
+        disconnectedShown = true;
+        stopHeartbeats();
+        showDisconnectedOverlay();
+      }
+    }
   }
   function startHeartbeats() {
     if (heartbeatTimer) return;
+    if (disconnectedShown) return;
     sendHeartbeat();
     heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
   }

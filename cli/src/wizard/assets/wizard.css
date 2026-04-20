@@ -545,6 +545,12 @@ html, body {
   color: var(--primary);
 }
 .wizard-overlay-card.wizard-overlay-cancel .wizard-overlay-icon { color: #e03131; }
+/* Amber warning tone — distinct from the green success ✓ and red cancel ✗.
+   Used when the CLI goes away while the browser tab is still open. */
+.wizard-overlay-card.wizard-overlay-disconnect {
+  border-color: #f59f00;
+}
+.wizard-overlay-card.wizard-overlay-disconnect .wizard-overlay-icon { color: #f59f00; }
 .wizard-overlay-title {
   margin: 0 0 0.5rem;
   font-size: 1.25rem;
