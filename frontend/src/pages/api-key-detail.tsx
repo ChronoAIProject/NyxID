@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { RefreshCw, Trash2 } from "lucide-react";
 import { DetailsCard } from "@/components/dashboard/api-key-detail/details-card";
+import { ServiceScopeCard } from "@/components/dashboard/api-key-detail/service-scope-card";
 import { NodeScopeCard } from "@/components/dashboard/api-key-detail/node-scope-card";
 import { RotateKeyDialog } from "@/components/dashboard/api-key-detail/rotate-key-dialog";
 import { DeleteKeyDialog } from "@/components/dashboard/api-key-detail/delete-key-dialog";
@@ -109,6 +110,14 @@ export function ApiKeyDetailPage() {
 
         <PlatformCard keyId={apiKey.id} platform={apiKey.platform} />
         <CallbackUrlCard keyId={apiKey.id} callbackUrl={apiKey.callback_url} />
+
+        <ServiceScopeCard
+          keyId={apiKey.id}
+          allowAllServices={apiKey.allow_all_services}
+          allowedServiceIds={apiKey.allowed_service_ids}
+          allowedServices={apiKey.allowed_services}
+          apiKeySource={apiKey.credential_source}
+        />
 
         <NodeScopeCard
           keyId={apiKey.id}
