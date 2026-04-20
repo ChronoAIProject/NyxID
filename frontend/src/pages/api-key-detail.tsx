@@ -7,7 +7,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { RefreshCw, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw, Trash2 } from "lucide-react";
 import { DetailsCard } from "@/components/dashboard/api-key-detail/details-card";
 import { ServiceScopeCard } from "@/components/dashboard/api-key-detail/service-scope-card";
 import { NodeScopeCard } from "@/components/dashboard/api-key-detail/node-scope-card";
@@ -24,6 +24,7 @@ export function ApiKeyDetailPage() {
   const { data: apiKey, isLoading, error } = useApiKey(keyId);
   const [rotateOpen, setRotateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   if (isLoading) {
     return (
@@ -109,22 +110,6 @@ export function ApiKeyDetailPage() {
         />
 
         <PlatformCard keyId={apiKey.id} platform={apiKey.platform} />
-        <CallbackUrlCard keyId={apiKey.id} callbackUrl={apiKey.callback_url} />
-
-        <NodeScopeCard
-          keyId={apiKey.id}
-          allowAllNodes={apiKey.allow_all_nodes}
-          allowedNodeIds={apiKey.allowed_node_ids}
-          allowedNodes={apiKey.allowed_nodes}
-        />
-
-        <RateLimitCard
-          keyId={apiKey.id}
-          rateLimitPerSecond={apiKey.rate_limit_per_second}
-          rateLimitBurst={apiKey.rate_limit_burst}
-        />
-
-        <UsageStatsCard keyId={apiKey.id} />
 
         <ServiceScopeCard
           keyId={apiKey.id}
@@ -134,10 +119,58 @@ export function ApiKeyDetailPage() {
           apiKeySource={apiKey.credential_source}
         />
 
-        <BindingsCard
-          keyId={apiKey.id}
-          apiKeySource={apiKey.credential_source}
-        />
+        <div className="md:col-span-2">
+          <UsageStatsCard keyId={apiKey.id} />
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        <button
+          type="button"
+          onClick={() => setAdvancedOpen((v) => !v)}
+          aria-expanded={advancedOpen}
+          aria-controls="api-key-advanced"
+          className="flex w-full items-center justify-between rounded-lg border border-border bg-card px-4 py-3 text-left text-sm font-medium hover:bg-muted/40"
+        >
+          <span className="flex items-center gap-2">
+            {advancedOpen ? (
+              <ChevronDown className="h-4 w-4" aria-hidden="true" />
+            ) : (
+              <ChevronRight className="h-4 w-4" aria-hidden="true" />
+            )}
+            Advanced
+          </span>
+          <span className="text-xs font-normal text-muted-foreground">
+            Callback URL, Node Scope, Rate Limits, Credential Overrides
+          </span>
+        </button>
+
+        {advancedOpen && (
+          <div id="api-key-advanced" className="grid gap-4 md:grid-cols-2">
+            <CallbackUrlCard
+              keyId={apiKey.id}
+              callbackUrl={apiKey.callback_url}
+            />
+
+            <NodeScopeCard
+              keyId={apiKey.id}
+              allowAllNodes={apiKey.allow_all_nodes}
+              allowedNodeIds={apiKey.allowed_node_ids}
+              allowedNodes={apiKey.allowed_nodes}
+            />
+
+            <RateLimitCard
+              keyId={apiKey.id}
+              rateLimitPerSecond={apiKey.rate_limit_per_second}
+              rateLimitBurst={apiKey.rate_limit_burst}
+            />
+
+            <BindingsCard
+              keyId={apiKey.id}
+              apiKeySource={apiKey.credential_source}
+            />
+          </div>
+        )}
       </div>
 
       <RotateKeyDialog
