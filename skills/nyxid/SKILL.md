@@ -158,6 +158,61 @@ nyxid node credentials setup --service api-lark \
 
 Most users do not know where to find API keys or what authentication method to use. Follow this workflow:
 
+### The new default: CLI → browser wizard
+
+Running `nyxid service add <slug>` with no scripted flags on an interactive TTY now launches a **local browser wizard** (PR #396, wizard v2). This is the recommended flow for non-technical users -- they get the same visual experience as the frontend's Add Key dialog without leaving the terminal to open the web app. End-to-end:
+
+1. User runs `nyxid service add llm-openai` (or with no slug, to pick from the catalog in-wizard).
+2. Terminal prints:
+   ```
+   → Opening http://127.0.0.1:<port>/?csrf=... … (Ctrl-C to cancel)
+     Waiting for browser …
+   ```
+   The CLI boots a local axum server bound to `127.0.0.1:0` (random port, localhost-only), mints a per-session CSRF token, and hands the URL to `open::that` to launch the user's default browser.
+3. Browser opens to the wizard SPA -- served entirely from the CLI binary (no remote scripts, strict CSP: `default-src 'none'; script-src 'self'; style-src 'self'`). The page inherits the prefill: catalog card pre-selected, label/endpoint/via-node pre-filled from the flags the user typed.
+4. User completes the form: picks a catalog service or `--custom`-style custom endpoint, enters credentials (API key / OAuth / device-code all supported in-browser), clicks **"Done — return to terminal"**.
+5. CLI rings the terminal bell (`\x07` + OSC-9 attention cue for iTerm2/WezTerm/Kitty) and prints a summary:
+   ```
+   ✓ Service 'OpenAI' created.
+     Slug:      llm-openai
+     Proxy URL: https://nyx-api.chrono-ai.fun/api/v1/proxy/s/llm-openai/
+     Next:
+       curl https://nyx-api.chrono-ai.fun/api/v1/proxy/s/llm-openai/<api-path> -H "Authorization: Bearer $NYX_KEY"
+   ```
+6. User closes the browser tab (or the tab says "You can close this tab and return to your terminal").
+
+**Safety posture:** everything is local -- the browser never talks to the NyxID backend directly. The wizard's narrow allowlist of endpoints is proxied through the local server with the user's bearer token attached server-side, so the access token never hits the browser. A 10-second heartbeat watchdog cancels the CLI if the browser tab is closed without clicking Done; a 30-minute ceiling catches walked-away tabs.
+
+**Prefill flags** (safe to combine with the wizard -- they just seed the form):
+`--slug`, `--label`, `--via-node`, `--endpoint-url`.
+
+### When the CLI falls back to terminal (rpassword) mode
+
+Terminal mode is selected when **any** of the following is true:
+
+- `--terminal` (alias `--no-wizard`) is passed on the command line -- **per-invocation override**, useful for a one-off scripted call on a GUI machine.
+- `NYXID_NO_WIZARD=1` is set in the environment -- **sticky** across all invocations. Right choice for CI runners, Dockerfiles, and systemd units where you never want a browser to launch.
+- A **scripted flag** is present (tells the CLI the caller already decided the flow): `--oauth`, `--device-code`, `--credential-env`, `--credential`, `--custom`, `--auth-method`, `--auth-key-name`, `--scope`, `--org`, `--openapi-spec-url`, or `--output json`.
+- Running over **SSH** (`SSH_CONNECTION` or `SSH_TTY` is set) -- the browser would open on the wrong machine.
+- Running on **Linux without a display** (both `DISPLAY` and `WAYLAND_DISPLAY` unset).
+- **stdout is not a TTY** (piped to another command, redirected to a file).
+
+Examples:
+
+```bash
+# One-off terminal prompt on a GUI machine
+nyxid service add llm-openai --terminal
+
+# Sticky opt-out (put in .bashrc, Dockerfile, or systemd Environment=)
+NYXID_NO_WIZARD=1 nyxid service add llm-openai
+
+# Scripted flow (auto-falls-through, no flag needed)
+nyxid service add llm-openai --credential-env OPENAI_KEY --output json
+```
+
+**Guidance for AI agents using this skill:** always pass scripted flags (`--oauth`, `--credential-env`, `--output json`, etc.). Those automatically bypass the wizard, so an agent never accidentally tries to open a browser on a headless box. Use `--terminal` only when you need to explicitly force the rpassword prompt in an interactive session where none of the other triggers apply.
+
+
 ### Step 1: Check the catalog
 
 ```bash
@@ -361,6 +416,7 @@ nyxid service update <id> --openapi-spec-url https://api.example.com/openapi.jso
 nyxid service update <id> --openapi-spec-url ""                # clear the OpenAPI spec URL
 nyxid service update <id> --default-header 'x-openclaw-scopes=operator.read,operator.write'
 nyxid service update <id> --default-header 'x-api-version=v2:overridable'
+nyxid service update <id> --default-header 'x-secret-token=abc123:sensitive'   # redact value in audit logs / API responses
 nyxid service update <id> --clear-default-headers
 nyxid service delete <id> --yes                                # remove service (no prompt)
 ```
