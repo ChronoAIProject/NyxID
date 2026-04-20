@@ -172,6 +172,49 @@ pub async fn feishu_webhook(
     (StatusCode::OK, "".to_string()).into_response()
 }
 
+/// POST /api/v1/webhooks/channel/slack/{bot_id}
+///
+/// Receives Events API callbacks from Slack for a specific channel bot.
+/// Slack requires a 2xx response within 3 seconds, so heavy processing
+/// (signature verification, agent dispatch) runs in a background task and
+/// the handler returns 200 OK immediately. The one-time `url_verification`
+/// challenge is answered synchronously without bot lookup.
+pub async fn slack_webhook(
+    State(state): State<AppState>,
+    Path(bot_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let adapter = match resolve_adapter("slack", &state.token_exchange_cache) {
+        Ok(a) => a,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".to_string()).into_response(),
+    };
+
+    if let Some(challenge_response) = adapter.handle_challenge(&body) {
+        return (StatusCode::OK, Json(challenge_response)).into_response();
+    }
+
+    // Honor Slack's 3-second ACK rule: ACK immediately, process asynchronously.
+    let state_bg = state.clone();
+    let bot_id_bg = bot_id.clone();
+    let headers_bg = headers.clone();
+    let body_bg = body.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            handle_webhook_inner(&state_bg, &bot_id_bg, "slack", &headers_bg, &body_bg).await
+        {
+            tracing::warn!(
+                bot_id = %bot_id_bg,
+                platform = "slack",
+                error = %e,
+                "slack webhook processing error (background, suppressed)"
+            );
+        }
+    });
+
+    (StatusCode::OK, "".to_string()).into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Shared inner handler
 // ---------------------------------------------------------------------------
@@ -231,10 +274,11 @@ async fn handle_webhook_inner(
         },
     )?;
 
-    // For Lark/Feishu, the adapter uses webhook_secret_hash as the HMAC key.
-    // The real verification token is the app_secret, so decrypt it and inject
-    // it into a cloned bot for the verification step.
-    let bot_for_verify = if matches!(bot.platform.as_str(), "lark" | "feishu") {
+    // For Lark/Feishu/Slack, the adapter needs the raw signing material, not
+    // its hash. We store the encrypted secret in `app_secret_encrypted` and
+    // decrypt + inject it into `webhook_secret_hash` on a cloned bot here so
+    // the adapter's verify_webhook can use it as the HMAC key.
+    let bot_for_verify = if matches!(bot.platform.as_str(), "lark" | "feishu" | "slack") {
         if let Some(ref encrypted) = bot.app_secret_encrypted {
             match state.encryption_keys.decrypt(encrypted).await {
                 Ok(decrypted) => {

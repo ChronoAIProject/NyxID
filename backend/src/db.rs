@@ -857,15 +857,51 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // ── channel_conversations ──
+    //
+    // Two partial unique indexes cover the two conversation regimes, since
+    // device conversations (platform="device") have no `channel_bot_id`:
+    //
+    //   * Bot conversations:  uniqueness by (bot, conv_id, sender).
+    //   * Device conversations: uniqueness by (user, platform_conversation_id),
+    //                           since devices have no group/sender concept.
+    //
+    // The legacy unnamed unique index (created by an earlier version of this
+    // file) is dropped by its default name on first boot so the partial
+    // indexes below can own the namespace. Subsequent boots see it missing
+    // and the drop becomes a cheap no-op.
     let channel_convos = db.collection::<mongodb::bson::Document>("channel_conversations");
+    let _ = channel_convos
+        .drop_index("channel_bot_id_1_platform_conversation_id_1_platform_sender_id_1")
+        .await;
     channel_convos
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "channel_bot_id": 1, "platform_conversation_id": 1, "platform_sender_id": 1 })
                 .options(
                     IndexOptions::builder()
+                        .name("channel_conversations_bot_uniq".to_string())
                         .unique(true)
-                        .partial_filter_expression(doc! { "is_active": true })
+                        .partial_filter_expression(doc! {
+                            "is_active": true,
+                            "channel_bot_id": { "$type": "string" },
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    channel_convos
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "platform_conversation_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("channel_conversations_device_uniq".to_string())
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "is_active": true,
+                            "platform": "device",
+                        })
                         .build(),
                 )
                 .build(),

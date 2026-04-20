@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use mongodb::bson::doc;
+use mongodb::bson::{Document, doc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -94,14 +94,24 @@ pub async fn forward_event(
         .as_deref()
         .ok_or_else(|| AppError::Unauthorized("API key required for channel events".to_string()))?;
 
-    // 2. Conversation lookup, scoped to this caller's API key.
+    // 2. Conversation lookup, scoped to this caller's API key AND to
+    //    device-platform rows only.
     //
-    //    The ownership filter (`agent_api_key_id: api_key_id`) is folded
-    //    into the query so that "not found", "inactive", and "owned by a
-    //    different key" all collapse into one opaque 401 response. That
-    //    closes the existence-leak vector where an attacker holding a
-    //    valid API key could distinguish a foreign conversation from a
-    //    nonexistent one.
+    //    The `platform: "device"` filter is load-bearing: without it, a
+    //    caller bound to a bot-backed (telegram/discord/lark/feishu)
+    //    conversation could POST to /channel-events/{bot_conversation_id}
+    //    and synthesize a `platform="device"` ChannelMessage row whose
+    //    parent conversation is still bot-backed. A later reply through
+    //    /channel-relay/reply would then pass the device-guard (because
+    //    `conversation.platform != "device"`) and dispatch through the
+    //    PlatformAdapter, bypassing the one-way device-channel invariant
+    //    and the Discord-interaction TTL shortening we rely on.
+    //
+    //    Collapsing platform, ownership, existence, and active state into
+    //    one query preserves the opaque-401 property: all four miss
+    //    reasons return the same error, so an attacker with a valid
+    //    api_key cannot distinguish a foreign conversation from a
+    //    nonexistent one or a bot conversation from a device one.
     //
     //    `is_active: true` mirrors `channel_routing_service::resolve_agent()`
     //    so device events respect the same off-switch as webhook-driven
@@ -110,39 +120,28 @@ pub async fn forward_event(
     //    token bucket.
     let conversation = db
         .collection::<ChannelConversation>(CHANNEL_CONVERSATIONS)
-        .find_one(doc! {
-            "_id": conversation_id,
-            "is_active": true,
-            "agent_api_key_id": api_key_id,
-        })
+        .find_one(conversation_lookup_filter(conversation_id, api_key_id))
         .await?
         .ok_or_else(|| {
             tracing::warn!(
                 conversation_id = %conversation_id,
                 provided_key = %api_key_id,
-                "Channel event rejected: conversation not found or not bound to caller"
+                "Channel event rejected: conversation not found, not bound to caller, or not a device channel"
             );
             AppError::Unauthorized(
                 "conversation not found or not bound to this API key".to_string(),
             )
         })?;
 
-    // Reject wildcard / default-agent catch-all routes. These rows have
-    // `platform_conversation_id == "*"` and exist purely as fallback routing
-    // for unmatched webhook traffic. They cannot back a device event because
-    // a later async reply via /channel-relay/reply would persist `"*"` as
-    // the literal chat ID and the platform adapters (Telegram/Discord/Lark/
-    // Feishu) would fail to deliver.
-    //
-    // This check only runs *after* the ownership-scoped lookup, so a 400
-    // here is only ever surfaced to the conversation's legitimate owner —
-    // it cannot be used to probe for the existence of a wildcard
-    // conversation belonging to another key.
+    // Device conversations always have a concrete `platform_conversation_id`
+    // (the conversation-creation handler rejects "*" / empty for device
+    // channels). A wildcard value reaching this point would indicate an
+    // orphaned bot-route being abused as an event target; reject defensively.
+    debug_assert_ne!(conversation.platform_conversation_id, "*");
     if conversation.platform_conversation_id == "*" {
         return Err(AppError::ValidationError(
-            "wildcard_conversation_not_supported: device events require a \
-             conversation bound to a concrete platform_conversation_id, not a \
-             default-agent catch-all route"
+            "wildcard_conversation_not_supported: device events require a concrete \
+             platform_conversation_id"
                 .to_string(),
         ));
     }
@@ -230,7 +229,7 @@ pub async fn forward_event(
     //    webhook path's "persist before forward" ordering.
     let stored_message = channel_relay_service::store_device_event_message(
         db,
-        &conversation.channel_bot_id,
+        conversation.channel_bot_id.as_deref(),
         conversation_id,
         &conversation.platform_conversation_id,
         &conversation.user_id,
@@ -362,6 +361,34 @@ pub async fn forward_event(
     }
 }
 
+/// Build the filter used to look up the target conversation for a device
+/// event.
+///
+/// **Invariants** (verify any change against the tests below — they are the
+/// contract):
+///
+/// 1. `platform: "device"` — rejects bot-backed conversations even when
+///    the caller's API key is correctly bound to them. Without this, a
+///    Telegram/Discord/Lark/Feishu conversation could be used as a device
+///    channel and an agent reply through `/channel-relay/reply` would
+///    bypass the one-way device-channel invariant plus the shortened
+///    Discord-interaction TTL we rely on for device-originated replies.
+/// 2. `agent_api_key_id: api_key_id` — the caller must already be the
+///    assigned agent for the conversation.
+/// 3. `is_active: true` — mirrors the webhook resolver's off-switch.
+///
+/// All miss reasons fold into a single opaque 401 at the call site, so an
+/// attacker holding a valid agent key cannot distinguish a nonexistent
+/// channel from a foreign one or a bot channel from a device one.
+fn conversation_lookup_filter(conversation_id: &str, api_key_id: &str) -> Document {
+    doc! {
+        "_id": conversation_id,
+        "is_active": true,
+        "agent_api_key_id": api_key_id,
+        "platform": "device",
+    }
+}
+
 /// Fetch the most recent **webhook-driven** inbound `ChannelMessage` for a
 /// conversation and return its `thread_id`, for inheritance onto a newly
 /// synthesized device-event row.
@@ -460,7 +487,10 @@ fn build_device_callback_payload(
         conversation: CallbackConversation {
             id: conversation.id.clone(),
             platform_id: conversation.platform_conversation_id.clone(),
-            conversation_type: "device".to_string(),
+            // Device conversations default their type to "device" at
+            // creation time but callers may override (e.g. to distinguish
+            // "camera" vs "sensor"). Honor the stored value.
+            conversation_type: conversation.platform_conversation_type.clone(),
         },
         sender: CallbackSender {
             platform_id: envelope.source.clone(),
@@ -568,7 +598,9 @@ mod tests {
         ChannelConversation {
             id: "conv-1".to_string(),
             user_id: "user-1".to_string(),
-            channel_bot_id: "bot-1".to_string(),
+            // Device channels have no backing bot. See NyxID#221 /
+            // nyxid-event-gateway.md.
+            channel_bot_id: None,
             platform: "device".to_string(),
             platform_conversation_id: "household-1".to_string(),
             platform_conversation_type: "device".to_string(),
@@ -702,6 +734,41 @@ mod tests {
         .unwrap();
         assert_eq!(payload.agent.api_key_id, "key-1");
         assert_eq!(payload.agent.name, "test-agent");
+    }
+
+    #[test]
+    fn lookup_filter_requires_platform_device() {
+        // Regression for Codex review finding: without the platform="device"
+        // clause, an agent bound to a Telegram/Discord/Lark/Feishu
+        // conversation could POST to /channel-events/{bot_conversation_id}
+        // and the resulting reply would bypass the one-way device-channel
+        // invariant.
+        let filter = conversation_lookup_filter("conv-1", "key-1");
+        assert_eq!(filter.get_str("platform").unwrap(), "device");
+    }
+
+    #[test]
+    fn lookup_filter_scopes_to_active_and_caller() {
+        let filter = conversation_lookup_filter("conv-1", "key-1");
+        assert_eq!(filter.get_str("_id").unwrap(), "conv-1");
+        assert_eq!(filter.get_str("agent_api_key_id").unwrap(), "key-1");
+        assert!(filter.get_bool("is_active").unwrap());
+    }
+
+    #[test]
+    fn lookup_filter_has_no_extra_keys() {
+        // Opaque-401 property: adding more conditions to this filter
+        // without routing them through the same "not found or not bound"
+        // error would create a distinguishable failure mode. Fail the
+        // test when a future edit adds a key so the author is forced to
+        // reason about the side effect.
+        let filter = conversation_lookup_filter("c", "k");
+        let mut keys: Vec<&str> = filter.keys().map(|s| s.as_str()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["_id", "agent_api_key_id", "is_active", "platform"],
+        );
     }
 
     #[test]

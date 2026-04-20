@@ -8,10 +8,11 @@ pub struct ChannelBot {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
-    /// Platform identifier: "telegram", "discord", "lark", "feishu"
+    /// Platform identifier: "telegram", "discord", "lark", "feishu", "slack"
     pub platform: String,
     pub label: String,
-    /// Encrypted bot token (AES-256 envelope encryption)
+    /// Encrypted bot token (AES-256 envelope encryption).
+    /// For Slack this is the `xoxb-` bot user token.
     #[serde(with = "crate::models::bson_bytes::required")]
     pub bot_token_encrypted: Vec<u8>,
     /// Platform-assigned bot identifier
@@ -20,12 +21,16 @@ pub struct ChannelBot {
     pub platform_bot_username: String,
     /// Whether a webhook has been successfully registered with the platform
     pub webhook_registered: bool,
-    /// SHA-256 hash of the webhook verification secret
+    /// SHA-256 hash of the webhook verification secret (Telegram); unused for
+    /// platforms that derive the verifier from `app_secret_encrypted` instead
+    /// (Lark/Feishu/Slack).
     pub webhook_secret_hash: String,
     /// Lark/Feishu only: application ID
     #[serde(default)]
     pub app_id: Option<String>,
-    /// Lark/Feishu only: encrypted app secret (AES-256 envelope encryption)
+    /// Encrypted app/signing secret (AES-256 envelope encryption).
+    /// Lark/Feishu use it for HMAC + tenant-token exchange; Slack stores its
+    /// app signing secret here for Events API signature verification.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub app_secret_encrypted: Option<Vec<u8>>,
     /// Discord only: application public key for Ed25519 signature verification

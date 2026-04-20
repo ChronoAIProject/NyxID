@@ -113,7 +113,7 @@ pub async fn store_inbound_message(
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
         id: uuid::Uuid::new_v4().to_string(),
-        channel_bot_id: channel_bot_id.to_string(),
+        channel_bot_id: Some(channel_bot_id.to_string()),
         conversation_id: conversation_id.to_string(),
         platform_conversation_id: Some(inbound.conversation_id.clone()),
         user_id: user_id.to_string(),
@@ -156,7 +156,7 @@ pub async fn store_outbound_message(
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
         id: uuid::Uuid::new_v4().to_string(),
-        channel_bot_id: channel_bot_id.to_string(),
+        channel_bot_id: Some(channel_bot_id.to_string()),
         conversation_id: conversation_id.to_string(),
         platform_conversation_id: None,
         user_id: user_id.to_string(),
@@ -205,7 +205,7 @@ pub async fn store_outbound_message(
 #[allow(clippy::too_many_arguments)]
 pub async fn store_device_event_message(
     db: &mongodb::Database,
-    channel_bot_id: &str,
+    channel_bot_id: Option<&str>,
     conversation_id: &str,
     platform_conversation_id: &str,
     user_id: &str,
@@ -217,7 +217,7 @@ pub async fn store_device_event_message(
 ) -> AppResult<ChannelMessage> {
     let message = ChannelMessage {
         id: uuid::Uuid::new_v4().to_string(),
-        channel_bot_id: channel_bot_id.to_string(),
+        channel_bot_id: channel_bot_id.map(String::from),
         conversation_id: conversation_id.to_string(),
         platform_conversation_id: Some(platform_conversation_id.to_string()),
         user_id: user_id.to_string(),

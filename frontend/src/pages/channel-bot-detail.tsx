@@ -95,6 +95,8 @@ function platformLabel(platform: ChannelPlatform): string {
       return "Lark";
     case "feishu":
       return "Feishu";
+    case "slack":
+      return "Slack";
     default:
       return platform;
   }

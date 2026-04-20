@@ -1,8 +1,20 @@
-export type ChannelPlatform = "telegram" | "discord" | "lark" | "feishu";
+export type ChannelPlatform =
+  | "telegram"
+  | "discord"
+  | "lark"
+  | "feishu"
+  | "slack";
+
+/**
+ * All platform values a conversation may report. `"device"` is for HTTP
+ * Event Gateway channels (NyxID#221) and, unlike the bot platforms, is
+ * never a valid `ChannelBot.platform`.
+ */
+export type ConversationPlatform = ChannelPlatform | "device";
 
 export type ChannelBotStatus = "pending" | "active" | "failed" | "invalid";
 
-export type ConversationType = "private" | "group" | "channel";
+export type ConversationType = "private" | "group" | "channel" | "device";
 
 export type MessageDirection = "inbound" | "outbound";
 
@@ -50,7 +62,7 @@ export interface CreateChannelBotRequest {
   readonly label: string;
   /** Lark/Feishu only */
   readonly app_id?: string;
-  /** Lark/Feishu only */
+  /** Lark/Feishu: app secret. Slack: app signing secret. */
   readonly app_secret?: string;
   /** Discord only */
   readonly public_key?: string;
@@ -67,8 +79,9 @@ export interface CreateChannelBotResponse {
 
 export interface ChannelConversationItem {
   readonly id: string;
-  readonly channel_bot_id: string;
-  readonly platform: ChannelPlatform;
+  /** `null` or omitted for device channels (platform === "device"). */
+  readonly channel_bot_id: string | null;
+  readonly platform: ConversationPlatform;
   readonly platform_conversation_id: string;
   readonly platform_conversation_type: ConversationType;
   readonly platform_sender_id: string | null;
@@ -96,6 +109,19 @@ export interface CreateChannelConversationRequest {
   readonly target_org_id?: string;
 }
 
+/**
+ * Request body for creating a device channel (HTTP Event Gateway, NyxID#221).
+ * No backing bot is required or allowed; the conversation is identified
+ * directly by `platform_conversation_id`.
+ */
+export interface CreateDeviceConversationRequest {
+  readonly platform: "device";
+  readonly platform_conversation_id: string;
+  readonly agent_api_key_id: string;
+  readonly platform_conversation_type?: string;
+  readonly target_org_id?: string;
+}
+
 export interface UpdateChannelConversationRequest {
   readonly agent_api_key_id?: string;
   readonly default_agent?: boolean;
@@ -114,10 +140,11 @@ export interface UpdateChannelConversationRequest {
  */
 export interface ChannelMessageItem {
   readonly id: string;
-  readonly channel_bot_id: string;
+  /** `null` for messages on device channels. */
+  readonly channel_bot_id: string | null;
   readonly conversation_id: string;
   readonly direction: MessageDirection;
-  readonly platform: ChannelPlatform;
+  readonly platform: ConversationPlatform;
   readonly platform_message_id: string | null;
   readonly sender_platform_id: string | null;
   readonly sender_display_name: string | null;

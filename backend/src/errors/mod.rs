@@ -184,6 +184,9 @@ pub enum AppError {
     #[error("Channel platform error: {0}")]
     ChannelPlatformError(String),
 
+    #[error("Device channel conversations do not support replies")]
+    DeviceChannelReplyNotAllowed,
+
     #[error("Organization accounts cannot authenticate directly")]
     OrgCannotAuthenticate,
 
@@ -267,6 +270,7 @@ impl AppError {
             Self::ChannelWebhookVerificationFailed(_) => StatusCode::UNAUTHORIZED,
             Self::ChannelRelayFailed(_) => StatusCode::BAD_GATEWAY,
             Self::ChannelPlatformError(_) => StatusCode::BAD_GATEWAY,
+            Self::DeviceChannelReplyNotAllowed => StatusCode::BAD_REQUEST,
             Self::OrgCannotAuthenticate => StatusCode::FORBIDDEN,
             Self::OrgQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
             Self::OrgNotFound(_) => StatusCode::NOT_FOUND,
@@ -334,6 +338,7 @@ impl AppError {
             Self::ChannelWebhookVerificationFailed(_) => 10003,
             Self::ChannelRelayFailed(_) => 10004,
             Self::ChannelPlatformError(_) => 10005,
+            Self::DeviceChannelReplyNotAllowed => 10006,
             Self::OrgCannotAuthenticate => 1403,
             Self::OrgQueryTimeout => 8100,
             Self::OrgNotFound(_) => 8101,
@@ -431,6 +436,7 @@ impl AppError {
             Self::ChannelWebhookVerificationFailed(_) => "channel_webhook_verification_failed",
             Self::ChannelRelayFailed(_) => "channel_relay_failed",
             Self::ChannelPlatformError(_) => "channel_platform_error",
+            Self::DeviceChannelReplyNotAllowed => "device_channel_reply_not_allowed",
             Self::OrgCannotAuthenticate => "org_cannot_authenticate",
             Self::OrgQueryTimeout => "org_query_timeout",
             Self::OrgNotFound(_) => "org_not_found",

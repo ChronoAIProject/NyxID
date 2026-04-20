@@ -10,8 +10,11 @@ pub struct ChannelConversation {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
-    pub channel_bot_id: String,
-    /// Platform identifier: "telegram", "discord", "lark", "feishu"
+    /// The bot that hosts this conversation. `None` when `platform == "device"`
+    /// (HTTP Event Gateway channels are not backed by a bot).
+    #[serde(default)]
+    pub channel_bot_id: Option<String>,
+    /// Platform identifier: "telegram" | "discord" | "lark" | "feishu" | "device"
     pub platform: String,
     /// Platform-native conversation/chat identifier
     pub platform_conversation_id: String,
@@ -47,7 +50,7 @@ mod tests {
         ChannelConversation {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
-            channel_bot_id: uuid::Uuid::new_v4().to_string(),
+            channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
             platform: "telegram".to_string(),
             platform_conversation_id: "chat_12345".to_string(),
             platform_conversation_type: "private".to_string(),
@@ -116,5 +119,32 @@ mod tests {
         assert_eq!(restored.platform_sender_id, None);
         assert!(!restored.default_agent);
         assert_eq!(restored.last_message_at, None);
+    }
+
+    #[test]
+    fn bson_roundtrip_device_conversation() {
+        // Device conversations have platform = "device" and no backing bot.
+        let mut conv = make_conversation();
+        conv.channel_bot_id = None;
+        conv.platform = "device".to_string();
+        conv.platform_conversation_id = "household-camera".to_string();
+        conv.platform_conversation_type = "device".to_string();
+        let doc = bson::to_document(&conv).expect("serialize");
+        let restored: ChannelConversation = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.channel_bot_id, None);
+        assert_eq!(restored.platform, "device");
+        assert_eq!(restored.platform_conversation_id, "household-camera");
+    }
+
+    #[test]
+    fn bson_missing_channel_bot_id_defaults_to_none() {
+        // Forward compat: a document written without channel_bot_id (device
+        // conversations emit it as null/absent) must deserialize with
+        // channel_bot_id = None.
+        let conv = make_conversation();
+        let mut doc = bson::to_document(&conv).expect("serialize");
+        doc.remove("channel_bot_id");
+        let restored: ChannelConversation = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.channel_bot_id, None);
     }
 }

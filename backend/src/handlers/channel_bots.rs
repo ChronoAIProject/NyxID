@@ -12,6 +12,7 @@ use crate::mw::auth::AuthUser;
 use crate::services::channel_adapters::discord::DiscordAdapter;
 use crate::services::channel_adapters::lark::LarkFamilyAdapter;
 use crate::services::channel_adapters::openclaw::OpenClawAdapter;
+use crate::services::channel_adapters::slack::SlackAdapter;
 use crate::services::channel_adapters::telegram::TelegramAdapter;
 use crate::services::channel_platform::PlatformAdapter;
 use crate::services::{audit_service, channel_bot_service, org_service};
@@ -204,7 +205,7 @@ async fn resolve_list_owner(
 
 /// Resolve the platform adapter for the given platform identifier.
 ///
-/// Supported platforms: telegram, discord, lark, feishu, openclaw.
+/// Supported platforms: telegram, discord, lark, feishu, slack, openclaw.
 ///
 /// The Lark and Feishu adapters share a process-wide
 /// [`TokenExchangeCache`] that is also used by the proxy's
@@ -225,9 +226,10 @@ pub fn resolve_adapter(
         "feishu" => Ok(Box::new(LarkFamilyAdapter::feishu(
             token_exchange_cache.clone(),
         ))),
+        "slack" => Ok(Box::new(SlackAdapter)),
         "openclaw" => Ok(Box::new(OpenClawAdapter)),
         other => Err(AppError::ValidationError(format!(
-            "unsupported platform: {other}. Supported: telegram, discord, lark, feishu, openclaw"
+            "unsupported platform: {other}. Supported: telegram, discord, lark, feishu, slack, openclaw"
         ))),
     }
 }
@@ -263,10 +265,10 @@ pub async fn create_bot(
     // OpenClaw uses a separate integration path (openclaw_channel handler).
     if !matches!(
         body.platform.as_str(),
-        "telegram" | "discord" | "lark" | "feishu"
+        "telegram" | "discord" | "lark" | "feishu" | "slack"
     ) {
         return Err(AppError::ValidationError(format!(
-            "unsupported bot platform: {}. Supported: telegram, discord, lark, feishu",
+            "unsupported bot platform: {}. Supported: telegram, discord, lark, feishu, slack",
             body.platform
         )));
     }

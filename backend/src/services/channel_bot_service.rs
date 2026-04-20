@@ -61,6 +61,19 @@ pub async fn create_bot(
         )));
     }
 
+    // Slack requires the app's signing secret to verify webhook signatures.
+    // Without it the bot can never receive any inbound message, so fail fast
+    // at registration time. Mirrors the Lark/Feishu requirement of
+    // `app_id`+`app_secret` enforced at the handler layer. Treat blank /
+    // whitespace-only secrets as missing so non-frontend clients (CLI with
+    // an empty env var, API callers passing `""`) can't register an unusable
+    // bot.
+    if adapter.platform_id() == "slack" && app_secret.map(|s| s.trim().is_empty()).unwrap_or(true) {
+        return Err(AppError::ValidationError(
+            "Slack signing secret is required (pass via app_secret)".to_string(),
+        ));
+    }
+
     // For Lark/Feishu, verify_bot_token expects "app_id:app_secret" format.
     // Build the effective token for verification matching what we'll store.
     let verify_token = if matches!(adapter.platform_id(), "lark" | "feishu") {

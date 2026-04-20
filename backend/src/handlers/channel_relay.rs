@@ -161,6 +161,26 @@ fn validate_reply_for_platform(body: &AsyncReplyBody, platform: &str) -> AppResu
     ))
 }
 
+/// Returns true if a reply to `(original_message, conversation)` must be
+/// rejected because it targets a device channel (NyxID#221 / ADR-013).
+///
+/// Both fields are independently load-bearing:
+///
+/// * `conversation_platform == "device"` covers the happy path where the
+///   conversation row itself is a device channel.
+/// * `original_platform == "device"` covers **legacy `ChannelMessage` rows**
+///   written by the prior event-gateway behavior — when device events
+///   were stored with `platform="device"` on the message row while the
+///   parent conversation was still Telegram/Discord/Lark/Feishu. Those
+///   rows survived the upgrade and must not dispatch through a bot
+///   adapter. The new `forward_event` filter (see
+///   `channel_event_service::conversation_lookup_filter`) prevents new
+///   such rows from being created, but pre-existing ones can only be
+///   blocked here.
+fn is_device_reply_forbidden(original_platform: &str, conversation_platform: &str) -> bool {
+    original_platform == "device" || conversation_platform == "device"
+}
+
 fn message_to_item(msg: &crate::models::channel_message::ChannelMessage) -> MessageItem {
     MessageItem {
         id: msg.id.clone(),
@@ -216,8 +236,22 @@ pub async fn async_reply(
         ));
     }
 
-    // Get the bot and verify it is still active
-    let bot = channel_bot_service::get_bot(&state.db, &original.channel_bot_id).await?;
+    // Device channels are one-way (HTTP Event Gateway, NyxID#221 / ADR-013):
+    // the spec explicitly says device events have no reply surface. Refuse
+    // here before any bot lookup — device conversations carry no bot token
+    // and no adapter.
+    if is_device_reply_forbidden(&original.platform, &conversation.platform) {
+        return Err(AppError::DeviceChannelReplyNotAllowed);
+    }
+
+    // Get the bot and verify it is still active. `channel_bot_id` is always
+    // present on non-device conversations; the guard above ensures that.
+    let channel_bot_id = original.channel_bot_id.as_deref().ok_or_else(|| {
+        AppError::Internal(
+            "bot-backed conversation is missing channel_bot_id on its message row".to_string(),
+        )
+    })?;
+    let bot = channel_bot_service::get_bot(&state.db, channel_bot_id).await?;
     if !bot.is_active {
         return Err(AppError::ChannelBotInactive(
             "Bot has been deactivated".to_string(),
@@ -249,18 +283,10 @@ pub async fn async_reply(
     //    follow-up webhook endpoint instead of `/channels/{id}/messages`.
     //
     //    **TTL guard:** Discord interaction tokens are valid for ~15 min
-    //    with up to 5 follow-ups. Two different reply windows apply:
-    //
-    //    - **Webhook-driven original** (the usual case):
-    //      `original.created_at` IS the real interaction timestamp,
-    //      so 14 minutes leaves a 1-minute safety margin.
-    //    - **Device-event original** (`original.platform == "device"`):
-    //      the token was inherited from an older webhook inbound by
-    //      `channel_event_service::lookup_recent_inbound_thread_id`,
-    //      which caps source age at 2 min. The device event row's
-    //      `created_at` is NOT the real interaction timestamp — use
-    //      a 12-minute reply window so combined `source_age + reply_delay`
-    //      stays at 14 min < 15 min TTL.
+    //    with up to 5 follow-ups. `original.created_at` IS the real
+    //    interaction timestamp, so 14 minutes leaves a 1-minute safety
+    //    margin. (Device channels are guarded out above and never reach
+    //    this branch.)
     //
     // 2. **Telegram forum-topic id** (numeric `message_thread_id`).
     //    Injected as `message_thread_id` so `telegram::send_reply()`
@@ -268,22 +294,12 @@ pub async fn async_reply(
     //    scoped to the originating topic rather than the root chat.
     //    Topic ids do not expire, so no TTL guard is applied.
     //
-    //    Dispatch uses **`conversation.platform`**, not
-    //    `original.platform`. For webhook-driven Telegram messages they
-    //    agree, but device events store `original.platform = "device"`
-    //    even when the underlying bot is Telegram, so checking the
-    //    conversation's platform catches both cases.
-    //
     // Other platforms currently have no thread-context routing, so we
     // leave their metadata untouched.
     let mut metadata = body.reply.metadata;
     if let Some(ref tid) = original.thread_id {
         if tid.starts_with("interaction:") {
-            let interaction_window = if original.platform == "device" {
-                Duration::minutes(12)
-            } else {
-                Duration::minutes(14)
-            };
+            let interaction_window = Duration::minutes(14);
             let age = Utc::now() - original.created_at;
             if age < interaction_window {
                 let md = metadata.get_or_insert_with(|| serde_json::json!({}));
@@ -304,6 +320,17 @@ pub async fn async_reply(
             let md = metadata.get_or_insert_with(|| serde_json::json!({}));
             if let Some(obj) = md.as_object_mut() {
                 obj.entry("message_thread_id")
+                    .or_insert_with(|| serde_json::json!(tid));
+            }
+        } else if conversation.platform == "slack" {
+            // Slack threading uses the ROOT message's `ts` as `thread_ts`.
+            // The inbound `thread_id` already holds the root (`thread_ts`
+            // from the original event), while `reply_to_platform_message_id`
+            // can be a child reply's `ts`. Surface the root explicitly so
+            // the adapter doesn't anchor replies on the wrong message.
+            let md = metadata.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(obj) = md.as_object_mut() {
+                obj.entry("thread_ts")
                     .or_insert_with(|| serde_json::json!(tid));
             }
         }
@@ -458,6 +485,37 @@ mod tests {
         AsyncReplyBody {
             text: text.map(String::from),
             metadata,
+        }
+    }
+
+    #[test]
+    fn device_reply_guard_rejects_device_conversation() {
+        assert!(is_device_reply_forbidden("telegram", "device"));
+    }
+
+    #[test]
+    fn device_reply_guard_rejects_legacy_device_message_on_bot_conversation() {
+        // Pre-split rows: ChannelMessage.platform == "device" while the
+        // parent ChannelConversation is still Telegram/Discord/Lark/Feishu.
+        // Without the original-platform check, those rows would still
+        // dispatch replies through the bot adapter.
+        for platform in ["telegram", "discord", "lark", "feishu"] {
+            assert!(
+                is_device_reply_forbidden("device", platform),
+                "legacy device message must be blocked when conversation.platform == {platform}"
+            );
+        }
+    }
+
+    #[test]
+    fn device_reply_guard_allows_pure_bot_flow() {
+        // Same platform on both sides is the normal bot-chat case — must
+        // NOT trip the guard.
+        for platform in ["telegram", "discord", "lark", "feishu"] {
+            assert!(
+                !is_device_reply_forbidden(platform, platform),
+                "bot reply on platform={platform} must be allowed"
+            );
         }
     }
 

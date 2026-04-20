@@ -10,11 +10,12 @@ use std::io::{Read, Write};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::ApiClient;
-use crate::cli::{ChannelEventCommands, OutputFormat};
+use crate::cli::{ChannelEventChannelCommands, ChannelEventCommands, OutputFormat};
 
 pub async fn run(command: ChannelEventCommands) -> Result<()> {
     match command {
@@ -91,6 +92,135 @@ pub async fn run(command: ChannelEventCommands) -> Result<()> {
                     eprintln!("Status:       {status}");
                 }
             }
+            Ok(())
+        }
+        ChannelEventCommands::Channel { command } => run_channel(command).await,
+    }
+}
+
+async fn run_channel(command: ChannelEventChannelCommands) -> Result<()> {
+    match command {
+        ChannelEventChannelCommands::Create {
+            conversation_id,
+            agent_key_id,
+            conversation_type,
+            org,
+            auth,
+        } => {
+            let mut api = ApiClient::from_auth(&auth)?;
+
+            let mut body = serde_json::json!({
+                "platform": "device",
+                "platform_conversation_id": conversation_id,
+                "agent_api_key_id": agent_key_id,
+            });
+            if let Some(ct) = &conversation_type {
+                body["platform_conversation_type"] = Value::String(ct.clone());
+            }
+            if let Some(org_id) = &org {
+                body["target_org_id"] = Value::String(org_id.clone());
+            }
+
+            let result: Value = api.post("/channel-conversations", &body).await?;
+
+            match auth.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                OutputFormat::Table => {
+                    let id = result["id"].as_str().unwrap_or("-");
+                    let conv_id = result["platform_conversation_id"].as_str().unwrap_or("-");
+                    let conv_type = result["platform_conversation_type"].as_str().unwrap_or("-");
+                    eprintln!("Device channel created.");
+                    eprintln!();
+                    eprintln!("ID:              {id}");
+                    eprintln!("Channel ID:      {conv_id}");
+                    eprintln!("Type:            {conv_type}");
+                    eprintln!("Agent Key:       {agent_key_id}");
+                    eprintln!();
+                    eprintln!(
+                        "Push events with: nyxid channel-event push --conversation-id {id} ..."
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        ChannelEventChannelCommands::List { org, auth } => {
+            let mut api = ApiClient::from_auth(&auth)?;
+            let path = match &org {
+                Some(o) => format!("/channel-conversations?org_id={}", urlencoding::encode(o)),
+                None => "/channel-conversations".to_string(),
+            };
+            let response: Value = api.get(&path).await?;
+
+            // The list endpoint returns bot routes AND device channels; filter
+            // client-side so `nyxid channel-event channel list` only shows
+            // the device ones.
+            let all = response
+                .get("conversations")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let devices: Vec<&Value> = all
+                .iter()
+                .filter(|c| c.get("platform").and_then(|v| v.as_str()) == Some("device"))
+                .collect();
+
+            match auth.output {
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "conversations": devices,
+                            "total": devices.len(),
+                        }))?
+                    );
+                }
+                OutputFormat::Table => {
+                    if devices.is_empty() {
+                        eprintln!("No device channels.");
+                        return Ok(());
+                    }
+                    let mut table = Table::new();
+                    table.load_preset(UTF8_FULL_CONDENSED);
+                    table.set_header(["ID", "Channel ID", "Type", "Agent Key", "Active"]);
+                    for conv in devices {
+                        let id = conv["id"].as_str().unwrap_or("-");
+                        let short_id = if id.len() > 8 { &id[..8] } else { id };
+                        let chan = conv["platform_conversation_id"].as_str().unwrap_or("-");
+                        let ctype = conv["platform_conversation_type"].as_str().unwrap_or("-");
+                        let agent = conv["agent_api_key_id"].as_str().unwrap_or("-");
+                        let short_agent = if agent.len() > 8 { &agent[..8] } else { agent };
+                        let active = if conv["is_active"].as_bool().unwrap_or(false) {
+                            "yes"
+                        } else {
+                            "no"
+                        };
+                        table.add_row([short_id, chan, ctype, short_agent, active]);
+                    }
+                    eprintln!("{table}");
+                }
+            }
+            Ok(())
+        }
+
+        ChannelEventChannelCommands::Delete { id, yes, auth } => {
+            if !yes {
+                eprint!("Delete device channel {id}? [y/N] ");
+                std::io::stderr().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !answer.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("Cancelled.");
+                    return Ok(());
+                }
+            }
+
+            let mut api = ApiClient::from_auth(&auth)?;
+            api.delete_empty(&format!("/channel-conversations/{id}"))
+                .await?;
+            eprintln!("Device channel deleted.");
             Ok(())
         }
     }

@@ -953,6 +953,18 @@ nyxid service add api-discord-bot
 nyxid proxy request api-discord-bot /channels/{channel_id}/messages \
   -m POST -d '{"content":"hello"}'
 # NyxID adds `Authorization: Bot <your_token>` automatically.
+
+# Slack bot (persistent xoxb- token, standard Bearer auth)
+nyxid service add api-slack-bot
+# CLI prompts for the Bot User OAuth Token (xoxb-...) from your Slack app's
+# OAuth & Permissions page. NyxID injects `Authorization: Bearer xoxb-...`
+# on every outbound call.
+nyxid proxy request api-slack-bot /chat.postMessage \
+  -m POST \
+  -H "Content-Type: application/json; charset=utf-8" \
+  -d '{"channel":"C1234567890","text":"hello"}'
+
+nyxid proxy request api-slack-bot /conversations.list -m GET
 ```
 
 ### If Lark/Feishu bot calls fail, recreate the binding
@@ -1015,10 +1027,12 @@ steps apply to `api-feishu-bot`.
 | `api-telegram-bot` | Telegram Bot API |
 | `api-discord` | Discord API as a logged-in user (OAuth) |
 | `api-discord-bot` | Discord API as a bot (persistent bot token) |
+| `api-slack` | Slack Web API as a logged-in user (OAuth) |
+| `api-slack-bot` | Slack Web API as a bot (persistent `xoxb-` token) |
 
 ## Channel Bot Relay
 
-NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and delivery to the agent.
+NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu, Slack) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and delivery to the agent.
 
 NyxID is a **pure passthrough gateway** (ADR-013): it never stores message bodies or attachments. Only routing metadata lives in NyxID; the full conversation history belongs to the downstream agent.
 
@@ -1033,9 +1047,12 @@ nyxid channel-bot register --platform discord --label "My Discord Bot" --token-e
 
 # Lark / Feishu (requires app credentials)
 nyxid channel-bot register --platform lark --label "My Lark Bot" --token-env LARK_BOT_TOKEN --app-id "cli_xxx" --app-secret-env LARK_APP_SECRET
+
+# Slack (pass the xoxb- bot user token and the app's signing secret)
+nyxid channel-bot register --platform slack --label "My Slack Bot" --token-env SLACK_BOT_TOKEN --app-secret-env SLACK_SIGNING_SECRET
 ```
 
-For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. The bot auto-activates on first successful webhook delivery.
+For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. The bot auto-activates on first successful webhook delivery. For Slack, paste the URL into the app's **Event Subscriptions** page — Slack's `url_verification` handshake is answered automatically.
 
 ### Manage bots
 
@@ -1075,11 +1092,11 @@ nyxid channel-bot route delete <ROUTE_ID> --yes
 
 Routing priority: sender-specific match > exact conversation match > default catch-all.
 
-For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890` for groups). For Discord, it's the `channel_id`. The bot must be added to the group/channel on the platform side.
+For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890` for groups). For Discord, it's the `channel_id`. For Slack, it's the channel id (`C...` public channel, `G...` private group / mpim, `D...` direct message). The bot must be added to the group/channel on the platform side.
 
 ### How it works
 
-1. User sends message on Telegram/Discord/Lark/Feishu
+1. User sends message on Telegram/Discord/Lark/Feishu/Slack
 2. Platform webhook delivers to NyxID
 3. NyxID verifies signature, resolves route, writes a metadata-only record (per ADR-013, no text or attachments are persisted)
 4. NyxID POSTs the normalized payload to the agent's `callback_url` with an HMAC signature
@@ -1087,7 +1104,9 @@ For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890`
 6. Agent processes asynchronously, then POSTs the reply to `/channel-relay/reply`
 7. NyxID delivers the reply to the platform chat
 
-The callback payload includes normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark JSON). The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
+Slack specifics: inbound events land on `/api/v1/webhooks/channel/slack/{bot_id}` and are HMAC-verified against the app's signing secret (`v0:{ts}:{body}` with a 5-minute replay window). NyxID ACKs with HTTP 200 inside Slack's 3-second window and processes in a background task. Outbound replies go through `chat.postMessage`; threaded replies anchor on the thread root via `metadata.thread_ts`. Rate-limit signals (HTTP 429 with `Retry-After`, or `{"ok":false,"error":"ratelimited"}`) surface as a clearly-labeled error so the agent can decide when to retry.
+
+The callback payload includes normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark/Slack JSON). The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
 
 ### Agent-facing endpoints (API-key authenticated)
 
@@ -1107,14 +1126,56 @@ GET /api/v1/channel-relay/resolve-sender?platform=telegram&platform_id=12345
 
 ## HTTP Event Gateway — device/analyzer events
 
-NyxID also accepts push-mode events from external devices and analyzers on the same channel infrastructure. The envelope is converted to a `CallbackPayload` with `platform = "device"` and forwarded through the agent's `callback_url` just like a chat message.
+NyxID accepts push-mode events from external devices and analyzers on the same channel relay infrastructure. The envelope is converted to a `CallbackPayload` with `platform = "device"` and forwarded through the agent's `callback_url` just like a chat message.
+
+Device channels are **first-class** and **not backed by a bot** — no Telegram/Discord/Lark/Feishu registration is required. A device channel is a `ChannelConversation` row with `platform = "device"` and `channel_bot_id = null`.
 
 **Endpoint:** `POST /api/v1/channel-events/{conversation_id}`
 **Auth:** Bearer API key (`nyxid_ag_...`) bound to the target conversation
 **Storage:** Metadata only. Event payloads are never persisted (ADR-013).
 **Retry:** None. NyxID is a pure passthrough — the client decides what to do on failure.
-**Rate limit:** 100 events/second per conversation (default, configurable).
+**Rate limit:** 100 events/second per conversation (default, configurable via `CHANNEL_EVENT_RATE_LIMIT_PER_SECOND`).
 **Idempotency:** Best-effort — same `event_id` within 5 minutes is deduplicated.
+**One-way:** Device conversations do not support agent replies. `POST /channel-relay/reply` returns `400 device_channel_reply_not_allowed` against a device channel.
+
+### Create a device channel
+
+Before pushing events, create a device channel (once) and bind it to an agent API key with a `callback_url`:
+
+```bash
+# Create the agent key first if you don't have one
+nyxid api-key create --name "household-agent" --platform custom \
+  --callback-url "https://my-agent.example.com/webhook"
+
+# Create the device channel
+nyxid channel-event channel create \
+  --conversation-id household-camera \
+  --agent-key-id <API_KEY_ID> \
+  --conversation-type camera     # optional; defaults to "device"
+
+# List device channels
+nyxid channel-event channel list
+
+# Delete a device channel (takes the NyxID-assigned _id, not the logical name)
+nyxid channel-event channel delete <CONVERSATION_ROW_ID> --yes
+```
+
+You can also create the channel through `POST /api/v1/channel-conversations` directly:
+
+```json
+{
+  "platform": "device",
+  "platform_conversation_id": "household-camera",
+  "agent_api_key_id": "<api-key-uuid>"
+}
+```
+
+Validation rules for device channels:
+
+- `channel_bot_id` MUST be omitted or null.
+- `platform_conversation_id` is **required** and must be non-empty and not `"*"` (no catch-all routes).
+- `platform_sender_id` and `default_agent: true` are rejected — devices have no group/sender or fan-out concept.
+- Uniqueness is per `(user_id, platform_conversation_id)` — each owner gets one active device channel per logical name.
 
 ### Envelope
 
@@ -1129,21 +1190,22 @@ NyxID also accepts push-mode events from external devices and analyzers on the s
 }
 ```
 
-### CLI
+### Push events
+
+The `conversation_id` in the path is the NyxID-assigned `_id` returned by `channel create` (not the logical `platform_conversation_id`).
 
 ```bash
-# Push a device event from a shell script
+# Push from the CLI
 nyxid channel-event push \
-  --conversation-id <CONVERSATION_ID> \
+  --conversation-id <CONVERSATION_ROW_ID> \
   --source camera-analyzer \
   --type person_detected \
   --payload-json '{"room":"living_room","confidence":0.95}'
 ```
 
-### curl
-
 ```bash
-curl -X POST https://<your-nyxid>/api/v1/channel-events/<CONVERSATION_ID> \
+# Push via curl
+curl -X POST https://<your-nyxid>/api/v1/channel-events/<CONVERSATION_ROW_ID> \
   -H "Authorization: Bearer nyxid_ag_..." \
   -H "Content-Type: application/json" \
   -d '{
@@ -1161,8 +1223,7 @@ curl -X POST https://<your-nyxid>/api/v1/channel-events/<CONVERSATION_ID> \
 |---|---|
 | 200 | Accepted (delivered) or deduplicated |
 | 400 | Invalid envelope shape |
-| 401 | Missing/invalid bearer, or API key is not bound to the conversation |
-| 404 | Conversation not found |
+| 401 | Missing/invalid bearer, **or** conversation not found, **or** API key is not bound to the conversation (collapsed into one opaque error to prevent existence-probing) |
 | 429 | Per-channel rate limit exceeded |
 | 502 | Downstream agent unreachable or returned non-2xx |
 

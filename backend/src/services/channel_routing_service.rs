@@ -105,11 +105,15 @@ pub async fn resolve_agent(
 }
 
 /// Create a new conversation routing rule.
+///
+/// `channel_bot_id` is `None` for device channels (platform="device"); the
+/// caller is responsible for enforcing the `platform == "device" ⇔ bot_id is
+/// None` invariant — see `handlers::channel_conversations::create_conversation`.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_conversation(
     db: &mongodb::Database,
     user_id: &str,
-    channel_bot_id: &str,
+    channel_bot_id: Option<&str>,
     platform: &str,
     platform_conversation_id: &str,
     platform_conversation_type: &str,
@@ -134,12 +138,15 @@ pub async fn create_conversation(
     // bot. We deactivate (not just clear default_agent) because the old route
     // with platform_conversation_id="*" would otherwise clash with the unique
     // partial index on active routes.
-    if default_agent {
+    //
+    // Only applies to bot-backed conversations: device channels have no
+    // default-agent concept (there's no webhook fan-out to disambiguate).
+    if default_agent && let Some(bot_id) = channel_bot_id {
         let now = bson::DateTime::from_chrono(Utc::now());
         db.collection::<ChannelConversation>(COLLECTION_NAME)
             .update_many(
                 doc! {
-                    "channel_bot_id": channel_bot_id,
+                    "channel_bot_id": bot_id,
                     "user_id": user_id,
                     "default_agent": true,
                     "is_active": true,
@@ -157,7 +164,7 @@ pub async fn create_conversation(
     let conversation = ChannelConversation {
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
-        channel_bot_id: channel_bot_id.to_string(),
+        channel_bot_id: channel_bot_id.map(String::from),
         platform: platform.to_string(),
         platform_conversation_id: platform_conversation_id.to_string(),
         platform_conversation_type: platform_conversation_type.to_string(),
@@ -243,11 +250,21 @@ pub async fn update_conversation(
                 AppError::NotFound(format!("Conversation not found: {conversation_id}"))
             })?;
 
+        // default_agent is a bot-only concept: it disambiguates which agent
+        // answers an inbound webhook when no exact conversation match exists.
+        // Device channels have no such fan-out, so reject the toggle for them
+        // rather than silently no-op'ing.
+        let Some(bot_id) = conv.channel_bot_id.as_deref() else {
+            return Err(AppError::ValidationError(
+                "default_agent cannot be set on device conversations".to_string(),
+            ));
+        };
+
         let now = bson::DateTime::from_chrono(Utc::now());
         db.collection::<ChannelConversation>(COLLECTION_NAME)
             .update_many(
                 doc! {
-                    "channel_bot_id": &conv.channel_bot_id,
+                    "channel_bot_id": bot_id,
                     "user_id": user_id,
                     "default_agent": true,
                     "is_active": true,

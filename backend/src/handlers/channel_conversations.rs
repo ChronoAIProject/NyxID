@@ -21,7 +21,14 @@ use crate::services::{
 
 #[derive(Debug, Deserialize)]
 pub struct CreateConversationRequest {
-    pub channel_bot_id: String,
+    /// Required for bot-backed conversations (`telegram`/`discord`/`lark`/
+    /// `feishu`). Must be omitted (or null) when `platform == "device"`.
+    #[serde(default)]
+    pub channel_bot_id: Option<String>,
+    /// Required for device conversations. When omitted, the platform is
+    /// inferred from the bot referenced by `channel_bot_id`.
+    #[serde(default)]
+    pub platform: Option<String>,
     pub agent_api_key_id: String,
     #[serde(default)]
     pub platform_conversation_id: Option<String>,
@@ -64,7 +71,9 @@ pub struct ListConversationsQuery {
 #[derive(Debug, Serialize)]
 pub struct ConversationItem {
     pub id: String,
-    pub channel_bot_id: String,
+    /// `None` for device channels (platform="device").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_bot_id: Option<String>,
     pub platform: String,
     pub platform_conversation_id: String,
     pub platform_conversation_type: String,
@@ -175,6 +184,19 @@ async fn load_api_key_any_owner(state: &AppState, key_id: &str) -> AppResult<Api
         .ok_or_else(|| AppError::NotFound(format!("API key not found: {key_id}")))
 }
 
+/// Return `value` unchanged if non-empty, otherwise return `default`.
+///
+/// react-hook-form (and most plain HTML forms) submits `""` rather than
+/// omitting the field when a text input is cleared. A plain
+/// `Option::unwrap_or(default)` fires only on `None`, which means a
+/// cleared-then-submitted input would overwrite the caller's intended
+/// default with an empty string. This helper treats empty and missing
+/// identically so the default always wins when the user didn't type
+/// anything meaningful.
+fn normalize_conversation_type<'a>(value: Option<&'a str>, default: &'a str) -> &'a str {
+    value.filter(|s| !s.is_empty()).unwrap_or(default)
+}
+
 fn conversation_to_item(
     conv: &crate::models::channel_conversation::ChannelConversation,
 ) -> ConversationItem {
@@ -199,6 +221,16 @@ fn conversation_to_item(
 // ---------------------------------------------------------------------------
 
 /// POST /api/v1/channel-conversations
+///
+/// Two regimes, selected by `platform`:
+///
+/// * **Bot conversation** (`platform` omitted OR one of
+///   `telegram`/`discord`/`lark`/`feishu`): requires `channel_bot_id`;
+///   behaves as before.
+/// * **Device conversation** (`platform == "device"`): requires
+///   `platform_conversation_id`, rejects `channel_bot_id` and
+///   `platform_sender_id`, and does not support `default_agent`. See
+///   NyxID#221 / nyxid-event-gateway.md.
 pub async fn create_conversation(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -210,11 +242,63 @@ pub async fn create_conversation(
     // target_org_id is set; the actor themselves otherwise.
     let owner_id = resolve_create_owner(&state, &actor, body.target_org_id.as_deref()).await?;
 
-    // Cross-scope rule: the channel bot and the agent api key must both
-    // belong to the resolved owner. Otherwise a conversation could mix
-    // personal + org resources (or two different orgs), which would
-    // silently cross-authorize downstream services through the api key.
-    let bot = channel_bot_service::get_bot(&state.db, &body.channel_bot_id).await?;
+    // Cross-scope rule: the agent api key must belong to the resolved owner.
+    // Otherwise a conversation could mix personal + org resources (or two
+    // different orgs), which would silently cross-authorize downstream
+    // services through the api key.
+    let agent_key = load_api_key_any_owner(&state, &body.agent_api_key_id).await?;
+    if agent_key.user_id != owner_id {
+        return Err(AppError::ValidationError(
+            "agent_api_key and conversation owner must match (personal key must be bound to a \
+             personal conversation, org key must be bound to an org conversation under the \
+             same org)"
+                .to_string(),
+        ));
+    }
+
+    let is_device = matches!(body.platform.as_deref(), Some("device"));
+
+    let conversation = if is_device {
+        create_device_conversation(&state, &owner_id, &body).await?
+    } else {
+        create_bot_conversation(&state, &owner_id, &body).await?
+    };
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(actor),
+        "channel_conversation_created".to_string(),
+        Some(serde_json::json!({
+            "conversation_id": &conversation.id,
+            "channel_bot_id": &body.channel_bot_id,
+            "platform": &conversation.platform,
+            "agent_api_key_id": &body.agent_api_key_id,
+            "owner_user_id": &owner_id,
+            "target_org_id": body.target_org_id,
+        })),
+        None,
+        None,
+        auth_user.api_key_id.clone(),
+        auth_user.api_key_name.clone(),
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(conversation_to_item(&conversation)),
+    ))
+}
+
+/// Create a bot-backed conversation (telegram/discord/lark/feishu).
+async fn create_bot_conversation(
+    state: &AppState,
+    owner_id: &str,
+    body: &CreateConversationRequest,
+) -> AppResult<crate::models::channel_conversation::ChannelConversation> {
+    let channel_bot_id = body.channel_bot_id.as_deref().ok_or_else(|| {
+        AppError::ValidationError("channel_bot_id is required for bot conversations".to_string())
+    })?;
+
+    let bot = channel_bot_service::get_bot(&state.db, channel_bot_id).await?;
     if bot.user_id != owner_id {
         return Err(AppError::ValidationError(
             "channel_bot and conversation owner must match (personal bot must be bound to a \
@@ -224,14 +308,16 @@ pub async fn create_conversation(
         ));
     }
 
-    let agent_key = load_api_key_any_owner(&state, &body.agent_api_key_id).await?;
-    if agent_key.user_id != owner_id {
-        return Err(AppError::ValidationError(
-            "agent_api_key and conversation owner must match (personal key must be bound to a \
-             personal conversation, org key must be bound to an org conversation under the \
-             same org)"
-                .to_string(),
-        ));
+    // If the caller supplied `platform` explicitly, it must match the bot's
+    // actual platform. This lets clients send `platform` redundantly for
+    // symmetry with the device branch without risking a silent mismatch.
+    if let Some(declared) = body.platform.as_deref()
+        && declared != bot.platform
+    {
+        return Err(AppError::ValidationError(format!(
+            "declared platform '{declared}' does not match bot platform '{}'",
+            bot.platform
+        )));
     }
 
     // When no conversation ID is provided (or empty), treat as a wildcard.
@@ -257,10 +343,8 @@ pub async fn create_conversation(
         // No conversation ID and no sender ID = true catch-all
         true
     };
-    let platform_conversation_type = body
-        .platform_conversation_type
-        .as_deref()
-        .unwrap_or("private");
+    let platform_conversation_type =
+        normalize_conversation_type(body.platform_conversation_type.as_deref(), "private");
 
     if platform_conversation_id.len() > 256 {
         return Err(AppError::ValidationError(
@@ -268,10 +352,10 @@ pub async fn create_conversation(
         ));
     }
 
-    let conversation = channel_routing_service::create_conversation(
+    channel_routing_service::create_conversation(
         &state.db,
-        &owner_id,
-        &body.channel_bot_id,
+        owner_id,
+        Some(channel_bot_id),
         &bot.platform,
         platform_conversation_id,
         platform_conversation_type,
@@ -279,29 +363,66 @@ pub async fn create_conversation(
         &body.agent_api_key_id,
         default_agent,
     )
-    .await?;
+    .await
+}
 
-    audit_service::log_async(
-        state.db.clone(),
-        Some(actor),
-        "channel_conversation_created".to_string(),
-        Some(serde_json::json!({
-            "conversation_id": &conversation.id,
-            "channel_bot_id": &body.channel_bot_id,
-            "agent_api_key_id": &body.agent_api_key_id,
-            "owner_user_id": &owner_id,
-            "target_org_id": body.target_org_id,
-        })),
-        None,
-        None,
-        auth_user.api_key_id.clone(),
-        auth_user.api_key_name.clone(),
-    );
+/// Create a device-backed conversation (HTTP Event Gateway, no bot).
+async fn create_device_conversation(
+    state: &AppState,
+    owner_id: &str,
+    body: &CreateConversationRequest,
+) -> AppResult<crate::models::channel_conversation::ChannelConversation> {
+    if body.channel_bot_id.is_some() {
+        return Err(AppError::ValidationError(
+            "channel_bot_id must be omitted for device conversations".to_string(),
+        ));
+    }
+    if body
+        .platform_sender_id
+        .as_deref()
+        .is_some_and(|s| !s.is_empty())
+    {
+        return Err(AppError::ValidationError(
+            "platform_sender_id is not supported on device conversations".to_string(),
+        ));
+    }
+    if body.default_agent == Some(true) {
+        return Err(AppError::ValidationError(
+            "default_agent is not supported on device conversations".to_string(),
+        ));
+    }
 
-    Ok((
-        StatusCode::CREATED,
-        Json(conversation_to_item(&conversation)),
-    ))
+    let platform_conversation_id = body
+        .platform_conversation_id
+        .as_deref()
+        .filter(|s| !s.is_empty() && *s != "*")
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "platform_conversation_id is required for device conversations".to_string(),
+            )
+        })?;
+
+    if platform_conversation_id.len() > 256 {
+        return Err(AppError::ValidationError(
+            "platform_conversation_id exceeds 256 characters".to_string(),
+        ));
+    }
+
+    let platform_conversation_type =
+        normalize_conversation_type(body.platform_conversation_type.as_deref(), "device");
+
+    channel_routing_service::create_conversation(
+        &state.db,
+        owner_id,
+        None,
+        "device",
+        platform_conversation_id,
+        platform_conversation_type,
+        None,
+        &body.agent_api_key_id,
+        false,
+    )
+    .await
 }
 
 /// GET /api/v1/channel-conversations
@@ -506,4 +627,35 @@ pub async fn list_conversation_messages(
         page: params.page,
         per_page,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_conversation_type;
+
+    #[test]
+    fn normalize_returns_default_when_none() {
+        assert_eq!(normalize_conversation_type(None, "device"), "device");
+    }
+
+    #[test]
+    fn normalize_returns_default_when_empty_string() {
+        // Regression for Codex review finding: react-hook-form submits
+        // "" for cleared text inputs, and `Option::unwrap_or` alone
+        // would let that empty string overwrite the caller's default.
+        assert_eq!(normalize_conversation_type(Some(""), "device"), "device");
+        assert_eq!(normalize_conversation_type(Some(""), "private"), "private");
+    }
+
+    #[test]
+    fn normalize_passes_through_non_empty_value() {
+        assert_eq!(
+            normalize_conversation_type(Some("camera"), "device"),
+            "camera"
+        );
+        assert_eq!(
+            normalize_conversation_type(Some("group"), "private"),
+            "group"
+        );
+    }
 }

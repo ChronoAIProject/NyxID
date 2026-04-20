@@ -1800,10 +1800,11 @@ pub enum AiSetupCommands {
 pub enum ChannelBotCommands {
     /// Register a new messaging platform bot
     Register {
-        /// Platform: telegram, discord, lark, feishu, openclaw
+        /// Platform: telegram, discord, lark, feishu, slack
         #[arg(long)]
         platform: String,
-        /// Bot token (hidden from help -- use --token-env instead)
+        /// Bot token (hidden from help -- use --token-env instead).
+        /// Slack: pass the `xoxb-` bot user OAuth token.
         #[arg(long, hide = true)]
         bot_token: Option<String>,
         /// Read bot token from this environment variable
@@ -1812,16 +1813,17 @@ pub enum ChannelBotCommands {
         /// Label for this bot
         #[arg(long)]
         label: String,
-        /// Platform app ID (required for some platforms, e.g. Discord, Lark)
+        /// Platform app ID (required for Lark/Feishu)
         #[arg(long)]
         app_id: Option<String>,
-        /// Platform app secret (hidden from help -- use --app-secret-env instead)
+        /// App secret (hidden from help -- use --app-secret-env instead).
+        /// Lark/Feishu: app secret. Slack: app signing secret.
         #[arg(long, hide = true)]
         app_secret: Option<String>,
         /// Read app secret from this environment variable
         #[arg(long)]
         app_secret_env: Option<String>,
-        /// Platform public key (required for some platforms, e.g. Discord)
+        /// Platform public key (required for Discord)
         #[arg(long)]
         public_key: Option<String>,
         /// Create this bot under the given org (you must be an admin of
@@ -1986,5 +1988,54 @@ pub enum ChannelEventCommands {
         /// Output format: table or json
         #[arg(long, default_value = "table")]
         output: OutputFormat,
+    },
+    /// Manage device channels (HTTP Event Gateway conversations, NyxID#221).
+    ///
+    /// Device channels are NOT backed by a bot — they exist purely as
+    /// conversation rows on the channel relay pipeline so the gateway has
+    /// somewhere to address events to.
+    Channel {
+        #[command(subcommand)]
+        command: ChannelEventChannelCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ChannelEventChannelCommands {
+    /// Create a device channel (platform = "device").
+    Create {
+        /// Logical device channel ID (the name devices POST to).
+        #[arg(long)]
+        conversation_id: String,
+        /// Agent API key ID that handles events for this channel.
+        #[arg(long)]
+        agent_key_id: String,
+        /// Conversation type label surfaced to the agent. Defaults to "device".
+        #[arg(long)]
+        conversation_type: Option<String>,
+        /// Create under the given org (caller must be an admin of that org).
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List device channels (platform = "device").
+    List {
+        /// List channels owned by the given org (admin-only).
+        #[arg(long, value_name = "ORG_ID")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete a device channel by conversation ID.
+    Delete {
+        /// Conversation ID (the `_id` returned by `create`, not the logical
+        /// channel name).
+        id: String,
+        /// Skip confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
     },
 }

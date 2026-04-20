@@ -829,6 +829,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             "/api/v1/webhooks/channel/feishu/{bot_id}",
             post(handlers::channel_webhooks::feishu_webhook),
         )
+        .route(
+            "/api/v1/webhooks/channel/slack/{bot_id}",
+            post(handlers::channel_webhooks::slack_webhook),
+        )
         .nest("/api/v1/integrations", integration_routes)
         .nest("/api/v1", api_v1)
         // WebSocket endpoint for node agents. Auth happens in-message (not middleware).

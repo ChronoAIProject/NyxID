@@ -1,9 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useChannelBots, useCreateChannelBot, useDeleteChannelBot } from "@/hooks/use-channel-bots";
-import { createChannelBotSchema, type CreateChannelBotFormData } from "@/schemas/channels";
+import {
+  useChannelConversations,
+  useCreateDeviceConversation,
+  useDeleteChannelConversation,
+} from "@/hooks/use-channel-conversations";
+import { useApiKeys } from "@/hooks/use-api-keys";
+import {
+  createChannelBotSchema,
+  createDeviceConversationSchema,
+  type CreateChannelBotFormData,
+  type CreateDeviceConversationFormData,
+} from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
@@ -37,9 +48,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Bot, Check, Plus, Trash2 } from "lucide-react";
+import { Bot, Check, Copy, Cpu, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import type { ChannelBotItem, ChannelBotStatus, ChannelPlatform } from "@/types/channels";
+import type {
+  ChannelBotItem,
+  ChannelBotStatus,
+  ChannelConversationItem,
+  ChannelPlatform,
+} from "@/types/channels";
 
 function statusBadgeVariant(
   status: ChannelBotStatus,
@@ -68,6 +84,8 @@ function platformLabel(platform: ChannelPlatform): string {
       return "Lark";
     case "feishu":
       return "Feishu";
+    case "slack":
+      return "Slack";
     default:
       return platform;
   }
@@ -299,6 +317,7 @@ function CreateBotDialog({
                 <SelectItem value="discord">Discord</SelectItem>
                 <SelectItem value="lark">Lark</SelectItem>
                 <SelectItem value="feishu">Feishu</SelectItem>
+                <SelectItem value="slack">Slack</SelectItem>
               </SelectContent>
             </Select>
             {errors.platform && (
@@ -385,6 +404,28 @@ function CreateBotDialog({
             </div>
           )}
 
+          {platform === "slack" && (
+            <div className="space-y-2">
+              <Label htmlFor="app_secret">Signing Secret</Label>
+              <Input
+                id="app_secret"
+                type="password"
+                placeholder="Slack app signing secret"
+                {...register("app_secret")}
+              />
+              <p className="text-xs text-muted-foreground">
+                Found under Basic Information → App Credentials in your
+                Slack app settings. Used to verify Events API request
+                signatures.
+              </p>
+              {errors.app_secret && (
+                <p className="text-xs text-destructive">
+                  {errors.app_secret.message}
+                </p>
+              )}
+            </div>
+          )}
+
           <DialogFooter>
             <Button
               type="button"
@@ -463,10 +504,363 @@ function LoadingSkeleton() {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Device channels (HTTP Event Gateway, NyxID#221)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function CreateDeviceChannelDialog({
+  open,
+  onOpenChange,
+  defaultOrgId,
+}: {
+  readonly open: boolean;
+  readonly onOpenChange: (open: boolean) => void;
+  readonly defaultOrgId: string | null;
+}) {
+  const createDevice = useCreateDeviceConversation();
+  const { data: apiKeys } = useApiKeys({ orgId: defaultOrgId });
+
+  // Device events arrive through an agent callback URL, so only keys with
+  // one configured are selectable.
+  const activeApiKeys = useMemo(
+    () => (apiKeys ?? []).filter((k) => k.is_active),
+    [apiKeys],
+  );
+
+  const {
+    register,
+    handleSubmit,
+    setValue,
+    reset,
+    formState: { errors },
+  } = useForm<CreateDeviceConversationFormData>({
+    resolver: zodResolver(createDeviceConversationSchema),
+    defaultValues: {
+      platform_conversation_id: "",
+      agent_api_key_id: "",
+      target_org_id: defaultOrgId ?? undefined,
+    },
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    reset({
+      platform_conversation_id: "",
+      agent_api_key_id: "",
+      target_org_id: defaultOrgId ?? undefined,
+    });
+  }, [open, defaultOrgId, reset]);
+
+  function onSubmit(data: CreateDeviceConversationFormData) {
+    // react-hook-form's `register` submits `""` for blank text inputs.
+    // Drop empty strings so the backend's default ("device") applies
+    // instead of being overwritten with an empty conversation type.
+    const conversationType =
+      data.platform_conversation_type && data.platform_conversation_type.trim().length > 0
+        ? data.platform_conversation_type.trim()
+        : undefined;
+
+    createDevice.mutate(
+      {
+        platform_conversation_id: data.platform_conversation_id,
+        agent_api_key_id: data.agent_api_key_id,
+        platform_conversation_type: conversationType,
+        target_org_id:
+          data.target_org_id && data.target_org_id.length > 0
+            ? data.target_org_id
+            : undefined,
+      },
+      {
+        onSuccess: (created) => {
+          // Surface the NyxID row _id — this is the path parameter for
+          // POST /api/v1/channel-events/{conversation_id}, NOT the
+          // logical `platform_conversation_id` the user typed in.
+          toast.success(
+            `Device channel created (ID: ${created.id}). Copy this ID — it's the path parameter for /channel-events.`,
+          );
+          reset();
+          onOpenChange(false);
+        },
+        onError: (err) => {
+          toast.error(
+            err instanceof ApiError
+              ? err.message
+              : "Failed to create device channel",
+          );
+        },
+      },
+    );
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Add Device Channel</DialogTitle>
+          <DialogDescription>
+            Device channels receive events through{" "}
+            <code className="text-xs">
+              POST /api/v1/channel-events/&#123;conversation_id&#125;
+            </code>
+            . No bot token is required — authenticate with the agent API key
+            configured below.
+          </DialogDescription>
+        </DialogHeader>
+
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="platform_conversation_id">Device Channel ID</Label>
+            <Input
+              id="platform_conversation_id"
+              placeholder="household-camera"
+              {...register("platform_conversation_id")}
+            />
+            <p className="text-xs text-muted-foreground">
+              The logical name the device will POST to. Must be unique per
+              owner.
+            </p>
+            {errors.platform_conversation_id && (
+              <p className="text-xs text-destructive">
+                {errors.platform_conversation_id.message}
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label>Agent API Key</Label>
+            {activeApiKeys.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                No active agent API keys in this scope. Create one with a
+                callback URL first.
+              </p>
+            ) : (
+              <Select
+                onValueChange={(value) => setValue("agent_api_key_id", value)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select an API key" />
+                </SelectTrigger>
+                <SelectContent>
+                  {activeApiKeys.map((key) => (
+                    <SelectItem
+                      key={key.id}
+                      value={key.id}
+                      disabled={!key.callback_url}
+                    >
+                      {key.name}
+                      {!key.callback_url ? " -- no callback URL" : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {errors.agent_api_key_id && (
+              <p className="text-xs text-destructive">
+                {errors.agent_api_key_id.message}
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="platform_conversation_type">
+              Channel Type (optional)
+            </Label>
+            <Input
+              id="platform_conversation_type"
+              placeholder="device"
+              {...register("platform_conversation_type")}
+            />
+            <p className="text-xs text-muted-foreground">
+              Freeform label surfaced to the agent as
+              <code className="mx-1 text-xs">conversation.conversation_type</code>
+              (e.g. <code className="text-xs">camera</code>,{" "}
+              <code className="text-xs">sensor</code>). Defaults to
+              <code className="mx-1 text-xs">device</code>.
+            </p>
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={createDevice.isPending}>
+              {createDevice.isPending ? "Creating..." : "Create Device Channel"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function DeviceChannelRow({
+  conversation,
+  onDelete,
+}: {
+  readonly conversation: ChannelConversationItem;
+  readonly onDelete: (id: string) => void;
+}) {
+  async function copyRowId() {
+    try {
+      await navigator.clipboard.writeText(conversation.id);
+      toast.success("Channel ID copied");
+    } catch {
+      toast.error("Could not copy — your browser blocked clipboard access");
+    }
+  }
+
+  return (
+    <TableRow>
+      <TableCell>
+        <div className="flex items-center gap-2">
+          <code
+            className="font-mono text-xs text-muted-foreground"
+            title={conversation.id}
+          >
+            {conversation.id.slice(0, 8)}…
+          </code>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={() => void copyRowId()}
+            title="Copy full channel ID (path parameter for /channel-events/{id})"
+          >
+            <Copy className="h-3 w-3 text-muted-foreground" />
+          </Button>
+        </div>
+      </TableCell>
+      <TableCell className="font-mono text-xs">
+        {conversation.platform_conversation_id}
+      </TableCell>
+      <TableCell>
+        <Badge variant="outline">{conversation.platform_conversation_type}</Badge>
+      </TableCell>
+      <TableCell className="font-mono text-xs text-muted-foreground">
+        {conversation.agent_api_key_id.slice(0, 8)}…
+      </TableCell>
+      <TableCell>
+        <Badge variant={conversation.is_active ? "success" : "secondary"}>
+          {conversation.is_active ? "active" : "inactive"}
+        </Badge>
+      </TableCell>
+      <TableCell className="text-xs text-muted-foreground">
+        {formatDate(conversation.created_at)}
+      </TableCell>
+      <TableCell className="w-[60px]">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          onClick={() => onDelete(conversation.id)}
+        >
+          <Trash2 className="h-4 w-4 text-muted-foreground" />
+        </Button>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function DeviceChannelsSection({
+  orgId,
+  onAdd,
+}: {
+  readonly orgId: string | null;
+  readonly onAdd: () => void;
+}) {
+  const { data: conversations, isLoading } = useChannelConversations({ orgId });
+  const deleteConversation = useDeleteChannelConversation();
+
+  // Device channels live in the same `channel_conversations` collection as
+  // bot routes. Filter client-side on `platform === "device"` rather than
+  // add a new server-side filter.
+  const devices = useMemo(
+    () => (conversations ?? []).filter((c) => c.platform === "device"),
+    [conversations],
+  );
+
+  function handleDelete(id: string) {
+    deleteConversation.mutate(id, {
+      onSuccess: () => toast.success("Device channel deleted"),
+      onError: (err) =>
+        toast.error(
+          err instanceof ApiError ? err.message : "Failed to delete",
+        ),
+    });
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">Device Channels</h2>
+          <p className="text-sm text-muted-foreground">
+            HTTP Event Gateway channels for analyzers, sensors, and other
+            non-bot event sources.
+          </p>
+        </div>
+        <Button size="sm" variant="outline" onClick={onAdd}>
+          <Plus className="mr-2 h-4 w-4" />
+          Add Device Channel
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <LoadingSkeleton />
+      ) : devices.length === 0 ? (
+        <Card>
+          <CardContent className="flex flex-col items-center gap-3 py-10">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full border border-border">
+              <Cpu className="h-5 w-5 text-muted-foreground" />
+            </div>
+            <p className="text-sm font-medium">No device channels yet</p>
+            <p className="text-xs text-muted-foreground">
+              Create one to let devices push events into the channel relay
+              pipeline.
+            </p>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="rounded-xl border border-border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead title="NyxID conversation _id — path parameter for POST /api/v1/channel-events/{id}">
+                  ID
+                </TableHead>
+                <TableHead>Channel Name</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Agent Key</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Created</TableHead>
+                <TableHead className="w-[60px]" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {devices.map((conversation) => (
+                <DeviceChannelRow
+                  key={conversation.id}
+                  conversation={conversation}
+                  onDelete={handleDelete}
+                />
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ChannelBotsPage() {
   const [scopeOrgId, setScopeOrgId] = useState<string | null>(null);
   const { data: bots, isLoading, error } = useChannelBots({ orgId: scopeOrgId });
   const [createOpen, setCreateOpen] = useState(false);
+  const [createDeviceOpen, setCreateDeviceOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   return (
@@ -505,9 +899,19 @@ export function ChannelBotsPage() {
         <BotsTable bots={bots} onDelete={setDeleteTarget} />
       )}
 
+      <DeviceChannelsSection
+        orgId={scopeOrgId}
+        onAdd={() => setCreateDeviceOpen(true)}
+      />
+
       <CreateBotDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
+        defaultOrgId={scopeOrgId}
+      />
+      <CreateDeviceChannelDialog
+        open={createDeviceOpen}
+        onOpenChange={setCreateDeviceOpen}
         defaultOrgId={scopeOrgId}
       />
       <DeleteBotDialog botId={deleteTarget} onClose={() => setDeleteTarget(null)} />

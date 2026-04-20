@@ -19,7 +19,10 @@ pub const COLLECTION_NAME: &str = "channel_messages";
 pub struct ChannelMessage {
     #[serde(rename = "_id")]
     pub id: String,
-    pub channel_bot_id: String,
+    /// The bot that hosts this message's conversation. `None` for messages on
+    /// device channels (HTTP Event Gateway, platform = "device").
+    #[serde(default)]
+    pub channel_bot_id: Option<String>,
     pub conversation_id: String,
     /// The actual platform chat/channel ID (e.g. Telegram chat_id).
     /// Stored separately from the conversation route's platform_conversation_id
@@ -79,7 +82,7 @@ mod tests {
     fn make_message() -> ChannelMessage {
         ChannelMessage {
             id: uuid::Uuid::new_v4().to_string(),
-            channel_bot_id: uuid::Uuid::new_v4().to_string(),
+            channel_bot_id: Some(uuid::Uuid::new_v4().to_string()),
             conversation_id: uuid::Uuid::new_v4().to_string(),
             platform_conversation_id: Some("chat_789".to_string()),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -167,6 +170,28 @@ mod tests {
         let restored: ChannelMessage = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.platform_message_id, None);
         assert_eq!(restored.callback_status, None);
+    }
+
+    #[test]
+    fn bson_roundtrip_device_message() {
+        // Device events persist a ChannelMessage with no backing bot.
+        let mut msg = make_message();
+        msg.channel_bot_id = None;
+        msg.platform = "device".to_string();
+        msg.sender_platform_id = Some("camera-analyzer".to_string());
+        let doc = bson::to_document(&msg).expect("serialize");
+        let restored: ChannelMessage = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.channel_bot_id, None);
+        assert_eq!(restored.platform, "device");
+    }
+
+    #[test]
+    fn bson_missing_channel_bot_id_defaults_to_none() {
+        let msg = make_message();
+        let mut doc = bson::to_document(&msg).expect("serialize");
+        doc.remove("channel_bot_id");
+        let restored: ChannelMessage = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.channel_bot_id, None);
     }
 
     #[test]

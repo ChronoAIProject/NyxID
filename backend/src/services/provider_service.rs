@@ -1352,6 +1352,58 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 22e. Slack Bot API (API Key — bot user OAuth token `xoxb-`)
+    if !slug_exists!("slack-bot") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "slack-bot".to_string(),
+            name: "Slack Bot API".to_string(),
+            description: Some(
+                "Slack bot user (`xoxb-`) token credentials. NyxID stores your bot \
+                 token and injects it as `Authorization: Bearer <token>` on outbound \
+                 calls. Tokens are long-lived; rotate them in the Slack app UI."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a Slack app at https://api.slack.com/apps, add the bot scopes \
+                 you need (e.g. `chat:write`, `channels:read`, `users:read`), install \
+                 the app to your workspace, then copy the **Bot User OAuth Token** \
+                 (starts with `xoxb-`) from OAuth & Permissions."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://api.slack.com/apps".to_string()),
+            icon_url: None,
+            documentation_url: Some(
+                "https://api.slack.com/authentication/token-types#bot".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "slack-bot", "Seeded default provider: Slack Bot API");
+        seeded_count += 1;
+    }
+
     // 23. OpenClaw (API Key + self-hosted gateway URL)
     if !slug_exists!("openclaw") {
         let provider = ProviderConfig {
@@ -1636,13 +1688,18 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     DefaultServiceSeed {
         provider_slug: "slack",
         service_slug: "api-slack",
-        service_name: "Slack API",
+        service_name: "Slack API (User OAuth)",
         base_url: "https://slack.com/api",
         injection_method: "bearer",
         injection_key: "Authorization",
         service_auth_method: None,
         service_auth_key_name: None,
-        description: None,
+        description: Some(
+            "Slack Web API authenticated as the installing user via OAuth 2.0. \
+             Use this when the agent should act on behalf of a real Slack user. \
+             For bot-level access with a long-lived `xoxb-` token, use \
+             `api-slack-bot` instead.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "microsoft",
@@ -1785,6 +1842,25 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              `Authorization: Bot <token>` (note: `Bot`, not `Bearer`) on outbound calls. \
              Bot tokens are persistent and never expire. Use for sending channel messages, \
              managing guilds, and any other Discord bot operations.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "slack-bot",
+        service_slug: "api-slack-bot",
+        service_name: "Slack Bot API",
+        base_url: "https://slack.com/api",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Slack Web API authenticated as the app's bot user. Paste a `xoxb-` \
+             bot token once (from your Slack app's OAuth & Permissions page), and \
+             NyxID injects it as `Authorization: Bearer <token>` on every outbound \
+             call. Bot tokens are long-lived and only rotate when you reinstall \
+             the app or rotate in the Slack UI. Use for `chat.postMessage`, \
+             `conversations.history`, `users.info`, and any other Web API method \
+             outside the channel-relay flow.",
         ),
     },
     DefaultServiceSeed {

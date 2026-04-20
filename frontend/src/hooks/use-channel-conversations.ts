@@ -4,6 +4,7 @@ import type {
   ChannelConversationListResponse,
   ChannelConversationItem,
   CreateChannelConversationRequest,
+  CreateDeviceConversationRequest,
   UpdateChannelConversationRequest,
 } from "@/types/channels";
 
@@ -75,6 +76,31 @@ export function useCreateChannelConversation() {
         queryKey: CHANNEL_CONVERSATIONS_ROOT,
       });
       void queryClient.invalidateQueries({ queryKey: ["channel-bots"] });
+    },
+  });
+}
+
+/**
+ * Create a device channel (HTTP Event Gateway, NyxID#221). Device channels
+ * are not backed by a bot and accept events via
+ * `POST /api/v1/channel-events/{conversation_id}`.
+ */
+export function useCreateDeviceConversation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (
+      data: Omit<CreateDeviceConversationRequest, "platform">,
+    ): Promise<ChannelConversationItem> => {
+      return api.post<ChannelConversationItem>("/channel-conversations", {
+        platform: "device",
+        ...data,
+      } satisfies CreateDeviceConversationRequest);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: CHANNEL_CONVERSATIONS_ROOT,
+      });
     },
   });
 }
