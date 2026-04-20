@@ -176,7 +176,40 @@ pub async fn run(command: NodeCommands) -> Result<()> {
             Ok(())
         }
 
-        NodeCommands::RotateToken { id, auth } => {
+        NodeCommands::RotateToken { id, terminal, auth } => {
+            use std::io::IsTerminal;
+            // Wizard mode (v3 DisplayOnce) when output is interactive,
+            // stdout is a TTY, and the environment can open a local
+            // browser. Mirrors the v2 `service add` gate. Anything else
+            // (--terminal, --output json, piped, SSH, NYXID_NO_WIZARD)
+            // falls through to the scripted path BELOW, byte-identical
+            // to pre-wizard behavior.
+            let interactive_output = matches!(auth.output, OutputFormat::Table);
+            let wizard_eligible = !terminal
+                && interactive_output
+                && std::io::stdout().is_terminal()
+                && crate::wizard::is_wizard_eligible();
+
+            if wizard_eligible {
+                let mut api = ApiClient::from_auth(&auth)?;
+                let resolved_id = resolve_node_id(&mut api, &id).await?;
+                // Best-effort fetch of the display name for the confirm
+                // panel. Falls back to id if the GET fails.
+                let display_name = match api.get::<Value>(&format!("/nodes/{resolved_id}")).await {
+                    Ok(node) => node["name"]
+                        .as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| resolved_id.clone()),
+                    Err(_) => resolved_id.clone(),
+                };
+                let prefill = crate::wizard::RotatePrefill {
+                    resource_id: resolved_id,
+                    display_name,
+                };
+                return crate::wizard::run_node_rotate_token_wizard(&auth, prefill).await;
+            }
+
+            // Scripted / headless path — UNCHANGED from pre-wizard behavior.
             let mut api = ApiClient::from_auth(&auth)?;
             let resolved_id = resolve_node_id(&mut api, &id).await?;
             let result: Value = api

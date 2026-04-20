@@ -415,7 +415,7 @@ Not tested on Windows, Docker, Codespaces, or devcontainers. The §3.1 gate shou
 
 ### 10.2 `DisplayOnce` step type for rotation flows
 
-Future rotation / MFA / node-token / SSH-cert flows need "secret shown exactly once, acknowledge-before-continue, optional download-as-file" semantics that today's confirmation step doesn't express. **Lands in:** first rotation flow PR (probably `api-key rotate` + `node rotate-token` together).
+Implemented in v3.0 — see [CLI_WIZARD_V3.md](./CLI_WIZARD_V3.md). Ships `nyxid api-key rotate` and `nyxid node rotate-token`. `api-key create`, `node register-token`, `channel-bot register` defer to v3.1; `mfa setup` to v3.2 (also needs §10.3 QR work).
 
 ### 10.3 QR code rendering for MFA
 

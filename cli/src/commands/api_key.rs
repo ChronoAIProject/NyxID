@@ -226,7 +226,44 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             Ok(())
         }
 
-        ApiKeyCommands::Rotate { id, auth } => {
+        ApiKeyCommands::Rotate { id, terminal, auth } => {
+            use std::io::IsTerminal;
+            // Wizard mode (v3 DisplayOnce) when output is interactive,
+            // stdout is a TTY, and the environment can open a local
+            // browser. Mirrors the v2 `service add` gate. Anything else
+            // (--terminal, --output json, piped, SSH, NYXID_NO_WIZARD)
+            // falls through to the scripted path BELOW, byte-identical
+            // to pre-wizard behavior.
+            let interactive_output = matches!(auth.output, OutputFormat::Table);
+            let wizard_eligible = !terminal
+                && interactive_output
+                && std::io::stdout().is_terminal()
+                && crate::wizard::is_wizard_eligible();
+
+            if wizard_eligible {
+                let mut api = ApiClient::from_auth(&auth)?;
+                // Resolve id-or-name → canonical id BEFORE handing off to
+                // the wizard. Refuses on ambiguous names (see
+                // `find_key_by_name`) so we can never rotate the wrong key.
+                let key_id = resolve_key_id(&mut api, &id).await?;
+                // Best-effort fetch of the display name for the confirm
+                // panel. Fallback to id if the fetch fails — non-fatal.
+                let display_name = match api.get::<Value>(&format!("/api-keys/{key_id}")).await {
+                    Ok(key) => key["name"]
+                        .as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| key_id.clone()),
+                    Err(_) => key_id.clone(),
+                };
+                let prefill = crate::wizard::RotatePrefill {
+                    resource_id: key_id,
+                    display_name,
+                };
+                return crate::wizard::run_api_key_rotate_wizard(&auth, prefill).await;
+            }
+
+            // Scripted / headless path — UNCHANGED from pre-wizard
+            // behavior so existing CI / scripts keep working.
             let mut api = ApiClient::from_auth(&auth)?;
             let result: Value = api
                 .post(&format!("/api-keys/{id}/rotate"), &serde_json::json!({}))
@@ -331,16 +368,29 @@ fn array_from_response<'a>(
         .or_else(|| value.as_array().map(Vec::as_slice))
 }
 
-/// Find an API key by name, returning the full key object.
+/// Find an API key by name, returning the full key object. Refuses to
+/// proceed if the name is ambiguous (multiple keys with the same name)
+/// — silently picking the first match could rotate / mutate the wrong
+/// key, which is irreversible for rotation. Caller must use the ID
+/// directly to disambiguate.
 async fn find_key_by_name(api: &mut ApiClient, name: &str) -> Result<Value> {
     let keys: Value = api.get("/api-keys").await?;
     let items = array_from_response(&keys, &["keys", "api_keys"]);
 
-    let found = items.and_then(|arr| arr.iter().find(|k| k["name"].as_str() == Some(name)));
+    let matches: Vec<&Value> = items
+        .map(|arr| {
+            arr.iter()
+                .filter(|k| k["name"].as_str() == Some(name))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
-    match found {
-        Some(k) => Ok(k.clone()),
-        None => anyhow::bail!("API key '{name}' not found. Run `nyxid api-key list` to see keys."),
+    match matches.len() {
+        0 => anyhow::bail!("API key '{name}' not found. Run `nyxid api-key list` to see keys."),
+        1 => Ok(matches[0].clone()),
+        n => anyhow::bail!(
+            "Name '{name}' matches {n} keys. Pass the ID instead — run `nyxid api-key list` to see them."
+        ),
     }
 }
 

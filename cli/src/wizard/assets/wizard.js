@@ -12,10 +12,14 @@
   // back to its own defaults.
   const PARAMS = new URLSearchParams(window.location.search);
   const PREFILL = {
+    // ai-key flow
     slug: PARAMS.get("slug") || null,
     label: PARAMS.get("label") || null,
     viaNode: PARAMS.get("via_node") || null,
     endpointUrl: PARAMS.get("endpoint_url") || null,
+    // v3 rotation flows (api-key-rotate / node-rotate-token)
+    resourceId: PARAMS.get("resource_id") || null,
+    displayName: PARAMS.get("display_name") || null,
   };
 
   let postInFlight = false;   // swallow beforeunload cancel while a POST is open
@@ -1104,9 +1108,20 @@
     try {
       await navigator.clipboard.writeText(text);
       if (btn) {
-        const prev = btn.textContent;
-        btn.textContent = "Copied!";
-        setTimeout(() => { btn.textContent = prev; }, 1200);
+        // Buttons with an icon use a `.wizard-btn-label` child to hold
+        // the label text — flipping just that child preserves the SVG
+        // icon during the "copied!" feedback. Buttons without an icon
+        // fall back to swapping the whole textContent (legacy behavior).
+        const label = btn.querySelector(".wizard-btn-label");
+        if (label) {
+          const prev = label.textContent;
+          label.textContent = "copied!";
+          setTimeout(() => { label.textContent = prev; }, 1200);
+        } else {
+          const prev = btn.textContent;
+          btn.textContent = "Copied!";
+          setTimeout(() => { btn.textContent = prev; }, 1200);
+        }
       }
     } catch (_) {
       // Clipboard requires a secure context in some browsers; 127.0.0.1
@@ -1395,7 +1410,308 @@
     copyCurlBtn.addEventListener("click", () => copyText(confirmCurl.textContent, copyCurlBtn));
   }
 
-  wire();
-  if (!document.hidden) startHeartbeats();
-  loadCatalog();
+  // ---- v3: rotation flows (api-key-rotate / node-rotate-token) ----
+  //
+  // These flows skip the catalog/credential steps entirely. The CLI
+  // resolves id-or-name → canonical id BEFORE launching the wizard and
+  // passes it via ?resource_id=&display_name=. We render a confirm
+  // panel ("Rotate API key 'foo'?"), then on Rotate click POST the
+  // backend's rotate route, then render the DisplayOnce panel with the
+  // returned secret(s).
+  //
+  // Critical design notes:
+  //   - The secret value lives ONLY in a JS-local closure variable.
+  //     The DOM holds a "•••" mask string in its text node until the
+  //     user clicks Reveal; revealing flips the text content to the
+  //     real value. Auto-remasks on blur / visibilitychange-hidden so
+  //     the secret doesn't sit visible if the user walks away.
+  //   - Download uses Blob + URL.createObjectURL + revokeObjectURL.
+  //     Codex P2: data: URLs leak into history / crash logs / UI; Blob
+  //     handles are revocable and same-origin opaque.
+  //   - Ack click POSTs `{ acknowledged: true, resource_id }` to
+  //     /api/proxy/complete. The Rust `RotationAckPayload` struct has
+  //     `#[serde(deny_unknown_fields)]` so any extra field (e.g. the
+  //     secret slipping in by accident) gets rejected with 400 server-
+  //     side. We also enforce here: only those two keys are sent.
+
+  function showRotationPanel(id) {
+    document.querySelectorAll(".wizard-step-panel").forEach(p => {
+      p.hidden = p.id !== id;
+    });
+  }
+
+  function setRotationStatus(elId, msg, cls) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    el.textContent = msg || "";
+    el.className = "wizard-status" + (cls ? " " + cls : "");
+  }
+
+  async function onCancelRotation(reason) {
+    if (finished) return;
+    finished = true;
+    try {
+      await proxyFetch("POST", "/api/proxy/cancel", {});
+      showOverlay({
+        cancel: true,
+        icon: "✗",
+        title: "Cancelled",
+        body: reason || "No rotation was performed. It is safe to close the browser now.",
+      });
+    } catch (err) {
+      // CLI is gone — show disconnected overlay path.
+      setRotationStatus("rotate-confirm-status",
+        "Couldn't reach the CLI: " + (err.message || String(err)), "error");
+    }
+  }
+
+  // Inline SVG copy icon — lucide-style clipboard. Returned as an
+  // HTML string and inserted via innerHTML so the element is part of
+  // the document (NOT loaded via img-src, which CSP forbids for remote
+  // sources). 14×14 sits cleanly next to the .wizard-btn-tiny label
+  // text without changing the button's existing height.
+  const COPY_ICON_SVG =
+    '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" '
+    + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    + 'stroke-linejoin="round" aria-hidden="true">'
+    + '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>'
+    + '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'
+    + '</svg>';
+
+  function renderDisplayOnce(flow, resourceId, displayName, secrets) {
+    const isApiKey = flow === "api-key-rotate";
+    document.getElementById("display-once-title").textContent =
+      isApiKey ? "Save the new API key" : "Save the new node credentials";
+
+    const rowsEl = document.getElementById("display-once-rows");
+    rowsEl.innerHTML = "";
+
+    // Track all reveal-toggle setters so visibility/blur can flip them
+    // all at once. Each setter is created per-row in its own closure
+    // so the secret value never escapes the row's scope.
+    const remaskAll = [];
+
+    for (const secret of secrets) {
+      const row = document.createElement("div");
+      row.className = "wizard-secret-row";
+
+      const label = document.createElement("span");
+      label.className = "wizard-secret-row-label";
+      label.textContent = secret.label;
+      row.appendChild(label);
+
+      const valueWrap = document.createElement("div");
+      valueWrap.className = "wizard-secret-row-value";
+
+      const code = document.createElement("code");
+      // Mask string is ALWAYS dots — never the real value, never a
+      // truncated prefix. Length capped so very long secrets don't
+      // produce a ridiculous mask.
+      const maskLen = Math.min(48, Math.max(8, secret.value.length));
+      const masked = "•".repeat(maskLen);
+      code.textContent = masked;
+      valueWrap.appendChild(code);
+
+      // Lowercase "show" / "hide" to match the v2 wizard-input-toggle
+      // password-field convention (keeps muscle memory consistent
+      // across both flows).
+      const reveal = document.createElement("button");
+      reveal.type = "button";
+      reveal.className = "wizard-btn-tiny";
+      reveal.textContent = "show";
+      let revealed = false;
+      const setRevealed = (v) => {
+        revealed = v;
+        if (v) {
+          code.textContent = secret.value;
+          code.classList.add("is-revealed");
+          reveal.textContent = "hide";
+        } else {
+          code.textContent = masked;
+          code.classList.remove("is-revealed");
+          reveal.textContent = "show";
+        }
+      };
+      reveal.addEventListener("click", () => setRevealed(!revealed));
+      valueWrap.appendChild(reveal);
+      remaskAll.push(() => { if (revealed) setRevealed(false); });
+
+      // Copy: SVG clipboard icon + label span. The label span lets
+      // copyText flip just the text ("copy" → "copied!") without
+      // nuking the icon.
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "wizard-btn-tiny wizard-btn-tiny-icon";
+      copy.setAttribute("aria-label", `copy ${secret.label}`);
+      copy.innerHTML = COPY_ICON_SVG + '<span class="wizard-btn-label">copy</span>';
+      copy.addEventListener("click", () => copyText(secret.value, copy));
+      valueWrap.appendChild(copy);
+
+      row.appendChild(valueWrap);
+      rowsEl.appendChild(row);
+    }
+
+    // Auto-remask on visibility/blur. Codex P2: 60s timer was
+    // mis-targeted (annoying when present, too long when away).
+    // Remask immediately on the events that mean "user can't see
+    // the page anyway."
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) remaskAll.forEach(fn => fn());
+    });
+    window.addEventListener("blur", () => {
+      remaskAll.forEach(fn => fn());
+    });
+
+    // (Download as .txt removed in this iteration — copy + reveal cover
+    // the api-key case. If the node-rotate flow's two-secret + rekey
+    // template assembly turns out to be friction, re-add a Blob-backed
+    // download here and bring back buildDownloadContent.)
+
+    // Ack click → POST /complete with the typed payload. The Rust
+    // RotationAckPayload's `deny_unknown_fields` rejects anything
+    // beyond these two keys — we MUST NOT add `secret`, `value`,
+    // `full_key`, etc. to this body.
+    const ackBtn = document.getElementById("display-once-ack");
+    ackBtn.onclick = async () => {
+      if (finished) return;
+      finished = true;
+      ackBtn.disabled = true;
+      const statusEl = document.getElementById("display-once-status");
+      if (statusEl) {
+        statusEl.textContent = "Signalling CLI…";
+        statusEl.className = "wizard-status";
+      }
+      try {
+        const res = await proxyFetch("POST", "/api/proxy/complete", {
+          acknowledged: true,
+          resource_id: resourceId,
+        });
+        if (!res.ok) {
+          if (statusEl) {
+            statusEl.textContent = `CLI rejected the ack (HTTP ${res.status}).`;
+            statusEl.className = "wizard-status error";
+          }
+          finished = false;
+          ackBtn.disabled = false;
+          return;
+        }
+        showOverlay({
+          icon: "✓",
+          title: "Saved",
+          body: "It is safe to close the browser now.",
+          sub: "Your terminal has the post-rotation summary.",
+        });
+      } catch (err) {
+        if (statusEl) {
+          statusEl.textContent = "Couldn't reach the CLI: " + (err.message || String(err));
+          statusEl.className = "wizard-status error";
+        }
+        finished = false;
+        ackBtn.disabled = false;
+      }
+    };
+  }
+
+  function initRotationFlow(flow) {
+    const isApiKey = flow === "api-key-rotate";
+    const resourceId = (PREFILL.resourceId || "").trim();
+    const displayName = (PREFILL.displayName || "").trim() || resourceId;
+
+    const titleEl = document.getElementById("rotate-confirm-title");
+    const idEl = document.getElementById("rotate-confirm-id");
+    const goBtn = document.getElementById("rotate-go");
+    const cancelRotateBtn = document.getElementById("rotate-cancel");
+    const errBanner = document.getElementById("rotate-confirm-error");
+
+    if (stepLabel) stepLabel.textContent = "Step 1 of 2 · confirm rotate";
+
+    if (!resourceId) {
+      titleEl.textContent = "Missing resource id";
+      errBanner.textContent =
+        "The wizard URL is missing a resource_id. Re-run the command from the CLI.";
+      errBanner.hidden = false;
+      goBtn.disabled = true;
+      cancelRotateBtn.addEventListener("click", () => onCancelRotation());
+      showRotationPanel("step-confirm-rotate");
+      return;
+    }
+
+    if (isApiKey) {
+      titleEl.textContent = `Rotate API key '${displayName}'`;
+    } else {
+      titleEl.textContent = `Rotate token for node '${displayName}'`;
+    }
+    idEl.textContent = resourceId;
+    showRotationPanel("step-confirm-rotate");
+
+    cancelRotateBtn.addEventListener("click", () => onCancelRotation());
+
+    goBtn.addEventListener("click", async () => {
+      if (postInFlight) return;
+      errBanner.hidden = true;
+      postInFlight = true;
+      goBtn.disabled = true;
+      cancelRotateBtn.disabled = true;
+      setRotationStatus("rotate-confirm-status", "Rotating…");
+      try {
+        const path = isApiKey
+          ? `/api/proxy/api/v1/api-keys/${encodeURIComponent(resourceId)}/rotate`
+          : `/api/proxy/api/v1/nodes/${encodeURIComponent(resourceId)}/rotate-token`;
+        const resp = await proxyJson("POST", path);
+
+        // Extract per-flow secret(s) from the response. Field names
+        // come from the backend response structs (CreateApiKeyResponse
+        // / RotateTokenResponse) and are stable.
+        let secrets;
+        if (isApiKey) {
+          const fullKey = resp?.full_key || "";
+          secrets = [{ label: "New API key", value: fullKey }];
+        } else {
+          const auth = resp?.auth_token || "";
+          const sig = resp?.signing_secret || "";
+          secrets = [
+            { label: "Auth token", value: auth },
+            { label: "Signing secret", value: sig },
+          ];
+        }
+        if (secrets.some(s => !s.value)) {
+          throw new Error(
+            "Backend returned an empty secret. The rotation may have failed silently — "
+            + "check the server logs and re-run the command."
+          );
+        }
+
+        renderDisplayOnce(flow, resourceId, displayName, secrets);
+        showRotationPanel("step-display-once");
+        if (stepLabel) stepLabel.textContent = "Step 2 of 2 · save the value";
+      } catch (err) {
+        errBanner.textContent = err.message || String(err);
+        errBanner.hidden = false;
+        goBtn.disabled = false;
+        cancelRotateBtn.disabled = false;
+        setRotationStatus("rotate-confirm-status", "");
+      } finally {
+        postInFlight = false;
+      }
+    });
+  }
+
+  // ---- init ----
+  //
+  // Per-flow dispatch. ai-key keeps the v2 boot sequence verbatim;
+  // rotation flows (v3) skip the catalog/credential machinery and
+  // jump straight into the confirm-rotate panel.
+  if (FLOW === "ai-key") {
+    wire();
+    if (!document.hidden) startHeartbeats();
+    loadCatalog();
+  } else if (FLOW === "api-key-rotate" || FLOW === "node-rotate-token") {
+    initRotationFlow(FLOW);
+    if (!document.hidden) startHeartbeats();
+  } else {
+    // Unknown flow — show a minimal error and do nothing else.
+    // Should be unreachable; serve_index only ever embeds known slugs.
+    document.body.innerHTML =
+      '<p style="padding:2rem;font-family:system-ui">Unknown wizard flow. Re-run from the CLI.</p>';
+  }
 })();

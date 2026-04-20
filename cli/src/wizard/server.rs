@@ -30,13 +30,46 @@ use tokio::{
     sync::{Notify, oneshot},
 };
 
-use super::{ProxyContext, WizardOutcome, WizardPrefill};
+use super::{ProxyContext, RotatePrefill, RotationAckPayload, WizardOutcome, WizardPrefill};
 
 /// Which flow is running. Each flow gets its own allowlist and default
-/// page body. M2 only has `AiKey`.
+/// page body. v2 shipped only `AiKey`; v3 added the two rotation
+/// (DisplayOnce-shaped) flows.
 #[derive(Debug, Clone, Copy)]
 pub enum FlowKind {
     AiKey,
+    ApiKeyRotate,
+    NodeRotateToken,
+}
+
+impl FlowKind {
+    /// True for flows whose Step 3 panel renders a one-time secret. The
+    /// heartbeat watchdog uses a longer dead-after window for these so
+    /// users have time to alt-tab into a password manager without the
+    /// CLI killing itself mid-save.
+    fn is_rotation(&self) -> bool {
+        matches!(self, FlowKind::ApiKeyRotate | FlowKind::NodeRotateToken)
+    }
+
+    /// String slug embedded in the served HTML's `<meta name="wizard-flow">`
+    /// tag. wizard.js dispatches its top-level state machine on this.
+    fn slug(&self) -> &'static str {
+        match self {
+            FlowKind::AiKey => "ai-key",
+            FlowKind::ApiKeyRotate => "api-key-rotate",
+            FlowKind::NodeRotateToken => "node-rotate-token",
+        }
+    }
+}
+
+/// Prefill data routed into the wizard's URL query string. Per-flow
+/// shapes — `WizardPrefill` for ai-key (slug/label/via_node/endpoint_url),
+/// `RotatePrefill` for the two rotation flows (resource_id/display_name).
+/// Kept as an enum so server::run_flow's signature stays single-typed
+/// while each flow's prefill can grow independently.
+pub enum PrefillData {
+    AiKey(WizardPrefill),
+    Rotate(RotatePrefill),
 }
 
 /// Static assets live under `src/wizard/assets/` and are baked into the binary.
@@ -50,6 +83,14 @@ const WIZARD_MAX_DURATION: Duration = Duration::from_secs(1800); // 30 min
 /// Browser pings `/api/proxy/heartbeat` every 10 s; miss two in a row
 /// and the CLI treats the tab as dead. Grace: 22 s (2 × 10 + jitter).
 const HEARTBEAT_DEAD_AFTER: Duration = Duration::from_secs(22);
+/// Rotation flows render a one-time secret on Step 3. Users may alt-tab
+/// into a password manager / vault / paper to copy it; chrome throttles
+/// `setInterval` in hidden tabs and visibility-change pauses our JS
+/// heartbeat sender entirely. A wider window means casual alt-tabs
+/// don't trip the watchdog and bury the panel under a "disconnected"
+/// overlay. Caveat (called out in CLI_WIZARD_V3.md §3): >60 s of
+/// silence STILL triggers cancel — this is a heuristic, not a fix.
+const HEARTBEAT_DEAD_AFTER_ROTATION: Duration = Duration::from_secs(60);
 /// Grace period at startup before we start enforcing the heartbeat dead
 /// line. Lets the browser actually load the page.
 const HEARTBEAT_STARTUP_GRACE: Duration = Duration::from_secs(8);
@@ -177,6 +218,45 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                 body_fields: &["state"],
             },
         ],
+        // API key rotation. Two routes only:
+        //   GET  /api-keys/:id           — sanity-read for the confirm panel's
+        //                                  display name + prefix.
+        //   POST /api-keys/:id/rotate    — empty body. Backend's `rotate_key`
+        //                                  takes no JSON body; the body
+        //                                  validator rejects anything beyond
+        //                                  `{}`.
+        // No DELETE: rotation is server-atomic, there is no placeholder
+        // to clean up. The `pending_keys` sniff at line ~656 only fires
+        // on `POST /api/v1/keys` so it's inert here.
+        FlowKind::ApiKeyRotate => vec![
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/api-keys/:key_id",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/api-keys/:key_id/rotate",
+                body_fields: &[],
+            },
+        ],
+        // Node token rotation. Same shape as ApiKeyRotate. The backend
+        // returns BOTH `auth_token` and `signing_secret` in the rotate
+        // response; the wizard.js display-once panel renders both rows
+        // and the .txt download bundles both with the `nyxid node rekey
+        // ...` template line.
+        FlowKind::NodeRotateToken => vec![
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/nodes/:node_id",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/nodes/:node_id/rotate-token",
+                body_fields: &[],
+            },
+        ],
     }
 }
 
@@ -258,9 +338,7 @@ async fn serve_index(State(state): State<ServerState>) -> Response {
             return (StatusCode::INTERNAL_SERVER_ERROR, "wizard.html missing").into_response();
         }
     };
-    let flow_name = match state.flow {
-        FlowKind::AiKey => "ai-key",
-    };
+    let flow_name = state.flow.slug();
     // base_url_root is the NyxID origin (e.g. https://nyx-api.chrono-ai.fun).
     // It's not secret — the user already knows what backend they logged into
     // — and the browser needs it to render a real proxy URL on Step 3
@@ -360,10 +438,24 @@ fn check_caller_relaxed(headers: &HeaderMap, port: u16) -> bool {
     check_origin_relaxed(headers, port) && check_host_exact(headers, port)
 }
 
+/// `POST /api/proxy/complete` — browser tells the CLI the user has
+/// acknowledged the wizard's terminal step.
+///
+/// Body parsing dispatches on `state.flow`:
+///   - `AiKey`: keep the historical untyped `Value` shape. Only fields
+///     in the printer's allowlist (`slug`/`label`/`proxy_url`) are read
+///     downstream; nothing here is secret-shaped.
+///   - `ApiKeyRotate`/`NodeRotateToken`: parse into the typed
+///     `RotationAckPayload` (with `deny_unknown_fields`). A buggy or
+///     compromised wizard page that tries to slip `full_key` /
+///     `auth_token` / `signing_secret` into the body is rejected with
+///     400 BEFORE it reaches CLI process memory at all. The struct's
+///     `Debug` impl can also only print fields it holds, so a future
+///     `tracing::debug!` of the outcome stays safe.
 async fn handle_complete(
     State(state): State<ServerState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: axum::body::Bytes,
 ) -> Response {
     if !check_caller_strict(&headers, state.bound_port) {
         return (StatusCode::FORBIDDEN, "bad origin/host").into_response();
@@ -371,7 +463,73 @@ async fn handle_complete(
     if !csrf_ok(&headers, &state.csrf_token) {
         return (StatusCode::FORBIDDEN, "bad csrf").into_response();
     }
-    signal_and_shutdown(state, WizardOutcome::Completed(body)).await;
+
+    let outcome = match state.flow {
+        FlowKind::AiKey => {
+            // Empty body is allowed (legacy: callers sometimes posted no
+            // body); fall back to Value::Null so `print_wizard_summary`
+            // sees no slug and prints the generic "Wizard completed" line.
+            let value: Value = if body.is_empty() {
+                Value::Null
+            } else {
+                match serde_json::from_slice(&body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            format!("complete: invalid JSON body: {e}"),
+                        )
+                            .into_response();
+                    }
+                }
+            };
+            WizardOutcome::AiKeyCompleted(value)
+        }
+        FlowKind::ApiKeyRotate | FlowKind::NodeRotateToken => {
+            let payload: RotationAckPayload = match serde_json::from_slice(&body) {
+                Ok(p) => p,
+                Err(e) => {
+                    // `deny_unknown_fields` surfaces here as a serde
+                    // error mentioning the offending field. We
+                    // INTENTIONALLY include the serde error message in
+                    // the response (it names the unknown field, never
+                    // its value) so a developer debugging a wizard.js
+                    // bug sees what got rejected. We do NOT echo the
+                    // body bytes themselves.
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("complete: invalid rotation ack payload: {e}"),
+                    )
+                        .into_response();
+                }
+            };
+            // Sanity-pin: the resource_id the browser sent must be a
+            // bounded UUID-ish string. Cheap defense against a buggy
+            // page sending a giant string we'd then format into the
+            // terminal summary.
+            if payload.resource_id.is_empty()
+                || payload.resource_id.len() > 64
+                || !is_uuid_like(&payload.resource_id)
+            {
+                return (StatusCode::BAD_REQUEST, "complete: bad resource_id").into_response();
+            }
+            // `acknowledged: true` is required — refusing `false` makes
+            // the field load-bearing instead of cosmetic. The browser
+            // posts true on ack-button click; a malformed/buggy page
+            // posting `false` (or omitting the field, which serde
+            // rejects via `deny_unknown_fields` semantics for missing
+            // required fields) gets a 400 here.
+            if !payload.acknowledged {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "complete: acknowledged must be true",
+                )
+                    .into_response();
+            }
+            WizardOutcome::RotationAcknowledged(payload)
+        }
+    };
+    signal_and_shutdown(state, outcome).await;
     (StatusCode::NO_CONTENT, base_security_headers()).into_response()
 }
 
@@ -810,20 +968,35 @@ async fn signal_and_shutdown(state: ServerState, outcome: WizardOutcome) {
 }
 
 /// Build the query string for the initial browser URL so prefill values
-/// are present on page load. Only non-empty fields are emitted.
-fn prefill_query(prefill: &WizardPrefill) -> String {
+/// are present on page load. Only non-empty fields are emitted. Per-flow
+/// shapes — ai-key uses slug/label/via_node/endpoint_url; rotation flows
+/// use resource_id + display_name.
+fn prefill_query(prefill: &PrefillData) -> String {
     let mut parts = Vec::new();
-    let push = |parts: &mut Vec<String>, k: &str, v: &Option<String>| {
+    let push_opt = |parts: &mut Vec<String>, k: &str, v: &Option<String>| {
         if let Some(val) = v.as_deref()
             && !val.is_empty()
         {
             parts.push(format!("{}={}", k, urlencoding::encode(val)));
         }
     };
-    push(&mut parts, "slug", &prefill.slug);
-    push(&mut parts, "label", &prefill.label);
-    push(&mut parts, "via_node", &prefill.via_node);
-    push(&mut parts, "endpoint_url", &prefill.endpoint_url);
+    let push = |parts: &mut Vec<String>, k: &str, v: &str| {
+        if !v.is_empty() {
+            parts.push(format!("{}={}", k, urlencoding::encode(v)));
+        }
+    };
+    match prefill {
+        PrefillData::AiKey(p) => {
+            push_opt(&mut parts, "slug", &p.slug);
+            push_opt(&mut parts, "label", &p.label);
+            push_opt(&mut parts, "via_node", &p.via_node);
+            push_opt(&mut parts, "endpoint_url", &p.endpoint_url);
+        }
+        PrefillData::Rotate(p) => {
+            push(&mut parts, "resource_id", &p.resource_id);
+            push(&mut parts, "display_name", &p.display_name);
+        }
+    }
     if parts.is_empty() {
         String::new()
     } else {
@@ -831,11 +1004,13 @@ fn prefill_query(prefill: &WizardPrefill) -> String {
     }
 }
 
-/// Flow runner. Binds, serves, opens the browser, waits for exit.
+/// Flow runner. Binds, serves, opens the browser, waits for exit. The
+/// `prefill` enum carries flow-specific URL-query state — see
+/// `PrefillData` and `prefill_query`.
 pub async fn run_flow(
     kind: FlowKind,
     proxy: ProxyContext,
-    prefill: WizardPrefill,
+    prefill: PrefillData,
 ) -> Result<WizardOutcome> {
     let csrf = mint_csrf();
     let (done_tx, done_rx) = oneshot::channel::<WizardOutcome>();
@@ -932,6 +1107,15 @@ pub async fn run_flow(
     let watchdog_state = state.clone();
     let watchdog_shutdown = shutdown.clone();
     let (watchdog_tx, watchdog_rx) = oneshot::channel::<()>();
+    // Per-flow dead-after window. Rotation flows render a one-time
+    // secret; users may alt-tab into a password manager mid-save and
+    // browsers throttle hidden-tab `setInterval` heartbeats. Cap is
+    // still bounded (60s) so a truly-dead tab still gets cleaned up.
+    let dead_after = if kind.is_rotation() {
+        HEARTBEAT_DEAD_AFTER_ROTATION
+    } else {
+        HEARTBEAT_DEAD_AFTER
+    };
     let watchdog_handle = tokio::spawn(async move {
         let tx = watchdog_tx;
         loop {
@@ -944,11 +1128,8 @@ pub async fn run_flow(
             }
             let last = *watchdog_state.last_heartbeat.lock().await;
             let dead = match last {
-                Some(t) => t.elapsed() > HEARTBEAT_DEAD_AFTER,
-                None => {
-                    watchdog_state.started_at.elapsed()
-                        > HEARTBEAT_STARTUP_GRACE + HEARTBEAT_DEAD_AFTER
-                }
+                Some(t) => t.elapsed() > dead_after,
+                None => watchdog_state.started_at.elapsed() > HEARTBEAT_STARTUP_GRACE + dead_after,
             };
             if dead {
                 let _ = tx.send(());

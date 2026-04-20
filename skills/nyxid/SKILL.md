@@ -400,7 +400,8 @@ nyxid api-key create --name "coding-agent" --platform claude-code  # optional pl
 nyxid api-key create --name "relay-agent" --callback-url "https://..."  # for channel bot relay
 nyxid api-key list --output json
 nyxid api-key show <ID_OR_NAME> --output json
-nyxid api-key rotate <ID_OR_NAME>
+nyxid api-key rotate <ID_OR_NAME>                          # interactive: opens browser wizard
+nyxid api-key rotate <ID_OR_NAME> --output json            # scripted: prints raw secret to stdout (legacy shape)
 nyxid api-key delete <ID_OR_NAME> --yes
 
 # Org-owned agent keys (for sharing one agent identity across the whole org)
@@ -440,6 +441,24 @@ export NYXID_ACCESS_TOKEN="nyxid_ag_..."
 ### Scope requirements for management writes
 
 Agent keys need `write` or `admin` scope to call management endpoints via REST (create/update/delete/rotate API keys, services, endpoints, bindings, etc.). `proxy read` is sufficient for proxy traffic only -- paths under `/proxy`, `/llm`, `/ssh`, `/channel-events`, `/channel-relay`, and `/delegation` do not require write scope. The `nyxid` CLI uses session auth (not API keys) and is unaffected.
+
+### Browser wizard for one-time secrets (v3.0)
+
+`nyxid api-key rotate` and `nyxid node rotate-token` open a local browser-based wizard for interactive use, so the new secret value lands in the user's browser tab instead of the terminal / agent context. The CLI prints `→ Opening http://127.0.0.1:…/wizard …` and a no-secret success line on exit. Full spec: [`docs/CLI_WIZARD_V3.md`](../../docs/CLI_WIZARD_V3.md).
+
+For scripted / agent use, the wizard is **bypassed automatically** when ANY of these is true:
+
+- `--output json` is passed (output is machine-readable)
+- stdout is not a TTY (piped, captured, redirected)
+- `NYXID_NO_WIZARD=1` is set in the environment
+- `SSH_CONNECTION` or `SSH_TTY` is set (SSH session, no local browser)
+- on Linux: both `DISPLAY` and `WAYLAND_DISPLAY` are unset
+
+In any of these cases, the rotate commands print the raw secret to stdout exactly as before (legacy shape, byte-identical). Agents calling these commands programmatically should always use `--output json` to be explicit and to make the response machine-parseable.
+
+Behavior change to be aware of: `nyxid api-key rotate <name>` now **refuses ambiguous names** — if multiple keys share the same name, the command exits with `Name 'X' matches N keys. Pass the ID instead.` Previously it silently rotated the first match (which could rotate the wrong key). Always prefer ID over name for scripted rotation.
+
+Rotation is **server-atomic** in both modes: the old key is deactivated and a new key is created with a new ID, preserving name + scopes + bindings. Anything that hard-codes the old ID (CI configs, dashboards, prior bindings registered out-of-band) will need updating to the new ID. Existing `AgentServiceBinding` records are cloned to the new key automatically.
 
 ## Organizations (Shared Credentials)
 
@@ -725,7 +744,8 @@ nyxid node list --output json                          # list nodes (includes ID
 nyxid node show <ID_OR_NAME> --output json             # show node details + metrics
 nyxid node register-token                              # generate registration token
 nyxid node delete <ID_OR_NAME> --yes                   # delete node
-nyxid node rotate-token <ID_OR_NAME>                   # rotate node auth token
+nyxid node rotate-token <ID_OR_NAME>                   # interactive: opens browser wizard (shows new auth_token + signing_secret)
+nyxid node rotate-token <ID_OR_NAME> --output json     # scripted: prints raw secret to stdout (legacy shape)
 
 # nyxid node CLI (run on the node machine)
 nyxid node credentials setup --service <SLUG>          # auto-detect and setup (recommended)

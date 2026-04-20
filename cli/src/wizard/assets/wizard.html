@@ -119,6 +119,74 @@
         <button type="button" id="wizard-done" class="wizard-btn wizard-btn-primary">Done — return to terminal</button>
       </div>
     </section>
+
+    <!-- v3: Rotation confirm panel — shown for FLOW=api-key-rotate /
+         node-rotate-token instead of catalog/credential. Heading + body
+         strings are populated by JS based on the flow + display_name. -->
+    <section class="wizard-step-panel" id="step-confirm-rotate" data-step="rotate-confirm" hidden>
+      <h1 class="wizard-title" id="rotate-confirm-title">Rotate</h1>
+      <p class="wizard-body" id="rotate-confirm-body">
+        The current value will stop working immediately. The new value will be
+        shown once on the next screen — make sure you have somewhere to save
+        it (password manager, vault, or paper) before continuing.
+      </p>
+
+      <div class="wizard-error-banner" id="rotate-confirm-error" role="alert" hidden></div>
+
+      <dl class="wizard-detail-list" id="rotate-confirm-meta">
+        <dt>ID</dt><dd><code id="rotate-confirm-id">—</code></dd>
+      </dl>
+
+      <div class="wizard-status" id="rotate-confirm-status" aria-live="polite"></div>
+
+      <div class="wizard-actions">
+        <button type="button" id="rotate-cancel" class="wizard-btn wizard-btn-ghost">Cancel</button>
+        <button type="button" id="rotate-go" class="wizard-btn wizard-btn-primary">Rotate now</button>
+      </div>
+    </section>
+
+    <!-- v3: DisplayOnce panel — secret displayed exactly once.
+         Masked-by-default with reveal toggle, copy, and Blob download.
+         Mask auto-restores on blur / visibilitychange → hidden so the
+         secret isn't sitting visible if the user walks away.
+         Secret values live in JS-local closure variables (NOT in DOM
+         text nodes) so DOM inspection / copy-as-HTML can't extract
+         them while masked. -->
+    <section class="wizard-step-panel" id="step-display-once" data-step="display-once" hidden>
+      <h1 class="wizard-title">
+        <span aria-hidden="true">🔑</span>
+        <span id="display-once-title">Save this now</span>
+      </h1>
+      <p class="wizard-body">
+        This is the only time you'll see the new value. Copy it or download it
+        before clicking acknowledge — once acknowledged, this page won't show
+        it again.
+      </p>
+
+      <div id="display-once-rows"><!-- secret rows injected by JS --></div>
+
+      <div class="wizard-warn-banner" id="display-once-warn" role="note">
+        <svg class="wizard-warn-banner-icon" viewBox="0 0 24 24" width="18" height="18"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
+          <line x1="12" y1="9" x2="12" y2="13"/>
+          <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+        <span>
+          Once you click <strong>I have saved this</strong>, this page won't show
+          the value again. Your old key is already revoked on the server.
+        </span>
+      </div>
+
+      <div class="wizard-status" id="display-once-status" aria-live="polite"></div>
+
+      <div class="wizard-actions">
+        <button type="button" id="display-once-ack" class="wizard-btn wizard-btn-primary">
+          I have saved this — close
+        </button>
+      </div>
+    </section>
   </main>
 
   <footer class="wizard-footer">

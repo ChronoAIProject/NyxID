@@ -493,6 +493,12 @@ pub enum ServiceCommands {
         /// the catalog entry's default spec URL.
         #[arg(long, value_name = "URL")]
         openapi_spec_url: Option<String>,
+        /// Skip the browser wizard and use the in-terminal flow even when
+        /// stdout is a TTY. Equivalent to setting `NYXID_NO_WIZARD=1`.
+        /// Useful when you'd rather paste a credential at the prompt than
+        /// open a browser tab.
+        #[arg(long)]
+        terminal: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -696,6 +702,11 @@ pub enum ApiKeyCommands {
     /// Rotate a key
     Rotate {
         id: String,
+        /// Skip the browser wizard and print the new key to the terminal.
+        /// The new key is shown ONCE — copy it before scrolling away.
+        /// Equivalent to setting `NYXID_NO_WIZARD=1`.
+        #[arg(long)]
+        terminal: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -957,6 +968,12 @@ pub enum NodeCommands {
     RotateToken {
         /// Node ID
         id: String,
+        /// Skip the browser wizard and print the new auth token + signing
+        /// secret to the terminal. The new values are shown ONCE — copy
+        /// them before scrolling away. Equivalent to setting
+        /// `NYXID_NO_WIZARD=1`.
+        #[arg(long)]
+        terminal: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },

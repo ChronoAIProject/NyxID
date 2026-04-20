@@ -472,6 +472,18 @@ html, body {
 .wizard-btn-tiny:active {
   background: color-mix(in srgb, var(--primary) 11%, var(--bg));
 }
+/* Icon variant: SVG + label span side-by-side. Used by the secret-row
+   Copy button (v3 DisplayOnce). The svg inherits currentColor so it
+   picks up the same primary-tint as the button text on hover. */
+.wizard-btn-tiny-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+}
+.wizard-btn-tiny-icon svg {
+  display: block;
+  flex: 0 0 auto;
+}
 
 .wizard-actions-left {
   justify-content: flex-start;
@@ -576,4 +588,77 @@ html, body {
   margin: 0;
   color: var(--muted);
   font-size: 0.875rem;
+}
+
+/* ---- v3: rotation confirm + DisplayOnce panels ---- */
+
+/* Each secret-row groups one secret label + masked code + tiny actions
+   on a single line. Multiple rows stack (used for node rotate-token,
+   which has both auth_token and signing_secret). */
+.wizard-secret-row {
+  margin: 1rem 0;
+  padding: 0.875rem 1rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.wizard-secret-row + .wizard-secret-row { margin-top: 0.5rem; }
+.wizard-secret-row-label {
+  display: block;
+  font-weight: 600;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.375rem;
+}
+.wizard-secret-row-value {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.wizard-secret-row-value code {
+  flex: 1 1 240px;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.875rem;
+  background: var(--ghost-hover);
+  padding: 0.375rem 0.625rem;
+  border-radius: 6px;
+  word-break: break-all;
+  /* Masking is text-content driven (not CSS) so we don't keep the
+     secret in any DOM-visible attribute or pseudo-element. The visible
+     text node holds dots until reveal flips it to the real value. */
+}
+.wizard-secret-row-value code.is-revealed {
+  background: color-mix(in srgb, var(--primary) 8%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--border));
+}
+
+/* Amber warning bar above the ack button — explains the irreversibility
+   so the user can't say nobody told them. Distinct from .wizard-error-banner
+   which is red and scoped to actual errors. */
+.wizard-warn-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.625rem;
+  margin: 1.25rem 0 0;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #f59f00 60%, var(--border));
+  background: color-mix(in srgb, #f59f00 10%, var(--panel));
+  color: var(--fg);
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+/* Triangle warning icon, same amber as the border. `flex: 0 0 auto`
+   keeps the icon at its natural width so the text can wrap freely
+   beside it. `margin-top` nudges it down to align with the first
+   line of text rather than the top of the box. */
+.wizard-warn-banner-icon {
+  flex: 0 0 auto;
+  display: block;
+  margin-top: 0.125rem;
+  color: #f59f00;
 }
