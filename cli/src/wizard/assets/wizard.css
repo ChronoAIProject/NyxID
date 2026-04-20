@@ -448,17 +448,30 @@ html, body {
   overflow-x: auto;
 }
 
+/* Secondary-action buttons (Copy, Open, ↻ Refresh). Subtle purple tint
+   so they read as interactive + on-brand without competing with the
+   primary CTA. `color-mix` blends --primary with neutrals so dark and
+   light modes auto-adapt. */
 .wizard-btn-tiny {
   padding: 0.25rem 0.625rem;
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--primary) 35%, var(--border));
   border-radius: 6px;
-  color: var(--muted);
+  color: color-mix(in srgb, var(--primary) 55%, var(--muted));
   font-size: 0.75rem;
   font-family: inherit;
+  font-weight: 500;
   cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
 }
-.wizard-btn-tiny:hover { background: var(--ghost-hover); color: var(--fg); }
+.wizard-btn-tiny:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, var(--bg));
+}
+.wizard-btn-tiny:active {
+  background: color-mix(in srgb, var(--primary) 18%, var(--bg));
+}
 
 .wizard-actions-left {
   justify-content: flex-start;
@@ -545,12 +558,12 @@ html, body {
   color: var(--primary);
 }
 .wizard-overlay-card.wizard-overlay-cancel .wizard-overlay-icon { color: #e03131; }
-/* Amber warning tone — distinct from the green success ✓ and red cancel ✗.
+/* Primary-accent tone — distinct from the green success ✓ and red cancel ✗.
    Used when the CLI goes away while the browser tab is still open. */
 .wizard-overlay-card.wizard-overlay-disconnect {
-  border-color: #f59f00;
+  border-color: var(--primary);
 }
-.wizard-overlay-card.wizard-overlay-disconnect .wizard-overlay-icon { color: #f59f00; }
+.wizard-overlay-card.wizard-overlay-disconnect .wizard-overlay-icon { color: var(--primary); }
 .wizard-overlay-title {
   margin: 0 0 0.5rem;
   font-size: 1.25rem;
