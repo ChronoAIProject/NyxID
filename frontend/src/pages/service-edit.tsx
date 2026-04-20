@@ -9,6 +9,8 @@ import {
   type UpdateServiceFormData,
   VISIBILITY_OPTIONS,
 } from "@/schemas/services";
+import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
+import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
 import {
   getAuthTypeLabel,
   SERVICE_CATEGORY_LABELS,
@@ -93,6 +95,7 @@ export function ServiceEditPage() {
       certificate_auth_enabled: false,
       certificate_ttl_minutes: "30",
       allowed_principals: "",
+      default_request_headers: [],
     },
   });
 
@@ -142,6 +145,9 @@ export function ServiceEditPage() {
           : "30",
         allowed_principals:
           service.ssh_config?.allowed_principals.join(", ") ?? "",
+        default_request_headers: service.default_request_headers
+          ? service.default_request_headers.map((h) => ({ ...h }))
+          : [],
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -149,6 +155,30 @@ export function ServiceEditPage() {
 
   async function onSubmit(data: UpdateServiceFormData) {
     if (!service) return;
+    // NyxID#356 tri-state encoding: only send `default_request_headers`
+    // when the user actually changed the list. Omitting the field tells
+    // the backend to leave it unchanged. `null` explicitly clears.
+    const previousHeaders = service.default_request_headers ?? [];
+    const nextHeaders = data.default_request_headers ?? [];
+    const headersChanged =
+      previousHeaders.length !== nextHeaders.length ||
+      previousHeaders.some((prev, idx) => {
+        const curr = nextHeaders[idx];
+        if (!curr) return true;
+        return (
+          prev.name !== curr.name ||
+          prev.value !== curr.value ||
+          prev.overridable !== curr.overridable ||
+          prev.sensitive !== curr.sensitive
+        );
+      });
+    const defaultRequestHeadersPayload: null | DefaultRequestHeader[] | undefined =
+      headersChanged
+        ? nextHeaders.length === 0
+          ? null
+          : nextHeaders.map((h) => ({ ...h }))
+        : undefined;
+
     try {
       await updateMutation.mutateAsync({
         serviceId: service.id,
@@ -210,6 +240,9 @@ export function ServiceEditPage() {
                   supports_websocket: data.supports_websocket ?? false,
                   supports_streaming: data.supports_streaming ?? false,
                 },
+                ...(defaultRequestHeadersPayload !== undefined
+                  ? { default_request_headers: defaultRequestHeadersPayload }
+                  : {}),
               },
       });
       toast.success("Service updated");
@@ -759,6 +792,80 @@ export function ServiceEditPage() {
                           </FormItem>
                         )}
                       />
+
+                      <Separator className="my-2" />
+                      <div className="space-y-2">
+                        <div className="space-y-1">
+                          <p className="text-sm font-medium">
+                            Default request headers
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            Headers NyxID injects on every proxied request for
+                            this service. Non-overridable headers replace
+                            caller-supplied values; overridable ones yield to
+                            them. Sensitive is a UI redaction flag only —
+                            values are stored plaintext in v1, so do not place
+                            real secrets here (use the service auth method
+                            instead).
+                          </p>
+                        </div>
+                        <FormField
+                          control={form.control}
+                          name="default_request_headers"
+                          render={({ field, formState }) => {
+                            // RHF stores nested array errors on the
+                            // array field itself (an object with numeric
+                            // keys). Without surfacing them, the editor
+                            // would silently eat blank-name /
+                            // invalid-value submits (see NyxID#356 code
+                            // review P3): Save would block with no red
+                            // state on the offending row. Flatten each
+                            // row's first error into the editor's
+                            // per-row `errors` map.
+                            const rowErrs: Record<number, string> = {};
+                            const nested = formState.errors
+                              .default_request_headers as
+                              | Record<
+                                  string,
+                                  {
+                                    name?: { message?: string };
+                                    value?: { message?: string };
+                                    root?: { message?: string };
+                                    message?: string;
+                                  }
+                                >
+                              | undefined;
+                            if (nested && typeof nested === "object") {
+                              for (const [key, err] of Object.entries(nested)) {
+                                const idx = Number(key);
+                                if (!Number.isInteger(idx) || !err) continue;
+                                const msg =
+                                  err.name?.message ??
+                                  err.value?.message ??
+                                  err.root?.message ??
+                                  err.message;
+                                if (typeof msg === "string" && msg.length > 0) {
+                                  rowErrs[idx] = msg;
+                                }
+                              }
+                            }
+                            return (
+                              <FormItem>
+                                <FormControl>
+                                  <DefaultHeadersEditor
+                                    value={field.value ?? []}
+                                    onChange={(next) =>
+                                      field.onChange(next.map((h) => ({ ...h })))
+                                    }
+                                    errors={rowErrs}
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            );
+                          }}
+                        />
+                      </div>
 
                       <div className="space-y-2">
                         <p className="text-sm font-medium">Capabilities</p>

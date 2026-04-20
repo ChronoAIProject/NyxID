@@ -7,6 +7,7 @@ use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
+use crate::models::default_request_header::{self, DefaultRequestHeader};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
@@ -39,6 +40,15 @@ pub struct ProxyTarget {
     pub auth_key_name: String,
     pub credential: String,
     pub service: DownstreamService,
+    /// Admin-configured catalog-level default headers resolved from the
+    /// owning `DownstreamService`. Applied to every outbound request in
+    /// both the direct and node-routed paths. See
+    /// [`crate::models::default_request_header`] for precedence semantics.
+    pub catalog_default_headers: Vec<DefaultRequestHeader>,
+    /// Per-user overrides sourced from `UserService.default_request_headers`.
+    /// Applied after the catalog layer; non-overridable entries win against
+    /// lower layers including the catalog defaults and caller-supplied headers.
+    pub user_service_default_headers: Vec<DefaultRequestHeader>,
 }
 
 pub(crate) struct PreparedDelegatedRequest {
@@ -87,6 +97,52 @@ fn is_allowed_forward_header(name_lower: &str) -> bool {
         || ALLOWED_FORWARD_HEADER_PREFIXES
             .iter()
             .any(|prefix| name_lower.starts_with(prefix))
+}
+
+/// Header name the current `auth_method` will inject via
+/// `RequestBuilder::header` (or equivalent). Returns `None` for methods
+/// that touch the URL (`query`, `path`), the body (`body`), or don't
+/// inject anything (`none`).
+///
+/// Used on every transport that layers caller / default headers ahead
+/// of the credential: the direct HTTP path strips collisions out of
+/// `outbound_headers`, and the node-routed paths
+/// (`handlers/proxy.rs`, `services/mcp_service.rs`) strip them out of
+/// `NodeProxyRequest.headers` before sending to the node agent — the
+/// agent then locally appends the credential, and we want the wire to
+/// carry exactly one value for that name. NyxID#356.
+pub(crate) fn credential_header_name(target: &ProxyTarget) -> Option<String> {
+    match target.auth_method.as_str() {
+        "header" => {
+            let trimmed = target.auth_key_name.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        "bearer" | "bot_bearer" | "basic" => Some("authorization".to_string()),
+        "token_exchange" => target
+            .service
+            .token_exchange_config
+            .as_ref()
+            .and_then(|cfg| {
+                let inj = cfg.injection.as_str();
+                if let Some(custom) = inj.strip_prefix("header:") {
+                    let trimmed = custom.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                } else if matches!(inj, "bearer" | "bot_bearer" | "token") {
+                    Some("authorization".to_string())
+                } else {
+                    None
+                }
+            }),
+        _ => None,
+    }
 }
 
 fn validate_path_injection_prefix(value: &str) -> AppResult<()> {
@@ -368,12 +424,15 @@ pub async fn resolve_proxy_target(
         let base_url = resolve_gateway_url_override(db, user_id, &service)
             .await?
             .unwrap_or_else(|| service.base_url.clone());
+        let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
         return Ok(ProxyTarget {
             base_url,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             credential: String::new(),
             service,
+            catalog_default_headers,
+            user_service_default_headers: Vec::new(),
         });
     }
 
@@ -404,12 +463,15 @@ pub async fn resolve_proxy_target(
         .await?
         .unwrap_or_else(|| service.base_url.clone());
 
+    let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
     Ok(ProxyTarget {
         base_url,
         auth_method: service.auth_method.clone(),
         auth_key_name: service.auth_key_name.clone(),
         credential,
         service,
+        catalog_default_headers,
+        user_service_default_headers: Vec::new(),
     })
 }
 
@@ -477,6 +539,7 @@ pub async fn resolve_proxy_target_lenient(
                 Ok(None) => (service.base_url.clone(), true),
                 Err(_) => (String::new(), false),
             };
+        let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
         return Ok((
             ProxyTarget {
                 base_url,
@@ -484,6 +547,8 @@ pub async fn resolve_proxy_target_lenient(
                 auth_key_name: service.auth_key_name.clone(),
                 credential: String::new(),
                 service,
+                catalog_default_headers,
+                user_service_default_headers: Vec::new(),
             },
             has_server_credential,
         ));
@@ -529,6 +594,7 @@ pub async fn resolve_proxy_target_lenient(
         .await?
         .unwrap_or_else(|| service.base_url.clone());
 
+    let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
     Ok((
         ProxyTarget {
             base_url,
@@ -536,6 +602,8 @@ pub async fn resolve_proxy_target_lenient(
             auth_key_name: service.auth_key_name.clone(),
             credential,
             service,
+            catalog_default_headers,
+            user_service_default_headers: Vec::new(),
         },
         has_credential,
     ))
@@ -1224,6 +1292,17 @@ async fn finish_resolution(
             AppError::Internal("Data integrity error: endpoint not found".to_string())
         })?;
 
+    // Resolve default request headers from the catalog DownstreamService
+    // once up-front; all branches below need them. Empty when the
+    // UserService is a custom endpoint (no catalog link) or the catalog
+    // entry has no defaults set.
+    let catalog_default_headers =
+        load_catalog_default_headers_for_user_service(db, &user_service).await;
+    let user_service_default_headers = user_service
+        .default_request_headers
+        .clone()
+        .unwrap_or_default();
+
     // Handle no-auth services (may have no api_key_id)
     if user_service.auth_method == "none" {
         let now = chrono::Utc::now();
@@ -1239,6 +1318,8 @@ async fn finish_resolution(
                 auth_key_name: user_service.auth_key_name.clone(),
                 credential: String::new(),
                 service: minimal_service,
+                catalog_default_headers: catalog_default_headers.clone(),
+                user_service_default_headers: user_service_default_headers.clone(),
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
@@ -1301,6 +1382,8 @@ async fn finish_resolution(
                 auth_key_name: user_service.auth_key_name.clone(),
                 credential: credential.unwrap_or_default(),
                 service: minimal_service,
+                catalog_default_headers: catalog_default_headers.clone(),
+                user_service_default_headers: user_service_default_headers.clone(),
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
@@ -1341,12 +1424,47 @@ async fn finish_resolution(
             auth_key_name: user_service.auth_key_name.clone(),
             credential,
             service: minimal_service,
+            catalog_default_headers,
+            user_service_default_headers,
         },
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
         has_server_credential: true,
         org_routing,
     })
+}
+
+/// Load the catalog `DownstreamService.default_request_headers` associated
+/// with the given `UserService` (if any). Returns an empty vec for custom
+/// endpoints (no catalog link), missing catalog rows, or catalog entries
+/// with no defaults configured.
+///
+/// Failures during the lookup are logged and swallowed — a missing catalog
+/// entry should not block a proxy request; we just skip the admin layer.
+async fn load_catalog_default_headers_for_user_service(
+    db: &mongodb::Database,
+    user_service: &crate::models::user_service::UserService,
+) -> Vec<DefaultRequestHeader> {
+    let catalog_id = match user_service.catalog_service_id.as_deref() {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+    match db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": catalog_id })
+        .await
+    {
+        Ok(Some(svc)) => svc.default_request_headers.unwrap_or_default(),
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                catalog_id,
+                error = %e,
+                "Failed to load catalog default_request_headers; proceeding without"
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Resolve a per-agent credential override for the given API key + service.
@@ -1591,6 +1709,7 @@ fn build_minimal_downstream_service(
         examples_url: None,
         recommended_skills: None,
         custom_user_agent: user_service.custom_user_agent.clone(),
+        default_request_headers: None,
         developer_app_ids: None,
         token_exchange_config,
         created_at: now,
@@ -1689,29 +1808,96 @@ pub async fn forward_request(
 
     let mut request = client.request(method.clone(), &url);
 
-    // Copy only allowed headers (allowlist approach).
-    // When a custom User-Agent is configured for this service, skip the
-    // client's User-Agent so we can inject the override below without
-    // producing duplicate header values.
+    // Build the final outbound header list up front so reqwest's
+    // append-by-default `RequestBuilder::header()` doesn't produce
+    // duplicate entries when defaults collide with caller headers.
+    //
+    // Order of precedence (low → high, per NyxID#356):
+    //   1. Caller-supplied headers (filtered by the forward allowlist)
+    //   2. Service `custom_user_agent` override (User-Agent only)
+    //   3. Identity propagation headers
+    //   4. Delegated provider credential headers (`prepared.delegated_headers`)
+    //   5. `DownstreamService.default_request_headers` (admin catalog)
+    //   6. `UserService.default_request_headers`       (per-user override)
+    //
+    // Layers 1–4 must all sit in `outbound_headers` BEFORE the merge so a
+    // non-overridable default collides with them inside
+    // `merge_into_header_list` and wins. The node-routed path in
+    // `handlers/proxy.rs` puts delegated headers in the same lower-precedence
+    // bucket; the two paths must agree here.
     let has_custom_ua = target.service.custom_user_agent.is_some();
+    let mut outbound_headers: Vec<(String, String)> = Vec::new();
     for (name, value) in headers.iter() {
-        let name_lower = name.as_str().to_lowercase();
+        let name_lower = name.as_str().to_ascii_lowercase();
         if has_custom_ua && name_lower == "user-agent" {
             continue;
         }
-        if is_allowed_forward_header(&name_lower) {
-            request = request.header(name, value);
+        if !is_allowed_forward_header(&name_lower) {
+            continue;
+        }
+        if let Ok(v) = value.to_str() {
+            outbound_headers.push((name.as_str().to_string(), v.to_string()));
         }
     }
-
-    // Override User-Agent if the service specifies a custom one.
-    // By default (None), the client's User-Agent is forwarded as-is.
     if let Some(ref ua) = target.service.custom_user_agent {
-        request = request.header("user-agent", ua.as_str());
+        outbound_headers.push(("user-agent".to_string(), ua.clone()));
+    }
+    for (name, value) in &identity_headers {
+        outbound_headers.push((name.clone(), value.clone()));
+    }
+    outbound_headers = default_request_header::merge_into_header_list(
+        outbound_headers,
+        &[
+            target.catalog_default_headers.as_slice(),
+            target.user_service_default_headers.as_slice(),
+        ],
+    );
+
+    // `reqwest::RequestBuilder::header` appends — it does NOT replace an
+    // existing value for the same name. Credential injection (including
+    // delegated provider headers and the service `auth_method`) also
+    // appends, so a default with the same name as the credential would
+    // ride alongside it on the wire.
+    //
+    // Two separate credential classes must win over defaults:
+    //
+    //   1. The service's own `auth_method` credential — `header` auth
+    //      uses `auth_key_name`, `bearer`/`basic`/... use `authorization`,
+    //      `token_exchange` parses its `injection` format. Resolved by
+    //      `credential_header_name(target)`.
+    //
+    //   2. Delegated provider credentials in `prepared.delegated_headers`
+    //      — these are how `auth_method = "none"` services combined with
+    //      `ServiceProviderRequirement` surface real downstream tokens
+    //      (e.g. Anthropic `x-api-key`, Google `x-goog-api-key`). A
+    //      non-overridable default with the same name would otherwise
+    //      *replace* the real token via `merge_into_header_list`, so we
+    //      explicitly strip those names before defaults could have
+    //      overwritten them, then apply the delegated headers last.
+    //
+    // Also strip `authorization` when `forward_access_token` is going to
+    // inject a NyxID bearer on top. The WS path uses
+    // `HeaderMap::insert` which replaces, so it doesn't need any of this
+    // filtering.
+    if let Some(cred_name) = credential_header_name(target) {
+        outbound_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&cred_name));
+    }
+    for (delegated_name, _) in &prepared.delegated_headers {
+        outbound_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(delegated_name));
+    }
+    if target.service.forward_access_token && caller_token.is_some() {
+        outbound_headers.retain(|(n, _)| !n.eq_ignore_ascii_case("authorization"));
     }
 
-    // Inject identity propagation headers
-    for (name, value) in &identity_headers {
+    for (name, value) in &outbound_headers {
+        request = request.header(name, value);
+    }
+
+    // Delegated provider credential headers are applied here, AFTER
+    // defaults have been attached, so a colliding non-overridable
+    // default cannot replace the real downstream token. See comment
+    // block above for the rationale.
+    for (name, value) in &prepared.delegated_headers {
         request = request.header(name, value);
     }
 
@@ -1836,10 +2022,10 @@ pub async fn forward_request(
         request = request.bearer_auth(token);
     }
 
-    // Inject delegated provider credentials that are represented as headers.
-    for (name, value) in &prepared.delegated_headers {
-        request = request.header(name, value);
-    }
+    // Delegated provider credential headers (`prepared.delegated_headers`)
+    // were already folded into `outbound_headers` and attached above, so
+    // non-overridable service defaults correctly replace them when names
+    // collide. Do NOT re-apply them here — that would double-emit.
 
     if let ProxyBody::Buffered(Some(ref body_bytes)) = body {
         // Log request body for LLM proxy calls to diagnose truncation issues
@@ -2027,6 +2213,88 @@ mod tests {
         TokenExchangeCache::new()
     }
 
+    // ---- credential_header_name tests (NyxID#356) ----
+
+    #[test]
+    fn credential_header_name_resolves_every_auth_method() {
+        use crate::models::downstream_service::{CredentialFieldSpec, TokenExchangeConfig};
+
+        let mut target = make_proxy_target("https://example.com".to_string());
+
+        target.auth_method = "none".to_string();
+        assert_eq!(credential_header_name(&target), None);
+
+        target.auth_method = "header".to_string();
+        target.auth_key_name = "X-API-Key".to_string();
+        assert_eq!(
+            credential_header_name(&target),
+            Some("X-API-Key".to_string())
+        );
+
+        target.auth_method = "header".to_string();
+        target.auth_key_name = "   ".to_string();
+        // Blank auth_key_name on `header` auth is a misconfiguration; we
+        // return None rather than strip the empty name (which would match
+        // nothing anyway). The credential injection path already errors
+        // out later.
+        assert_eq!(credential_header_name(&target), None);
+
+        for method in ["bearer", "bot_bearer", "basic"] {
+            target.auth_method = method.to_string();
+            target.auth_key_name = String::new();
+            assert_eq!(
+                credential_header_name(&target),
+                Some("authorization".to_string()),
+                "auth_method = {method} should inject into Authorization",
+            );
+        }
+
+        for method in ["query", "path", "body"] {
+            target.auth_method = method.to_string();
+            assert_eq!(
+                credential_header_name(&target),
+                None,
+                "auth_method = {method} does not inject a header",
+            );
+        }
+
+        // token_exchange: parse the injection format.
+        target.auth_method = "token_exchange".to_string();
+        let mk_cfg = |injection: &str| TokenExchangeConfig {
+            endpoint: "https://auth.example/token".to_string(),
+            request_encoding: "json".to_string(),
+            request_template: serde_json::json!({}),
+            token_response_path: "access_token".to_string(),
+            ttl_response_path: None,
+            default_ttl_secs: 3600,
+            injection: injection.to_string(),
+            error_code_path: None,
+            error_message_path: None,
+            credential_fields: Vec::<CredentialFieldSpec>::new(),
+        };
+        for bearer_shape in ["bearer", "bot_bearer", "token"] {
+            target.service.token_exchange_config = Some(mk_cfg(bearer_shape));
+            assert_eq!(
+                credential_header_name(&target),
+                Some("authorization".to_string()),
+                "token_exchange injection {bearer_shape} must land on Authorization",
+            );
+        }
+        target.service.token_exchange_config = Some(mk_cfg("header:X-Tenant-Token"));
+        assert_eq!(
+            credential_header_name(&target),
+            Some("X-Tenant-Token".to_string()),
+        );
+        target.service.token_exchange_config = Some(mk_cfg("header:   "));
+        assert_eq!(
+            credential_header_name(&target),
+            None,
+            "an empty custom header name must not produce a bogus strip target",
+        );
+        target.service.token_exchange_config = Some(mk_cfg("unrecognized-format"));
+        assert_eq!(credential_header_name(&target), None);
+    }
+
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
@@ -2074,11 +2342,14 @@ mod tests {
                 examples_url: None,
                 recommended_skills: None,
                 custom_user_agent: None,
+                default_request_headers: None,
                 developer_app_ids: None,
                 token_exchange_config: None,
                 created_at: now,
                 updated_at: now,
             },
+            catalog_default_headers: Vec::new(),
+            user_service_default_headers: Vec::new(),
         }
     }
 
@@ -2825,11 +3096,14 @@ mod tests {
                 recommended_skills: None,
                 examples_url: None,
                 custom_user_agent: None,
+                default_request_headers: None,
                 developer_app_ids: None,
                 token_exchange_config: Some(make_lark_token_exchange_config()),
                 created_at: now,
                 updated_at: now,
             },
+            catalog_default_headers: Vec::new(),
+            user_service_default_headers: Vec::new(),
         }
     }
 
@@ -2988,6 +3262,7 @@ mod tests {
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
+            default_request_headers: None,
             is_active: true,
             source: None,
             source_id: None,
@@ -3110,11 +3385,14 @@ mod tests {
                 recommended_skills: None,
                 examples_url: None,
                 custom_user_agent: None,
+                default_request_headers: None,
                 developer_app_ids: None,
                 token_exchange_config: None,
                 created_at: now,
                 updated_at: now,
             },
+            catalog_default_headers: Vec::new(),
+            user_service_default_headers: Vec::new(),
         }
     }
 

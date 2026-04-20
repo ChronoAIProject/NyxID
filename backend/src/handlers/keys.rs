@@ -250,6 +250,12 @@ pub struct KeyResponse {
     pub delegation_token_scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,
+    /// Per-user default HTTP headers (NyxID#356). Only user-owned entries
+    /// are surfaced here; catalog-level admin defaults are described on
+    /// the `/catalog/{slug}` response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_request_headers:
+        Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
     pub auto_connected: bool,
     /// Developer app (OAuth client) ID that triggered this auto-provision.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -316,6 +322,18 @@ pub struct UpdateKeyRequest {
     pub delegation_token_scope: Option<String>,
     /// Custom User-Agent override. Set to "" to clear, Some(value) to set.
     pub custom_user_agent: Option<String>,
+    /// Per-user default HTTP headers injected on every proxied request
+    /// (NyxID#356). Field omitted leaves the existing value unchanged;
+    /// explicit JSON `null` or `[]` clears; a non-empty array replaces
+    /// with a validated list. The `nullable_field` helper is what makes
+    /// the omitted-vs-null distinction survive serde deserialization —
+    /// a plain `Option<Option<_>>` collapses both to `None`.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub default_request_headers:
+        Option<Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>>,
     /// OpenAPI spec URL for endpoint discovery. Set to "" to clear,
     /// Some(value) to set.
     pub openapi_spec_url: Option<String>,
@@ -640,11 +658,18 @@ pub async fn update_key(
         || body.inject_delegation_token.is_some()
         || body.delegation_token_scope.is_some();
 
-    // Update UserService fields if any are provided
+    // Update UserService fields if any are provided.
+    //
+    // `custom_user_agent` and `default_request_headers` also live on
+    // `UserService` — include them in the guard so header-only requests
+    // (e.g. `nyxid service update --default-header …` with no other flags)
+    // actually reach `update_user_service`.
     if body.auth_method.is_some()
         || body.auth_key_name.is_some()
         || body.node_id.is_some()
         || body.is_active.is_some()
+        || body.custom_user_agent.is_some()
+        || body.default_request_headers.is_some()
         || has_identity_update
     {
         let identity = if has_identity_update {
@@ -692,6 +717,7 @@ pub async fn update_key(
             body.is_active,
             identity.as_ref(),
             body.custom_user_agent.as_deref(),
+            body.default_request_headers.as_ref(),
         )
         .await?;
 
@@ -799,6 +825,9 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         inject_delegation_token: result.service.inject_delegation_token,
         delegation_token_scope: result.service.delegation_token_scope.clone(),
         custom_user_agent: result.service.custom_user_agent.clone(),
+        default_request_headers: crate::models::default_request_header::redact_list_for_response(
+            result.service.default_request_headers.clone(),
+        ),
         auto_connected: false,
         source_app_id: None,
         source_app_name: None,
@@ -850,6 +879,9 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         inject_delegation_token: view.inject_delegation_token,
         delegation_token_scope: view.delegation_token_scope,
         custom_user_agent: view.custom_user_agent,
+        default_request_headers: crate::models::default_request_header::redact_list_for_response(
+            view.default_request_headers,
+        ),
         auto_connected: view.auto_connected,
         source_app_id: view.source_app_id,
         source_app_name: view.source_app_name,

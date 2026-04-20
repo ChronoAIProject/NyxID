@@ -266,6 +266,44 @@ POST /api/v1/proxy/s/llm-openclaw/tools/invoke
 
 Each user's requests route to their own OpenClaw instance.
 
+### Default request headers
+
+Admins attach headers to a catalog `DownstreamService` and they get injected on every proxied request. Users can also add per-user defaults on their `UserService` that layer on top of the catalog entry. Applied in both the direct HTTP path and the node-routed path. See NyxID#356 and NyxID#161 for history.
+
+The reporter's pain point in NyxID#161 was having to send `x-openclaw-scopes: operator.read,operator.write` on every call. Now:
+
+```bash
+nyxid service update <user-service-id> --default-header 'x-openclaw-scopes=operator.read,operator.write'
+```
+
+After that, every call through this service carries the header automatically.
+
+**Overridable vs non-overridable.** The default is non-overridable -- an admin-set header wins over a caller-supplied header. Append `:overridable` to let the caller override:
+
+```bash
+# Non-overridable (default) -- caller cannot override
+nyxid service update <id> --default-header 'x-openclaw-scopes=operator.read,operator.write'
+
+# Overridable -- caller can send its own value
+nyxid service update <id> --default-header 'x-api-version=v2:overridable'
+```
+
+**What you can't set.** The following headers are rejected: `authorization`, `cookie`, `user-agent`, `host`, `content-length`, hop-by-hop headers (`connection`, `transfer-encoding`, `upgrade`, etc.), `x-nyxid-*`, `x-forwarded-*`, `proxy-*`. Auth headers go through the service's `auth_method`; `user-agent` has its own `custom_user_agent` knob.
+
+**Caps.** 16 entries max, 256 chars per name, 4096 per value.
+
+**v1 scope.** Sensitive values are not yet encrypted at rest (plaintext in v1). The `sensitive` flag is UI-redaction only -- do not put secrets here; use `auth_method` for those.
+
+### Capability matrix
+
+| Capability | Status | Reference |
+|---|---|---|
+| HTTP proxying | Shipped | -- |
+| WebSocket passthrough | Shipped | NyxID#160 |
+| SSE / streaming responses | Shipped | -- |
+| Caller `x-openclaw-*` header passthrough | Shipped | NyxID#355 |
+| Service-level default header injection | Shipped | NyxID#356 |
+
 ### WebSocket passthrough (OpenClaw CLI / TUI)
 
 The OpenClaw CLI's native chat flow is a WebSocket upgrade against the

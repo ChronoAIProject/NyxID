@@ -12,7 +12,7 @@ import {
   useSetServiceApprovalConfig,
   useDeleteServiceApprovalConfig,
 } from "@/hooks/use-approvals";
-import { useServices } from "@/hooks/use-services";
+import { useUserServices } from "@/hooks/use-user-services";
 import {
   updateNotificationSettingsSchema,
   type UpdateNotificationSettingsFormData,
@@ -77,7 +77,7 @@ export function NotificationSettingsPage() {
     usePushDevices();
   const removeDeviceMutation = useRemoveDevice();
 
-  const { data: services } = useServices();
+  const { data: userServices } = useUserServices();
   const {
     data: serviceConfigs,
     isLoading: isServiceConfigsLoading,
@@ -112,18 +112,106 @@ export function NotificationSettingsPage() {
       : undefined,
   });
 
-  // Services that already have per-service configs
-  const configuredServiceIds = new Set(
-    serviceConfigs?.configs.map((c) => c.service_id) ?? [],
+  // Identifier set used to dedupe the picker. A single config may be
+  // keyed by either:
+  //   (a) a `UserService.id` (custom services, or explicitly targeted),
+  //   (b) a catalog `DownstreamService.id` that covers *all* of the
+  //       user's services sharing that `catalog_service_id`.
+  // Collect both so the picker hides every service already covered — not
+  // just the `user_service_id` the backend happened to return for case
+  // (b) (which is the most-recently-created sibling). Without this, an
+  // org/user with two OpenAI user services would still see the other one
+  // in the Add dialog and "adding" it would silently overwrite the same
+  // catalog-wide policy.
+  const configuredIds = new Set<string>();
+  for (const c of serviceConfigs?.configs ?? []) {
+    configuredIds.add(c.service_id);
+    if (c.user_service_id) configuredIds.add(c.user_service_id);
+  }
+
+  // `(org_id, service_id)` pairs where a specific org dominates the
+  // approval policy for a catalog service the caller inherits from it.
+  // `resolve_org_aware_approval` picks that org's policy before falling
+  // back to the actor's personal config, so personal overrides are
+  // silently ignored *for calls routed through that org*. We index by
+  // `org_id|service_id` so the picker only hides the org-specific
+  // entry; if the same catalog service is also inherited from a
+  // different org without a dominant policy, that entry stays
+  // selectable. Omitted on the org-scoped list — default to empty.
+  const dominantOrgPolicyKeys = new Set<string>(
+    (serviceConfigs?.dominant_org_policies ?? []).map(
+      (p) => `${p.org_id}|${p.service_id}`,
+    ),
   );
 
-  // Available services for adding a new per-service config
-  const availableServices =
+  // Picker entries for the Add-Override dialog. Two kinds of services
+  // are pickable:
+  //
+  //  1. **Personal** — the actor owns the UserService outright. We use
+  //     the `UserService.id` as the mutation key so the backend maps it
+  //     to the effective storage key (catalog id when catalog-backed,
+  //     user service id for custom services — see ChronoAIProject/NyxID#165).
+  //
+  //  2. **Org-inherited with a catalog id** — the UserService belongs to
+  //     an org the actor has proxy access to (member/admin), and the
+  //     org has no dominant per-service policy of its own. In that case
+  //     `resolve_org_aware_approval` falls back to the actor's personal
+  //     per-service config keyed by the catalog id, so the user *can*
+  //     author a personal override that affects their org-routed proxy
+  //     calls. We use `catalog_service_id` as the mutation key (the
+  //     legacy path accepts catalog ids) and label the entry with the
+  //     org name so the user knows the scope.
+  //
+  // Viewer-role entries carry `allowed: false` and are excluded — they
+  // can't proxy, so an approval policy would have nothing to gate.
+  // Custom (no-catalog) org services are also excluded: a personal
+  // policy can only key on the catalog id for org-shared resources,
+  // and there isn't one.
+  type PickerEntry = {
+    readonly id: string;
+    readonly label: string;
+  };
+  const selectableUserServices: readonly PickerEntry[] =
     isServiceConfigsLoading || serviceConfigsError
       ? []
-      : (services ?? []).filter(
-          (s) => s.is_active && !configuredServiceIds.has(s.id),
-        );
+      : (() => {
+          const out: PickerEntry[] = [];
+          const seen = new Set<string>();
+          for (const s of userServices ?? []) {
+            if (!s.is_active) continue;
+            const src = s.credential_source;
+            let mutationId: string | null = null;
+            let label = s.slug;
+            if (src.type === "personal") {
+              mutationId = s.id;
+            } else if (src.type === "org" && src.allowed && s.catalog_service_id) {
+              mutationId = s.catalog_service_id;
+              label = `${s.slug} (via ${src.org_name})`;
+            }
+            if (!mutationId) continue;
+            if (configuredIds.has(mutationId)) continue;
+            if (configuredIds.has(s.id)) continue;
+            if (s.catalog_service_id && configuredIds.has(s.catalog_service_id))
+              continue;
+            // Skip org-inherited entries whose *specific* org already
+            // has a dominant policy for this catalog — a personal
+            // override would be ignored at proxy time. Scoped per
+            // (org_id, service_id) so another org inheriting the same
+            // catalog without its own policy stays selectable.
+            if (
+              src.type === "org" &&
+              s.catalog_service_id &&
+              dominantOrgPolicyKeys.has(
+                `${src.org_id}|${s.catalog_service_id}`,
+              )
+            )
+              continue;
+            if (seen.has(mutationId)) continue;
+            seen.add(mutationId);
+            out.push({ id: mutationId, label });
+          }
+          return out;
+        })();
 
   async function handleSave(data: UpdateNotificationSettingsFormData) {
     try {
@@ -203,8 +291,13 @@ export function NotificationSettingsPage() {
     approvalRequired: boolean,
   ) {
     try {
+      // `serviceId` here is the mutation key — `user_service_id` when
+      // known, else the raw stored `service_id`. Match against either so
+      // catalog-keyed rows resolve too (their `service_id` is a catalog
+      // id, not a UserService id).
       const existingConfig = serviceConfigs?.configs.find(
-        (c) => c.service_id === serviceId,
+        (c) =>
+          c.user_service_id === serviceId || c.service_id === serviceId,
       );
       await setConfigMutation.mutateAsync({
         serviceId,
@@ -605,7 +698,7 @@ export function NotificationSettingsPage() {
                   disabled={
                     isServiceConfigsLoading ||
                     Boolean(serviceConfigsError) ||
-                    availableServices.length === 0
+                    selectableUserServices.length === 0
                   }
                 >
                   Add Override
@@ -629,7 +722,14 @@ export function NotificationSettingsPage() {
                 </p>
               ) : (
                 <div className="space-y-3">
-                  {serviceConfigs?.configs.map((config) => (
+                  {serviceConfigs?.configs.map((config) => {
+                    // Prefer the UserService id for API calls so the
+                    // backend resolves the same row the user sees on the
+                    // Keys page. Falls back to the raw service_id for
+                    // legacy rows without a matching active UserService.
+                    const mutationKey =
+                      config.user_service_id ?? config.service_id;
+                    return (
                     <div
                       key={config.service_id}
                       className="rounded-lg border border-border p-4"
@@ -640,6 +740,9 @@ export function NotificationSettingsPage() {
                             {config.service_name}
                           </p>
                           <p className="text-xs text-muted-foreground">
+                            {config.user_service_slug
+                              ? `${config.user_service_slug} — `
+                              : ""}
                             {config.approval_required
                               ? "Approval required"
                               : "Approval not required"}
@@ -650,7 +753,7 @@ export function NotificationSettingsPage() {
                             checked={config.approval_required}
                             onCheckedChange={(checked) =>
                               void handleToggleServiceConfig(
-                                config.service_id,
+                                mutationKey,
                                 checked,
                               )
                             }
@@ -659,7 +762,7 @@ export function NotificationSettingsPage() {
                             variant="ghost"
                             size="icon"
                             onClick={() =>
-                              void handleDeleteServiceConfig(config.service_id)
+                              void handleDeleteServiceConfig(mutationKey)
                             }
                             title="Remove override (use global default)"
                           >
@@ -676,7 +779,7 @@ export function NotificationSettingsPage() {
                             value={config.approval_mode}
                             onValueChange={(value) =>
                               void handleChangeApprovalMode(
-                                config.service_id,
+                                mutationKey,
                                 config.approval_required,
                                 value as "per_request" | "grant",
                               )
@@ -702,7 +805,8 @@ export function NotificationSettingsPage() {
                         </div>
                       )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </CardContent>
@@ -832,13 +936,17 @@ export function NotificationSettingsPage() {
                   <SelectValue placeholder="Select a service" />
                 </SelectTrigger>
                 <SelectContent>
-                  {availableServices.map((s) => (
+                  {selectableUserServices.map((s) => (
                     <SelectItem key={s.id} value={s.id}>
-                      {s.name}
+                      {s.label}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              <p className="text-xs text-muted-foreground">
+                Shows your configured AI services. To add a new one, go to
+                the Keys page.
+              </p>
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">

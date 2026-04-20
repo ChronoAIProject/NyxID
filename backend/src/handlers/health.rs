@@ -9,6 +9,7 @@ use crate::crypto::aes::EncryptionDecryptStats;
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    pub commit: String,
     pub encryption: EncryptionHealthResponse,
 }
 
@@ -25,6 +26,7 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        commit: env!("NYXID_GIT_HASH").to_string(),
         encryption: EncryptionHealthResponse {
             previous_key_configured: state.encryption_keys.has_previous(),
             decrypt_stats: state.encryption_keys.decrypt_stats(),

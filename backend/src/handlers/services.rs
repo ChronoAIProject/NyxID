@@ -69,6 +69,11 @@ pub struct CreateServiceRequest {
     /// response, cache it, and inject it on outbound requests.
     #[serde(default)]
     pub token_exchange_config: Option<TokenExchangeConfig>,
+    /// Initial admin-configured default HTTP headers (NyxID#356). Each
+    /// entry is validated against the shared denylist + length caps.
+    #[serde(default)]
+    pub default_request_headers:
+        Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
 }
 
 impl std::fmt::Debug for CreateServiceRequest {
@@ -164,6 +169,11 @@ pub struct ServiceResponse {
     pub recommended_skills: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,
+    /// Admin-configured default HTTP headers injected on every proxied
+    /// request (NyxID#356).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_request_headers:
+        Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_app_ids: Option<Vec<String>>,
     pub created_by: String,
@@ -211,6 +221,17 @@ pub struct UpdateServiceRequest {
     pub developer_app_ids: Option<Vec<String>>,
     /// Custom User-Agent override for this service. Set to "" to clear.
     pub custom_user_agent: Option<String>,
+    /// Replace the admin-configured default request headers for this
+    /// service (NyxID#356). Field omitted leaves the existing value
+    /// unchanged; explicit JSON `null` or `[]` clears; a non-empty array
+    /// replaces with a validated list. See `nullable_field::deserialize`
+    /// for why we can't just use `Option<Option<_>>` here.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub default_request_headers:
+        Option<Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>>,
     /// Replace the declarative token exchange config on a `token_exchange`
     /// service. Validated through the generic helpers before being
     /// persisted so typos in the template / injection format surface at
@@ -885,6 +906,12 @@ pub async fn create_service(
         validate_developer_app_ids(&state, &auth_user, app_ids).await?;
     }
 
+    // Validate & normalize initial default_request_headers (NyxID#356).
+    let default_request_headers = match body.default_request_headers.clone() {
+        Some(list) => crate::models::default_request_header::validate_headers(list)?,
+        None => None,
+    };
+
     let new_service = DownstreamService {
         id: id.clone(),
         name: body.name.clone(),
@@ -925,6 +952,7 @@ pub async fn create_service(
         examples_url: body.examples_url.clone(),
         recommended_skills: body.recommended_skills.clone(),
         custom_user_agent: None,
+        default_request_headers,
         developer_app_ids: body.developer_app_ids.clone(),
         token_exchange_config,
         created_at: now,
@@ -1525,6 +1553,50 @@ pub async fn update_service(
         }
     }
 
+    // default_request_headers (NyxID#356):
+    //   None         => leave unchanged
+    //   Some(None)   => explicit clear (Bson::Null)
+    //   Some(Some()) => reconcile redaction placeholders against the
+    //                    currently stored list, validate, then replace
+    let default_headers_changed = body.default_request_headers.is_some();
+    let default_headers_payload_names: Vec<String> = match &body.default_request_headers {
+        Some(Some(list)) => list.iter().map(|h| h.name.clone()).collect(),
+        _ => Vec::new(),
+    };
+    if let Some(drh) = body.default_request_headers.clone() {
+        match drh {
+            Some(list) => {
+                // Before validation, restore stored values for any
+                // entries the client submitted with the
+                // `REDACTED_PLACEHOLDER`. Without this, a GET → edit →
+                // PUT round trip would overwrite every sensitive value
+                // with the literal placeholder string.
+                let reconciled = crate::models::default_request_header::reconcile_with_stored(
+                    list,
+                    service.default_request_headers.as_deref(),
+                );
+                let normalized =
+                    crate::models::default_request_header::validate_headers(reconciled)?;
+                match normalized {
+                    Some(norm) => {
+                        let bson_val = bson::to_bson(&norm).map_err(|e| {
+                            AppError::Internal(format!(
+                                "Failed to serialize default_request_headers: {e}"
+                            ))
+                        })?;
+                        set_doc.insert("default_request_headers", bson_val);
+                    }
+                    None => {
+                        set_doc.insert("default_request_headers", bson::Bson::Null);
+                    }
+                }
+            }
+            None => {
+                set_doc.insert("default_request_headers", bson::Bson::Null);
+            }
+        }
+    }
+
     if set_doc.is_empty() {
         return Err(AppError::ValidationError(
             "At least one field must be provided for update".to_string(),
@@ -1681,6 +1753,25 @@ pub async fn update_service(
         None,
         None,
     );
+
+    // Per-change audit for default_request_headers mutations. Values are
+    // deliberately *never* logged — only the set of header names — so even
+    // misconfigured "sensitive" defaults don't leak into the audit store.
+    if default_headers_changed {
+        audit_service::log_async(
+            state.db.clone(),
+            Some(auth_user.user_id.to_string()),
+            "service_default_headers_updated".to_string(),
+            Some(serde_json::json!({
+                "service_id": &service_id,
+                "header_names": default_headers_payload_names,
+            })),
+            None,
+            None,
+            None,
+            None,
+        );
+    }
 
     // Re-fetch the updated service to return fresh data
     let updated = fetch_service(&state, &service_id).await?;
@@ -1976,7 +2067,44 @@ pub async fn regenerate_oidc_secret(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_spec_url_update;
+    use super::{UpdateServiceRequest, resolve_spec_url_update};
+
+    // Three wire shapes on the update request need to stay distinguishable
+    // so the admin can clear the field without an empty-array workaround:
+    //   omitted   -> None                 (leave unchanged)
+    //   null      -> Some(None)           (explicit clear)
+    //   array     -> Some(Some(vec![...]))(replace)
+    // A plain `Option<Option<_>>` collapses omitted and null to None, so
+    // we rely on `nullable_field::deserialize` for the outer layer.
+    #[test]
+    fn update_service_default_request_headers_tri_state_deser() {
+        let omitted: UpdateServiceRequest = serde_json::from_str("{}").expect("parse");
+        assert!(omitted.default_request_headers.is_none());
+
+        let null_body: UpdateServiceRequest =
+            serde_json::from_str(r#"{"default_request_headers": null}"#).expect("parse");
+        assert_eq!(null_body.default_request_headers, Some(None));
+
+        let array_body: UpdateServiceRequest = serde_json::from_str(
+            r#"{"default_request_headers": [{"name":"x-scope","value":"a","overridable":false,"sensitive":false}]}"#,
+        )
+        .expect("parse");
+        match array_body.default_request_headers {
+            Some(Some(list)) => {
+                assert_eq!(list.len(), 1);
+                assert_eq!(list[0].name, "x-scope");
+                assert_eq!(list[0].value, "a");
+            }
+            other => panic!("expected Some(Some(_)), got {other:?}"),
+        }
+
+        let empty_body: UpdateServiceRequest =
+            serde_json::from_str(r#"{"default_request_headers": []}"#).expect("parse");
+        match empty_body.default_request_headers {
+            Some(Some(list)) => assert!(list.is_empty()),
+            other => panic!("expected Some(Some([])), got {other:?}"),
+        }
+    }
 
     #[test]
     fn resolve_spec_url_update_prefers_explicit_url() {

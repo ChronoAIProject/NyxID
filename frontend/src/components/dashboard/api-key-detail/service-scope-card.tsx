@@ -59,7 +59,12 @@ export function ServiceScopeCard({
   // filter here is to avoid offering options that would 400 on save.
   const personalKeys = useMemo(
     () =>
-      (allKeys ?? []).filter((k) => sameOwner(k.credential_source, apiKeySource)),
+      (allKeys ?? []).filter(
+        (k) =>
+          !k.auto_connected &&
+          k.is_active &&
+          sameOwner(k.credential_source, apiKeySource),
+      ),
     [allKeys, apiKeySource],
   );
   const updateApiKey = useUpdateApiKey();

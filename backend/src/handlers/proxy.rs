@@ -1289,7 +1289,6 @@ async fn execute_proxy_inner(
 
         let mut enriched_headers = node_forward_headers;
         enriched_headers.extend(identity_headers.iter().cloned());
-        enriched_headers.extend(prepared.delegated_headers.iter().cloned());
 
         // Override User-Agent if the service specifies a custom one.
         // By default (None), the client's User-Agent is forwarded as-is.
@@ -1304,6 +1303,41 @@ async fn execute_proxy_inner(
         {
             enriched_headers.push(("authorization".to_string(), format!("Bearer {token}")));
         }
+
+        // Merge service-level default headers (NyxID#356) into the node
+        // request. The node agent applies these alongside the caller /
+        // identity headers when it builds the outbound request on the
+        // user's machine. Merge semantics match the direct HTTP path in
+        // `proxy_service::forward_request`.
+        //
+        // Delegated provider credentials (e.g. Anthropic `x-api-key`,
+        // Google `x-goog-api-key`) are appended AFTER this merge, so a
+        // colliding non-overridable default cannot replace the real
+        // downstream token — see the equivalent block in `forward_request`.
+        enriched_headers = crate::models::default_request_header::merge_into_header_list(
+            enriched_headers,
+            &[
+                target.catalog_default_headers.as_slice(),
+                target.user_service_default_headers.as_slice(),
+            ],
+        );
+
+        // Strip any header whose name will collide with what the node
+        // agent appends locally when it applies `auth_method`, plus any
+        // delegated-credential names we are about to re-append below.
+        // Without this, a catalog/user default called `x-api-key`
+        // (or any other `auth_key_name` / delegated name) would ride
+        // along on the frame and the node would append the real
+        // credential on top — the wire would then carry BOTH values.
+        if let Some(cred_name) = proxy_service::credential_header_name(&target) {
+            enriched_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&cred_name));
+        }
+        for (delegated_name, _) in &prepared.delegated_headers {
+            enriched_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(delegated_name));
+        }
+        // Re-append delegated headers last so they win over any
+        // colliding default.
+        enriched_headers.extend(prepared.delegated_headers.iter().cloned());
 
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
@@ -2165,7 +2199,111 @@ async fn connect_downstream_ws(
             Ok((name, value))
         };
 
-    // Inject service credential
+    // Header injection order mirrors the direct HTTP path so the two
+    // transports produce the same wire output for the same config.
+    //
+    // Precedence (low → high; later layers overwrite earlier ones via
+    // `HeaderMap::insert`):
+    //   1. Caller handshake metadata (`forward_headers`)
+    //   2. Identity propagation headers
+    //   3. Service default headers (catalog + user-service, NyxID#356)
+    //   4. Service `custom_user_agent` override
+    //   5. Delegated provider credential headers
+    //   6. `forward_access_token` NyxID bearer
+    //   7. Service auth credential (auth_method)
+    //
+    // Delegated provider credentials (5) run AFTER defaults (3) so a
+    // non-overridable default cannot clobber the real downstream token
+    // (e.g. Anthropic `x-api-key`, Google `x-goog-api-key`) for services
+    // using `auth_method = "none"` plus `ServiceProviderRequirement`.
+    // The service `auth_method` credential (7) still wins over
+    // everything when it also sets the same name.
+
+    // [1] Caller handshake metadata (Origin, Sec-WebSocket-*, etc.)
+    for (name, value) in forward_headers {
+        if let (Ok(hn), Ok(hv)) = (
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            headers.insert(hn, hv);
+        }
+    }
+
+    // [2] Identity propagation headers (best-effort -- these are internal)
+    for (name, value) in identity_headers {
+        if let (Ok(hn), Ok(hv)) = (
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            headers.insert(hn, hv);
+        }
+    }
+
+    // [3] Service-level default headers. Catalog layer first, then
+    // user-service overrides. Non-overridable defaults replace anything
+    // set by layers 1–2; overridable defaults only fill in when the
+    // handshake doesn't already carry that header.
+    for h in target
+        .catalog_default_headers
+        .iter()
+        .chain(target.user_service_default_headers.iter())
+    {
+        let hn = match reqwest::header::HeaderName::from_bytes(h.name.as_bytes()) {
+            Ok(n) => n,
+            Err(_) => continue, // validated on write, but stay defensive
+        };
+        let hv = match reqwest::header::HeaderValue::from_str(&h.value) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if h.overridable {
+            headers.entry(hn).or_insert(hv);
+        } else {
+            headers.insert(hn, hv);
+        }
+    }
+
+    // [4] Override User-Agent if the service specifies a custom one.
+    if let Some(ref ua) = target.service.custom_user_agent
+        && let Ok(hv) = reqwest::header::HeaderValue::from_str(ua)
+    {
+        headers.insert(reqwest::header::USER_AGENT, hv);
+    }
+
+    // [5] Delegated provider credential headers. Applied AFTER defaults
+    // via `HeaderMap::insert` so a colliding non-overridable default
+    // gets replaced by the real downstream token — the service
+    // `auth_method` credential below still wins if it targets the same
+    // name.
+    for cred in delegated {
+        match cred.injection_method.as_str() {
+            "bearer" => {
+                let (name, value) = make_header(
+                    cred.injection_key.as_bytes(),
+                    &format!("Bearer {}", cred.credential),
+                )?;
+                headers.insert(name, value);
+            }
+            "header" => {
+                let (name, value) = make_header(cred.injection_key.as_bytes(), &cred.credential)?;
+                headers.insert(name, value);
+            }
+            // "query" and "path" already handled in URL construction
+            _ => {}
+        }
+    }
+
+    // [6] Forward the caller's NyxID access token when the service is
+    // configured for it.
+    if target.service.forward_access_token
+        && let Some(token) = caller_token
+    {
+        let (_, value) = make_header(b"authorization", &format!("Bearer {token}"))?;
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
+
+    // [7] Service credential — injected LAST so it always wins over any
+    // default/delegated/identity header with the same name.
     match target.auth_method.as_str() {
         "none" => {}
         "header" => {
@@ -2190,61 +2328,6 @@ async fn connect_downstream_ws(
                 "Unsupported auth method for WS passthrough: {other}"
             )));
         }
-    }
-
-    // Forward the caller's NyxID access token when the service is configured for it.
-    if target.service.forward_access_token
-        && let Some(token) = caller_token
-    {
-        let (_, value) = make_header(b"authorization", &format!("Bearer {token}"))?;
-        headers.insert(reqwest::header::AUTHORIZATION, value);
-    }
-
-    // Inject delegated credential headers
-    for cred in delegated {
-        match cred.injection_method.as_str() {
-            "bearer" => {
-                let (name, value) = make_header(
-                    cred.injection_key.as_bytes(),
-                    &format!("Bearer {}", cred.credential),
-                )?;
-                headers.insert(name, value);
-            }
-            "header" => {
-                let (name, value) = make_header(cred.injection_key.as_bytes(), &cred.credential)?;
-                headers.insert(name, value);
-            }
-            // "query" and "path" already handled in URL construction
-            _ => {}
-        }
-    }
-
-    // Inject identity propagation headers (best-effort -- these are internal)
-    for (name, value) in identity_headers {
-        if let (Ok(hn), Ok(hv)) = (
-            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-            reqwest::header::HeaderValue::from_str(value),
-        ) {
-            headers.insert(hn, hv);
-        }
-    }
-
-    // Preserve handshake metadata that downstream WS services may require,
-    // such as origin checks and subprotocol negotiation.
-    for (name, value) in forward_headers {
-        if let (Ok(hn), Ok(hv)) = (
-            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
-            reqwest::header::HeaderValue::from_str(value),
-        ) {
-            headers.insert(hn, hv);
-        }
-    }
-
-    // Override User-Agent if the service specifies a custom one.
-    if let Some(ref ua) = target.service.custom_user_agent
-        && let Ok(hv) = reqwest::header::HeaderValue::from_str(ua)
-    {
-        headers.insert(reqwest::header::USER_AGENT, hv);
     }
 
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
@@ -2572,13 +2655,37 @@ async fn handle_ws_passthrough_via_node(
     };
     let mut enriched_headers = forward_headers.to_vec();
     enriched_headers.extend(identity_headers.iter().cloned());
-    enriched_headers.extend(prepared.delegated_headers.iter().cloned());
 
     // Override User-Agent if the service specifies a custom one.
     if let Some(ref ua) = target.service.custom_user_agent {
         enriched_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("user-agent"));
         enriched_headers.push(("user-agent".to_string(), ua.clone()));
     }
+
+    // Merge service-level default headers (NyxID#356) — same semantics as
+    // the direct WS path and the node-routed HTTP path. Delegated
+    // credentials are appended AFTER this merge so a colliding
+    // non-overridable default cannot clobber the real provider token.
+    enriched_headers = crate::models::default_request_header::merge_into_header_list(
+        enriched_headers,
+        &[
+            target.catalog_default_headers.as_slice(),
+            target.user_service_default_headers.as_slice(),
+        ],
+    );
+
+    // Strip the name the node agent will append its own credential on,
+    // plus any delegated-credential names we are about to re-append
+    // below, so the WS handshake doesn't carry both the default and the
+    // real credential.
+    if let Some(cred_name) = proxy_service::credential_header_name(target) {
+        enriched_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&cred_name));
+    }
+    for (delegated_name, _) in &prepared.delegated_headers {
+        enriched_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(delegated_name));
+    }
+    // Re-append delegated headers last so they win over colliding defaults.
+    enriched_headers.extend(prepared.delegated_headers.iter().cloned());
 
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -3432,6 +3539,8 @@ mod tests {
             auth_key_name: String::new(),
             credential: String::new(),
             service: crate::models::downstream_service::test_helpers::dummy_service(),
+            catalog_default_headers: Vec::new(),
+            user_service_default_headers: Vec::new(),
         }
     }
 

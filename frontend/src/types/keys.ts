@@ -1,4 +1,7 @@
 import type { CredentialSource } from "@/schemas/orgs";
+import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
+
+export type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
 export interface KeyInfo {
   readonly id: string;
@@ -12,11 +15,25 @@ export interface KeyInfo {
   readonly auth_key_name: string;
   readonly status: string;
   readonly catalog_service_id: string | null;
+  /**
+   * Slug of the catalog `DownstreamService` this key was provisioned
+   * from, when applicable. Distinct from `slug` above: `slug` is the
+   * user-facing proxy path which can diverge from the catalog entry
+   * (custom labels, auto-suffixing). Use this field — never `slug` —
+   * when joining against `CatalogEntry` rows.
+   */
+  readonly catalog_service_slug: string | null;
   readonly catalog_service_name: string | null;
   readonly node_id: string | null;
   readonly node_priority: number;
   readonly is_active: boolean;
   readonly custom_user_agent?: string | null;
+  /**
+   * NyxID#356: per-user default request headers attached to this
+   * service. Admin catalog-level defaults are surfaced separately via
+   * the catalog response.
+   */
+  readonly default_request_headers?: readonly DefaultRequestHeader[] | null;
   readonly auto_connected: boolean;
   readonly source_app_id?: string | null;
   readonly source_app_name?: string | null;
@@ -116,6 +133,13 @@ export interface CatalogEntry {
   readonly token_exchange_credential_fields?:
     | readonly CredentialFieldSpec[]
     | null;
+  /**
+   * NyxID#356: admin-configured catalog-level default request headers.
+   * Present when the backend catalog handler is upgraded to surface them;
+   * when absent, the per-user key page simply skips the catalog-defaults
+   * read-only section.
+   */
+  readonly default_request_headers?: readonly DefaultRequestHeader[] | null;
 }
 
 export interface CatalogListResponse {

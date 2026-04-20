@@ -8,10 +8,14 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
 };
+use crate::models::org_membership::OrgMembership;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::service_provider_requirement::{
     COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
 };
+use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+use crate::services::org_service;
 
 /// A catalog entry combining DownstreamService + ProviderConfig info.
 pub struct CatalogEntry {
@@ -71,6 +75,12 @@ pub struct CatalogEntry {
     /// format, only what to collect from the user.
     pub token_exchange_credential_fields:
         Option<Vec<crate::models::downstream_service::CredentialFieldSpec>>,
+    /// Admin-configured default HTTP headers declared on the catalog
+    /// `DownstreamService`. Exposed read-only so the per-user AI Services
+    /// UI can show catalog inheritance next to the user's overrides
+    /// (NyxID#356). `None` when the catalog entry has no defaults.
+    pub default_request_headers:
+        Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
 }
 
 fn build_catalog_entry(
@@ -150,6 +160,7 @@ fn build_catalog_entry(
         examples_url: svc.examples_url,
         recommended_skills: svc.recommended_skills,
         token_exchange_credential_fields: svc.token_exchange_config.map(|c| c.credential_fields),
+        default_request_headers: svc.default_request_headers,
     }
 }
 
@@ -195,9 +206,17 @@ fn legacy_service_category_filter(categories: &[&str]) -> mongodb::bson::Documen
 
 /// List catalog entries available for user key creation.
 /// Filters to connection-category + provider-linked services.
+///
+/// Enforces visibility: private services are only visible to their
+/// creator (admin overrides happen at the handler layer if needed).
+/// Without this filter, the response would include
+/// `default_request_headers` and other metadata for private services,
+/// which the slug endpoint already restricts — the list path used to
+/// undo that restriction.
 pub async fn list_catalog(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
+    user_id: &str,
 ) -> AppResult<Vec<CatalogEntry>> {
     // Legacy documents may lack requires_user_credential (defaults to true)
     // and service_category (defaults to "connection").
@@ -216,6 +235,7 @@ pub async fn list_catalog(
                     ],
                 },
                 legacy_service_category_filter(&["connection", "internal"]),
+                visibility_filter(user_id),
             ],
         },
     )
@@ -303,24 +323,113 @@ async fn list_catalog_filtered(
 }
 
 /// Get the raw DownstreamService by slug (lightweight, no provider/encryption lookup).
-/// Enforces visibility: private services only visible to their creator.
+///
+/// Enforces the same layered visibility rules as `get_catalog_entry`:
+/// public services are readable by everyone; private services are
+/// readable by the creator, admins, or any user with an active
+/// `UserService` (personal or org-owned, membership-scoped) referencing
+/// the service. Without this alignment, endpoint-discovery via
+/// `/catalog/{slug}/endpoints` would return 404 for private rows that
+/// the same caller can access on the parent `/catalog/{slug}`.
 pub async fn get_downstream_service_by_slug(
     db: &mongodb::Database,
     slug: &str,
     user_id: &str,
 ) -> AppResult<DownstreamService> {
-    let mut filter = doc! { "slug": slug, "is_active": true };
-    filter.extend(visibility_filter(user_id));
-    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(filter)
+    let svc = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "slug": slug, "is_active": true })
         .await?
-        .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))
+        .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
+
+    enforce_catalog_read_access(db, user_id, &svc).await?;
+
+    Ok(svc)
 }
 
-/// Get single catalog entry by slug.
+/// Enforce the layered catalog-read access check for a loaded
+/// `DownstreamService`. Returns `Err(NotFound)` (with the same shape as
+/// a missing slug) when the caller is not permitted to read the entry.
+///
+/// Callers are responsible for loading `svc` first; both
+/// `get_catalog_entry` and `get_downstream_service_by_slug` use this
+/// helper so their visibility rules cannot drift.
+async fn enforce_catalog_read_access(
+    db: &mongodb::Database,
+    user_id: &str,
+    svc: &DownstreamService,
+) -> AppResult<()> {
+    if svc.visibility != "private" || svc.created_by == user_id {
+        return Ok(());
+    }
+    let is_admin = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": user_id })
+        .await?
+        .is_some_and(|u| u.is_admin);
+    let has_active_user_service = if is_admin {
+        false
+    } else {
+        has_active_user_service_for_catalog(db, user_id, &svc.id).await?
+    };
+    if !caller_may_read_catalog_entry(
+        &svc.visibility,
+        &svc.created_by,
+        user_id,
+        is_admin,
+        has_active_user_service,
+    ) {
+        return Err(AppError::NotFound("Catalog entry not found".to_string()));
+    }
+    Ok(())
+}
+
+/// Pure-function visibility decision for a single catalog entry.
+///
+/// Extracted so the rule can be unit-tested without spinning up Mongo.
+/// Returns `true` when `user_id` is allowed to read the entry. The
+/// caller is responsible for the database lookups that produce
+/// `is_admin` and `has_active_user_service` before invoking this.
+pub(crate) fn caller_may_read_catalog_entry(
+    visibility: &str,
+    created_by: &str,
+    user_id: &str,
+    is_admin: bool,
+    has_active_user_service: bool,
+) -> bool {
+    if visibility != "private" {
+        return true;
+    }
+    if created_by == user_id {
+        return true;
+    }
+    if is_admin {
+        return true;
+    }
+    has_active_user_service
+}
+
+/// Get single catalog entry by slug, enforcing visibility against the
+/// requesting user.
+///
+/// Private catalog services were previously readable by any authenticated
+/// user who could guess or obtain the slug — exposing field values such as
+/// `default_request_headers` (which can carry routing / scope hints).
+/// This function now restricts access to:
+///   1. anyone, when the service is public / has no visibility field
+///   2. the creator of a private service
+///   3. admins
+///   4. users who already have an active `UserService` referencing this
+///      catalog entry — needed so the inherited-defaults panel keeps
+///      working for auto-provisioned no-auth services without re-leaking
+///      the row to unrelated callers.
+///
+/// All other lookups return `NotFound` (the same shape as a missing slug,
+/// so private services don't even leak existence).
 pub async fn get_catalog_entry(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
+    user_id: &str,
     slug: &str,
 ) -> AppResult<CatalogEntry> {
     let svc = db
@@ -328,6 +437,8 @@ pub async fn get_catalog_entry(
         .find_one(doc! { "slug": slug, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
+
+    enforce_catalog_read_access(db, user_id, &svc).await?;
 
     let provider = if let Some(ref pid) = svc.provider_config_id {
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -355,4 +466,239 @@ pub async fn get_catalog_entry(
         spr.as_ref(),
         oauth_client_id,
     ))
+}
+
+/// Does `user_id` have an active provisioned `UserService` for catalog
+/// `catalog_service_id`? Checks personal rows first (common case), then
+/// falls back to org-owned rows reachable through an active membership.
+///
+/// Org services store `UserService.user_id = org_user_id`, so a plain
+/// `{user_id}` lookup would miss them and deny catalog visibility to
+/// legitimate org members. Uses `OrgMembership.allows_resource` to
+/// respect per-membership `allowed_service_ids` scopes — a viewer with
+/// a scoped membership does NOT inherit visibility to services outside
+/// their scope.
+async fn has_active_user_service_for_catalog(
+    db: &mongodb::Database,
+    user_id: &str,
+    catalog_service_id: &str,
+) -> AppResult<bool> {
+    // Fast path: personal row.
+    let personal = db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! {
+            "user_id": user_id,
+            "catalog_service_id": catalog_service_id,
+            "is_active": true,
+        })
+        .await?
+        .is_some();
+    if personal {
+        return Ok(true);
+    }
+
+    // Org fallback. If the user has no active memberships the answer is
+    // definitively no; skip the second query.
+    let memberships = org_service::find_active_memberships_with_timeout(db, user_id).await?;
+    if memberships.is_empty() {
+        return Ok(false);
+    }
+
+    let org_user_ids: Vec<&str> = memberships.iter().map(|m| m.org_user_id.as_str()).collect();
+    let candidates: Vec<UserService> = db
+        .collection::<UserService>(USER_SERVICES)
+        .find(doc! {
+            "user_id": { "$in": &org_user_ids },
+            "catalog_service_id": catalog_service_id,
+            "is_active": true,
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    Ok(any_org_service_reachable(&candidates, &memberships))
+}
+
+/// Pure-function matcher: is there a `UserService` in `candidates` whose
+/// owning `org_user_id` corresponds to an `OrgMembership` whose
+/// `allowed_service_ids` scope covers that `UserService.id`?
+///
+/// Extracted so the scope-matching logic is unit-testable without Mongo.
+pub(crate) fn any_org_service_reachable(
+    candidates: &[UserService],
+    memberships: &[OrgMembership],
+) -> bool {
+    candidates.iter().any(|us| {
+        memberships
+            .iter()
+            .any(|m| m.org_user_id == us.user_id && m.allows_service(&us.id))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{any_org_service_reachable, caller_may_read_catalog_entry};
+    use crate::models::org_membership::OrgMembership;
+    use crate::models::user_service::UserService;
+    use chrono::Utc;
+
+    // The visibility decision is the load-bearing piece of the
+    // information-disclosure fix in NyxID#356: any path that broadens
+    // it would re-leak `default_request_headers` (and other catalog
+    // metadata) for private services. Pin the rules here so a future
+    // refactor can't quietly reopen the hole.
+
+    #[test]
+    fn public_entries_are_readable_by_everyone() {
+        assert!(caller_may_read_catalog_entry(
+            "public", "alice", "bob", false, false,
+        ));
+        // Legacy rows missing the visibility field surface as something
+        // other than "private"; this branch must default to allow.
+        assert!(caller_may_read_catalog_entry(
+            "", "alice", "bob", false, false,
+        ));
+    }
+
+    #[test]
+    fn private_creator_can_always_read() {
+        assert!(caller_may_read_catalog_entry(
+            "private", "alice", "alice", false, false,
+        ));
+    }
+
+    #[test]
+    fn private_admin_can_read() {
+        assert!(caller_may_read_catalog_entry(
+            "private", "alice", "bob", true, false,
+        ));
+    }
+
+    #[test]
+    fn private_user_with_active_service_can_read() {
+        // Auto-provisioned no-auth keys backed by a private catalog
+        // entry need this exception so the inherited-defaults panel
+        // works.
+        assert!(caller_may_read_catalog_entry(
+            "private", "alice", "bob", false, true,
+        ));
+    }
+
+    #[test]
+    fn private_user_without_relationship_is_denied() {
+        // Plain authenticated user with no link to the row: the
+        // disclosure path Codex flagged. Must stay denied.
+        assert!(!caller_may_read_catalog_entry(
+            "private", "alice", "bob", false, false,
+        ));
+    }
+
+    #[test]
+    fn private_user_with_inactive_service_is_denied() {
+        // Soft-deleted user-service must NOT keep catalog visibility.
+        // The handler caller is responsible for filtering
+        // `is_active: true` in its lookup; this assertion just pins
+        // the contract — `has_active_user_service: false` blocks.
+        assert!(!caller_may_read_catalog_entry(
+            "private", "alice", "bob", false, false,
+        ));
+    }
+
+    // ---- org visibility tests for any_org_service_reachable ----
+
+    fn user_service(id: &str, user_id: &str) -> UserService {
+        UserService {
+            id: id.to_string(),
+            user_id: user_id.to_string(),
+            slug: "test".to_string(),
+            endpoint_id: "ep-1".to_string(),
+            api_key_id: None,
+            auth_method: "none".to_string(),
+            auth_key_name: String::new(),
+            catalog_service_id: Some("cat-1".to_string()),
+            node_id: None,
+            node_priority: 0,
+            service_type: "http".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
+            custom_user_agent: None,
+            default_request_headers: None,
+            is_active: true,
+            source: None,
+            source_id: None,
+            source_app_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn membership(org_user_id: &str, allowed: Option<Vec<String>>) -> OrgMembership {
+        OrgMembership {
+            id: format!("mem-{org_user_id}"),
+            org_user_id: org_user_id.to_string(),
+            member_user_id: "bob".to_string(),
+            role: crate::models::org_membership::OrgRole::Member,
+            allowed_service_ids: allowed,
+            created_at: Utc::now(),
+            revoked_at: None,
+        }
+    }
+
+    #[test]
+    fn org_member_with_unrestricted_membership_can_see_catalog() {
+        // The concrete case that regressed: an org user's UserService
+        // is stored under the org's synthetic user_id, not the member's.
+        // A membership with no `allowed_service_ids` scope (full access)
+        // must grant visibility.
+        let svc = user_service("us-1", "org-1");
+        let memberships = vec![membership("org-1", None)];
+        assert!(any_org_service_reachable(&[svc], &memberships));
+    }
+
+    #[test]
+    fn org_member_with_matching_scope_can_see_catalog() {
+        let svc = user_service("us-1", "org-1");
+        let memberships = vec![membership("org-1", Some(vec!["us-1".to_string()]))];
+        assert!(any_org_service_reachable(&[svc], &memberships));
+    }
+
+    #[test]
+    fn org_member_scoped_to_other_services_cannot_see_catalog() {
+        // A viewer whose membership is restricted to a different
+        // UserService MUST NOT inherit catalog visibility through this
+        // path. The scope check is the gate.
+        let svc = user_service("us-1", "org-1");
+        let memberships = vec![membership("org-1", Some(vec!["us-2".to_string()]))];
+        assert!(!any_org_service_reachable(&[svc], &memberships));
+    }
+
+    #[test]
+    fn empty_scope_denies_all_services() {
+        // `allowed_service_ids = Some([])` means explicitly allow
+        // nothing — the viewer is gated out entirely.
+        let svc = user_service("us-1", "org-1");
+        let memberships = vec![membership("org-1", Some(vec![]))];
+        assert!(!any_org_service_reachable(&[svc], &memberships));
+    }
+
+    #[test]
+    fn no_matching_membership_denies_access() {
+        // UserService owned by org-1 but the caller only holds a
+        // membership in org-2.
+        let svc = user_service("us-1", "org-1");
+        let memberships = vec![membership("org-2", None)];
+        assert!(!any_org_service_reachable(&[svc], &memberships));
+    }
+
+    #[test]
+    fn no_candidates_means_no_access() {
+        let memberships = vec![membership("org-1", None)];
+        assert!(!any_org_service_reachable(&[], &memberships));
+    }
 }

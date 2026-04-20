@@ -68,7 +68,16 @@ pub struct ProviderConfig {
     pub documentation_url: Option<String>,
 
     pub is_active: bool,
-    /// "admin" | "user" | "both" -- controls where OAuth client credentials come from
+    /// "admin" | "user" | "both" -- controls where OAuth client credentials come from.
+    ///
+    /// Only meaningful for `oauth2` and `device_code` providers, where it gates
+    /// whether admin-level client_id/client_secret are required at setup time
+    /// (`user_token_service::ensure_oauth_provider_configured`) and whether the
+    /// admin client_id is disclosed to users during OAuth setup
+    /// (`catalog_service`). The field has no effect at request-time credential
+    /// resolution -- proxy credential lookup (`proxy_service`,
+    /// `delegation_service`) never reads it. `api_key` providers ignore this
+    /// field; the API rejects non-"admin" values on create/update.
     #[serde(default = "default_credential_mode")]
     pub credential_mode: String,
     /// How client credentials are sent to the token endpoint:

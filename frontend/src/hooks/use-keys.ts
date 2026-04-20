@@ -8,6 +8,7 @@ import type {
   ExternalApiKeyInfo,
   ExternalApiKeyListResponse,
 } from "@/types/keys";
+import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
 // -- Queries --
 
@@ -38,6 +39,32 @@ export function useCatalog() {
       const res = await api.get<CatalogListResponse>("/catalog");
       return res.entries;
     },
+  });
+}
+
+/**
+ * Fetch a single catalog entry by slug.
+ *
+ * Prefer this over scanning `useCatalog()` when you need to look up the
+ * catalog entry for an already-provisioned key. The list endpoint
+ * filters out no-auth / internal services that don't require credential
+ * setup, but a key can still be backed by one of those catalog rows
+ * (auto-provisioned). `/catalog/{slug}` returns the row regardless, so
+ * inherited metadata (e.g. `default_request_headers`) stays visible for
+ * those services — see NyxID#356 Codex review P2.
+ *
+ * Pass `null` or `undefined` when the key has no `catalog_service_slug`
+ * (purely custom endpoint); the hook disables itself so no request is
+ * issued.
+ */
+export function useCatalogEntry(slug: string | null | undefined) {
+  return useQuery({
+    queryKey: ["catalog", slug],
+    queryFn: async (): Promise<CatalogEntry> => {
+      return api.get<CatalogEntry>(`/catalog/${encodeURIComponent(slug!)}`);
+    },
+    enabled: Boolean(slug),
+    staleTime: 60_000,
   });
 }
 
@@ -115,6 +142,15 @@ interface UpdateKeyParams {
   readonly is_active?: boolean;
   /** Empty string clears the existing value. */
   readonly openapi_spec_url?: string;
+  /**
+   * NyxID#356 tri-state:
+   *   `undefined` (omit) leaves unchanged,
+   *   `null` clears,
+   *   array replaces.
+   */
+  readonly default_request_headers?:
+    | null
+    | readonly DefaultRequestHeader[];
 }
 
 export function useUpdateKey() {
@@ -168,6 +204,15 @@ interface UpdateUserServiceParams {
   readonly node_priority?: number;
   readonly is_active?: boolean;
   readonly custom_user_agent?: string;
+  /**
+   * NyxID#356 tri-state:
+   *   `undefined` (omit) leaves unchanged,
+   *   `null` clears,
+   *   array replaces.
+   */
+  readonly default_request_headers?:
+    | null
+    | readonly DefaultRequestHeader[];
 }
 
 export function useUpdateUserService() {

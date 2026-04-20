@@ -1,4 +1,20 @@
 import { z } from "zod";
+import {
+  defaultRequestHeaderListSchema,
+  defaultRequestHeaderSchema,
+  defaultRequestHeaderUpdateSchema,
+} from "./default-request-headers";
+
+export {
+  defaultRequestHeaderListSchema,
+  defaultRequestHeaderSchema,
+  defaultRequestHeaderUpdateSchema,
+} from "./default-request-headers";
+export type {
+  DefaultRequestHeader,
+  DefaultRequestHeaderList,
+  DefaultRequestHeaderUpdate,
+} from "./default-request-headers";
 
 export const AUTH_TYPES = [
   "none",
@@ -133,6 +149,8 @@ export const createServiceSchema = z
     certificate_auth_enabled: z.boolean().optional(),
     certificate_ttl_minutes: optionalString,
     allowed_principals: optionalString,
+    // NyxID#356: optional seed list for `default_request_headers`.
+    default_request_headers: defaultRequestHeaderListSchema.optional(),
   })
   .superRefine((value, ctx) => {
     if (value.service_type === "http") {
@@ -254,6 +272,10 @@ export const updateServiceSchema = z
     certificate_auth_enabled: z.boolean().optional(),
     certificate_ttl_minutes: optionalString,
     allowed_principals: optionalString,
+    /// NyxID#356: admin-facing default request headers for this service.
+    /// `undefined` leaves the value unchanged, `null` clears, an array
+    /// replaces. Matches the backend `Option<Option<Vec<...>>>` semantics.
+    default_request_headers: defaultRequestHeaderUpdateSchema,
   })
   .superRefine((value, ctx) => {
     if (value.service_type === "http") {
@@ -286,6 +308,21 @@ export const updateServiceSchema = z
   });
 
 export type UpdateServiceFormData = z.infer<typeof updateServiceSchema>;
+
+/**
+ * Shape fragment for NyxID#356 on `ServiceResponse` / `DownstreamService`
+ * payloads. Admin and user responses both carry this field when present.
+ * Kept as a separate schema (rather than a monolithic response schema)
+ * so callers can extend their existing `z.object` / TS interfaces
+ * without rewriting the whole thing.
+ */
+export const serviceResponseDefaultHeadersSchema = z.object({
+  default_request_headers: z.array(defaultRequestHeaderSchema).optional(),
+});
+
+export type ServiceResponseDefaultHeaders = z.infer<
+  typeof serviceResponseDefaultHeadersSchema
+>;
 
 // SEC-1: Restrict redirect URIs to http/https schemes only
 export const redirectUriSchema = z

@@ -3,6 +3,8 @@ use mongodb::bson::{Document, doc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::models::default_request_header::DefaultRequestHeader;
+
 pub const COLLECTION_NAME: &str = "downstream_services";
 
 /// Structured capability flags describing what a service supports through NyxID proxy.
@@ -271,6 +273,24 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,
 
+    /// Admin-configured default HTTP headers injected on every proxied
+    /// request to this service. Applied after caller headers are filtered
+    /// through the forward-allowlist and after identity propagation headers.
+    ///
+    /// Precedence: non-overridable entries replace any existing value for
+    /// that name (including the caller's). Overridable entries only fill
+    /// in when the caller (or a higher layer like `UserService` defaults)
+    /// has not set that name. See
+    /// `crate::models::default_request_header::merge_into_header_list`
+    /// for the merge semantics.
+    ///
+    /// Denylisted header names (`authorization`, `cookie`, `host`,
+    /// `x-nyxid-*`, `x-forwarded-*`, `proxy-*`, hop-by-hop headers) are
+    /// rejected at update time — see
+    /// `crate::models::default_request_header::validate_headers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_request_headers: Option<Vec<DefaultRequestHeader>>,
+
     /// Developer app (OAuth client) IDs that grant access to this service.
     /// When set on a private service, users who have consented to any of
     /// these apps will have the service auto-provisioned in their AI Services.
@@ -375,6 +395,7 @@ pub mod test_helpers {
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
+            default_request_headers: None,
             developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),
@@ -472,6 +493,14 @@ mod tests {
             examples_url: Some("https://github.com/example/repo/tree/main/examples".to_string()),
             recommended_skills: Some(vec!["example/skill".to_string()]),
             custom_user_agent: None,
+            default_request_headers: Some(vec![
+                crate::models::default_request_header::DefaultRequestHeader {
+                    name: "x-openclaw-scopes".to_string(),
+                    value: "operator.read,operator.write".to_string(),
+                    overridable: false,
+                    sensitive: false,
+                },
+            ]),
             developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),
@@ -482,6 +511,10 @@ mod tests {
         assert_eq!(svc.id, restored.id);
         assert_eq!(svc.slug, restored.slug);
         assert_eq!(svc.service_type, restored.service_type);
+        assert_eq!(
+            svc.default_request_headers,
+            restored.default_request_headers
+        );
         assert_eq!(svc.service_category, restored.service_category);
         assert_eq!(svc.homepage_url, restored.homepage_url);
         assert_eq!(svc.repository_url, restored.repository_url);
@@ -533,6 +566,7 @@ mod tests {
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
+            default_request_headers: None,
             developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),

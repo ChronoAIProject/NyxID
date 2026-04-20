@@ -11,6 +11,8 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::service_approval_config::ApprovalMode;
+use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
 use crate::services::{approval_service, audit_service};
 
@@ -157,11 +159,15 @@ fn ensure_request_owned_by_user(request_user_id: &str, auth_user_id: &str) -> Ap
 /// been removed or demoted decide outstanding requests. The live
 /// `resolve_owner_access` check is the single source of truth.
 ///
-/// `request.service_id` is a catalog `DownstreamService.id`, but
-/// `OrgMembership.allowed_service_ids` lives in the `UserService.id`
-/// space. We translate by looking up the `UserService` row that the
-/// request was filed against (`user_id = request.user_id`,
-/// `catalog_service_id = request.service_id`).
+/// `request.service_id` is either a catalog `DownstreamService.id`
+/// (catalog-backed services) or a `UserService.id` directly (custom
+/// services — see ChronoAIProject/NyxID#165). `OrgMembership.allowed_service_ids`
+/// lives in the `UserService.id` space, so we translate through the
+/// shared `scope_user_service_ids_for_config` helper which covers both
+/// cases: a direct `UserService.id` match *and* any `UserService` rows
+/// that reference the id as their `catalog_service_id`. Without the
+/// direct-match branch, a scoped admin would be notified for custom-
+/// service approvals but denied on decision (empty id list → `allows_any_resource` false for scoped roles).
 async fn ensure_caller_can_decide(
     db: &mongodb::Database,
     request: &crate::models::approval_request::ApprovalRequest,
@@ -184,17 +190,13 @@ async fn ensure_caller_can_decide(
         ));
     }
 
-    // Translate the catalog service id stored on the request into the
-    // UserService.id(s) used by the org membership scope, then gate on
-    // `allows_any_resource`. Empty result means the request was filed
-    // against a UserService that no longer exists -- safer to require
-    // an unscoped admin to decide it.
-    let user_service_ids = crate::services::user_service_service::user_service_ids_for_catalog(
-        db,
-        &request.user_id,
-        &request.service_id,
-    )
-    .await?;
+    // Translate the stored service id (catalog id *or* UserService id)
+    // into the `UserService.id` resource space the org membership scope
+    // uses, then gate on `allows_any_resource`. Empty result means the
+    // backing UserService has been deleted — safer to require an
+    // unscoped admin to decide it.
+    let user_service_ids =
+        scope_user_service_ids_for_config(db, &request.user_id, &request.service_id).await?;
     if !access.allows_any_resource(&user_service_ids) {
         return Err(AppError::Forbidden(
             "Your org admin role is scoped to other services and cannot decide on this approval request".to_string(),
@@ -625,17 +627,50 @@ pub async fn revoke_grant(
 
 #[derive(Debug, Serialize)]
 pub struct ServiceApprovalConfigItem {
+    /// The storage key used by proxy resolution. For catalog-backed user
+    /// services this is `catalog_service_id`; for custom user services this
+    /// is the `UserService.id` itself.
     pub service_id: String,
     pub service_name: String,
     pub approval_required: bool,
     pub approval_mode: ApprovalMode,
     pub created_at: String,
     pub updated_at: String,
+    /// The `UserService.id` that this policy applies to, when the config can
+    /// be traced back to one of the owner's active user services. Clients
+    /// should prefer this over `service_id` when cross-referencing against
+    /// `/user-services`, so configured AI services line up with the proxy
+    /// user sees in their dashboard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_service_id: Option<String>,
+    /// Proxy slug of the matching `UserService`, for display.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_service_slug: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ServiceApprovalConfigsResponse {
     pub configs: Vec<ServiceApprovalConfigItem>,
+    /// `(org_id, service_id)` pairs where an org the caller is a member
+    /// of has set its own per-service policy. `resolve_org_aware_approval`
+    /// treats those org policies as dominant over the actor's personal
+    /// config, so the UI should hide the matching entry from the
+    /// personal Add-Override picker — but only for that specific org.
+    /// When the same catalog service is inherited from a *different*
+    /// org without its own policy, the personal override is still
+    /// effective and should remain selectable.
+    ///
+    /// Populated only when listing the caller's personal configs (no
+    /// `?org_id` query). Left empty for the org-scoped list since the
+    /// org admin already sees the org's own configs directly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dominant_org_policies: Vec<DominantOrgPolicy>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DominantOrgPolicy {
+    pub org_id: String,
+    pub service_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -688,10 +723,75 @@ async fn resolve_service_config_owner(
     }
 }
 
+/// Collect the set of `UserService.id`s (the resource space that
+/// `OrgMembership.allowed_service_ids` lives in) that a given approval
+/// config `service_id` can reach:
+///
+/// 1. A direct `UserService.id` match (for custom services, or for policies
+///    written against the UserService id itself).
+/// 2. Every active `UserService` whose `catalog_service_id` matches
+///    (for catalog-backed policies, which cover all of the owner's user
+///    services that reuse that catalog entry).
+///
+/// The direct match deliberately does **not** filter on `is_active` —
+/// otherwise a scoped admin loses the ability to decide or clean up an
+/// outstanding approval the moment a custom service is deactivated,
+/// stranding the request. `user_service_ids_for_catalog` has the same
+/// always-visible semantics for catalog-backed rows; we mirror it here
+/// so deactivation never widens denial. Active-only ownership is
+/// enforced separately by `resolve_approval_target`, which governs
+/// *creating* or *updating* configs (a distinct operation from
+/// authorizing a caller to clean one up).
+async fn scope_user_service_ids_for_config(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    service_id: &str,
+) -> AppResult<Vec<String>> {
+    let mut ids = Vec::new();
+    if (db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(mongodb::bson::doc! {
+            "_id": service_id,
+            "user_id": owner_user_id,
+        })
+        .await?)
+        .is_some()
+    {
+        ids.push(service_id.to_string());
+    }
+    let mut catalog_ids = crate::services::user_service_service::user_service_ids_for_catalog(
+        db,
+        owner_user_id,
+        service_id,
+    )
+    .await?;
+    for id in catalog_ids.drain(..) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// Filter matching an *active*, owner-scoped `UserService` row. Used by
+/// write paths (`resolve_approval_target`) where creating a new policy
+/// against a deactivated service doesn't make sense. The scope/decision
+/// path deliberately drops the `is_active` predicate — see
+/// `scope_user_service_ids_for_config`.
+fn doc_ownership(owner_user_id: &str, service_id: &str) -> mongodb::bson::Document {
+    mongodb::bson::doc! {
+        "_id": service_id,
+        "user_id": owner_user_id,
+        "is_active": true,
+    }
+}
+
 /// Apply the org membership scope to a single approval-config target.
-/// Translates the catalog `service_id` to the underlying `UserService.id`s
-/// (which is what `OrgMembership.allowed_service_ids` actually stores)
-/// and then runs `allows_any_resource`.
+/// Translates the stored `service_id` (which may be a catalog
+/// `DownstreamService.id` or a `UserService.id` for custom services) to
+/// the underlying `UserService.id`s that live in the
+/// `OrgMembership.allowed_service_ids` resource space and then runs
+/// `allows_any_resource`.
 ///
 /// Orphan handling matches the list filter exactly so that any config
 /// an admin can *see* is also a config they can *delete*:
@@ -713,24 +813,162 @@ async fn ensure_service_config_in_scope(
     db: &mongodb::Database,
     access: &crate::services::org_service::OwnerAccess,
     owner_user_id: &str,
-    catalog_service_id: &str,
+    service_id: &str,
 ) -> AppResult<()> {
     // Direct owners (personal scope) skip the lookup entirely.
     if matches!(access, crate::services::org_service::OwnerAccess::Direct) {
         return Ok(());
     }
-    let user_service_ids = crate::services::user_service_service::user_service_ids_for_catalog(
-        db,
-        owner_user_id,
-        catalog_service_id,
-    )
-    .await?;
+    let user_service_ids = scope_user_service_ids_for_config(db, owner_user_id, service_id).await?;
     if !access.allows_any_resource(&user_service_ids) {
         return Err(AppError::OrgRoleInsufficient(
             "your org admin role is scoped to other services and cannot manage this approval policy".to_string(),
         ));
     }
     Ok(())
+}
+
+/// Outcome of resolving the path `service_id` into the identifiers used
+/// downstream: the storage key under which the `ServiceApprovalConfig`
+/// lives, a denormalized display name, and (when available) the backing
+/// `UserService` for UI annotation.
+struct ApprovalTarget {
+    /// Key used by `ServiceApprovalConfig.service_id` and by proxy
+    /// approval resolution (matches
+    /// `proxy_service::build_minimal_downstream_service`).
+    effective_service_id: String,
+    display_name: String,
+    user_service_id: Option<String>,
+    user_service_slug: Option<String>,
+}
+
+/// Translate a `service_id` path parameter into the storage key and
+/// display info for the approval policy.
+///
+/// The caller may pass:
+/// - A `UserService.id` owned by `owner_user_id` (primary path — matches
+///   the identifier returned by `GET /api/v1/user-services`). We then
+///   load the user service and collapse to `catalog_service_id` when
+///   present so the policy lines up with proxy resolution.
+/// - A catalog `DownstreamService.id` (legacy path, still accepted so
+///   existing callers and pre-existing policies keep working).
+///
+/// Returns `NotFound` if neither lookup succeeds.
+async fn resolve_approval_target(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    service_id: &str,
+) -> AppResult<ApprovalTarget> {
+    if let Some(user_service) = db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc_ownership(owner_user_id, service_id))
+        .await?
+    {
+        // Pick the display name by key space:
+        //  - Catalog-backed: the policy is keyed by `catalog_service_id`
+        //    and covers every sibling UserService reusing that catalog.
+        //    Persist the catalog `DownstreamService.name` so the stored
+        //    `service_name` is shared, stable, and never leaks a
+        //    sibling's endpoint label to another scoped admin.
+        //  - Custom: the policy is keyed by the UserService id itself,
+        //    so the endpoint label (or slug fallback) is both accurate
+        //    and uniquely attached to that one service.
+        let (effective_service_id, display_name) =
+            if let Some(ref catalog_id) = user_service.catalog_service_id {
+                let catalog_name = db
+                    .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                    .find_one(mongodb::bson::doc! { "_id": catalog_id })
+                    .await?
+                    .map(|s| s.name)
+                    .unwrap_or_else(|| user_service.slug.clone());
+                (catalog_id.clone(), catalog_name)
+            } else {
+                let endpoint_label = db
+                    .collection::<UserEndpoint>(USER_ENDPOINTS)
+                    .find_one(mongodb::bson::doc! { "_id": &user_service.endpoint_id })
+                    .await?
+                    .map(|ep| ep.label)
+                    .unwrap_or_else(|| user_service.slug.clone());
+                (user_service.id.clone(), endpoint_label)
+            };
+        return Ok(ApprovalTarget {
+            effective_service_id,
+            display_name,
+            user_service_id: Some(user_service.id.clone()),
+            user_service_slug: Some(user_service.slug),
+        });
+    }
+
+    if let Some(service) = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(mongodb::bson::doc! { "_id": service_id, "is_active": true })
+        .await?
+    {
+        return Ok(ApprovalTarget {
+            effective_service_id: service.id,
+            display_name: service.name,
+            user_service_id: None,
+            user_service_slug: Some(service.slug),
+        });
+    }
+
+    Err(AppError::NotFound("Service not found".to_string()))
+}
+
+/// Look up the owner's matching `UserService` for an existing config's
+/// `service_id`, filtered to the caller's `OwnerAccess` scope. The
+/// returned annotation is surfaced in list responses and used by the UI
+/// as the mutation id, so it must never name a service the caller is
+/// not entitled to operate on.
+///
+/// Resolution order:
+///  1. A direct `UserService.id` match (custom-service configs, or
+///     policies written against the UserService id directly).
+///  2. The newest active `UserService` sharing `catalog_service_id`
+///     (catalog-backed policies cover every sibling; we just need a
+///     representative).
+///
+/// `OwnerAccess::AsOrgAdmin` with a populated `allowed_service_ids`
+/// restricts both paths — scoped admins never see siblings outside their
+/// scope. `Direct` and unscoped `AsOrgAdmin` (`allowed_service_ids:
+/// None`) accept any match. Returning `None` is safe: the UI falls back
+/// to `service_id` for mutations, and the admin's outer scope check
+/// already guarantees they control the policy.
+async fn find_matching_user_service_for_config(
+    db: &mongodb::Database,
+    access: &crate::services::org_service::OwnerAccess,
+    owner_user_id: &str,
+    stored_service_id: &str,
+) -> AppResult<Option<UserService>> {
+    if let Some(us) = db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc_ownership(owner_user_id, stored_service_id))
+        .await?
+        && access.allows_resource(&us.id)
+    {
+        return Ok(Some(us));
+    }
+
+    // Catalog-backed fallback: stream the siblings in newest-first order
+    // and return the first one the access scope accepts. A scoped admin
+    // whose allowed_service_ids doesn't cover any sibling gets `None`,
+    // keeping their metadata sealed.
+    use futures::TryStreamExt;
+    let mut cursor = db
+        .collection::<UserService>(USER_SERVICES)
+        .find(mongodb::bson::doc! {
+            "user_id": owner_user_id,
+            "catalog_service_id": stored_service_id,
+            "is_active": true,
+        })
+        .sort(mongodb::bson::doc! { "created_at": -1 })
+        .await?;
+    while let Some(us) = cursor.try_next().await? {
+        if access.allows_resource(&us.id) {
+            return Ok(Some(us));
+        }
+    }
+    Ok(None)
 }
 
 // --- Per-service approval config handlers ---
@@ -757,16 +995,18 @@ pub async fn list_service_configs(
     for c in configs {
         if !matches!(access, crate::services::org_service::OwnerAccess::Direct) {
             let user_service_ids =
-                crate::services::user_service_service::user_service_ids_for_catalog(
-                    &state.db,
-                    &user_id,
-                    &c.service_id,
-                )
-                .await?;
+                scope_user_service_ids_for_config(&state.db, &user_id, &c.service_id).await?;
             if !access.allows_any_resource(&user_service_ids) {
                 continue;
             }
         }
+        let matching =
+            find_matching_user_service_for_config(&state.db, &access, &user_id, &c.service_id)
+                .await?;
+        let (user_service_id, user_service_slug) = match matching {
+            Some(us) => (Some(us.id), Some(us.slug)),
+            None => (None, None),
+        };
         items.push(ServiceApprovalConfigItem {
             service_id: c.service_id,
             service_name: c.service_name,
@@ -774,16 +1014,90 @@ pub async fn list_service_configs(
             approval_mode: c.approval_mode,
             created_at: c.created_at.to_rfc3339(),
             updated_at: c.updated_at.to_rfc3339(),
+            user_service_id,
+            user_service_slug,
         });
     }
 
-    Ok(Json(ServiceApprovalConfigsResponse { configs: items }))
+    // For the caller's personal list, also collect the `service_id` set
+    // of org policies that would dominate `resolve_org_aware_approval`
+    // for any org they're a member of. The UI uses this to hide those
+    // services from the personal Add-Override picker so users don't
+    // create no-op overrides against org-routed proxy calls. The org-
+    // scoped list path sees the org's own policies directly, so this
+    // stays empty there.
+    //
+    // Each included id must honor the member's own scope:
+    //   - Viewer role: the member can't proxy org services at all, so
+    //     no org policy can dominate *their* calls — skip entirely.
+    //   - Scoped member/admin (`allowed_service_ids: Some(...)`): only
+    //     include policies whose UserService-space translation
+    //     intersects the member's allowed set. Otherwise we'd expose
+    //     raw `service_id`s (especially custom-service ids, which are
+    //     just `UserService.id`s) for resources the member was never
+    //     granted access to — a violation of the org scope invariant.
+    //   - Unscoped (`allowed_service_ids: None`): every org policy
+    //     applies.
+    let dominant_org_policies = if query.org_id.is_some() {
+        Vec::new()
+    } else {
+        let mut out: Vec<DominantOrgPolicy> = Vec::new();
+        let memberships =
+            crate::services::org_service::list_memberships_for_member(&state.db, &actor, false)
+                .await?;
+        for m in memberships {
+            if !m.role.can_proxy() {
+                continue;
+            }
+            let org_configs =
+                approval_service::list_service_approval_configs(&state.db, &m.org_user_id).await?;
+            for c in org_configs {
+                let in_scope = match &m.allowed_service_ids {
+                    None => true,
+                    Some(allowed) => {
+                        let user_service_ids = scope_user_service_ids_for_config(
+                            &state.db,
+                            &m.org_user_id,
+                            &c.service_id,
+                        )
+                        .await?;
+                        user_service_ids
+                            .iter()
+                            .any(|id| allowed.iter().any(|a| a == id))
+                    }
+                };
+                if in_scope {
+                    out.push(DominantOrgPolicy {
+                        org_id: m.org_user_id.clone(),
+                        service_id: c.service_id,
+                    });
+                }
+            }
+        }
+        out
+    };
+
+    Ok(Json(ServiceApprovalConfigsResponse {
+        configs: items,
+        dominant_org_policies,
+    }))
 }
 
 /// PUT /api/v1/approvals/service-configs/{service_id}
 ///
 /// Set a per-service approval override. Creates or updates. Pass
 /// `?org_id=X` to set the policy on org X's behalf (caller must be admin).
+///
+/// The path `service_id` accepts either a `UserService.id` (the natural
+/// key that users interact with via `/user-services` and the unified keys
+/// UI — including custom services that have no catalog backing) or a
+/// legacy catalog `DownstreamService.id` (kept working so existing API
+/// consumers and pre-existing policies don't break). In both cases the
+/// stored config is keyed by the *effective* service id that proxy
+/// approval resolution uses (the catalog id when the user service is
+/// catalog-backed, otherwise the user service id itself), so a single
+/// policy naturally covers all user services reusing the same catalog
+/// entry while custom services get their own isolated policy.
 pub async fn set_service_config(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -801,23 +1115,31 @@ pub async fn set_service_config(
         ));
     }
 
-    // Verify the service exists
-    let service = state
-        .db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(mongodb::bson::doc! { "_id": &service_id, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+    let target = resolve_approval_target(&state.db, &user_id, &service_id).await?;
+
+    // Reject a scoped admin targeting a specific UserService outside
+    // their `allowed_service_ids`, even when a sibling for the same
+    // catalog is in scope. The catalog-level check below (effective
+    // service id) would otherwise pass via the in-scope sibling and the
+    // response/audit would leak the out-of-scope service id/slug.
+    if let Some(ref us_id) = target.user_service_id
+        && !access.allows_resource(us_id)
+    {
+        return Err(AppError::OrgRoleInsufficient(
+            "your org admin role is scoped to other services and cannot manage this approval policy".to_string(),
+        ));
+    }
 
     // Per-service scope check: scoped admins can only manage policies for
     // services in their `allowed_service_ids` set.
-    ensure_service_config_in_scope(&state.db, &access, &user_id, &service_id).await?;
+    ensure_service_config_in_scope(&state.db, &access, &user_id, &target.effective_service_id)
+        .await?;
 
     let config = approval_service::set_service_approval_config(
         &state.db,
         &user_id,
-        &service_id,
-        &service.name,
+        &target.effective_service_id,
+        &target.display_name,
         body.approval_required,
         body.approval_mode.as_ref(),
     )
@@ -828,8 +1150,9 @@ pub async fn set_service_config(
         Some(actor),
         "service_approval_config_set".to_string(),
         Some(serde_json::json!({
-            "service_id": service_id,
-            "service_name": service.name,
+            "service_id": target.effective_service_id,
+            "service_name": target.display_name,
+            "user_service_id": target.user_service_id,
             "policy_owner_user_id": user_id,
             "approval_required": config.approval_required,
             "approval_mode": config.approval_mode.as_str(),
@@ -847,6 +1170,8 @@ pub async fn set_service_config(
         approval_mode: config.approval_mode,
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
+        user_service_id: target.user_service_id,
+        user_service_slug: target.user_service_slug,
     }))
 }
 
@@ -864,17 +1189,32 @@ pub async fn delete_service_config(
     let (user_id, access) =
         resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
 
-    // Per-service scope check, same as set_service_config.
-    ensure_service_config_in_scope(&state.db, &access, &user_id, &service_id).await?;
+    // Resolve the path id to the stored-key space up-front so callers can
+    // pass either a UserService.id (what clients see on /user-services) or
+    // the raw effective service id (what's stored in the config). Falls
+    // back to the raw id when the user service has been deleted — that's
+    // an orphan cleanup case, and the legacy catalog lookup inside
+    // `resolve_approval_target` keeps those reachable.
+    let (effective_service_id, user_service_id) =
+        match resolve_approval_target(&state.db, &user_id, &service_id).await {
+            Ok(target) => (target.effective_service_id, target.user_service_id),
+            Err(AppError::NotFound(_)) => (service_id.clone(), None),
+            Err(e) => return Err(e),
+        };
 
-    approval_service::delete_service_approval_config(&state.db, &user_id, &service_id).await?;
+    // Per-service scope check, same as set_service_config.
+    ensure_service_config_in_scope(&state.db, &access, &user_id, &effective_service_id).await?;
+
+    approval_service::delete_service_approval_config(&state.db, &user_id, &effective_service_id)
+        .await?;
 
     audit_service::log_async(
         state.db.clone(),
         Some(actor),
         "service_approval_config_deleted".to_string(),
         Some(serde_json::json!({
-            "service_id": service_id,
+            "service_id": effective_service_id,
+            "user_service_id": user_service_id,
             "policy_owner_user_id": user_id,
         })),
         None,

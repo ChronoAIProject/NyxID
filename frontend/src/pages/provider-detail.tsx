@@ -130,19 +130,22 @@ export function ProviderDetailPage() {
           }
           badge
         />
-        <DetailRow
-          label="Credential Mode"
-          value={
-            provider.credential_mode === "admin"
-              ? "Admin Only"
-              : provider.credential_mode === "user"
-                ? "User Provided"
-                : provider.credential_mode === "both"
-                  ? "Admin or User"
-                  : provider.credential_mode
-          }
-          badge
-        />
+        {(provider.provider_type === "oauth2" ||
+          provider.provider_type === "device_code") && (
+          <DetailRow
+            label="Credential Mode"
+            value={
+              provider.credential_mode === "admin"
+                ? "Admin Only"
+                : provider.credential_mode === "user"
+                  ? "User Provided"
+                  : provider.credential_mode === "both"
+                    ? "Admin or User"
+                    : provider.credential_mode
+            }
+            badge
+          />
+        )}
         <DetailRow
           label="Status"
           value={provider.is_active ? "Active" : "Inactive"}

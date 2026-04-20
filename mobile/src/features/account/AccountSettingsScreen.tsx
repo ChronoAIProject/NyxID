@@ -100,6 +100,20 @@ function getIdentityName(name?: string | null, provider?: string | null): string
   return "User";
 }
 
+function formatSignInMethod(provider?: string | null): string {
+  if (!provider) return "Email/Password";
+  switch (provider.toLowerCase()) {
+    case "google":
+      return "Google";
+    case "github":
+      return "GitHub";
+    case "apple":
+      return "Apple";
+    default:
+      return provider.charAt(0).toUpperCase() + provider.slice(1);
+  }
+}
+
 function getDisplayNameValue(name?: string | null, provider?: string | null): string {
   const trimmedName = name?.trim();
   if (trimmedName) return trimmedName;
@@ -349,7 +363,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
                 value={getDisplayNameValue(profile.display_name, profile.social_provider)}
               />
               <AccountRow label="Email" value={profile.email} />
-              <AccountRow label="Sign-in Method" value={profile.social_provider ? profile.social_provider.charAt(0).toUpperCase() + profile.social_provider.slice(1) : "Email"} isLast />
+              <AccountRow label="Sign-in Method" value={formatSignInMethod(profile.social_provider)} isLast />
             </>
           )}
         </View>

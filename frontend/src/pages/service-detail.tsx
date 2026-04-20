@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { CopyableField } from "@/components/shared/copyable-field";
+import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
 import { OidcCredentialsSection } from "@/components/dashboard/oidc-credentials-section";
 import { EndpointList } from "@/components/dashboard/endpoint-list";
 import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
@@ -486,6 +487,31 @@ export function ServiceDetailPage() {
               </DetailSection>
             </>
           )}
+
+          <Separator />
+          <DetailSection title="Default request headers">
+            {service.default_request_headers &&
+            service.default_request_headers.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">
+                  Injected on every proxied request. Non-overridable entries
+                  replace caller-supplied values; overridable ones yield to
+                  them.
+                </p>
+                <DefaultHeadersEditor
+                  value={service.default_request_headers.map((h) => ({ ...h }))}
+                  onChange={() => {
+                    /* read-only */
+                  }}
+                  readOnly
+                />
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                No default headers configured for this service.
+              </p>
+            )}
+          </DetailSection>
 
           <Separator />
           <DetailSection title="Provider Requirements">

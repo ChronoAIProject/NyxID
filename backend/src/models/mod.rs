@@ -11,6 +11,7 @@ pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
 pub mod consent;
+pub mod default_request_header;
 pub mod downstream_service;
 pub mod group;
 pub mod invite_code;

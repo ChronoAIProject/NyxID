@@ -3,6 +3,12 @@ FROM rust:1.93-bookworm AS builder
 
 WORKDIR /build
 
+# Commit hash baked into the binary for /health. `.git` is excluded from the
+# Docker context, so CI must pass this ARG explicitly; otherwise the build
+# script falls back to "unknown".
+ARG NYXID_GIT_HASH=unknown
+ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
+
 # Copy workspace manifests and lock file for dependency caching
 COPY Cargo.toml Cargo.lock ./
 COPY backend/Cargo.toml backend/Cargo.toml
@@ -16,8 +22,9 @@ RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
 # Remove the dummy build artifacts (forces recompilation of our code only)
 RUN rm -rf backend/src target/release/deps/nyxid-* target/release/nyxid
 
-# Copy the real source code and docs (docs are embedded via include_str!)
+# Copy the real source code, build script, and docs (docs are embedded via include_str!)
 COPY backend/src backend/src
+COPY backend/build.rs backend/build.rs
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
 # Touch main.rs to ensure cargo sees it as newer than the cached dummy

@@ -65,6 +65,18 @@ pub struct UpdateUserServiceRequest {
     pub delegation_token_scope: Option<String>,
     /// Custom User-Agent override. Set to "" to clear, Some(value) to set.
     pub custom_user_agent: Option<String>,
+    /// Per-user default HTTP headers injected on every proxied request
+    /// (NyxID#356). Field omitted leaves the existing value unchanged;
+    /// explicit JSON `null` or `[]` clears; a non-empty array replaces
+    /// with a validated list. The `nullable_field` helper preserves
+    /// the omitted-vs-null distinction through serde — a plain
+    /// `Option<Option<_>>` collapses both to `None`.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub default_request_headers:
+        Option<Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -93,6 +105,13 @@ pub struct UserServiceResponse {
     pub delegation_token_scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,
+    /// Per-user default HTTP headers injected on every proxied request
+    /// (NyxID#356). Returns the user-owned entries only; catalog-level
+    /// defaults inherited from the `DownstreamService` are surfaced on
+    /// the catalog response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_request_headers:
+        Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
     pub created_at: String,
     pub updated_at: String,
     /// Provenance: personal credentials, or inherited from an org membership.
@@ -270,6 +289,7 @@ pub async fn update_user_service(
         body.is_active,
         identity.as_ref(),
         body.custom_user_agent.as_deref(),
+        body.default_request_headers.as_ref(),
     )
     .await?;
 
@@ -376,6 +396,9 @@ fn user_service_with_source_response(item: UserServiceWithSource) -> UserService
         inject_delegation_token: svc.inject_delegation_token,
         delegation_token_scope: svc.delegation_token_scope,
         custom_user_agent: svc.custom_user_agent,
+        default_request_headers: crate::models::default_request_header::redact_list_for_response(
+            svc.default_request_headers,
+        ),
         created_at: svc.created_at.to_rfc3339(),
         updated_at: svc.updated_at.to_rfc3339(),
         credential_source: source.into(),

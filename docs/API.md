@@ -2225,7 +2225,7 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `slug`              | string   | Yes      | URL-safe identifier (1-100 chars, lowercase alphanumeric + hyphens)  |
 | `description`       | string   | No       | Provider description                                                 |
 | `provider_type`     | string   | Yes      | `oauth2`, `api_key`, or `device_code`                                |
-| `credential_mode`   | string   | No       | `admin` (default), `user`, or `both` -- controls where OAuth credentials come from |
+| `credential_mode`   | string   | No       | `admin` (default), `user`, or `both` -- controls where OAuth client credentials come from during setup. **Only applies to `oauth2` and `device_code` providers.** For `api_key` providers, must be `admin` or omitted (the API rejects other values). Does not affect request-time credential resolution for any provider type. |
 | `authorization_url` | string   | OAuth2   | OAuth2 authorization endpoint (required for `oauth2` type)           |
 | `token_url`         | string   | OAuth2   | OAuth2 token endpoint (required for `oauth2` type)                   |
 | `revocation_url`    | string   | No       | OAuth2 token revocation endpoint (RFC 7009)                          |
@@ -2351,7 +2351,7 @@ Update a provider configuration. Only the provided fields are updated (partial u
 | `name`              | string   | No       | Display name                                         |
 | `description`       | string   | No       | Provider description                                 |
 | `is_active`         | boolean  | No       | Enable or disable the provider                       |
-| `credential_mode`   | string   | No       | `admin`, `user`, or `both`                           |
+| `credential_mode`   | string   | No       | `admin`, `user`, or `both` (oauth2/device_code only; must be `admin` for api_key) |
 | `authorization_url` | string   | No       | OAuth2 authorization endpoint                        |
 | `token_url`         | string   | No       | OAuth2 token endpoint                                |
 | `revocation_url`    | string   | No       | OAuth2 revocation endpoint (RFC 7009)                |

@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::models::default_request_header::DefaultRequestHeader;
+
 pub const COLLECTION_NAME: &str = "user_services";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,6 +60,17 @@ pub struct UserService {
     /// When None, the client's User-Agent is forwarded as-is (passthrough).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,
+
+    /// Per-user default HTTP headers injected on every proxied request
+    /// through this service. Layered *above* the catalog
+    /// `DownstreamService.default_request_headers`:
+    /// the catalog layer lands first, then the user's overrides run with
+    /// the same precedence rules (non-overridable wins, overridable yields
+    /// to whatever is already set). See
+    /// `crate::models::default_request_header` for merge semantics and
+    /// denylist rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_request_headers: Option<Vec<DefaultRequestHeader>>,
 
     pub is_active: bool,
 
@@ -121,6 +134,7 @@ mod tests {
             inject_delegation_token: true,
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
+            default_request_headers: None,
             is_active: true,
             source: None,
             source_id: None,
@@ -164,6 +178,7 @@ mod tests {
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
+            default_request_headers: None,
             is_active: true,
             source: None,
             source_id: None,
@@ -202,6 +217,7 @@ mod tests {
             inject_delegation_token: true,
             delegation_token_scope: "custom:scope".to_string(),
             custom_user_agent: None,
+            default_request_headers: None,
             is_active: true,
             source: None,
             source_id: None,
@@ -253,6 +269,7 @@ mod tests {
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
+            default_request_headers: None,
             is_active: true,
             source: None,
             source_id: None,

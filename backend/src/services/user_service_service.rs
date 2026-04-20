@@ -532,6 +532,7 @@ pub async fn create_user_service(
         inject_delegation_token: identity.inject_delegation_token,
         delegation_token_scope: identity.delegation_token_scope,
         custom_user_agent: None,
+        default_request_headers: None,
         is_active: true,
         source: source.map(str::to_string),
         source_id: source_id.map(str::to_string),
@@ -566,6 +567,9 @@ pub async fn update_user_service(
     is_active: Option<bool>,
     identity: Option<&IdentityConfig>,
     custom_user_agent: Option<&str>,
+    default_request_headers: Option<
+        &Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    >,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
     let mut set_doc = doc! {
@@ -686,6 +690,49 @@ pub async fn update_user_service(
         }
     }
 
+    // default_request_headers: None means "no change". Some(None) means
+    // explicitly clear the field. Some(Some(list)) means replace with list.
+    // Validation is delegated to the shared module so admin + user paths
+    // enforce the same denylist / length caps. NyxID#356.
+    let mut audit_default_header_names: Option<Vec<String>> = None;
+    if let Some(drh) = default_request_headers {
+        match drh {
+            Some(list) => {
+                // Restore stored values for entries whose `value` was
+                // submitted as the redaction placeholder — otherwise a
+                // GET → editor → PUT round trip clobbers every
+                // sensitive value with the literal placeholder string.
+                // `current` was fetched at the top of this function.
+                let reconciled = crate::models::default_request_header::reconcile_with_stored(
+                    list.clone(),
+                    current.default_request_headers.as_deref(),
+                );
+                let normalized =
+                    crate::models::default_request_header::validate_headers(reconciled)?;
+                match normalized {
+                    Some(norm) => {
+                        audit_default_header_names =
+                            Some(norm.iter().map(|h| h.name.clone()).collect());
+                        let bson_val = bson::to_bson(&norm).map_err(|e| {
+                            AppError::Internal(format!(
+                                "Failed to serialize default_request_headers: {e}"
+                            ))
+                        })?;
+                        set_doc.insert("default_request_headers", bson_val);
+                    }
+                    None => {
+                        audit_default_header_names = Some(Vec::new());
+                        set_doc.insert("default_request_headers", bson::Bson::Null);
+                    }
+                }
+            }
+            None => {
+                audit_default_header_names = Some(Vec::new());
+                set_doc.insert("default_request_headers", bson::Bson::Null);
+            }
+        }
+    }
+
     let result = db
         .collection::<UserService>(COLLECTION_NAME)
         .update_one(
@@ -696,6 +743,28 @@ pub async fn update_user_service(
 
     if result.matched_count == 0 {
         return Err(AppError::NotFound("User service not found".to_string()));
+    }
+
+    // Audit per-user default header mutations (NyxID#356). Names only —
+    // values never reach the audit store, even when non-sensitive,
+    // because clients sometimes mistake which entries hold secrets.
+    // Mirrors the admin `service_default_headers_updated` event so org
+    // observability covers both surfaces uniformly.
+    if let Some(names) = audit_default_header_names {
+        crate::services::audit_service::log_async(
+            db.clone(),
+            Some(actor_user_id.to_string()),
+            "user_service_default_headers_updated".to_string(),
+            Some(serde_json::json!({
+                "user_service_id": service_id,
+                "owner_user_id": user_id,
+                "header_names": names,
+            })),
+            None,
+            None,
+            None,
+            None,
+        );
     }
 
     Ok(())
@@ -722,6 +791,7 @@ pub async fn deactivate_user_service(
         None,
         None,
         Some(false),
+        None,
         None,
         None,
     )

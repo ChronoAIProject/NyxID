@@ -16,6 +16,7 @@ pub mod openclaw;
 pub mod org;
 pub mod profile;
 pub mod proxy;
+pub mod repo;
 pub mod service;
 pub mod session;
 pub mod ssh;

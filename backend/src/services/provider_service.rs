@@ -1173,7 +1173,7 @@ pub async fn seed_default_providers(
             icon_url: None,
             documentation_url: Some("https://core.telegram.org/bots/api".to_string()),
             is_active: true,
-            credential_mode: "user".to_string(),
+            credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -1228,7 +1228,7 @@ pub async fn seed_default_providers(
                     .to_string(),
             ),
             is_active: true,
-            credential_mode: "user".to_string(),
+            credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -1280,7 +1280,7 @@ pub async fn seed_default_providers(
                     .to_string(),
             ),
             is_active: true,
-            credential_mode: "user".to_string(),
+            credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -1334,7 +1334,7 @@ pub async fn seed_default_providers(
                 "https://docs.discord.com/developers/reference#authentication".to_string(),
             ),
             is_active: true,
-            credential_mode: "user".to_string(),
+            credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
@@ -1400,6 +1400,31 @@ pub async fn seed_default_providers(
 
     if seeded_count > 0 {
         tracing::info!(count = seeded_count, "Default provider seeding complete");
+    }
+
+    // Migration (NyxID#238): normalize `credential_mode` on `api_key` providers
+    // to "admin". The field only meaningfully gates OAuth client-credential
+    // setup for oauth2/device_code providers; on api_key it's inert, and the
+    // API now rejects non-"admin" values on create/update. Earlier seeds
+    // (telegram-bot, lark-bot, feishu-bot, discord-bot) inserted "user",
+    // which would block admin edits of those rows. Idempotent via $ne filter.
+    let api_key_mode_migration = collection
+        .update_many(
+            doc! {
+                "provider_type": "api_key",
+                "credential_mode": { "$ne": "admin" },
+            },
+            doc! { "$set": {
+                "credential_mode": "admin",
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+    if api_key_mode_migration.modified_count > 0 {
+        tracing::info!(
+            count = api_key_mode_migration.modified_count,
+            "Normalized credential_mode=admin on existing api_key providers (NyxID#238)"
+        );
     }
 
     Ok(())
@@ -2053,6 +2078,7 @@ pub async fn seed_default_services(
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
+            default_request_headers: None,
             developer_app_ids: None,
             token_exchange_config,
             created_at: now,
@@ -2468,6 +2494,11 @@ pub async fn create_provider(
             "telegram_widget providers only support credential_mode=admin".to_string(),
         ));
     }
+    if provider_type == "api_key" && credential_mode != "admin" {
+        return Err(AppError::ValidationError(
+            "credential_mode only applies to oauth2/device_code providers; omit it or set \"admin\" for api_key providers".to_string(),
+        ));
+    }
 
     // Check slug uniqueness
     let existing = db
@@ -2636,6 +2667,14 @@ pub async fn update_provider(
     {
         return Err(AppError::ValidationError(
             "telegram_widget providers only support credential_mode=admin".to_string(),
+        ));
+    }
+    if existing.provider_type == "api_key"
+        && let Some(ref mode) = updates.credential_mode
+        && mode != "admin"
+    {
+        return Err(AppError::ValidationError(
+            "credential_mode only applies to oauth2/device_code providers; omit it or set \"admin\" for api_key providers".to_string(),
         ));
     }
 

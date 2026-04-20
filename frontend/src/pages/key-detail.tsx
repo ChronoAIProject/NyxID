@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   useKey,
@@ -7,8 +7,12 @@ import {
   useUpdateEndpoint,
   useUpdateExternalApiKey,
   useUpdateUserService,
+  useCatalogEntry,
 } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
+import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
+import { defaultRequestHeaderListSchema } from "@/schemas/default-request-headers";
+import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 import { ApiError } from "@/lib/api-client";
 import { deriveServiceBadge } from "@/lib/service-status";
 import { copyToClipboard } from "@/lib/utils";
@@ -1206,6 +1210,157 @@ function LabelEditor({
   );
 }
 
+function DefaultHeadersSection({
+  serviceId,
+  userHeaders,
+  catalogHeaders,
+  readOnly = false,
+}: {
+  readonly serviceId: string;
+  readonly userHeaders: readonly DefaultRequestHeader[];
+  readonly catalogHeaders: readonly DefaultRequestHeader[] | null;
+  readonly readOnly?: boolean;
+}) {
+  // Draft only exists while editing — we seed it on Edit click and discard
+  // on Save/Cancel. This keeps render pure: outside edit mode we render
+  // `userHeaders` directly, which always reflects server truth.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<readonly DefaultRequestHeader[]>([]);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const updateService = useUpdateUserService();
+
+  function handleEdit() {
+    setDraft(userHeaders.map((h) => ({ ...h })));
+    setSaveError(null);
+    setEditing(true);
+  }
+
+  function handleCancel() {
+    setDraft(userHeaders);
+    setSaveError(null);
+    setEditing(false);
+  }
+
+  function handleSave() {
+    const parsed = defaultRequestHeaderListSchema.safeParse(draft);
+    if (!parsed.success) {
+      const first = parsed.error.issues[0];
+      setSaveError(first?.message ?? "Invalid headers");
+      return;
+    }
+    const originalEmpty = userHeaders.length === 0;
+    const nextEmpty = parsed.data.length === 0;
+    // NyxID#356 tri-state: explicit clear when going from non-empty to
+    // empty; otherwise replace with the list. Never send `undefined`
+    // here because the user explicitly clicked Save.
+    const payload = nextEmpty && !originalEmpty ? null : parsed.data;
+    updateService.mutate(
+      {
+        serviceId,
+        default_request_headers: payload,
+      },
+      {
+        onSuccess: () => {
+          toast.success("Default headers updated");
+          setEditing(false);
+          setSaveError(null);
+        },
+        onError: (err) => {
+          const message =
+            err instanceof ApiError ? err.message : "Failed to update headers";
+          setSaveError(message);
+          toast.error(message);
+        },
+      },
+    );
+  }
+
+  return (
+    <Card className="md:col-span-2">
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <FileJson className="h-4 w-4 text-primary" />
+          <CardTitle className="text-sm">Default request headers</CardTitle>
+        </div>
+        <CardDescription>
+          Headers NyxID injects on every proxied request for this service.
+          Non-overridable entries replace caller-supplied values; overridable
+          ones yield to them. Values stored in plaintext in v1 — do not place
+          real secrets here (use the key&apos;s auth method instead).
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {catalogHeaders && catalogHeaders.length > 0 && (
+          <div className="space-y-2">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              From catalog (admin-configured)
+            </p>
+            <DefaultHeadersEditor
+              value={catalogHeaders}
+              onChange={() => {
+                /* read-only */
+              }}
+              readOnly
+              fromCatalog
+            />
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Your headers
+            </p>
+            {!readOnly && !editing && (
+              <Button size="sm" variant="outline" onClick={handleEdit}>
+                <Pencil className="mr-1 h-3 w-3" />
+                Edit
+              </Button>
+            )}
+          </div>
+          {editing ? (
+            <div className="space-y-2">
+              <DefaultHeadersEditor
+                value={draft}
+                onChange={setDraft}
+                disabled={updateService.isPending}
+              />
+              {saveError && (
+                <p className="text-xs text-destructive">{saveError}</p>
+              )}
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={handleSave}
+                  disabled={updateService.isPending}
+                >
+                  Save
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleCancel}
+                  disabled={updateService.isPending}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <DefaultHeadersEditor
+              value={userHeaders}
+              onChange={() => {
+                /* read-only when not editing */
+              }}
+              readOnly
+            />
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function KeyDetailPage() {
   const { keyId } = useParams({ strict: false }) as { keyId: string };
   const navigate = useNavigate();
@@ -1214,7 +1369,24 @@ export function KeyDetailPage() {
     readonly message?: string;
   };
   const { data: keyInfo, isLoading, error } = useKey(keyId);
+  // Fetch the catalog entry by slug directly instead of scanning the
+  // filtered `/catalog` listing. The list endpoint hides no-auth /
+  // internal services that don't need credential setup, but a key can
+  // still be backed by one of those rows (auto-provisioned) — scanning
+  // the list would silently drop the inherited-defaults panel for them
+  // even though the proxy still injects those defaults at request time.
+  // NyxID#356 Codex review P2.
+  const { data: catalogEntry } = useCatalogEntry(
+    keyInfo?.catalog_service_slug ?? null,
+  );
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  const catalogHeaders = useMemo<
+    readonly DefaultRequestHeader[] | null
+  >(() => {
+    if (!catalogEntry?.default_request_headers) return null;
+    return [...catalogEntry.default_request_headers];
+  }, [catalogEntry]);
 
   useEffect(() => {
     if (search.provider_status === "success") {
@@ -1378,46 +1550,62 @@ export function KeyDetailPage() {
       </div>
 
       {keyInfo.auto_connected ? (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Service Details</CardTitle>
-            <CardDescription>
-              {keyInfo.source_app_name
-                ? `This service was auto-connected via ${keyInfo.source_app_name}. It is managed by the platform and cannot be modified.`
-                : "This service requires no authentication and was auto-connected from the catalog. It is managed by the platform and cannot be modified."}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div>
-                <span className="text-xs font-medium text-muted-foreground">
-                  Endpoint
-                </span>
-                <p className="truncate font-mono text-xs">
-                  {keyInfo.endpoint_url}
-                </p>
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Service Details</CardTitle>
+              <CardDescription>
+                {keyInfo.source_app_name
+                  ? `This service was auto-connected via ${keyInfo.source_app_name}. It is managed by the platform and cannot be modified.`
+                  : "This service requires no authentication and was auto-connected from the catalog. It is managed by the platform and cannot be modified."}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Endpoint
+                  </span>
+                  <p className="truncate font-mono text-xs">
+                    {keyInfo.endpoint_url}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Proxy Path
+                  </span>
+                  <p className="font-mono text-xs">/proxy/s/{keyInfo.slug}</p>
+                </div>
+                <div>
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Auth Method
+                  </span>
+                  <p className="text-xs">None (no credentials required)</p>
+                </div>
+                <div>
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Routing
+                  </span>
+                  <p className="text-xs">Direct</p>
+                </div>
               </div>
-              <div>
-                <span className="text-xs font-medium text-muted-foreground">
-                  Proxy Path
-                </span>
-                <p className="font-mono text-xs">/proxy/s/{keyInfo.slug}</p>
-              </div>
-              <div>
-                <span className="text-xs font-medium text-muted-foreground">
-                  Auth Method
-                </span>
-                <p className="text-xs">None (no credentials required)</p>
-              </div>
-              <div>
-                <span className="text-xs font-medium text-muted-foreground">
-                  Routing
-                </span>
-                <p className="text-xs">Direct</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+
+          {/* Auto-connected keys still have catalog-level default headers
+              applied at proxy time (NyxID#356). Surface them read-only so
+              users can see why those headers reach the downstream — without
+              this, the panel only renders for user-managed keys and the
+              auto-connected case appears to have no defaults. */}
+          {!isSsh && catalogHeaders && catalogHeaders.length > 0 && (
+            <DefaultHeadersSection
+              serviceId={keyInfo.id}
+              userHeaders={[]}
+              catalogHeaders={catalogHeaders}
+              readOnly
+            />
+          )}
+        </>
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           <EndpointSection
@@ -1474,6 +1662,19 @@ export function KeyDetailPage() {
             serviceId={keyInfo.id}
             readOnly={readOnly}
           />
+
+          {!isSsh && (
+            <DefaultHeadersSection
+              serviceId={keyInfo.id}
+              userHeaders={
+                keyInfo.default_request_headers
+                  ? [...keyInfo.default_request_headers]
+                  : []
+              }
+              catalogHeaders={catalogHeaders}
+              readOnly={readOnly}
+            />
+          )}
 
           {keyInfo.node_id && !isSsh && (
           <NodeSetupHelper

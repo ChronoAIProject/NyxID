@@ -130,6 +130,17 @@ pub enum Commands {
         #[command(subcommand)]
         command: AdminCommands,
     },
+    /// Show the NyxID project repository URL
+    Repo(RepoArgs),
+    /// Show CLI version and project links
+    Info,
+}
+
+#[derive(Args)]
+pub struct RepoArgs {
+    /// Open the repository in the default browser
+    #[arg(long)]
+    pub open: bool,
 }
 
 #[derive(Subcommand)]
@@ -559,6 +570,23 @@ pub enum ServiceCommands {
         /// Set service to inactive
         #[arg(long, conflicts_with = "active")]
         inactive: bool,
+        /// Set or replace a default HTTP header injected on every proxied
+        /// request. Format: `name=value`, optionally suffixed with
+        /// `:overridable` to let a caller-supplied value win. Repeat the
+        /// flag to set multiple headers. Example:
+        ///   --default-header 'x-openclaw-scopes=operator.read,operator.write'
+        ///   --default-header 'x-api-version=v2:overridable'
+        /// When any `--default-header` flag is provided, the full list
+        /// replaces the service's current defaults.
+        #[arg(
+            long = "default-header",
+            value_name = "NAME=VALUE[:overridable]",
+            conflicts_with = "clear_default_headers"
+        )]
+        default_header: Vec<String>,
+        /// Clear all default request headers for this service.
+        #[arg(long)]
+        clear_default_headers: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1585,7 +1613,11 @@ pub enum ApprovalCommands {
     },
     /// Set approval configuration for a service
     SetConfig {
-        /// Service config ID or service ID
+        /// UserService ID (from `nyxid service list`) or catalog
+        /// DownstreamService ID. Use the UserService ID for custom
+        /// services that have no catalog backing — that's the only way
+        /// to target their policy. Catalog-backed user services accept
+        /// either and collapse to the same policy.
         id: String,
         /// Require approval for this service
         #[arg(long)]

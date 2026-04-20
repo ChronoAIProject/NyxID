@@ -98,6 +98,10 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=Apache-2.0
 
+      - name: Compute short git hash
+        id: git
+        run: echo "hash=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v7
@@ -106,6 +110,8 @@ jobs:
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
           outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}-${{ matrix.platform_pair }}

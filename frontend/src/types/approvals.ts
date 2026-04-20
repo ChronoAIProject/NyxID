@@ -113,10 +113,39 @@ export interface ServiceApprovalConfigItem {
   readonly approval_mode: ApprovalMode;
   readonly created_at: string;
   readonly updated_at: string;
+  /**
+   * The owner's `UserService.id` that this policy applies to, when the
+   * config can be traced back to an active user service. Absent for
+   * legacy catalog-keyed configs whose backing UserService has been
+   * deleted, and for policies set via the legacy DownstreamService path.
+   * Clients should prefer this over `service_id` when cross-referencing
+   * against `/user-services`.
+   */
+  readonly user_service_id?: string;
+  /** Proxy slug of the matching `UserService`, for display. */
+  readonly user_service_slug?: string;
+}
+
+export interface DominantOrgPolicy {
+  readonly org_id: string;
+  readonly service_id: string;
 }
 
 export interface ServiceApprovalConfigsResponse {
   readonly configs: readonly ServiceApprovalConfigItem[];
+  /**
+   * `(org_id, service_id)` pairs where an org the caller is a member of
+   * has set its own per-service approval policy. Those org policies are
+   * dominant in `resolve_org_aware_approval` **for that specific org**,
+   * so the UI hides the matching entry from the personal Add-Override
+   * picker — but only when the picker entry is inherited from that same
+   * org. If the user inherits the same catalog service from a different
+   * org without a dominant policy, the personal override still applies
+   * and the entry stays selectable. Omitted by the server when empty —
+   * treat as empty when absent. Only populated on the personal list
+   * (no `?org_id`).
+   */
+  readonly dominant_org_policies?: readonly DominantOrgPolicy[];
 }
 
 export interface SetServiceApprovalConfigRequest {
@@ -131,6 +160,8 @@ export interface SetServiceApprovalConfigResponse {
   readonly approval_mode: ApprovalMode;
   readonly created_at: string;
   readonly updated_at: string;
+  readonly user_service_id?: string;
+  readonly user_service_slug?: string;
 }
 
 export interface DeleteServiceApprovalConfigResponse {

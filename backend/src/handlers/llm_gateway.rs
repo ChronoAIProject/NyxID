@@ -514,6 +514,8 @@ pub async fn gateway_request(
             auth_key_name: target.auth_key_name,
             credential: target.credential,
             service: target.service,
+            catalog_default_headers: target.catalog_default_headers,
+            user_service_default_headers: target.user_service_default_headers,
         },
         None => target,
     };

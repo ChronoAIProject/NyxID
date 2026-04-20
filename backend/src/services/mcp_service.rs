@@ -2022,6 +2022,30 @@ pub async fn execute_tool(
             }
         }
 
+        // NyxID#356: service-level default headers must be injected on
+        // node-routed MCP calls too, not just on the direct HTTP proxy
+        // path. Without this, required defaults (e.g. `x-openclaw-scopes`)
+        // would reach the downstream for regular proxy requests but go
+        // missing for MCP tool invocations of the same service.
+        all_headers = crate::models::default_request_header::merge_into_header_list(
+            all_headers,
+            &[
+                target.catalog_default_headers.as_slice(),
+                target.user_service_default_headers.as_slice(),
+            ],
+        );
+
+        // Strip any default whose name collides with what the node
+        // agent will append locally as the service credential. Matches
+        // the trim on the node-routed HTTP / WS paths in
+        // `handlers/proxy.rs`; without it, a default `x-api-key` (or
+        // equivalent) would ride along in the frame and the node would
+        // put the real credential on top of it, leaving two values on
+        // the wire.
+        if let Some(cred_name) = crate::services::proxy_service::credential_header_name(&target) {
+            all_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&cred_name));
+        }
+
         let node_request = NodeProxyRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
             service_id: target.service.id.clone(),

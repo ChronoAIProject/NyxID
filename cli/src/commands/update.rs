@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
 
 use crate::cli::UpdateArgs;
-
-/// GitHub repository for cargo install.
-const REPO_URL: &str = "https://github.com/ChronoAIProject/NyxID";
+use crate::commands::repo::REPO_URL;
 
 pub async fn run(args: UpdateArgs) -> Result<()> {
     if args.skills_only {

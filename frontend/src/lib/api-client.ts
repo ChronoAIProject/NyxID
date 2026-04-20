@@ -1,4 +1,5 @@
 import type { ApiErrorResponse } from "@/types/api";
+import { useAuthStore } from "@/stores/auth-store";
 
 const API_ORIGIN = "";
 
@@ -92,7 +93,6 @@ export async function apiClient<T>(
   const response = await fetch(url, config);
 
   if (response.status === 401 && !NO_AUTH_STATE_CLEAR_ENDPOINTS.has(endpoint)) {
-    const { useAuthStore } = await import("@/stores/auth-store");
     useAuthStore.getState().setUser(null);
   }
 

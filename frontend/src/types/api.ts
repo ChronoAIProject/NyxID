@@ -154,6 +154,18 @@ export interface DownstreamService {
   readonly examples_url?: string | null;
   readonly recommended_skills?: readonly string[] | null;
   readonly developer_app_ids?: readonly string[] | null;
+  /**
+   * NyxID#356: admin-configured default HTTP headers injected on every
+   * proxied request. `null` / `undefined` means no defaults are set.
+   */
+  readonly default_request_headers?: readonly DefaultRequestHeader[] | null;
+}
+
+export interface DefaultRequestHeader {
+  readonly name: string;
+  readonly value: string;
+  readonly overridable: boolean;
+  readonly sensitive: boolean;
 }
 
 export interface ServiceCapabilities {
@@ -232,6 +244,15 @@ export type UpdateServicePayload =
       readonly examples_url?: string;
       readonly recommended_skills?: readonly string[];
       readonly developer_app_ids?: readonly string[];
+      /**
+       * NyxID#356 tri-state update semantics:
+       * - `undefined` (omit) leaves the existing value unchanged
+       * - `null` clears the list
+       * - array replaces with a validated list
+       */
+      readonly default_request_headers?:
+        | null
+        | readonly DefaultRequestHeader[];
     }
   | {
       readonly name?: string;

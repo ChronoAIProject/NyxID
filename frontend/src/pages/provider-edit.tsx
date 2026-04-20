@@ -130,11 +130,17 @@ export function ProviderEditPage() {
     try {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { slug: _, provider_type: _providerType, ...updateFields } = data;
+      const isOAuthOrDeviceCode =
+        data.provider_type === "oauth2" ||
+        data.provider_type === "device_code";
       const cleaned = stripEmptyStrings({
         ...updateFields,
         default_scopes: splitScopes(data.default_scopes),
         supports_pkce:
           data.provider_type === "oauth2" ? data.supports_pkce : undefined,
+        credential_mode: isOAuthOrDeviceCode
+          ? updateFields.credential_mode
+          : undefined,
       });
       await updateMutation.mutateAsync(
         cleaned as Parameters<typeof updateMutation.mutateAsync>[0],

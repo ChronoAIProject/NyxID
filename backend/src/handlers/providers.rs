@@ -291,6 +291,11 @@ pub async fn create_provider(
             "telegram_widget providers only support credential_mode=admin".to_string(),
         ));
     }
+    if body.provider_type == "api_key" && credential_mode != "admin" {
+        return Err(AppError::ValidationError(
+            "credential_mode only applies to oauth2/device_code providers; omit it or set \"admin\" for api_key providers".to_string(),
+        ));
+    }
 
     let token_endpoint_auth_method = body
         .token_endpoint_auth_method

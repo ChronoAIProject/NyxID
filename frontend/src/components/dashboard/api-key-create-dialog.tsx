@@ -399,6 +399,8 @@ export function ApiKeyCreateDialog() {
                           // `watchTargetOrg` is undefined.
                           const visibleServices = (services ?? []).filter(
                             (s) => {
+                              if (s.auto_connected) return false;
+                              if (!s.is_active) return false;
                               const source = s.credential_source;
                               if (watchTargetOrg) {
                                 return (

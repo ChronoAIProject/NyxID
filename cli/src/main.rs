@@ -90,5 +90,9 @@ async fn run() -> Result<()> {
 
         // Admin-only operations
         Commands::Admin { command } => commands::admin::run(command).await,
+
+        // Project links
+        Commands::Repo(args) => commands::repo::run_repo(args).await,
+        Commands::Info => commands::repo::run_info().await,
     }
 }

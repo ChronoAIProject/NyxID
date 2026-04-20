@@ -980,7 +980,6 @@ curl -X POST http://localhost:3001/api/v1/providers \
     "name": "Anthropic",
     "slug": "anthropic",
     "provider_type": "api_key",
-    "credential_mode": "user",
     "api_key_instructions": "Get your API key from https://console.anthropic.com/settings/keys",
     "api_key_url": "https://console.anthropic.com/settings/keys"
   }'

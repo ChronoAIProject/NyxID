@@ -62,17 +62,15 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
 
   // Only org-owned services for this org -- personal services show up under
   // /notifications. We also hide disabled keys so admins do not configure
-  // a policy on a service that no-one can use, and require a
-  // `catalog_service_id` because the approval config endpoint is keyed by
-  // the catalog `DownstreamService.id`, not the per-user `UserService.id`.
-  // Custom-only services (no catalog binding) cannot have a per-service
-  // approval policy and are excluded from the picker.
+  // a policy on a service that no-one can use. Custom services (no
+  // `catalog_service_id`) are included: the approval config endpoint
+  // accepts UserService IDs directly, so custom org services are
+  // configurable too (ChronoAIProject/NyxID#165).
   const orgServices = useMemo(() => {
     return (keys ?? []).filter((key) => {
       const src = key.credential_source;
       return (
         key.is_active &&
-        key.catalog_service_id !== null &&
         src !== undefined &&
         src.type === "org" &&
         src.org_id === orgId
@@ -80,22 +78,32 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
     });
   }, [keys, orgId]);
 
-  // `serviceConfigs.configs[].service_id` and the picker option values
-  // are both in `DownstreamService.id` space, so dedupe through that
-  // identifier.
-  const configuredCatalogIds = useMemo(
-    () => new Set((serviceConfigs?.configs ?? []).map((c) => c.service_id)),
-    [serviceConfigs],
-  );
+  // Identifier set used to dedupe the picker. A catalog-backed config is
+  // keyed by `catalog_service_id` and covers every org UserService that
+  // shares that catalog id; a custom-service config is keyed by the
+  // UserService id directly. Collect both so the Add dialog hides every
+  // service already covered, not just the one `user_service_id` the
+  // backend returned for catalog-backed configs (which is the
+  // most-recently-created sibling — the others would otherwise still
+  // appear and silently overwrite the same catalog-wide policy).
+  const configuredIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const c of serviceConfigs?.configs ?? []) {
+      ids.add(c.service_id);
+      if (c.user_service_id) ids.add(c.user_service_id);
+    }
+    return ids;
+  }, [serviceConfigs]);
 
   const availableServices = useMemo(
     () =>
-      orgServices.filter(
-        (s) =>
-          s.catalog_service_id !== null &&
-          !configuredCatalogIds.has(s.catalog_service_id),
-      ),
-    [orgServices, configuredCatalogIds],
+      orgServices.filter((s) => {
+        if (configuredIds.has(s.id)) return false;
+        if (s.catalog_service_id && configuredIds.has(s.catalog_service_id))
+          return false;
+        return true;
+      }),
+    [orgServices, configuredIds],
   );
 
   async function handleAdd() {
@@ -121,8 +129,11 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
 
   async function handleToggle(serviceId: string, approvalRequired: boolean) {
     try {
+      // `serviceId` is the mutation key (`user_service_id` when known).
+      // Match against either field so catalog-keyed configs resolve too.
       const existing = serviceConfigs?.configs.find(
-        (c) => c.service_id === serviceId,
+        (c) =>
+          c.user_service_id === serviceId || c.service_id === serviceId,
       );
       await setConfigMutation.mutateAsync({
         serviceId,
@@ -222,7 +233,14 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             </p>
           ) : (
             <div className="space-y-3">
-              {serviceConfigs?.configs.map((config) => (
+              {serviceConfigs?.configs.map((config) => {
+                // Prefer the UserService id so the backend resolves the
+                // same row admins see on the Keys page. Falls back to the
+                // raw service_id for legacy rows whose backing
+                // UserService has been deleted.
+                const mutationKey =
+                  config.user_service_id ?? config.service_id;
+                return (
                 <div
                   key={config.service_id}
                   className="rounded-lg border border-border p-4"
@@ -242,13 +260,13 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                       <Switch
                         checked={config.approval_required}
                         onCheckedChange={(checked) =>
-                          void handleToggle(config.service_id, checked)
+                          void handleToggle(mutationKey, checked)
                         }
                       />
                       <Button
                         variant="ghost"
                         size="icon"
-                        onClick={() => void handleDelete(config.service_id)}
+                        onClick={() => void handleDelete(mutationKey)}
                         title="Remove org policy"
                       >
                         <RotateCcw className="h-4 w-4 text-muted-foreground" />
@@ -264,7 +282,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                         value={config.approval_mode}
                         onValueChange={(value) =>
                           void handleChangeMode(
-                            config.service_id,
+                            mutationKey,
                             config.approval_required,
                             value as ApprovalMode,
                           )
@@ -290,7 +308,8 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>
@@ -324,15 +343,13 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                 </SelectTrigger>
                 <SelectContent>
                   {availableServices.map((s) => (
-                    // The Select stores `catalog_service_id` because the
-                    // backend `/approvals/service-configs/{id}` endpoint
-                    // expects a `DownstreamService.id`. The
-                    // `availableServices` filter above guarantees this is
-                    // non-null.
-                    <SelectItem
-                      key={s.catalog_service_id ?? s.id}
-                      value={s.catalog_service_id ?? ""}
-                    >
+                    // Use the `UserService.id` as the option value. The
+                    // backend resolves it to the effective storage key
+                    // (catalog id for catalog-backed services, user
+                    // service id for custom ones) so this works for both
+                    // — in particular, custom org services become
+                    // configurable here (ChronoAIProject/NyxID#165).
+                    <SelectItem key={s.id} value={s.id}>
                       {s.label}
                     </SelectItem>
                   ))}

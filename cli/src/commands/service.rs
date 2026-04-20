@@ -7,6 +7,57 @@ use serde_json::Value;
 use crate::api::ApiClient;
 use crate::cli::{OutputFormat, ServiceCommands};
 
+/// Parse one or more `--default-header NAME=VALUE[:overridable]` flag values
+/// into a JSON-shaped list that the backend `validate_headers` helper will
+/// then normalize and persist. NyxID#356.
+///
+/// - The separator is the *first* `=` in the raw argument, so values may
+///   themselves contain `=` characters.
+/// - The optional `:overridable` suffix must be the literal tail of the
+///   trimmed value. Anything else after the final `:` is treated as part
+///   of the value (e.g. URLs with ports still round-trip).
+pub(crate) fn parse_default_headers(raw: &[String]) -> Result<Vec<serde_json::Value>> {
+    let mut out = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let (name, rest) = entry.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("--default-header must be in NAME=VALUE form (got: {entry})")
+        })?;
+
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            bail!("--default-header has empty name: {entry}");
+        }
+
+        // Detect `:overridable` / `:sensitive` suffix flags. Keep the
+        // check conservative — require the suffix to be exactly one of
+        // the known tokens so values containing colons (URLs, scoped
+        // tokens, etc.) are not clipped. Multiple flags can be chained
+        // via repeated `:` suffixes.
+        let mut value = rest.to_string();
+        let mut overridable = false;
+        let mut sensitive = false;
+        loop {
+            if let Some(stripped) = value.strip_suffix(":overridable") {
+                overridable = true;
+                value = stripped.to_string();
+            } else if let Some(stripped) = value.strip_suffix(":sensitive") {
+                sensitive = true;
+                value = stripped.to_string();
+            } else {
+                break;
+            }
+        }
+
+        out.push(serde_json::json!({
+            "name": name,
+            "value": value,
+            "overridable": overridable,
+            "sensitive": sensitive,
+        }));
+    }
+    Ok(out)
+}
+
 // Backend `UpdateUserServiceRequest::node_id` semantics:
 //   ""        -> clear node_id (switch to direct routing)
 //   Some(id)  -> set node_id
@@ -551,6 +602,8 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             no_node,
             active,
             inactive,
+            default_header,
+            clear_default_headers,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -576,6 +629,20 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 body.insert("is_active".into(), Value::Bool(true));
             } else if inactive {
                 body.insert("is_active".into(), Value::Bool(false));
+            }
+
+            // NyxID#356: default_request_headers.
+            //   --clear-default-headers     -> null (clears)
+            //   any --default-header flags  -> replace with parsed list
+            //   neither                     -> field omitted (no change)
+            if clear_default_headers {
+                body.insert("default_request_headers".into(), Value::Null);
+            } else if !default_header.is_empty() {
+                let parsed = parse_default_headers(&default_header)?;
+                body.insert(
+                    "default_request_headers".into(),
+                    serde_json::to_value(parsed)?,
+                );
             }
 
             let _: Value = api
@@ -1400,5 +1467,58 @@ mod tests {
         {
             assert!(!is_headless_environment());
         }
+    }
+
+    #[test]
+    fn parse_default_header_simple_pair() {
+        let parsed =
+            parse_default_headers(&["x-openclaw-scopes=operator.read".to_string()]).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["name"], "x-openclaw-scopes");
+        assert_eq!(parsed[0]["value"], "operator.read");
+        assert_eq!(parsed[0]["overridable"], serde_json::Value::Bool(false));
+        assert_eq!(parsed[0]["sensitive"], serde_json::Value::Bool(false));
+    }
+
+    #[test]
+    fn parse_default_header_with_overridable_suffix() {
+        let parsed = parse_default_headers(&["x-api-version=v2:overridable".to_string()]).unwrap();
+        assert_eq!(parsed[0]["value"], "v2");
+        assert_eq!(parsed[0]["overridable"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn parse_default_header_value_may_contain_equals_and_commas() {
+        let parsed = parse_default_headers(&["x-scopes=a,b=c,d".to_string()]).unwrap();
+        assert_eq!(parsed[0]["value"], "a,b=c,d");
+    }
+
+    #[test]
+    fn parse_default_header_value_may_contain_url_with_port() {
+        // Colons inside the value must survive; the suffix detector only
+        // strips `:overridable` / `:sensitive` exact tails.
+        let parsed =
+            parse_default_headers(&["x-origin=https://example.com:8443".to_string()]).unwrap();
+        assert_eq!(parsed[0]["value"], "https://example.com:8443");
+        assert_eq!(parsed[0]["overridable"], serde_json::Value::Bool(false));
+    }
+
+    #[test]
+    fn parse_default_header_rejects_missing_equals() {
+        assert!(parse_default_headers(&["x-no-value".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_default_header_rejects_empty_name() {
+        assert!(parse_default_headers(&["=v".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_default_header_accepts_empty_value() {
+        // Backend will validate final shape; the parser itself does not
+        // reject empty values — admin might legitimately want to emit an
+        // empty header.
+        let parsed = parse_default_headers(&["x-empty=".to_string()]).unwrap();
+        assert_eq!(parsed[0]["value"], "");
     }
 }

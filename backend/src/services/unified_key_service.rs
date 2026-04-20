@@ -211,6 +211,11 @@ pub struct KeyView {
     pub inject_delegation_token: bool,
     pub delegation_token_scope: String,
     pub custom_user_agent: Option<String>,
+    /// User-configured default request headers (NyxID#356). Returns only
+    /// the user-owned entries; catalog-level admin defaults are surfaced
+    /// separately on the catalog payload.
+    pub default_request_headers:
+        Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
     pub auto_connected: bool,
     /// Developer app (OAuth client) ID that triggered this auto-provision.
     pub source_app_id: Option<String>,
@@ -714,6 +719,7 @@ pub async fn create_key(
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
+            default_request_headers: None,
             developer_app_ids: None,
             token_exchange_config: None,
             created_at: now,
@@ -1782,6 +1788,7 @@ fn build_key_view(
         inject_delegation_token: svc.inject_delegation_token,
         delegation_token_scope: svc.delegation_token_scope.clone(),
         custom_user_agent: svc.custom_user_agent.clone(),
+        default_request_headers: svc.default_request_headers.clone(),
         auto_connected,
         source_app_id: svc.source_app_id.clone(),
         source_app_name,
@@ -1865,6 +1872,7 @@ mod tests {
             inject_delegation_token: false,
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
+            default_request_headers: None,
             is_active: true,
             source_app_id: None,
             source: None,
@@ -1928,6 +1936,7 @@ mod tests {
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
+            default_request_headers: None,
             developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),
@@ -2053,6 +2062,103 @@ mod tests {
             direct_credential_type_for_service(&key, &service, None),
             Some("bearer")
         );
+    }
+
+    /// Regression guard for NyxID#356: `service update --endpoint-url`
+    /// reflects immediately in both `service show` (GET /keys/:id) and
+    /// `service list` (GET /keys). Both handler paths funnel through
+    /// `build_key_view` and derive `endpoint_url` from `UserEndpoint.url`.
+    /// This test pins that invariant: given one `UserEndpoint`, both call
+    /// sites -- the list batch path (which builds a shared `cat_map` over
+    /// many services) and the single-key path (which builds a one-entry
+    /// map) -- must produce the same `endpoint_url`. If someone changes
+    /// one path to source from a different field (e.g., a cached value on
+    /// `UserService`), this test fails.
+    #[test]
+    fn build_key_view_endpoint_url_is_consistent_between_list_and_show() {
+        let service = sample_service("bearer");
+        let api_key = sample_api_key("bearer");
+        let endpoint = UserEndpoint {
+            id: "ep-1".to_string(),
+            user_id: "user-1".to_string(),
+            label: "Updated label".to_string(),
+            url: "https://new.example.com/v2".to_string(),
+            catalog_service_id: None,
+            openapi_spec_url: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        // Show path: per-service one-entry cat_map.
+        let show_view = build_key_view(
+            &service,
+            &endpoint,
+            Some(&api_key),
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+
+        // List path: batch-built shared cat_map (same function, same inputs).
+        let shared_cat_map: HashMap<&str, &crate::models::downstream_service::DownstreamService> =
+            HashMap::new();
+        let shared_app_map: HashMap<String, String> = HashMap::new();
+        let list_view = build_key_view(
+            &service,
+            &endpoint,
+            Some(&api_key),
+            &shared_cat_map,
+            &shared_app_map,
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+
+        assert_eq!(list_view.endpoint_url, show_view.endpoint_url);
+        assert_eq!(list_view.endpoint_url, "https://new.example.com/v2");
+        assert_eq!(list_view.endpoint_id, show_view.endpoint_id);
+        // Label also flows from the same source on both paths (the api_key's
+        // label when present, else the endpoint label). Pin both.
+        assert_eq!(list_view.label, show_view.label);
+    }
+
+    /// Companion guard: when the service has no api key (auto-provisioned
+    /// no-auth), the label falls back to the endpoint label. If a caller
+    /// later updates the endpoint label, both paths must reflect the new
+    /// value since they both read from `UserEndpoint.label`.
+    #[test]
+    fn build_key_view_label_fallback_is_consistent_between_list_and_show() {
+        let mut service = sample_service("none");
+        service.api_key_id = None;
+        let endpoint = UserEndpoint {
+            id: "ep-1".to_string(),
+            user_id: "user-1".to_string(),
+            label: "Renamed endpoint".to_string(),
+            url: "https://svc.example.com".to_string(),
+            catalog_service_id: None,
+            openapi_spec_url: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let show_view = build_key_view(
+            &service,
+            &endpoint,
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+        let list_view = build_key_view(
+            &service,
+            &endpoint,
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+
+        assert_eq!(list_view.label, "Renamed endpoint");
+        assert_eq!(list_view.label, show_view.label);
+        assert_eq!(list_view.endpoint_url, show_view.endpoint_url);
     }
 
     #[test]

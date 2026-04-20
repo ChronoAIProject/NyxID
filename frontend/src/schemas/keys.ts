@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { credentialSourceSchema } from "./orgs";
+import {
+  defaultRequestHeaderSchema,
+  defaultRequestHeaderUpdateSchema,
+} from "./default-request-headers";
 
 export { credentialSourceSchema } from "./orgs";
 export type {
@@ -7,6 +11,16 @@ export type {
   CredentialSourcePersonal,
   CredentialSourceOrg,
 } from "./orgs";
+export {
+  defaultRequestHeaderSchema,
+  defaultRequestHeaderListSchema,
+  defaultRequestHeaderUpdateSchema,
+} from "./default-request-headers";
+export type {
+  DefaultRequestHeader,
+  DefaultRequestHeaderList,
+  DefaultRequestHeaderUpdate,
+} from "./default-request-headers";
 
 /**
  * Wire-format response for `GET /api/v1/user-services` entries.
@@ -41,12 +55,35 @@ export const userServiceResponseSchema = z.object({
   inject_delegation_token: z.boolean(),
   delegation_token_scope: z.string(),
   custom_user_agent: z.string().nullable().optional(),
+  /// NyxID#356: per-user default request headers owned by this user
+  /// service. Catalog-level admin defaults are surfaced separately.
+  default_request_headers: z.array(defaultRequestHeaderSchema).optional(),
   created_at: z.string(),
   updated_at: z.string(),
   credential_source: credentialSourceSchema,
 });
 
 export type UserServiceResponse = z.infer<typeof userServiceResponseSchema>;
+
+/**
+ * Partial-update payload for `PUT /api/v1/user-services/{id}` and
+ * `PUT /api/v1/keys/{id}`. `default_request_headers` follows the backend
+ * tri-state: `undefined` leaves unchanged, `null` clears, array
+ * replaces.
+ */
+export const updateUserServiceRequestSchema = z.object({
+  auth_method: z.string().optional(),
+  auth_key_name: z.string().optional(),
+  node_id: z.string().optional(),
+  node_priority: z.number().int().optional(),
+  is_active: z.boolean().optional(),
+  custom_user_agent: z.string().optional(),
+  default_request_headers: defaultRequestHeaderUpdateSchema,
+});
+
+export type UpdateUserServiceRequest = z.infer<
+  typeof updateUserServiceRequestSchema
+>;
 
 export const userServiceListResponseSchema = z.object({
   services: z.array(userServiceResponseSchema),

@@ -114,6 +114,9 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
         examples_url: s.examples_url,
         recommended_skills: s.recommended_skills,
         custom_user_agent: s.custom_user_agent,
+        default_request_headers: crate::models::default_request_header::redact_list_for_response(
+            s.default_request_headers,
+        ),
         developer_app_ids: s.developer_app_ids,
         created_by: s.created_by,
         created_at: s.created_at.to_rfc3339(),

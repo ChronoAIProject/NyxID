@@ -103,6 +103,14 @@ pub struct CatalogEntryResponse {
     /// read this to render the correct multi-field credential form.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_exchange_credential_fields: Option<Vec<CredentialFieldSpec>>,
+    /// Admin-configured default HTTP headers inherited from this catalog
+    /// entry (NyxID#356). Read-only on this response; see the admin
+    /// `PUT /services/{id}` endpoint to mutate. The per-user AI Services
+    /// UI displays these as `(from catalog)` alongside the user's own
+    /// entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_request_headers:
+        Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -162,7 +170,7 @@ pub async fn list_catalog(
     let entries = if query.include_all {
         catalog_service::list_catalog_all(&state.db, &state.encryption_keys, &user_id).await?
     } else {
-        catalog_service::list_catalog(&state.db, &state.encryption_keys).await?
+        catalog_service::list_catalog(&state.db, &state.encryption_keys, &user_id).await?
     };
     let items = entries.into_iter().map(catalog_entry_response).collect();
     Ok(Json(CatalogListResponse { entries: items }))
@@ -184,11 +192,18 @@ pub async fn list_catalog(
 /// GET /api/v1/catalog/{slug}
 pub async fn get_catalog_entry(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Path(slug): Path<String>,
 ) -> AppResult<Json<CatalogEntryResponse>> {
+    // Pass the caller's user_id so the service layer can enforce
+    // visibility on private catalog entries — see
+    // `catalog_service::get_catalog_entry` for the rules. Without this,
+    // any authenticated user who guessed a private slug could read its
+    // `default_request_headers` and other metadata.
+    let user_id = auth_user.user_id.to_string();
     let entry =
-        catalog_service::get_catalog_entry(&state.db, &state.encryption_keys, &slug).await?;
+        catalog_service::get_catalog_entry(&state.db, &state.encryption_keys, &user_id, &slug)
+            .await?;
     Ok(Json(catalog_entry_response(entry)))
 }
 
@@ -245,6 +260,9 @@ fn catalog_entry_response(entry: catalog_service::CatalogEntry) -> CatalogEntryR
         examples_url: entry.examples_url,
         recommended_skills: entry.recommended_skills,
         token_exchange_credential_fields: entry.token_exchange_credential_fields,
+        default_request_headers: crate::models::default_request_header::redact_list_for_response(
+            entry.default_request_headers,
+        ),
     }
 }
 
