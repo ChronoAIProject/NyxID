@@ -2,6 +2,7 @@
 name = "nyxid-cli"
 version = "0.2.0"
 edition = "2024"
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
@@ -54,7 +55,7 @@ axum = { workspace = true }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["set-header", "cors"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
-constant_time_eq = "0.4"
+constant_time_eq = "=0.4.2"
 
 [dev-dependencies]
 tempfile = "3"
