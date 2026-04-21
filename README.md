@@ -86,9 +86,8 @@ The end-to-end loop is short: connect a service to NyxID once, then any AI agent
 
 <details>
   <summary><strong>▶ Watch with sound / fullscreen</strong></summary>
-  <p align="center">
-    <video src="https://chrono-ai-assets.godgpt-labs.workers.dev/edited-video-2.mp4" controls muted playsinline width="80%"></video>
-  </p>
+
+  <p align="center"><a href="https://chrono-ai-assets.godgpt-labs.workers.dev/edited-video-2.mp4"><strong>Open the 30-second demo video</strong></a> (plays natively with sound + fullscreen in your browser)</p>
 </details>
 
 ## Why NyxID
