@@ -1556,6 +1556,18 @@
     containerEl.appendChild(row);
   }
 
+  // Set the tail sentence of the display-once warn banner. Split from
+  // the static prefix ("Once you click I have saved this, this page
+  // won't show the value again.") so rotate flows can keep the original
+  // "Your old key is already revoked on the server" wording while the
+  // v3.1 create flows can swap in flow-appropriate copy (there is no
+  // "old key" to revoke when the user is creating a key, not rotating
+  // one). textContent-only — no HTML injection path.
+  function setWarnTail(text) {
+    const el = document.getElementById("display-once-warn-tail");
+    if (el) el.textContent = text;
+  }
+
   // Attach visibilitychange + blur remask listeners. Call once per
   // DisplayOnce render, AFTER all rows have been appended via
   // renderSecretRow. Listeners stay attached for the life of the page
@@ -1577,6 +1589,13 @@
     const isApiKey = flow === "api-key-rotate";
     document.getElementById("display-once-title").textContent =
       isApiKey ? "Save the new API key" : "Save the new node credentials";
+
+    // Rotate flows: the POST /rotate call that preceded this render
+    // atomically revoked the old secret server-side, so the "already
+    // revoked" tail is factually correct by the time the panel is
+    // visible. (Create-shaped flows set a different tail — see
+    // renderNodeRegisterDisplayOnce / renderApiKeyCreateDisplayOnce.)
+    setWarnTail("Your old key is already revoked on the server.");
 
     const rowsEl = document.getElementById("display-once-rows");
     rowsEl.innerHTML = "";
@@ -1839,6 +1858,11 @@
   function renderNodeRegisterDisplayOnce(tokenId, nodeName, token) {
     document.getElementById("display-once-title").textContent =
       `Save the registration token for '${nodeName}'`;
+    // Create-flow wording: there is no old token to revoke, so the
+    // rotate-flow tail ("Your old key is already revoked…") would
+    // mislead here. The token is backend-stored as a hash only, so
+    // there is genuinely no way to retrieve it later.
+    setWarnTail("There is no way to retrieve this token later — save it before continuing.");
 
     const rowsEl = document.getElementById("display-once-rows");
     rowsEl.innerHTML = "";
@@ -2285,6 +2309,10 @@
   function renderApiKeyCreateDisplayOnce(apiKeyId, keyName, fullKey) {
     document.getElementById("display-once-title").textContent =
       `Save the API key for '${keyName}'`;
+    // Create-flow wording: nothing was revoked, nothing is pending.
+    // The backend stored only a SHA-256 of the key; the plaintext
+    // exists solely on this page right now.
+    setWarnTail("There is no way to retrieve this key later — save it before continuing.");
 
     const rowsEl = document.getElementById("display-once-rows");
     rowsEl.innerHTML = "";
