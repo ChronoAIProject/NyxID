@@ -81,12 +81,15 @@ The end-to-end loop is short: connect a service to NyxID once, then any AI agent
 3. **Use it** — Claude Code, Cursor, or any MCP client can now call the service through NyxID. The agent sees the response; never the key.
 
 <p align="center">
-  <a href="assets/demo.gif">
-    <img src="assets/demo.gif" alt="NyxID end-to-end demo — connect a service, wire up MCP, call through the proxy" width="80%">
-  </a>
+  <img src="assets/demo.gif" alt="NyxID end-to-end demo — connect a service, wire up MCP, call through the proxy" width="80%">
 </p>
 
-<p align="center"><sub><a href="assets/demo.gif">Click the demo to view full size</a></sub></p>
+<details>
+  <summary><strong>▶ Watch with sound / fullscreen</strong></summary>
+  <p align="center">
+    <video src="https://chrono-ai-assets.godgpt-labs.workers.dev/edited-video-2.mp4" controls muted playsinline width="80%"></video>
+  </p>
+</details>
 
 ## Why NyxID
 
