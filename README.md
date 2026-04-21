@@ -80,16 +80,13 @@ The end-to-end loop is short: connect a service to NyxID once, then any AI agent
 2. **Wire up your AI tool** — `claude mcp add --transport http nyxid http://localhost:3001/mcp` (or one-click install for Cursor in **Settings → MCP**).
 3. **Use it** — Claude Code, Cursor, or any MCP client can now call the service through NyxID. The agent sees the response; never the key.
 
-<details>
-<summary><strong>▶ Watch the 30-second demo</strong></summary>
-
 <p align="center">
-  <video src="https://github.com/ChronoAIProject/NyxID/raw/chore/demo-gif-expandable/assets/demo.mp4" controls muted playsinline width="80%">
-    NyxID end-to-end demo — connect a service, wire up MCP, call through the proxy.
-  </video>
+  <a href="assets/demo.gif">
+    <img src="assets/demo.gif" alt="NyxID end-to-end demo — connect a service, wire up MCP, call through the proxy" width="80%">
+  </a>
 </p>
 
-</details>
+<p align="center"><sub><a href="assets/demo.gif">Click the demo to view full size</a></sub></p>
 
 ## Why NyxID
 
