@@ -84,7 +84,7 @@ The end-to-end loop is short: connect a service to NyxID once, then any AI agent
 <summary><strong>▶ Watch the 30-second demo</strong></summary>
 
 <p align="center">
-  <video src="https://github.com/ChronoAIProject/NyxID/raw/main/assets/demo.mp4" controls muted playsinline width="80%">
+  <video src="https://github.com/ChronoAIProject/NyxID/raw/chore/demo-gif-expandable/assets/demo.mp4" controls muted playsinline width="80%">
     NyxID end-to-end demo — connect a service, wire up MCP, call through the proxy.
   </video>
 </p>
