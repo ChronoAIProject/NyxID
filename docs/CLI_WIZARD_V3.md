@@ -358,6 +358,20 @@ Scope picker lives in `#step-scope-picker` (wizard.html) with `initApiKeyCreateF
 
 `FlowKind::NodeRegisterToken` allowlist: just `POST /api/v1/nodes/register-token` with body_fields `["name"]`. Reuses `step-confirm-rotate` (panel copy overridden at init) + `step-display-once` verbatim. Typed ack payload `NodeRegisterAckPayload { acknowledged, token_id }` with the same `deny_unknown_fields` guard as rotation flows. Heartbeat dead-after window widened to 60 s via the generalized `FlowKind::is_display_once()` (previously `is_rotation()`).
 
+### 10.4.1 UI shell inheritance — v3.1 flows reuse the v2/v3 chrome
+
+Both v3.1 flows sit **inside the existing v2 shell**, not a new one. `wizard.html` puts every per-flow panel inside `<div class="wizard-shell"> … <main class="wizard-main"> … </main> …` — and everything outside `<main>` is shared across all flows:
+
+- **Header** — brand mark + NyxID wordmark (DM Serif Display) on the left; a per-flow step label (`#wizard-step-label`) on the right. v3.1's flows just update the step-label text ("Step 1 of 2 · name this node" for `node register-token`, "Step 1 of 2 · configure scope" for `api-key create`); the brand lockup is untouched.
+- **Footer** — "Served locally from `<origin>`  · Nothing leaves your machine." Rendered once at the bottom of the shell and inherited by every flow. No v3.1 change.
+- **Overlay** — the ✓ success / ✗ cancel / ⚠ disconnect end-state card (`#wizard-overlay`). v3.1 reuses `showOverlay(...)` on ack/cancel paths just like v3 rotation flows do.
+- **Design tokens** — `--bg`, `--fg`, `--muted`, `--panel`, `--border`, `--primary`, `--primary-hover`, `--wordmark`, `--ghost-hover`, `--card-hover`, `--selected-ring`. Defined once in `wizard.css` with a `prefers-color-scheme: light` override. v3.1 styles only use these tokens — no new color literals, no new font stacks.
+- **Button / secret-row tier** — `.wizard-btn`, `.wizard-btn-primary`, `.wizard-btn-ghost`, `.wizard-btn-tiny`, `.wizard-btn-tiny-icon`, `.wizard-secret-row`, `.wizard-status`, `.wizard-error-banner`, `.wizard-detail-list`. All reused as-is.
+
+New CSS in v3.1 is limited to the scope-picker's internal widgets (`.wizard-text-input`, `.wizard-scope-group`, `.wizard-checkbox`, `.wizard-radio`, `.wizard-multi-wrap`, `.wizard-multi-list`, `.wizard-multi-toolbar`, `.wizard-rate-row`, `.wizard-field-inline`). They all key off the existing tokens, so light/dark mode and accent-color rules apply automatically.
+
+Net effect: a user who ran `nyxid api-key rotate` on a v3 CLI and runs `nyxid api-key create` on a v3.1 CLI sees the identical frame — same logo, same step-label position, same footer tagline, same overlay. Only the body of the active panel differs.
+
 ### 10.4.1 channel-bot register — deferred
 
 Not a DisplayOnce flow today: `CreateChannelBotResponse` returns only `id`/`platform`/`platform_bot_username`/`status`; the webhook secret is generated server-side, used to register the webhook with the external platform, then discarded. The right shape is either (a) a backend change to reveal the webhook secret + add a rotate-secret endpoint, or (b) a v2-style input flow that hides the platform bot token on entry. Design conversation pending.

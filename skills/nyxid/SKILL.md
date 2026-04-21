@@ -500,20 +500,25 @@ export NYXID_ACCESS_TOKEN="nyxid_ag_..."
 
 Agent keys need `write` or `admin` scope to call management endpoints via REST (create/update/delete/rotate API keys, services, endpoints, bindings, etc.). `proxy read` is sufficient for proxy traffic only -- paths under `/proxy`, `/llm`, `/ssh`, `/channel-events`, `/channel-relay`, and `/delegation` do not require write scope. The `nyxid` CLI uses session auth (not API keys) and is unaffected.
 
-### Browser wizard for one-time secrets (v3.0 + v3.1)
+### Browser wizard for one-time secrets (v2 + v3.0 + v3.1)
 
-Four commands now open a local browser-based wizard for interactive use, so the new secret lands in the user's browser tab instead of the terminal / agent context:
+Five commands now open a local browser-based wizard for interactive use, so the secret (either collected from the user or minted by the backend) lands in the user's browser tab instead of the terminal / agent context:
 
-- `nyxid api-key rotate` — v3.0
-- `nyxid node rotate-token` — v3.0
-- `nyxid node register-token` — v3.1
-- `nyxid api-key create` — v3.1 (scope picker collects name + owner + platform + scopes + expiry + allowed services/nodes + rate limits; the key is minted on submit and shown once in the same DisplayOnce panel)
+| Command                           | Version | Wizard role                                                                                            |
+|-----------------------------------|:-------:|--------------------------------------------------------------------------------------------------------|
+| `nyxid service add [<slug>]`      |   v2    | Collects a paste-key / OAuth / device-code credential; creates the service + key record.               |
+| `nyxid api-key rotate <id>`       |   v3.0  | DisplayOnce: backend mints a new `nyxid_ag_…`, rendered masked with click-to-reveal + copy.            |
+| `nyxid node rotate-token <id>`    |   v3.0  | DisplayOnce: backend mints a new auth token + signing secret (two rows).                               |
+| `nyxid node register-token`       |   v3.1  | DisplayOnce: backend mints a new `nyx_nreg_…` for bootstrapping a fresh node.                          |
+| `nyxid api-key create`            |   v3.1  | Scope picker (name + owner + platform + scopes + expiry + service/node multi-select + rate limits) → DisplayOnce on the new `nyxid_ag_…`. |
 
-The CLI prints `→ Opening http://127.0.0.1:…/wizard …` and a no-secret success line on exit. Full spec: [`docs/CLI_WIZARD_V3.md`](../../docs/CLI_WIZARD_V3.md).
+The CLI prints `→ Opening http://127.0.0.1:…/wizard …` and a no-secret success line on exit. Full spec: [`docs/CLI_WIZARD_V2.md`](../../docs/CLI_WIZARD_V2.md) (v2) + [`docs/CLI_WIZARD_V3.md`](../../docs/CLI_WIZARD_V3.md) (v3 / v3.1).
+
+**Visual consistency.** Every wizard command — v2 and v3 and v3.1 alike — shares the same shell: same brand lockup (NyxID wordmark in DM Serif Display) in the header, same "Served locally from <origin> · Nothing leaves your machine" footer, same ✓/✗/⚠ overlay system, same purple accent (`#8b5cf6` / `#7c3aed`), same button and field styling. v3.1 adds only the scope-picker's internal widgets (multi-select rows, radio groups, numeric inputs); the frame around them is unchanged from v2. A user who ran `nyxid api-key rotate` on v3.0 sees the identical chrome when running `nyxid api-key create` on v3.1.
 
 For scripted / agent use, the wizard is **bypassed automatically** when ANY of these is true:
 
-- `--terminal` (alias `--no-wizard`) is passed -- per-invocation override, available on all four wizard commands + `nyxid service add`
+- `--terminal` (alias `--no-wizard`) is passed -- per-invocation override, available on all five wizard commands
 - `--output json` is passed (output is machine-readable)
 - stdout is not a TTY (piped, captured, redirected)
 - `NYXID_NO_WIZARD=1` is set in the environment
