@@ -16,6 +16,7 @@ pub mod channel_conversations;
 pub mod channel_events;
 pub mod channel_relay;
 pub mod channel_webhooks;
+pub mod cli_release;
 pub mod connections;
 pub mod consent;
 pub mod delegation;

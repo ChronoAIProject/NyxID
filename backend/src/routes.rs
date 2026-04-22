@@ -808,6 +808,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
     );
 
     let private = Router::new()
+        .route(
+            "/cli/latest",
+            get(handlers::cli_release::latest_cli_release),
+        )
         .route("/health", get(handlers::health::health_check))
         .route("/llms.txt", get(handlers::llms_txt::llms_txt))
         .route("/llms-full.txt", get(handlers::llms_txt::llms_full_txt))
