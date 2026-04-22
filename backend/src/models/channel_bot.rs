@@ -29,10 +29,22 @@ pub struct ChannelBot {
     #[serde(default)]
     pub app_id: Option<String>,
     /// Encrypted app/signing secret (AES-256 envelope encryption).
-    /// Lark/Feishu use it for HMAC + tenant-token exchange; Slack stores its
-    /// app signing secret here for Events API signature verification.
+    /// Lark/Feishu use it for tenant-token exchange; Slack stores its app
+    /// signing secret here for Events API signature verification.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub app_secret_encrypted: Option<Vec<u8>>,
+    /// Lark/Feishu only: encrypted Event Subscription "Verification Token".
+    /// Lark copies this value into every event callback body (`header.token`
+    /// in v2 schema, top-level `token` in v1) so the server can prove the
+    /// request originated from Lark. Distinct from `app_secret_encrypted`.
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub lark_verification_token_encrypted: Option<Vec<u8>>,
+    /// Lark/Feishu only: encrypted Event Subscription "Encrypt Key".
+    /// When present, Lark AES-256-CBC-encrypts the webhook body and signs it
+    /// via the `X-Lark-Signature` header. Absent means plaintext bodies with
+    /// token-only verification.
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub lark_encrypt_key_encrypted: Option<Vec<u8>>,
     /// Discord only: application public key for Ed25519 signature verification
     #[serde(default)]
     pub public_key: Option<String>,
@@ -67,6 +79,8 @@ mod tests {
             webhook_secret_hash: "abc123".to_string(),
             app_id: None,
             app_secret_encrypted: None,
+            lark_verification_token_encrypted: None,
+            lark_encrypt_key_encrypted: None,
             public_key: None,
             status: "pending".to_string(),
             is_active: true,
@@ -93,11 +107,18 @@ mod tests {
         bot.platform = "lark".to_string();
         bot.app_id = Some("cli_abc123".to_string());
         bot.app_secret_encrypted = Some(vec![10, 20, 30]);
+        bot.lark_verification_token_encrypted = Some(vec![40, 50, 60]);
+        bot.lark_encrypt_key_encrypted = Some(vec![70, 80, 90]);
         bot.public_key = Some("ed25519pubkey".to_string());
         let doc = bson::to_document(&bot).expect("serialize");
         let restored: ChannelBot = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.app_id.as_deref(), Some("cli_abc123"));
         assert_eq!(restored.app_secret_encrypted, Some(vec![10, 20, 30]));
+        assert_eq!(
+            restored.lark_verification_token_encrypted,
+            Some(vec![40, 50, 60])
+        );
+        assert_eq!(restored.lark_encrypt_key_encrypted, Some(vec![70, 80, 90]));
         assert_eq!(restored.public_key.as_deref(), Some("ed25519pubkey"));
     }
 
@@ -126,10 +147,14 @@ mod tests {
         let mut doc = bson::to_document(&bot).expect("serialize");
         doc.remove("app_id");
         doc.remove("app_secret_encrypted");
+        doc.remove("lark_verification_token_encrypted");
+        doc.remove("lark_encrypt_key_encrypted");
         doc.remove("public_key");
         let restored: ChannelBot = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.app_id, None);
         assert_eq!(restored.app_secret_encrypted, None);
+        assert_eq!(restored.lark_verification_token_encrypted, None);
+        assert_eq!(restored.lark_encrypt_key_encrypted, None);
         assert_eq!(restored.public_key, None);
     }
 }

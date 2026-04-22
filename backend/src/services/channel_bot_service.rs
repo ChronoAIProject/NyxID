@@ -39,6 +39,8 @@ pub async fn create_bot(
     label: &str,
     app_id: Option<&str>,
     app_secret: Option<&str>,
+    lark_verification_token: Option<&str>,
+    lark_encrypt_key: Option<&str>,
     public_key: Option<&str>,
 ) -> AppResult<CreateBotResult> {
     // Validate label
@@ -71,6 +73,23 @@ pub async fn create_bot(
     if adapter.platform_id() == "slack" && app_secret.map(|s| s.trim().is_empty()).unwrap_or(true) {
         return Err(AppError::ValidationError(
             "Slack signing secret is required (pass via app_secret)".to_string(),
+        ));
+    }
+
+    // Lark/Feishu require the Event Subscription Verification Token. Without
+    // it, there is no way to authenticate inbound webhook deliveries when
+    // Encrypt Key is disabled (the only other proof-of-origin path), and the
+    // bot would stay stuck in pending_webhook forever. Failing fast at
+    // registration time surfaces the misconfiguration to the caller.
+    if matches!(adapter.platform_id(), "lark" | "feishu")
+        && lark_verification_token
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return Err(AppError::ValidationError(
+            "Lark/Feishu Verification Token is required (pass via verification_token). \
+             Copy it from the Lark Developer Console -> Event Subscriptions."
+                .to_string(),
         ));
     }
 
@@ -127,10 +146,23 @@ pub async fn create_bot(
     // Encrypt the bot token
     let bot_token_encrypted = encryption_keys.encrypt(effective_token.as_bytes()).await?;
 
-    // Encrypt app secret if provided (Lark/Feishu)
+    // Encrypt app secret if provided (Lark/Feishu, Slack)
     let app_secret_encrypted = match app_secret {
         Some(secret) => Some(encryption_keys.encrypt(secret.as_bytes()).await?),
         None => None,
+    };
+
+    // Encrypt Lark/Feishu Event Subscription secrets separately from the
+    // app secret. The verification token and encrypt key are rotated and
+    // configured independently of the app secret in the Lark Developer
+    // Console, so they need their own storage.
+    let lark_verification_token_encrypted = match lark_verification_token {
+        Some(v) if !v.trim().is_empty() => Some(encryption_keys.encrypt(v.as_bytes()).await?),
+        _ => None,
+    };
+    let lark_encrypt_key_encrypted = match lark_encrypt_key {
+        Some(v) if !v.trim().is_empty() => Some(encryption_keys.encrypt(v.as_bytes()).await?),
+        _ => None,
     };
 
     let now = Utc::now();
@@ -146,6 +178,8 @@ pub async fn create_bot(
         webhook_secret_hash: secret_hash,
         app_id: app_id.map(String::from),
         app_secret_encrypted,
+        lark_verification_token_encrypted,
+        lark_encrypt_key_encrypted,
         public_key: public_key.map(String::from),
         status: "pending".to_string(),
         is_active: true,

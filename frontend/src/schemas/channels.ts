@@ -43,6 +43,19 @@ export const createChannelBotSchema = z
       .max(128, "Label must be at most 128 characters"),
     app_id: z.string().max(256).optional(),
     app_secret: z.string().max(512).optional(),
+    /**
+     * Lark/Feishu Event Subscription Verification Token. Required for
+     * Lark/Feishu bots; copied from the Lark Developer Console under
+     * Event Subscriptions. Distinct from `app_secret`.
+     */
+    verification_token: z.string().max(512).optional(),
+    /**
+     * Lark/Feishu Event Subscription Encrypt Key. Optional — only set if
+     * the Lark app is configured with an Encrypt Key. When present, Lark
+     * AES-256-CBC-encrypts every webhook body and signs it with
+     * `X-Lark-Signature`, which the server verifies.
+     */
+    encrypt_key: z.string().max(512).optional(),
     public_key: z.string().max(256).optional(),
     /** When set, create this bot under the given org (caller must be admin). */
     target_org_id: z.string().optional(),
@@ -66,6 +79,17 @@ export const createChannelBotSchema = z
         code: z.ZodIssueCode.custom,
         message: "App Secret is required for Lark/Feishu",
         path: ["app_secret"],
+      });
+    }
+    if (
+      (data.platform === "lark" || data.platform === "feishu") &&
+      !data.verification_token
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Verification Token is required for Lark/Feishu. Copy it from the Lark Developer Console -> Event Subscriptions.",
+        path: ["verification_token"],
       });
     }
     if (data.platform === "discord" && !data.public_key) {

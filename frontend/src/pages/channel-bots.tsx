@@ -385,6 +385,48 @@ function CreateBotDialog({
                   </p>
                 )}
               </div>
+              <div className="space-y-2">
+                <Label htmlFor="verification_token">Verification Token</Label>
+                <Input
+                  id="verification_token"
+                  type="password"
+                  placeholder="Event Subscription Verification Token"
+                  {...register("verification_token")}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Required. Copy it from Lark Developer Console &rarr;
+                  Event Subscriptions. Distinct from the App Secret.
+                </p>
+                {errors.verification_token && (
+                  <p className="text-xs text-destructive">
+                    {errors.verification_token.message}
+                  </p>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="encrypt_key">
+                  Encrypt Key{" "}
+                  <span className="text-xs text-muted-foreground">
+                    (optional)
+                  </span>
+                </Label>
+                <Input
+                  id="encrypt_key"
+                  type="password"
+                  placeholder="Leave blank if Encrypt Key is disabled"
+                  {...register("encrypt_key")}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Only set this if Event Subscriptions has an Encrypt Key.
+                  NyxID will AES-decrypt inbound bodies and verify the
+                  <code className="mx-1">X-Lark-Signature</code> header.
+                </p>
+                {errors.encrypt_key && (
+                  <p className="text-xs text-destructive">
+                    {errors.encrypt_key.message}
+                  </p>
+                )}
+              </div>
             </>
           )}
 

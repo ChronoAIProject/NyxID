@@ -17,6 +17,10 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             app_id,
             app_secret,
             app_secret_env,
+            verification_token,
+            verification_token_env,
+            encrypt_key,
+            encrypt_key_env,
             public_key,
             org,
             auth,
@@ -24,6 +28,12 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             let token = resolve_secret(bot_token.as_deref(), token_env.as_deref(), "bot token")?;
             let resolved_app_secret =
                 resolve_optional_secret(app_secret.as_deref(), app_secret_env.as_deref())?;
+            let resolved_verification_token = resolve_optional_secret(
+                verification_token.as_deref(),
+                verification_token_env.as_deref(),
+            )?;
+            let resolved_encrypt_key =
+                resolve_optional_secret(encrypt_key.as_deref(), encrypt_key_env.as_deref())?;
 
             let mut api = ApiClient::from_auth(&auth)?;
 
@@ -38,6 +48,12 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             }
             if let Some(secret) = resolved_app_secret {
                 body["app_secret"] = Value::String(secret);
+            }
+            if let Some(token) = resolved_verification_token {
+                body["verification_token"] = Value::String(token);
+            }
+            if let Some(key) = resolved_encrypt_key {
+                body["encrypt_key"] = Value::String(key);
             }
             if let Some(key) = public_key {
                 body["public_key"] = Value::String(key);

@@ -12,7 +12,7 @@
 use crate::errors::AppResult;
 use crate::models::channel_bot::ChannelBot;
 use crate::services::channel_platform::{
-    BotIdentity, InboundMessage, OutboundReply, PlatformAdapter,
+    BotIdentity, InboundMessage, OutboundReply, PlatformAdapter, WebhookSecrets,
 };
 use crate::services::openclaw_channel_service::OpenClawChannelMessage;
 
@@ -43,10 +43,11 @@ impl PlatformAdapter for OpenClawAdapter {
     async fn verify_webhook(
         &self,
         _bot: &ChannelBot,
+        _secrets: &WebhookSecrets,
         _headers: &axum::http::HeaderMap,
         _body: &[u8],
-    ) -> AppResult<()> {
-        Ok(())
+    ) -> AppResult<Option<Vec<u8>>> {
+        Ok(None)
     }
 
     /// Parse an OpenClaw channel webhook payload into the normalized
@@ -155,8 +156,9 @@ mod tests {
     async fn verify_webhook_always_succeeds() {
         let adapter = OpenClawAdapter;
         let bot = make_test_bot();
+        let secrets = WebhookSecrets::default();
         let headers = axum::http::HeaderMap::new();
-        let result = adapter.verify_webhook(&bot, &headers, b"").await;
+        let result = adapter.verify_webhook(&bot, &secrets, &headers, b"").await;
         assert!(result.is_ok());
     }
 
@@ -285,6 +287,8 @@ mod tests {
             webhook_secret_hash: "placeholder".to_string(),
             app_id: None,
             app_secret_encrypted: None,
+            lark_verification_token_encrypted: None,
+            lark_encrypt_key_encrypted: None,
             public_key: None,
             status: "active".to_string(),
             is_active: true,

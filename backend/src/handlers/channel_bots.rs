@@ -30,6 +30,18 @@ pub struct CreateChannelBotRequest {
     pub app_id: Option<String>,
     #[serde(default)]
     pub app_secret: Option<String>,
+    /// Lark/Feishu only: Event Subscription Verification Token (plaintext).
+    /// Required for Lark/Feishu bots. Lark copies this value into every
+    /// inbound webhook body so the server can confirm the request came from
+    /// Lark. Not the same as `app_secret`.
+    #[serde(default)]
+    pub verification_token: Option<String>,
+    /// Lark/Feishu only: Event Subscription Encrypt Key (plaintext). Optional.
+    /// When set, Lark AES-256-CBC-encrypts the webhook body and signs it with
+    /// `X-Lark-Signature`; the server decrypts the body and verifies the
+    /// signature before processing.
+    #[serde(default)]
+    pub encrypt_key: Option<String>,
     #[serde(default)]
     pub public_key: Option<String>,
     /// When set, create this channel bot under the given org. The
@@ -299,6 +311,8 @@ pub async fn create_bot(
         &body.label,
         body.app_id.as_deref(),
         body.app_secret.as_deref(),
+        body.verification_token.as_deref(),
+        body.encrypt_key.as_deref(),
         body.public_key.as_deref(),
     )
     .await?;

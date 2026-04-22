@@ -3326,6 +3326,7 @@ dependencies = [
 name = "nyxid"
 version = "0.2.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "anyhow",
  "argon2",
@@ -3337,6 +3338,7 @@ dependencies = [
  "base64 0.22.1",
  "bson",
  "bytes",
+ "cbc",
  "chrono",
  "clap",
  "dashmap",

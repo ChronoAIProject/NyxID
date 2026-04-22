@@ -10,7 +10,7 @@ use subtle::ConstantTimeEq;
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
 use crate::services::channel_platform::{
-    BotIdentity, InboundAttachment, InboundMessage, OutboundReply, PlatformAdapter,
+    BotIdentity, InboundAttachment, InboundMessage, OutboundReply, PlatformAdapter, WebhookSecrets,
 };
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org/bot";
@@ -264,9 +264,10 @@ impl PlatformAdapter for TelegramAdapter {
     async fn verify_webhook(
         &self,
         bot: &ChannelBot,
+        _secrets: &WebhookSecrets,
         headers: &axum::http::HeaderMap,
         _body: &[u8],
-    ) -> AppResult<()> {
+    ) -> AppResult<Option<Vec<u8>>> {
         let header_value = headers
             .get(SECRET_HEADER)
             .and_then(|v| v.to_str().ok())
@@ -286,7 +287,7 @@ impl PlatformAdapter for TelegramAdapter {
             .ct_eq(stored_hash.as_bytes())
             .into()
         {
-            Ok(())
+            Ok(None)
         } else {
             Err(AppError::ChannelWebhookVerificationFailed(
                 "secret token mismatch".to_string(),
@@ -755,10 +756,11 @@ mod tests {
         let stored_hash = hex::encode(Sha256::digest(secret.as_bytes()));
 
         let bot = make_test_bot(&stored_hash);
+        let secrets = WebhookSecrets::default();
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(SECRET_HEADER, secret.parse().unwrap());
 
-        let result = adapter.verify_webhook(&bot, &headers, b"").await;
+        let result = adapter.verify_webhook(&bot, &secrets, &headers, b"").await;
         assert!(result.is_ok());
     }
 
@@ -768,10 +770,11 @@ mod tests {
         let stored_hash = hex::encode(Sha256::digest(b"correct_secret"));
 
         let bot = make_test_bot(&stored_hash);
+        let secrets = WebhookSecrets::default();
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(SECRET_HEADER, "wrong_secret".parse().unwrap());
 
-        let result = adapter.verify_webhook(&bot, &headers, b"").await;
+        let result = adapter.verify_webhook(&bot, &secrets, &headers, b"").await;
         assert!(result.is_err());
     }
 
@@ -779,9 +782,10 @@ mod tests {
     async fn verify_webhook_missing_header() {
         let adapter = TelegramAdapter::new();
         let bot = make_test_bot("somehash");
+        let secrets = WebhookSecrets::default();
         let headers = axum::http::HeaderMap::new();
 
-        let result = adapter.verify_webhook(&bot, &headers, b"").await;
+        let result = adapter.verify_webhook(&bot, &secrets, &headers, b"").await;
         assert!(result.is_err());
     }
 
@@ -800,6 +804,8 @@ mod tests {
             webhook_secret_hash: webhook_secret_hash.to_string(),
             app_id: None,
             app_secret_encrypted: None,
+            lark_verification_token_encrypted: None,
+            lark_encrypt_key_encrypted: None,
             public_key: None,
             status: "active".to_string(),
             is_active: true,

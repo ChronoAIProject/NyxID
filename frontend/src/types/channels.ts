@@ -64,6 +64,16 @@ export interface CreateChannelBotRequest {
   readonly app_id?: string;
   /** Lark/Feishu: app secret. Slack: app signing secret. */
   readonly app_secret?: string;
+  /**
+   * Lark/Feishu only: Event Subscription Verification Token (plaintext).
+   * Required for Lark/Feishu bots.
+   */
+  readonly verification_token?: string;
+  /**
+   * Lark/Feishu only: Event Subscription Encrypt Key (plaintext). Optional —
+   * set only if the Lark Developer Console has Encrypt Key enabled.
+   */
+  readonly encrypt_key?: string;
   /** Discord only */
   readonly public_key?: string;
   /** Create this bot under the given org (caller must be admin). */

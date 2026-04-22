@@ -274,34 +274,46 @@ async fn handle_webhook_inner(
         },
     )?;
 
-    // For Lark/Feishu/Slack, the adapter needs the raw signing material, not
-    // its hash. We store the encrypted secret in `app_secret_encrypted` and
-    // decrypt + inject it into `webhook_secret_hash` on a cloned bot here so
-    // the adapter's verify_webhook can use it as the HMAC key.
-    let bot_for_verify = if matches!(bot.platform.as_str(), "lark" | "feishu" | "slack") {
-        if let Some(ref encrypted) = bot.app_secret_encrypted {
-            match state.encryption_keys.decrypt(encrypted).await {
-                Ok(decrypted) => {
-                    let mut cloned = bot.clone();
-                    cloned.webhook_secret_hash = String::from_utf8_lossy(&decrypted).to_string();
-                    cloned
-                }
-                Err(_) => bot.clone(),
-            }
-        } else {
-            bot.clone()
-        }
-    } else {
-        bot.clone()
-    };
+    // Build the plaintext secrets bag the adapter needs. The handler owns
+    // the encryption keys and decrypts here so each adapter sees only the
+    // bytes it actually needs to verify the request (and so we do not have
+    // to overload unrelated fields on the `ChannelBot` struct).
+    let mut secrets = crate::services::channel_platform::WebhookSecrets::default();
 
-    // Verify webhook signature
-    adapter
-        .verify_webhook(&bot_for_verify, headers, body)
+    if matches!(bot.platform.as_str(), "slack") {
+        if let Some(ref encrypted) = bot.app_secret_encrypted
+            && let Ok(decrypted) = state.encryption_keys.decrypt(encrypted).await
+        {
+            secrets.slack_signing_secret =
+                Some(String::from_utf8_lossy(&decrypted).to_string());
+        }
+    }
+
+    if matches!(bot.platform.as_str(), "lark" | "feishu") {
+        if let Some(ref encrypted) = bot.lark_verification_token_encrypted
+            && let Ok(decrypted) = state.encryption_keys.decrypt(encrypted).await
+        {
+            secrets.lark_verification_token =
+                Some(String::from_utf8_lossy(&decrypted).to_string());
+        }
+        if let Some(ref encrypted) = bot.lark_encrypt_key_encrypted
+            && let Ok(decrypted) = state.encryption_keys.decrypt(encrypted).await
+        {
+            secrets.lark_encrypt_key = Some(String::from_utf8_lossy(&decrypted).to_string());
+        }
+    }
+
+    // Verify webhook signature. The adapter may return a decrypted plaintext
+    // body (Lark with Encrypt Key enabled); in that case `parse_inbound` must
+    // see the plaintext, not the ciphertext we received.
+    let decoded_body = adapter
+        .verify_webhook(&bot, &secrets, headers, body)
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("webhook verification failed: {e}").into()
         })?;
+
+    let body_for_parse: &[u8] = decoded_body.as_deref().unwrap_or(body);
 
     // Auto-promote pending_webhook bots AFTER successful signature verification.
     // This proves the user correctly configured the webhook URL on the platform.
@@ -324,8 +336,8 @@ async fn handle_webhook_inner(
         tracing::info!(bot_id = %bot_id, "auto-promoted pending_webhook bot to active");
     }
 
-    // Parse inbound messages
-    let messages = adapter.parse_inbound(body).await.map_err(
+    // Parse inbound messages from the (possibly decrypted) body.
+    let messages = adapter.parse_inbound(body_for_parse).await.map_err(
         |e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("failed to parse inbound messages: {e}").into()
         },

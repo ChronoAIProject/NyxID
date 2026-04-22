@@ -5,8 +5,17 @@
 //! identifier. The two platforms share the same webhook format, event schema,
 //! and REST API shape -- only the hostname differs.
 //!
-//! Webhook verification uses HMAC-SHA256 over the request body, with the
-//! verification token stored on the [`ChannelBot`] document.
+//! Webhook verification follows the Event Subscriptions security model
+//! documented by Lark / Feishu:
+//! - **Verification Token** (required): Lark copies this token into every
+//!   event body (`header.token` in v2 schema, top-level `token` in v1). The
+//!   adapter compares it against the decrypted token stored on the bot in
+//!   constant time.
+//! - **Encrypt Key** (optional): when set on the platform side, Lark
+//!   encrypts the body with AES-256-CBC, wraps it in `{"encrypt": "..."}`,
+//!   and signs it with `X-Lark-Signature = hex(SHA-256(timestamp + nonce +
+//!   encrypt_key + raw_encrypted_body))`. The adapter verifies the signature
+//!   and returns the decrypted plaintext body for downstream parsing.
 //!
 //! Message parsing handles the standard `im.message.receive_v1` event schema,
 //! interactive card callbacks via `card.action.trigger`, and the
@@ -19,19 +28,21 @@
 
 use std::sync::Arc;
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use aes::Aes256;
+use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+use base64::Engine as _;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
 use crate::models::downstream_service::{CredentialFieldSpec, TokenExchangeConfig};
 use crate::services::channel_platform::{
-    BotIdentity, InboundMessage, OutboundReply, PlatformAdapter,
+    BotIdentity, InboundMessage, OutboundReply, PlatformAdapter, WebhookSecrets,
 };
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
 
-type HmacSha256 = Hmac<Sha256>;
+type Aes256CbcDec = cbc::Decryptor<Aes256>;
 
 /// Build the `TokenExchangeConfig` that matches Lark / Feishu's tenant
 /// token endpoint. Shared with the proxy catalog seeds so there is exactly
@@ -307,69 +318,68 @@ impl PlatformAdapter for LarkFamilyAdapter {
 
     async fn verify_webhook(
         &self,
-        bot: &ChannelBot,
+        _bot: &ChannelBot,
+        secrets: &WebhookSecrets,
         headers: &axum::http::HeaderMap,
         body: &[u8],
-    ) -> AppResult<()> {
-        // Lark sends signature in X-Lark-Signature header
-        let header_signature = headers
-            .get("x-lark-signature")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                AppError::ChannelWebhookVerificationFailed(
-                    "missing X-Lark-Signature header".to_string(),
-                )
+    ) -> AppResult<Option<Vec<u8>>> {
+        let verification_token =
+            secrets
+                .lark_verification_token
+                .as_deref()
+                .ok_or_else(|| {
+                    AppError::ChannelWebhookVerificationFailed(
+                        "Lark/Feishu verification token not configured on the bot. \
+                         Re-register the bot with its Event Subscription Verification Token."
+                            .to_string(),
+                    )
+                })?;
+
+        // When Encrypt Key is configured on the Lark side, the body arrives
+        // as `{"encrypt": "<base64>"}` accompanied by `X-Lark-Signature`. Verify
+        // the signature and decrypt the envelope before any token check.
+        let (plaintext_bytes, rewrote_body) = match secrets.lark_encrypt_key.as_deref() {
+            Some(key) if !key.is_empty() => {
+                verify_lark_signature(key, headers, body)?;
+                (decrypt_lark_envelope(key, body)?, true)
+            }
+            _ => (body.to_vec(), false),
+        };
+
+        let payload: serde_json::Value =
+            serde_json::from_slice(&plaintext_bytes).map_err(|e| {
+                AppError::ChannelWebhookVerificationFailed(format!(
+                    "Lark webhook body is not valid JSON: {e}"
+                ))
             })?;
 
-        // Parse the body to extract timestamp and nonce for verification
-        let payload: serde_json::Value = serde_json::from_slice(body).map_err(|_| {
+        // url_verification requests are sent BEFORE the inbound-event flow
+        // and carry the token at the top level; handle_challenge upstream
+        // should already have short-circuited them, but if one ever lands
+        // here (e.g. replay) we still accept it as long as the token matches.
+        let payload_token = extract_lark_token(&payload);
+
+        let payload_token = payload_token.ok_or_else(|| {
             AppError::ChannelWebhookVerificationFailed(
-                "invalid JSON body for signature verification".to_string(),
+                "Lark webhook body missing `token` field; cannot verify origin".to_string(),
             )
         })?;
 
-        let timestamp = payload
-            .get("header")
-            .and_then(|h| h.get("create_time"))
-            .and_then(|v| v.as_str())
-            .or_else(|| payload.get("ts").and_then(|v| v.as_str()))
-            .unwrap_or("");
-
-        let nonce = payload
-            .get("header")
-            .and_then(|h| h.get("nonce"))
-            .and_then(|v| v.as_str())
-            .or_else(|| payload.get("nonce").and_then(|v| v.as_str()))
-            .unwrap_or("");
-
-        // The webhook_secret_hash stores the SHA-256 hash of the verification
-        // token. For HMAC verification we compute:
-        // HMAC-SHA256(verification_token, timestamp + nonce + body)
-        // However, since we only store the hash, we use the hash itself as the
-        // HMAC key (consistent with how the token was registered).
-        let stored_hash = &bot.webhook_secret_hash;
-
-        // Build the HMAC message: timestamp + nonce + encrypt_key + body_string
-        let body_str = std::str::from_utf8(body).unwrap_or("");
-        let hmac_message = format!("{timestamp}{nonce}{stored_hash}{body_str}");
-
-        let mut mac = HmacSha256::new_from_slice(stored_hash.as_bytes()).map_err(|_| {
-            AppError::ChannelWebhookVerificationFailed("failed to create HMAC verifier".to_string())
-        })?;
-        mac.update(hmac_message.as_bytes());
-        let computed = hex::encode(mac.finalize().into_bytes());
-
-        if computed
+        let matches: bool = payload_token
             .as_bytes()
-            .ct_eq(header_signature.as_bytes())
-            .into()
-        {
-            Ok(())
-        } else {
-            Err(AppError::ChannelWebhookVerificationFailed(
-                "Lark signature verification failed".to_string(),
-            ))
+            .ct_eq(verification_token.as_bytes())
+            .into();
+        if !matches {
+            return Err(AppError::ChannelWebhookVerificationFailed(
+                "Lark verification token mismatch".to_string(),
+            ));
         }
+
+        Ok(if rewrote_body {
+            Some(plaintext_bytes)
+        } else {
+            None
+        })
     }
 
     async fn parse_inbound(&self, body: &[u8]) -> AppResult<Vec<InboundMessage>> {
@@ -541,6 +551,128 @@ impl PlatformAdapter for LarkFamilyAdapter {
 }
 
 // ---------------------------------------------------------------------------
+// Lark Event Subscription security helpers
+// ---------------------------------------------------------------------------
+
+/// Extract the Lark Event Subscription "Verification Token" from a decoded
+/// webhook payload.
+///
+/// Lark delivers the token in different places depending on the schema:
+/// v2 events put it at `header.token`, older v1 events and `url_verification`
+/// challenges put it at the top level (`token`). We accept both.
+fn extract_lark_token(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("header")
+        .and_then(|h| h.get("token"))
+        .and_then(|v| v.as_str())
+        .or_else(|| payload.get("token").and_then(|v| v.as_str()))
+}
+
+/// Verify the `X-Lark-Signature` header that Lark sends when Event
+/// Subscription encryption is enabled.
+///
+/// Per Lark's docs the signature is
+/// `hex(SHA256(timestamp + nonce + encrypt_key + raw_body))` -- a plain
+/// SHA-256 digest, NOT HMAC. The comparison is constant-time to avoid
+/// timing oracles.
+fn verify_lark_signature(
+    encrypt_key: &str,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+) -> AppResult<()> {
+    let expected_sig = headers
+        .get("x-lark-signature")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            AppError::ChannelWebhookVerificationFailed(
+                "missing X-Lark-Signature header (Encrypt Key is configured on this bot, \
+                 so Lark must sign every request)"
+                    .to_string(),
+            )
+        })?;
+
+    let timestamp = headers
+        .get("x-lark-request-timestamp")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            AppError::ChannelWebhookVerificationFailed(
+                "missing X-Lark-Request-Timestamp header".to_string(),
+            )
+        })?;
+
+    let nonce = headers
+        .get("x-lark-request-nonce")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            AppError::ChannelWebhookVerificationFailed(
+                "missing X-Lark-Request-Nonce header".to_string(),
+            )
+        })?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(timestamp.as_bytes());
+    hasher.update(nonce.as_bytes());
+    hasher.update(encrypt_key.as_bytes());
+    hasher.update(body);
+    let computed = hex::encode(hasher.finalize());
+
+    if computed.as_bytes().ct_eq(expected_sig.as_bytes()).into() {
+        Ok(())
+    } else {
+        Err(AppError::ChannelWebhookVerificationFailed(
+            "Lark signature verification failed".to_string(),
+        ))
+    }
+}
+
+/// Decrypt Lark's `{"encrypt": "<base64>"}` envelope into the plaintext JSON
+/// event body.
+///
+/// Lark uses AES-256-CBC with PKCS#7 padding. The encryption key is
+/// `SHA-256(encrypt_key)` and the IV is the first 16 bytes of the ciphertext;
+/// the remainder is the actual encrypted payload.
+fn decrypt_lark_envelope(encrypt_key: &str, body: &[u8]) -> AppResult<Vec<u8>> {
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        encrypt: String,
+    }
+
+    let env: Envelope = serde_json::from_slice(body).map_err(|e| {
+        AppError::ChannelWebhookVerificationFailed(format!(
+            "Lark encrypted body must be JSON with an `encrypt` field: {e}"
+        ))
+    })?;
+
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(env.encrypt.as_bytes())
+        .map_err(|e| {
+            AppError::ChannelWebhookVerificationFailed(format!(
+                "Lark `encrypt` value is not valid base64: {e}"
+            ))
+        })?;
+
+    if ciphertext.len() < 16 {
+        return Err(AppError::ChannelWebhookVerificationFailed(
+            "Lark encrypted payload shorter than AES block size".to_string(),
+        ));
+    }
+
+    let (iv, payload) = ciphertext.split_at(16);
+    let key = Sha256::digest(encrypt_key.as_bytes());
+
+    let mut buffer = payload.to_vec();
+    let plaintext = Aes256CbcDec::new(key.as_slice().into(), iv.into())
+        .decrypt_padded_mut::<Pkcs7>(&mut buffer)
+        .map_err(|_| {
+            AppError::ChannelWebhookVerificationFailed(
+                "Lark AES-256-CBC decryption failed (wrong Encrypt Key?)".to_string(),
+            )
+        })?;
+
+    Ok(plaintext.to_vec())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -601,6 +733,240 @@ mod tests {
     fn handle_challenge_invalid_json_returns_none() {
         let adapter = LarkFamilyAdapter::lark(test_cache());
         assert!(adapter.handle_challenge(b"not json").is_none());
+    }
+
+    // -- verify_webhook ------------------------------------------------------
+
+    fn make_test_bot() -> ChannelBot {
+        ChannelBot {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            platform: "lark".to_string(),
+            label: "Test Lark Bot".to_string(),
+            bot_token_encrypted: vec![0; 16],
+            platform_bot_id: "cli_test".to_string(),
+            platform_bot_username: "lark_bot".to_string(),
+            webhook_registered: true,
+            webhook_secret_hash: String::new(),
+            app_id: Some("cli_test".to_string()),
+            app_secret_encrypted: None,
+            lark_verification_token_encrypted: None,
+            lark_encrypt_key_encrypted: None,
+            public_key: None,
+            status: "active".to_string(),
+            is_active: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn secrets_with(verification_token: &str, encrypt_key: Option<&str>) -> WebhookSecrets {
+        WebhookSecrets {
+            lark_verification_token: Some(verification_token.to_string()),
+            lark_encrypt_key: encrypt_key.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_plaintext_matching_token_v2_header() {
+        let adapter = LarkFamilyAdapter::lark(test_cache());
+        let bot = make_test_bot();
+        let secrets = secrets_with("vt_abc123", None);
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_type": "im.message.receive_v1",
+                "token": "vt_abc123"
+            },
+            "event": {}
+        }))
+        .unwrap();
+
+        let headers = axum::http::HeaderMap::new();
+        let result = adapter
+            .verify_webhook(&bot, &secrets, &headers, &body)
+            .await
+            .expect("matching token should pass without signature");
+        assert!(result.is_none(), "plaintext body should not be rewritten");
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_plaintext_matching_token_v1_top_level() {
+        let adapter = LarkFamilyAdapter::feishu(test_cache());
+        let bot = make_test_bot();
+        let secrets = secrets_with("vt_xyz", None);
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "type": "event_callback",
+            "token": "vt_xyz",
+            "event": {}
+        }))
+        .unwrap();
+
+        let headers = axum::http::HeaderMap::new();
+        adapter
+            .verify_webhook(&bot, &secrets, &headers, &body)
+            .await
+            .expect("v1 top-level token should match");
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_plaintext_mismatched_token_is_rejected() {
+        let adapter = LarkFamilyAdapter::lark(test_cache());
+        let bot = make_test_bot();
+        let secrets = secrets_with("expected_token", None);
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "header": { "token": "wrong_token" },
+            "event": {}
+        }))
+        .unwrap();
+
+        let err = adapter
+            .verify_webhook(&bot, &secrets, &axum::http::HeaderMap::new(), &body)
+            .await
+            .expect_err("mismatched token must fail");
+        assert!(matches!(err, AppError::ChannelWebhookVerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_missing_verification_token_on_bot() {
+        let adapter = LarkFamilyAdapter::lark(test_cache());
+        let bot = make_test_bot();
+        // No verification token configured on the bot.
+        let secrets = WebhookSecrets::default();
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "header": { "token": "anything" },
+            "event": {}
+        }))
+        .unwrap();
+
+        let err = adapter
+            .verify_webhook(&bot, &secrets, &axum::http::HeaderMap::new(), &body)
+            .await
+            .expect_err("bot without verification token must not pass");
+        assert!(matches!(err, AppError::ChannelWebhookVerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_body_missing_token_field() {
+        let adapter = LarkFamilyAdapter::lark(test_cache());
+        let bot = make_test_bot();
+        let secrets = secrets_with("some_token", None);
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "header": { "event_type": "im.message.receive_v1" },
+            "event": {}
+        }))
+        .unwrap();
+
+        let err = adapter
+            .verify_webhook(&bot, &secrets, &axum::http::HeaderMap::new(), &body)
+            .await
+            .expect_err("body without token must fail");
+        assert!(matches!(err, AppError::ChannelWebhookVerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_encrypted_body_valid_roundtrip() {
+        use aes::Aes256;
+        use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+        type Aes256CbcEnc = cbc::Encryptor<Aes256>;
+
+        let adapter = LarkFamilyAdapter::lark(test_cache());
+        let bot = make_test_bot();
+        let encrypt_key = "bZBy7jqmK8Uy8d3C";
+        let verification_token = "vt_encrypted";
+        let secrets = secrets_with(verification_token, Some(encrypt_key));
+
+        // Build a plaintext event body that carries the verification token.
+        let plaintext = serde_json::to_vec(&serde_json::json!({
+            "header": { "token": verification_token },
+            "event": { "hello": "world" }
+        }))
+        .unwrap();
+
+        // Encrypt it the way Lark does: AES-256-CBC / PKCS7 / key =
+        // SHA256(encrypt_key), IV = 16 random bytes prepended to the
+        // ciphertext.
+        let key = Sha256::digest(encrypt_key.as_bytes());
+        let iv = [0x11u8; 16];
+        let block_size = 16;
+        let mut buf = vec![0u8; plaintext.len() + block_size];
+        buf[..plaintext.len()].copy_from_slice(&plaintext);
+        let ct_len = Aes256CbcEnc::new(key.as_slice().into(), (&iv).into())
+            .encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len())
+            .expect("encrypt")
+            .len();
+        let mut full_ct = iv.to_vec();
+        full_ct.extend_from_slice(&buf[..ct_len]);
+        let envelope = serde_json::to_vec(&serde_json::json!({
+            "encrypt": base64::engine::general_purpose::STANDARD.encode(&full_ct)
+        }))
+        .unwrap();
+
+        // Build the matching X-Lark-Signature: SHA256(ts + nonce + key + body)
+        let ts = "1700000000";
+        let nonce = "nonce123";
+        let mut hasher = Sha256::new();
+        hasher.update(ts.as_bytes());
+        hasher.update(nonce.as_bytes());
+        hasher.update(encrypt_key.as_bytes());
+        hasher.update(&envelope);
+        let sig = hex::encode(hasher.finalize());
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-lark-signature", sig.parse().unwrap());
+        headers.insert("x-lark-request-timestamp", ts.parse().unwrap());
+        headers.insert("x-lark-request-nonce", nonce.parse().unwrap());
+
+        let decoded = adapter
+            .verify_webhook(&bot, &secrets, &headers, &envelope)
+            .await
+            .expect("valid encrypted body should pass");
+        let decoded = decoded.expect("encrypted path must return plaintext body");
+        assert_eq!(decoded, plaintext);
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_encrypted_body_bad_signature() {
+        let adapter = LarkFamilyAdapter::lark(test_cache());
+        let bot = make_test_bot();
+        let encrypt_key = "k";
+        let secrets = secrets_with("vt", Some(encrypt_key));
+
+        let envelope = serde_json::to_vec(&serde_json::json!({
+            "encrypt": "aaaa"
+        }))
+        .unwrap();
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-lark-signature", "deadbeef".parse().unwrap());
+        headers.insert("x-lark-request-timestamp", "1".parse().unwrap());
+        headers.insert("x-lark-request-nonce", "n".parse().unwrap());
+
+        let err = adapter
+            .verify_webhook(&bot, &secrets, &headers, &envelope)
+            .await
+            .expect_err("bad signature must fail");
+        assert!(matches!(err, AppError::ChannelWebhookVerificationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_webhook_encrypted_body_missing_signature_header() {
+        let adapter = LarkFamilyAdapter::lark(test_cache());
+        let bot = make_test_bot();
+        let secrets = secrets_with("vt", Some("key"));
+        let envelope = serde_json::to_vec(&serde_json::json!({ "encrypt": "x" })).unwrap();
+
+        let err = adapter
+            .verify_webhook(&bot, &secrets, &axum::http::HeaderMap::new(), &envelope)
+            .await
+            .expect_err("missing signature must fail when encrypt_key is configured");
+        assert!(matches!(err, AppError::ChannelWebhookVerificationFailed(_)));
     }
 
     // -- parse_inbound -------------------------------------------------------

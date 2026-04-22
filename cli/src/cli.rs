@@ -2028,6 +2028,24 @@ pub enum ChannelBotCommands {
         /// Read app secret from this environment variable
         #[arg(long)]
         app_secret_env: Option<String>,
+        /// Lark/Feishu Event Subscription Verification Token
+        /// (hidden from help -- use --verification-token-env instead).
+        /// REQUIRED for Lark/Feishu. Copy it from the Lark Developer Console
+        /// -> Event Subscriptions. Not the same as the app secret.
+        #[arg(long, hide = true)]
+        verification_token: Option<String>,
+        /// Read Lark/Feishu verification token from this environment variable
+        #[arg(long)]
+        verification_token_env: Option<String>,
+        /// Lark/Feishu Event Subscription Encrypt Key, when enabled on the
+        /// platform side (hidden from help -- use --encrypt-key-env instead).
+        /// Optional: leave blank if Lark Event Subscriptions are not
+        /// configured with an Encrypt Key.
+        #[arg(long, hide = true)]
+        encrypt_key: Option<String>,
+        /// Read Lark/Feishu encrypt key from this environment variable
+        #[arg(long)]
+        encrypt_key_env: Option<String>,
         /// Platform public key (required for Discord)
         #[arg(long)]
         public_key: Option<String>,

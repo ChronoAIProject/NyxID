@@ -13,7 +13,7 @@ use ed25519_dalek::{Signature, VerifyingKey};
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
 use crate::services::channel_platform::{
-    BotIdentity, InboundMessage, OutboundReply, PlatformAdapter,
+    BotIdentity, InboundMessage, OutboundReply, PlatformAdapter, WebhookSecrets,
 };
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
@@ -226,9 +226,10 @@ impl PlatformAdapter for DiscordAdapter {
     async fn verify_webhook(
         &self,
         bot: &ChannelBot,
+        _secrets: &WebhookSecrets,
         headers: &axum::http::HeaderMap,
         body: &[u8],
-    ) -> AppResult<()> {
+    ) -> AppResult<Option<Vec<u8>>> {
         let public_key_hex = bot.public_key.as_deref().ok_or_else(|| {
             AppError::ChannelWebhookVerificationFailed(
                 "Discord bot missing public_key configuration".to_string(),
@@ -293,7 +294,7 @@ impl PlatformAdapter for DiscordAdapter {
             )
         })?;
 
-        Ok(())
+        Ok(None)
     }
 
     async fn parse_inbound(&self, body: &[u8]) -> AppResult<Vec<InboundMessage>> {
@@ -647,11 +648,14 @@ mod tests {
         let signature_hex = hex::encode(signature.to_bytes());
 
         let bot = make_test_bot(Some(&public_key_hex));
+        let secrets = WebhookSecrets::default();
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("x-signature-ed25519", signature_hex.parse().unwrap());
         headers.insert("x-signature-timestamp", timestamp.parse().unwrap());
 
-        let result = adapter.verify_webhook(&bot, &headers, body_content).await;
+        let result = adapter
+            .verify_webhook(&bot, &secrets, &headers, body_content)
+            .await;
         assert!(result.is_ok());
     }
 
@@ -661,6 +665,7 @@ mod tests {
 
         // Use a known public key but wrong signature
         let bot = make_test_bot(Some(&hex::encode([1u8; 32])));
+        let secrets = WebhookSecrets::default();
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             "x-signature-ed25519",
@@ -668,7 +673,9 @@ mod tests {
         );
         headers.insert("x-signature-timestamp", "12345".parse().unwrap());
 
-        let result = adapter.verify_webhook(&bot, &headers, b"{}").await;
+        let result = adapter
+            .verify_webhook(&bot, &secrets, &headers, b"{}")
+            .await;
         assert!(result.is_err());
     }
 
@@ -676,9 +683,12 @@ mod tests {
     async fn verify_webhook_missing_public_key() {
         let adapter = DiscordAdapter;
         let bot = make_test_bot(None);
+        let secrets = WebhookSecrets::default();
         let headers = axum::http::HeaderMap::new();
 
-        let result = adapter.verify_webhook(&bot, &headers, b"{}").await;
+        let result = adapter
+            .verify_webhook(&bot, &secrets, &headers, b"{}")
+            .await;
         assert!(result.is_err());
     }
 
@@ -686,9 +696,12 @@ mod tests {
     async fn verify_webhook_missing_headers() {
         let adapter = DiscordAdapter;
         let bot = make_test_bot(Some(&hex::encode([1u8; 32])));
+        let secrets = WebhookSecrets::default();
         let headers = axum::http::HeaderMap::new();
 
-        let result = adapter.verify_webhook(&bot, &headers, b"{}").await;
+        let result = adapter
+            .verify_webhook(&bot, &secrets, &headers, b"{}")
+            .await;
         assert!(result.is_err());
     }
 
@@ -707,6 +720,8 @@ mod tests {
             webhook_secret_hash: "unused_for_discord".to_string(),
             app_id: None,
             app_secret_encrypted: None,
+            lark_verification_token_encrypted: None,
+            lark_encrypt_key_encrypted: None,
             public_key: public_key.map(String::from),
             status: "active".to_string(),
             is_active: true,

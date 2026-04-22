@@ -53,6 +53,28 @@ pub struct OutboundReply {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Plaintext secrets that the handler has already decrypted from the
+/// [`ChannelBot`](crate::models::channel_bot::ChannelBot) record and is
+/// passing to the adapter for webhook verification.
+///
+/// Kept separate from `ChannelBot` so verification material never has to be
+/// written back into the model struct in memory, and so each adapter only
+/// sees the fields it actually needs.
+#[derive(Default, Debug)]
+pub struct WebhookSecrets {
+    /// Slack: plaintext app signing secret used as the HMAC-SHA256 key for
+    /// `X-Slack-Signature` verification.
+    pub slack_signing_secret: Option<String>,
+    /// Lark/Feishu: plaintext Event Subscription Verification Token. Lark
+    /// places this value in every inbound body so the server can confirm
+    /// the request came from Lark.
+    pub lark_verification_token: Option<String>,
+    /// Lark/Feishu: plaintext Event Subscription Encrypt Key. When set, Lark
+    /// AES-256-CBC-encrypts the request body and signs it via
+    /// `X-Lark-Signature`.
+    pub lark_encrypt_key: Option<String>,
+}
+
 /// Trait that each chat platform (Telegram, Discord, Lark, Feishu) implements
 /// to normalize webhook verification, message parsing, and reply sending.
 #[async_trait::async_trait]
@@ -61,12 +83,18 @@ pub trait PlatformAdapter: Send + Sync {
     fn platform_id(&self) -> &str;
 
     /// Verify the incoming webhook signature or secret headers.
+    ///
+    /// Returns `Some(plaintext_body)` if the adapter decrypted the body on
+    /// the way through (e.g. Lark with Encrypt Key enabled) and the handler
+    /// should feed that plaintext to [`parse_inbound`] instead of the raw
+    /// body. Returns `None` when the input body should be used as-is.
     async fn verify_webhook(
         &self,
         bot: &crate::models::channel_bot::ChannelBot,
+        secrets: &WebhookSecrets,
         headers: &axum::http::HeaderMap,
         body: &[u8],
-    ) -> AppResult<()>;
+    ) -> AppResult<Option<Vec<u8>>>;
 
     /// Parse the raw webhook body into zero or more normalized inbound messages.
     async fn parse_inbound(&self, body: &[u8]) -> AppResult<Vec<InboundMessage>>;
