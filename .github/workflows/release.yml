@@ -1,26 +1,35 @@
 name: Release
 
-# Creates a GitHub Release with an auto-generated changelog when a `v*` tag is
-# pushed. Container images are built and pushed separately by
-# `publish-images.yml`, which also runs on tag pushes and gates on CI.
+# Builds precompiled NyxID CLI archives with cargo-dist, reshapes the final
+# release asset names to match NyxID's public contract, signs the unified
+# checksum file with cosign keyless, emits GitHub provenance attestations, and
+# publishes the GitHub Release. Container images are published separately by
+# `publish-images.yml`.
 
 on:
   push:
     tags:
-      - "v*"
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Create GitHub Release with changelog. CI gating lives in publish-images.yml
-  # for tag pushes -- the release notes job itself is pure git log + changelog
-  # generation and does not need to re-run CI.
-  # ---------------------------------------------------------------------------
-  github-release:
-    name: GitHub Release
+  ci-gate:
+    name: CI Gate
+    uses: ./.github/workflows/ci.yml
+
+  changelog:
+    name: Changelog
     runs-on: ubuntu-latest
+    outputs:
+      changes: ${{ steps.changelog.outputs.changes }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -41,21 +50,265 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create release
-        uses: softprops/action-gh-release@v3
+  plan:
+    name: Dist Plan
+    runs-on: ubuntu-22.04
+    needs: ci-gate
+    outputs:
+      manifest: ${{ steps.plan.outputs.manifest }}
+      version: ${{ steps.version.outputs.version }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
         with:
-          body: |
-            ## Changes
+          persist-credentials: false
+          submodules: recursive
 
-            ${{ steps.changelog.outputs.changes }}
+      - uses: dtolnay/rust-toolchain@stable
 
-            ## Container images
+      - name: Install dist
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-installer.sh \
+            | sh
 
-            Multi-arch (linux/amd64, linux/arm64) images for this release are
-            published to GitHub Container Registry by the `Publish Images`
-            workflow:
+      - name: Resolve version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-            - `ghcr.io/chronoaiproject/nyxid/backend:${{ github.ref_name }}`
-            - `ghcr.io/chronoaiproject/nyxid/frontend:${{ github.ref_name }}`
-            - `ghcr.io/chronoaiproject/nyxid/node-agent:${{ github.ref_name }}`
-          generate_release_notes: true
+      - name: Build dist plan
+        id: plan
+        run: |
+          dist plan --allow-dirty --tag="${GITHUB_REF_NAME}" --output-format=json > dist-manifest.json
+          echo "manifest=$(jq -c '.' dist-manifest.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dist plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-plan-dist-manifest
+          path: dist-manifest.json
+
+  build-local-artifacts:
+    name: Build ${{ join(matrix.targets, ', ') }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.manifest).ci.github.artifacts_matrix }}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container && matrix.container.image || null }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
+    steps:
+      - name: Enable Windows long paths
+        run: git config --global core.longpaths true
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.container }}
+
+      - name: Install Rust in container if needed
+        if: ${{ matrix.container }}
+        run: |
+          if ! command -v cargo > /dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Install dist
+        run: ${{ matrix.install_dist.run }}
+
+      - name: Fetch dist plan
+        uses: actions/download-artifact@v8
+        with:
+          name: artifacts-plan-dist-manifest
+          path: target/distrib/
+
+      - name: Install dependencies
+        if: ${{ matrix.packages_install != '' }}
+        run: |
+          ${{ matrix.packages_install }}
+
+      - name: Build local artifacts
+        run: |
+          dist build --allow-dirty \
+            --tag="${GITHUB_REF_NAME}" \
+            --print=linkage \
+            --output-format=json \
+            ${{ matrix.dist_args }} > dist-manifest.json
+
+      - id: cargo-dist
+        name: Collect local artifact paths
+        shell: bash
+        run: |
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+
+      - name: Upload local artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-build-local-${{ join(matrix.targets, '_') }}
+          path: |
+            ${{ steps.cargo-dist.outputs.paths }}
+            ${{ env.BUILD_MANIFEST_NAME }}
+
+  build-global-artifacts:
+    name: Build global artifacts
+    runs-on: ubuntu-22.04
+    needs:
+      - plan
+      - build-local-artifacts
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dist
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-installer.sh \
+            | sh
+
+      - name: Fetch local artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+
+      - id: cargo-dist
+        name: Build global artifacts
+        shell: bash
+        run: |
+          dist build --allow-dirty \
+            --tag="${GITHUB_REF_NAME}" \
+            --output-format=json \
+            --artifacts=global > dist-manifest.json
+
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          jq --raw-output '.upload_files[]' dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+
+      - name: Upload global artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-build-global
+          path: |
+            ${{ steps.cargo-dist.outputs.paths }}
+            ${{ env.BUILD_MANIFEST_NAME }}
+
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-22.04
+    needs:
+      - changelog
+      - plan
+      - build-local-artifacts
+      - build-global-artifacts
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      CHANGELOG: ${{ needs.changelog.outputs.changes }}
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release-artifacts
+
+          for target in \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-apple-darwin \
+            aarch64-apple-darwin \
+            x86_64-pc-windows-msvc \
+            aarch64-pc-windows-msvc
+          do
+            ext=".tar.xz"
+            case "$target" in
+              *windows*) ext=".zip" ;;
+            esac
+
+            src="target/distrib/nyxid-cli-${target}${ext}"
+            dest="release-artifacts/nyxid-${VERSION}-${target}${ext}"
+            test -f "$src"
+            cp "$src" "$dest"
+          done
+
+          (
+            cd release-artifacts
+            sha256sum nyxid-* > SHA256SUMS
+          )
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SHA256SUMS
+        shell: bash
+        run: |
+          cosign sign-blob \
+            --yes \
+            --output-signature release-artifacts/SHA256SUMS.sig \
+            --output-certificate release-artifacts/SHA256SUMS.pem \
+            release-artifacts/SHA256SUMS
+
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-checksums: release-artifacts/SHA256SUMS
+
+      - name: Upload final release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: release-artifacts/*
+
+      - name: Write release notes
+        shell: bash
+        run: |
+          {
+            echo "## Changes"
+            echo
+            printf '%s\n' "$CHANGELOG"
+            echo
+            echo "## Container images"
+            echo
+            echo "Multi-arch (linux/amd64, linux/arm64) images for this release are"
+            echo "published to GitHub Container Registry by the \`Publish Images\`"
+            echo "workflow:"
+            echo
+            echo "- \`ghcr.io/chronoaiproject/nyxid/backend:${GITHUB_REF_NAME}\`"
+            echo "- \`ghcr.io/chronoaiproject/nyxid/frontend:${GITHUB_REF_NAME}\`"
+            echo "- \`ghcr.io/chronoaiproject/nyxid/node-agent:${GITHUB_REF_NAME}\`"
+          } > "$RUNNER_TEMP/release-notes.md"
+
+      - name: Create GitHub release
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            release-artifacts/*

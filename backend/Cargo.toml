@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 axum = { workspace = true }
 tower = "0.5.3"
