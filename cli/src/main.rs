@@ -25,6 +25,8 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
     let update_check_context = update_check::UpdateCheckContext::from_command(&cli.command);
 
+    update_check::maybe_refresh_update_check(&update_check_context).await;
+
     let result = match cli.command {
         Commands::Login(args) => auth::run_login(args).await,
         Commands::Logout(args) => {
@@ -110,7 +112,6 @@ async fn run() -> Result<()> {
     };
 
     if result.is_ok() {
-        update_check::maybe_spawn_update_check(&update_check_context);
         update_check::maybe_print_update_banner(&update_check_context);
     }
 

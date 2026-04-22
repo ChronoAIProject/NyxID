@@ -397,12 +397,12 @@ pub async fn verify_checksums_signature(
 pub fn handle_signature_verification_failure(
     failure: VerificationFailure,
     allow_unverified: bool,
-) -> Result<bool> {
+) -> Result<()> {
     match failure {
         VerificationFailure::Unavailable(error) => {
             if allow_unverified {
                 eprintln!("Warning: checksum signature verification was skipped: {error:#}");
-                Ok(false)
+                Ok(())
             } else {
                 bail!(
                     "Checksum signature verification is unavailable: {error:#}\n\
