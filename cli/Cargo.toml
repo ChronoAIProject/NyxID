@@ -31,6 +31,15 @@ rand = "0.8"
 hex = "0.4"
 comfy-table = "7"
 url = "2"
+self_update = { version = "0.44.0", default-features = false, features = ["reqwest", "archive-tar", "archive-zip", "compression-zip-deflate", "rustls"] }
+self-replace = "1.5.0"
+sigstore = { version = "0.13.0", default-features = false, features = ["cosign", "sigstore-trust-root", "rustls-tls"] }
+tar = "0.4"
+xz2 = "0.1"
+x509-cert = "0.2.5"
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+webpki = { package = "rustls-webpki", version = "0.103", features = ["std"], default-features = false }
 
 # SSH subcommand + node agent WebSocket
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }

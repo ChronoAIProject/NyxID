@@ -256,11 +256,41 @@ impl BaseUrlArgs {
 #[derive(Args, Clone)]
 pub struct UpdateArgs {
     /// Only update installed skills, skip CLI binary update
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["check", "from_source", "allow_unverified", "version"])]
     pub skills_only: bool,
+    /// Install a specific CLI version instead of the latest release
+    #[arg(long)]
+    pub version: Option<String>,
+    /// Check whether an update is available without installing it
+    #[arg(long, conflicts_with = "skills_only")]
+    pub check: bool,
+    /// Force the legacy cargo-install update path
+    #[arg(long, conflicts_with = "skills_only")]
+    pub from_source: bool,
+    /// Allow unsigned binary installs only when no verifier is available
+    #[arg(long, conflicts_with_all = ["skills_only", "from_source"])]
+    pub allow_unverified: bool,
     /// NyxID base URL for skill content (uses saved URL by default)
     #[arg(long, env = "NYXID_URL")]
     pub base_url: Option<String>,
+    /// Agent profile name (isolates saved base URLs and update cache)
+    #[arg(long, env = "NYXID_PROFILE")]
+    pub profile: Option<String>,
+}
+
+impl UpdateArgs {
+    pub fn resolved_base_url(&self) -> anyhow::Result<String> {
+        if let Some(url) = &self.base_url {
+            return Ok(url.clone());
+        }
+        if let Some(url) = crate::auth::read_saved_base_url_for(self.profile.as_deref()) {
+            return Ok(url);
+        }
+        anyhow::bail!(
+            "No base URL configured. Run `nyxid login --base-url <URL>` first, \
+             or pass --base-url, or set NYXID_URL"
+        )
+    }
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
