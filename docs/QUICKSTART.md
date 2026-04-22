@@ -10,9 +10,7 @@ For the one-paragraph overview and the AI-assisted setup prompt (drive the whole
 
 - [Docker](https://docs.docker.com/get-docker/) — required for the server stack (backend, frontend, MongoDB). ~2 GB disk for images on first pull.
 - A bash-compatible terminal — macOS Terminal, Linux shell, or [WSL (Windows Subsystem for Linux)](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows.
-- [Rust / Cargo](https://www.rust-lang.org/tools/install) — **optional**, only needed if you install the `nyxid` CLI (see [Install the `nyxid` CLI](#optional-install-the-nyxid-cli) below). The installer will set this up automatically if missing. Budget ~1.5 GB disk (~300 MB for the toolchain plus ~1 GB for the build cache) and 3–10 minutes for the first compile.
-
-Total disk footprint: ~2 GB for the server only, ~3.5 GB if you also install the CLI from source.
+- [Rust / Cargo](https://www.rust-lang.org/tools/install) — **optional**, only needed if you intentionally use the CLI's `--from-source` install path or an unsupported platform requires it.
 
 ---
 
@@ -146,15 +144,34 @@ To stop NyxID: `docker compose -f docker-compose.yml -f docker-compose.prod.yml 
 
 The server stack above is fully usable from the web console — the CLI (Command Line Interface) is only needed if you want to script credential setup, manage credential nodes, or drive NyxID from your terminal. Skip this section if you'd rather stay in the browser.
 
-> **Heads-up:** the installer builds from source via Cargo. It will install Rust automatically if you don't already have it (~300 MB) and then compile the CLI (~1 GB build cache, 3–10 minutes on first run). Make sure you have ~1.5 GB free.
-
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh)"
-source ~/.cargo/env                               # make nyxid available in current shell
-nyxid --version                                   # verify
+curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh | bash
+"$HOME/.local/bin/nyxid" --version
 ```
 
-> Already have Rust? You can also install with: `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli`
+Windows PowerShell:
+
+```powershell
+Invoke-Expression (Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.ps1).Content
+$HOME\.local\bin\nyxid.exe --version
+```
+
+<details>
+<summary><strong>Power user / unsupported platform</strong></summary>
+
+Download via the installer but force the legacy Cargo path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/tools/install.sh | bash -s -- --from-source
+```
+
+Or install directly with Cargo:
+
+```bash
+cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli --force --locked
+```
+
+</details>
 
 ---
 
