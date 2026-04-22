@@ -6,6 +6,7 @@ pub mod auth_flows;
 pub mod catalog;
 pub mod channel_bot;
 pub mod channel_event;
+pub mod config;
 pub mod developer_app;
 pub mod endpoint;
 pub mod external_key;

@@ -52,6 +52,10 @@ fn token_dir_for_profile(profile: Option<&str>) -> Result<PathBuf> {
     }
 }
 
+pub fn state_dir_for_profile(profile: Option<&str>) -> Result<PathBuf> {
+    token_dir_for_profile(profile)
+}
+
 fn token_file_path_for(profile: Option<&str>) -> Result<PathBuf> {
     Ok(token_dir_for_profile(profile)?.join(TOKEN_FILE_NAME))
 }

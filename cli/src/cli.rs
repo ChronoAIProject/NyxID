@@ -125,6 +125,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: AiSetupCommands,
     },
+    /// Manage CLI settings
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
     /// Update the CLI and installed skills
     Update(UpdateArgs),
     /// Manage channel bot relay (Telegram/Discord/Lark/Feishu bridge to agents)
@@ -153,6 +158,31 @@ pub struct RepoArgs {
     /// Open the repository in the default browser
     #[arg(long)]
     pub open: bool,
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCommands {
+    /// Persist a CLI setting in the selected profile
+    Set {
+        /// Setting key
+        key: ConfigKey,
+        /// Setting value
+        value: ConfigToggleValue,
+        /// Agent profile name
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ConfigKey {
+    UpdateCheck,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ConfigToggleValue {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]

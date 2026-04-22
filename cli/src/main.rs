@@ -3,6 +3,8 @@ mod auth;
 mod cli;
 mod commands;
 pub mod node;
+mod settings;
+mod update_check;
 mod update_support;
 mod wizard;
 
@@ -21,8 +23,9 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    let update_check_context = update_check::UpdateCheckContext::from_command(&cli.command);
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Login(args) => auth::run_login(args).await,
         Commands::Logout(args) => {
             auth::run_logout(&args.resolved_base_url()?, args.profile.as_deref()).await
@@ -86,6 +89,9 @@ async fn run() -> Result<()> {
         // AI skill setup
         Commands::AiSetup { command } => commands::ai_setup::run(command).await,
 
+        // CLI settings
+        Commands::Config { command } => commands::config::run(command).await,
+
         // Self-update CLI + skills
         Commands::Update(args) => commands::update::run(args).await,
 
@@ -101,5 +107,12 @@ async fn run() -> Result<()> {
         // Project links
         Commands::Repo(args) => commands::repo::run_repo(args).await,
         Commands::Info => commands::repo::run_info().await,
+    };
+
+    if result.is_ok() {
+        update_check::maybe_spawn_update_check(&update_check_context);
+        update_check::maybe_print_update_banner(&update_check_context);
     }
+
+    result
 }
