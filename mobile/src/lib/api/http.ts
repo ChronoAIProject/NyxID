@@ -96,6 +96,12 @@ type BackendApprovalRequestItem = {
   approval_mode: ApprovalMode;
   status: string;
   created_at: string;
+  // Org context — optional so responses from older backends still
+  // parse. `from_org_policy` is the authoritative flag; `org_id` and
+  // `org_name` are only set when the flag is true.
+  from_org_policy?: boolean;
+  org_id?: string | null;
+  org_name?: string | null;
 };
 
 type BackendApprovalRequestsResponse = {
@@ -114,6 +120,10 @@ type BackendApprovalGrantItem = {
   requester_label?: string | null;
   granted_at: string;
   expires_at: string;
+  // Org context for grants — optional for the same reason as above.
+  org_scoped?: boolean;
+  org_id?: string | null;
+  org_name?: string | null;
 };
 
 type BackendApprovalGrantsResponse = {
@@ -304,6 +314,13 @@ function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): Challen
   const summary = item.action_description ?? item.operation_summary;
   const parsed = parseOperationSummary(summary);
 
+  // Only surface org fields when the backend flags the request as
+  // created under an org policy. Falsy / missing `from_org_policy`
+  // yields the pre-existing personal-approval shape.
+  const fromOrgPolicy = item.from_org_policy === true;
+  const orgId = fromOrgPolicy ? item.org_id ?? null : undefined;
+  const orgName = fromOrgPolicy ? item.org_name ?? null : undefined;
+
   return {
     id: item.id,
     title: sanitizeDisplayValue(item.service_name, "Unknown Service"),
@@ -322,6 +339,9 @@ function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): Challen
         "Unknown"
       ),
     },
+    from_org_policy: fromOrgPolicy,
+    org_id: orgId,
+    org_name: orgName,
   };
 }
 
@@ -530,8 +550,13 @@ async function listPendingApprovalRequests(
   page = 1,
   perPage = ACTIVITY_PAGE_SIZE
 ): Promise<BackendApprovalRequestsResponse> {
+  // `include_admin_orgs=true` asks the backend to union in org-policy
+  // requests for every org the caller is an active admin of. Backends
+  // that don't yet recognize the param ignore it and return the legacy
+  // personal-only list, so the mobile build remains compatible with
+  // older deployments (see ChronoAIProject/NyxID#376).
   return requestJson<BackendApprovalRequestsResponse>(
-    `/approvals/requests?status=pending&page=${page}&per_page=${perPage}`
+    `/approvals/requests?status=pending&page=${page}&per_page=${perPage}&include_admin_orgs=true`
   );
 }
 
@@ -601,6 +626,10 @@ export async function listApprovalRequestsRequest(params?: {
   if (params?.status) qs.set("status", params.status);
   qs.set("page", String(params?.page ?? 1));
   qs.set("per_page", String(params?.per_page ?? 20));
+  // See listPendingApprovalRequests for rationale. History queries use
+  // the same opt-in so admins see their org's approved/rejected items
+  // alongside their personal history.
+  qs.set("include_admin_orgs", "true");
 
   const response = await requestJson<BackendApprovalRequestsResponse>(
     `/approvals/requests?${qs.toString()}`
@@ -658,31 +687,51 @@ export async function listApprovalsRequest(
   page = 1,
   perPage = ACTIVITY_PAGE_SIZE
 ): Promise<PageResponse<ApprovalItem>> {
+  // Same admin-org opt-in as requests: mobile's Active tab shows
+  // personal grants plus any org-scoped grants the caller admins.
   const response = await requestJson<BackendApprovalGrantsResponse>(
-    `/approvals/grants?page=${page}&per_page=${perPage}`
+    `/approvals/grants?page=${page}&per_page=${perPage}&include_admin_orgs=true`
   );
 
   return {
-    items: response.grants.map((item) => ({
-      id: item.id,
-      service_id: item.service_id,
-      service_name: sanitizeDisplayValue(item.service_name, "Unknown Service"),
-      requester_type: sanitizeDisplayValue(item.requester_type, "Unknown"),
-      requester_id: sanitizeDisplayValue(item.requester_id, "unknown"),
-      requester_label: sanitizeOptionalDisplayValue(item.requester_label),
-      granted_at: item.granted_at,
-      expires_at: item.expires_at,
-    })),
+    items: response.grants.map((item) => {
+      const orgScoped = item.org_scoped === true;
+      return {
+        id: item.id,
+        service_id: item.service_id,
+        service_name: sanitizeDisplayValue(item.service_name, "Unknown Service"),
+        requester_type: sanitizeDisplayValue(item.requester_type, "Unknown"),
+        requester_id: sanitizeDisplayValue(item.requester_id, "unknown"),
+        requester_label: sanitizeOptionalDisplayValue(item.requester_label),
+        granted_at: item.granted_at,
+        expires_at: item.expires_at,
+        org_scoped: orgScoped,
+        org_id: orgScoped ? item.org_id ?? null : undefined,
+        org_name: orgScoped ? item.org_name ?? null : undefined,
+      };
+    }),
     total: response.total,
     page: response.page,
     per_page: response.per_page,
   };
 }
 
-export async function revokeApprovalRequest(approvalId: string): Promise<RevokeApprovalResponse> {
-  return requestJson<MessageResponse>(`/approvals/grants/${encodeURIComponent(approvalId)}`, {
-    method: "DELETE",
-  });
+export async function revokeApprovalRequest(
+  approvalId: string,
+  orgId?: string | null
+): Promise<RevokeApprovalResponse> {
+  // Org-scoped grants live under the owning org's user_id, not the
+  // caller's. The backend's revoke handler uses `?org_id=` to pivot
+  // ownership to the target org and then checks the caller is an
+  // active admin of it. Without this param, DELETE on an org grant
+  // 404s because the default path still searches by user_id = actor.
+  const qs = orgId ? `?org_id=${encodeURIComponent(orgId)}` : "";
+  return requestJson<MessageResponse>(
+    `/approvals/grants/${encodeURIComponent(approvalId)}${qs}`,
+    {
+      method: "DELETE",
+    }
+  );
 }
 
 export async function registerPushTokenRequest(

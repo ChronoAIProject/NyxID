@@ -125,6 +125,11 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
             Review this request before creating reusable access for {grantDurationLabel}.
           </Text>
         )}
+        {data.from_org_policy ? (
+          <Text style={styles.orgContext}>
+            On behalf of {data.org_name ?? "your org"}
+          </Text>
+        ) : null}
 
         <View style={styles.detailCard}>
           <Text style={flowStyles.cardTitle}>Request Context</Text>
@@ -134,6 +139,13 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
           <DetailRow label="Risk Level" value={data.risk_level.toUpperCase()} valueColor={riskColor} flowStyles={flowStyles} />
           <DetailRow label="Status" value={actionState.statusLabel} valueColor={colors.warning} flowStyles={flowStyles} />
           {isGrantMode && <DetailRow label="Grant Duration" value={grantDurationLabel} flowStyles={flowStyles} />}
+          {data.from_org_policy ? (
+            <DetailRow
+              label="Org"
+              value={data.org_name ?? "Unnamed org"}
+              flowStyles={flowStyles}
+            />
+          ) : null}
           <DetailRow label="Location" value={data.request_context.location} isLast flowStyles={flowStyles} />
         </View>
 
@@ -182,6 +194,12 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     fontSize: 13,
     color: c.textSecondary,
     lineHeight: 20,
+  },
+  orgContext: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: c.textSecondary,
+    letterSpacing: 0.3,
   },
   stateNotice: {
     borderRadius: radius.sm,

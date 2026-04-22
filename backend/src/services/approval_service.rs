@@ -348,6 +348,28 @@ pub async fn create_approval_request(
     // their channel/message ids are not stored on the request -- the
     // decision-time edit will only update one of them. Trade-off accepted
     // for now; a fuller fix would store per-recipient delivery state.
+    //
+    // For org-policy requests, resolve the owning org's display name
+    // exactly once and pass it into every fan-out call so Telegram and
+    // push notifications can render org-aware wording. A failed lookup
+    // degrades gracefully to the generic template (`None`) rather than
+    // blocking the request.
+    let org_name: Option<String> = if request.from_org_policy {
+        match crate::services::org_service::get_org_user(db, &request.user_id).await {
+            Ok(org_user) => org_user.display_name.clone(),
+            Err(e) => {
+                tracing::warn!(
+                    org_id = %request.user_id,
+                    error = %e,
+                    "Failed to resolve org display name for approval notification"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut all_channels: Vec<String> = Vec::new();
     let mut primary_chat_id: Option<i64> = None;
     let mut primary_message_id: Option<i64> = None;
@@ -363,6 +385,7 @@ pub async fn create_approval_request(
             apns_auth,
             recipient,
             &request,
+            org_name.as_deref(),
         )
         .await
         {
@@ -503,7 +526,9 @@ pub async fn create_tool_approval_request(
         .await
         .map_err(AppError::DatabaseError)?;
 
-    // Send notification through existing pipeline
+    // Send notification through existing pipeline. Tool approvals are
+    // always personal (see `from_org_policy: false` above), so no org
+    // context is ever passed here.
     match notification_service::send_approval_notification(
         db,
         config,
@@ -512,6 +537,7 @@ pub async fn create_tool_approval_request(
         apns_auth,
         user_id,
         &request,
+        None,
     )
     .await
     {
@@ -970,17 +996,119 @@ pub fn map_wait_for_decision_error(
     }
 }
 
+/// Listing-scope descriptor for one admin org branch on the
+/// opt-in `include_admin_orgs=true` listing paths. Handlers pre-resolve
+/// each admin membership's `allowed_service_ids` (which live in
+/// `UserService.id` space) into the set of concrete storage-space
+/// `service_id`s that can match an `ApprovalRequest` / `ApprovalGrant`
+/// row, so the Mongo filter itself enforces scope. This keeps
+/// pagination correct: a scoped admin's empty-page case from the
+/// post-fetch filter is eliminated, because we never fetch rows we
+/// can't return.
+///
+/// `service_id_scope` semantics:
+/// - `None` — unscoped admin. Every org-owned row (subject to the
+///   `from_org_policy` / `org_scoped` flag) passes.
+/// - `Some(vec)` — scoped admin. Only rows whose `service_id` is in
+///   `vec` pass. An empty `vec` means the admin's scope resolved to no
+///   storage-space ids — the caller should drop this branch entirely
+///   so the admin sees nothing from that org.
+#[derive(Debug, Clone)]
+pub struct OrgFilterBranch {
+    pub org_id: String,
+    pub service_id_scope: Option<Vec<String>>,
+}
+
+/// Build the Mongo filter for listing approval requests.
+///
+/// Empty `admin_branches` preserves the legacy per-user shape so
+/// callers that don't opt in to the admin-org union get byte-identical
+/// behavior. When non-empty, branches are emitted as `$or` alternatives
+/// keyed on each org's `user_id` + `from_org_policy: true`, with a
+/// per-branch `service_id: { $in: ... }` when the admin is scoped.
+/// Scoped admins whose resolved storage-space id list is empty are
+/// dropped from the filter (they see no org rows from that
+/// membership).
+fn build_requests_filter(user_id: &str, admin_branches: &[OrgFilterBranch]) -> bson::Document {
+    let mut branches: Vec<bson::Document> = Vec::new();
+    // Personal branch always included so the caller's own rows are
+    // part of the unified result.
+    branches.push(doc! { "user_id": user_id });
+
+    for branch in admin_branches {
+        match &branch.service_id_scope {
+            Some(ids) if ids.is_empty() => {
+                // Scoped admin with no services in scope — emit nothing.
+                continue;
+            }
+            Some(ids) => {
+                let mut ids_bson = bson::Array::new();
+                for id in ids {
+                    ids_bson.push(bson::Bson::String(id.clone()));
+                }
+                branches.push(doc! {
+                    "user_id": &branch.org_id,
+                    "from_org_policy": true,
+                    "service_id": { "$in": ids_bson },
+                });
+            }
+            None => {
+                branches.push(doc! {
+                    "user_id": &branch.org_id,
+                    "from_org_policy": true,
+                });
+            }
+        }
+    }
+
+    if branches.len() == 1 {
+        // Only the personal branch survived. Fall back to the legacy
+        // flat shape so callers see the same Document they always did.
+        return branches.remove(0);
+    }
+    let mut arr = bson::Array::new();
+    for b in branches {
+        arr.push(bson::Bson::Document(b));
+    }
+    doc! { "$or": arr }
+}
+
 /// List approval requests for a user (for history page).
+///
+/// `admin_branches` widens the listing to also include org-policy
+/// requests owned by each supplied admin org, with per-branch scope
+/// applied in the Mongo filter so pagination is correct. Callers
+/// that don't want the union pass `&[]` and get the historic
+/// personal-only result.
+///
+/// `statuses` accepts zero, one, or many status values. Empty slice
+/// means "no status filter" (all statuses returned). Single value
+/// becomes an equality predicate (`status: "pending"`). Multiple
+/// values become `status: { $in: [...] }` so the history view can
+/// ask for "everything except pending" in a single query — the
+/// alternative (filter client-side after pagination) stranded
+/// decided rows behind pages full of admin-org PENDING items.
 pub async fn list_requests(
     db: &Database,
     user_id: &str,
-    status_filter: Option<&str>,
+    admin_branches: &[OrgFilterBranch],
+    statuses: &[&str],
     page: u64,
     per_page: u64,
 ) -> AppResult<(Vec<ApprovalRequest>, u64)> {
-    let mut filter = doc! { "user_id": user_id };
-    if let Some(status) = status_filter {
-        filter.insert("status", status);
+    let mut filter = build_requests_filter(user_id, admin_branches);
+    match statuses {
+        [] => {}
+        [single] => {
+            filter.insert("status", *single);
+        }
+        many => {
+            let mut arr = bson::Array::new();
+            for s in many {
+                arr.push(bson::Bson::String((*s).to_string()));
+            }
+            filter.insert("status", doc! { "$in": arr });
+        }
     }
 
     let total = db
@@ -1014,39 +1142,161 @@ pub async fn get_request(db: &Database, request_id: &str) -> AppResult<ApprovalR
         .ok_or_else(|| AppError::NotFound("Approval request not found".to_string()))
 }
 
+/// Build the Mongo filter for listing approval grants. Empty
+/// `admin_branches` preserves the legacy per-user shape. When
+/// non-empty, branches are emitted as `$or` alternatives. Each
+/// branch carries its OWN grant-mode service-id set so one owner's
+/// `grant_mode` config never leaks another owner's grants (the
+/// cross-owner bug codex flagged in round 2). Per-branch scope is
+/// also intersected with the mode set so a scoped admin never sees
+/// rows outside their `allowed_service_ids`.
+///
+/// `grant_mode_by_owner` maps an owner `user_id` → its grant-mode
+/// service ids. An owner missing from the map has no services in
+/// grant mode and contributes no grants.
+fn build_grants_filter(
+    user_id: &str,
+    admin_branches: &[OrgFilterBranch],
+    grant_mode_by_owner: &std::collections::HashMap<String, Vec<String>>,
+    now: bson::DateTime,
+) -> bson::Document {
+    let mut branches: Vec<bson::Document> = Vec::new();
+
+    // Personal branch: only include if the caller has at least one
+    // service in grant mode. Otherwise we emit no personal branch at
+    // all, matching the legacy "no configs → no grants" behavior.
+    if let Some(actor_mode_ids) = grant_mode_by_owner.get(user_id)
+        && !actor_mode_ids.is_empty()
+    {
+        let mut ids_bson = bson::Array::new();
+        for id in actor_mode_ids {
+            ids_bson.push(bson::Bson::String(id.clone()));
+        }
+        branches.push(doc! {
+            "user_id": user_id,
+            "service_id": { "$in": ids_bson },
+        });
+    }
+
+    // Admin org branches. Each intersects the org's own grant-mode
+    // service ids with the admin's scope (if any). Skip branches that
+    // resolve to an empty set.
+    for branch in admin_branches {
+        let Some(mode_ids) = grant_mode_by_owner.get(&branch.org_id) else {
+            continue;
+        };
+        if mode_ids.is_empty() {
+            continue;
+        }
+        let effective: Vec<String> = match &branch.service_id_scope {
+            None => mode_ids.clone(),
+            Some(scope_ids) => mode_ids
+                .iter()
+                .filter(|sid| scope_ids.iter().any(|s| s == *sid))
+                .cloned()
+                .collect(),
+        };
+        if effective.is_empty() {
+            continue;
+        }
+        let mut ids_bson = bson::Array::new();
+        for id in &effective {
+            ids_bson.push(bson::Bson::String(id.clone()));
+        }
+        branches.push(doc! {
+            "user_id": &branch.org_id,
+            "org_scoped": true,
+            "service_id": { "$in": ids_bson },
+        });
+    }
+
+    let mut filter = doc! {
+        "revoked": false,
+        "expires_at": { "$gt": now },
+    };
+
+    if branches.is_empty() {
+        // Nothing matches. Use a predicate that's cheap for Mongo to
+        // evaluate as false (synthetic sentinel on the `_id` field).
+        filter.insert("_id", doc! { "$in": bson::Array::new() });
+    } else if branches.len() == 1 {
+        // Inline single branch so the filter stays flat and indexed.
+        let only = branches.remove(0);
+        for (k, v) in only {
+            filter.insert(k, v);
+        }
+    } else {
+        let mut arr = bson::Array::new();
+        for b in branches {
+            arr.push(bson::Bson::Document(b));
+        }
+        filter.insert("$or", bson::Bson::Array(arr));
+    }
+
+    filter
+}
+
 /// List active approval grants for a user.
 ///
-/// Only returns grants for services currently in `Grant` mode. Grants for
-/// services in `PerRequest` mode (or with no config, which defaults to
-/// `PerRequest`) are excluded even if they haven't been revoked yet. This
-/// read-time filter acts as a safety net for any write-time race conditions
-/// or partial failures during mode switches (see #146).
+/// Only returns grants for services currently in `Grant` mode.
+/// Grants for services in `PerRequest` mode (or with no config,
+/// which defaults to `PerRequest`) are excluded even if they
+/// haven't been revoked yet. This read-time filter acts as a
+/// safety net for any write-time race conditions or partial
+/// failures during mode switches (see #146).
+///
+/// `admin_branches` widens the listing to also include org-scoped
+/// grants owned by each supplied admin org, with per-branch scope
+/// (`service_id_scope`) intersected against that org's own grant-mode
+/// configs in the Mongo filter. Callers that don't opt in pass
+/// `&[]`.
 pub async fn list_grants(
     db: &Database,
     user_id: &str,
+    admin_branches: &[OrgFilterBranch],
     page: u64,
     per_page: u64,
 ) -> AppResult<(Vec<ApprovalGrant>, u64)> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
-    // Collect service IDs that are explicitly in grant mode for this user.
-    // Services with no config default to per_request, so their grants are excluded.
-    let grant_mode_service_ids: Vec<String> = db
+    // Collect grant-mode configs for the actor AND each admin org,
+    // but keep them grouped BY owner. The per-owner grouping is the
+    // fix for the round-2 cross-owner leak: owner A's "grant" config
+    // must not allow owner B's grants through.
+    let mut config_owner_ids: Vec<String> = vec![user_id.to_string()];
+    for b in admin_branches {
+        if !config_owner_ids.iter().any(|id| id == &b.org_id) {
+            config_owner_ids.push(b.org_id.clone());
+        }
+    }
+    let mut ids_bson = bson::Array::new();
+    for id in &config_owner_ids {
+        ids_bson.push(bson::Bson::String(id.clone()));
+    }
+    let configs: Vec<ServiceApprovalConfig> = db
         .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
-        .find(doc! { "user_id": user_id, "approval_mode": "grant" })
+        .find(doc! {
+            "user_id": { "$in": ids_bson },
+            "approval_mode": "grant",
+        })
         .await?
-        .try_collect::<Vec<ServiceApprovalConfig>>()
-        .await?
-        .into_iter()
-        .map(|c| c.service_id)
-        .collect();
+        .try_collect()
+        .await?;
+    let mut grant_mode_by_owner: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for c in configs {
+        grant_mode_by_owner
+            .entry(c.user_id)
+            .or_default()
+            .push(c.service_id);
+    }
+    // De-dupe per owner.
+    for v in grant_mode_by_owner.values_mut() {
+        let set: HashSet<String> = v.drain(..).collect();
+        v.extend(set);
+    }
 
-    let filter = doc! {
-        "user_id": user_id,
-        "revoked": false,
-        "expires_at": { "$gt": now },
-        "service_id": { "$in": &grant_mode_service_ids },
-    };
+    let filter = build_grants_filter(user_id, admin_branches, &grant_mode_by_owner, now);
 
     let total = db
         .collection::<ApprovalGrant>(GRANTS)
@@ -1739,5 +1989,157 @@ mod tests {
         );
 
         assert!(matches!(error, AppError::DatabaseError(_)));
+    }
+
+    fn unscoped_branch(org_id: &str) -> OrgFilterBranch {
+        OrgFilterBranch {
+            org_id: org_id.to_string(),
+            service_id_scope: None,
+        }
+    }
+
+    fn scoped_branch(org_id: &str, ids: &[&str]) -> OrgFilterBranch {
+        OrgFilterBranch {
+            org_id: org_id.to_string(),
+            service_id_scope: Some(ids.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    #[test]
+    fn build_requests_filter_without_admin_branches_keeps_legacy_shape() {
+        // Empty admin_branches must produce the historic single-owner
+        // filter so callers that don't opt in see byte-identical
+        // behavior.
+        let filter = build_requests_filter("user-1", &[]);
+        assert_eq!(filter.get_str("user_id").unwrap(), "user-1");
+        assert!(filter.get("$or").is_none());
+    }
+
+    #[test]
+    fn build_requests_filter_with_unscoped_admin_unions_every_org_row() {
+        let filter = build_requests_filter(
+            "user-1",
+            &[unscoped_branch("org-a"), unscoped_branch("org-b")],
+        );
+        let branches = filter.get_array("$or").expect("$or present");
+        assert_eq!(branches.len(), 3);
+
+        assert_eq!(
+            branches[0]
+                .as_document()
+                .unwrap()
+                .get_str("user_id")
+                .unwrap(),
+            "user-1"
+        );
+        // Each org branch keys on its own org_id and requires
+        // from_org_policy = true. No service_id restriction.
+        for (i, org) in ["org-a", "org-b"].iter().enumerate() {
+            let b = branches[i + 1].as_document().unwrap();
+            assert_eq!(b.get_str("user_id").unwrap(), *org);
+            assert!(b.get_bool("from_org_policy").unwrap());
+            assert!(b.get("service_id").is_none());
+        }
+    }
+
+    #[test]
+    fn build_requests_filter_scoped_admin_applies_service_id_in() {
+        let filter =
+            build_requests_filter("user-1", &[scoped_branch("org-a", &["svc-1", "svc-2"])]);
+        let branches = filter.get_array("$or").expect("$or present");
+        assert_eq!(branches.len(), 2);
+        let org = branches[1].as_document().unwrap();
+        let ids = org
+            .get_document("service_id")
+            .unwrap()
+            .get_array("$in")
+            .unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0].as_str().unwrap(), "svc-1");
+        assert_eq!(ids[1].as_str().unwrap(), "svc-2");
+    }
+
+    #[test]
+    fn build_requests_filter_scoped_admin_with_empty_scope_drops_branch() {
+        // An admin whose scope resolves to no storage-space ids (e.g.
+        // every allowed UserService was deleted) must not widen the
+        // caller's view at all. The filter should collapse back to
+        // the legacy personal-only shape.
+        let filter = build_requests_filter("user-1", &[scoped_branch("org-a", &[])]);
+        assert_eq!(filter.get_str("user_id").unwrap(), "user-1");
+        assert!(filter.get("$or").is_none());
+    }
+
+    #[test]
+    fn build_grants_filter_without_admin_branches_keeps_legacy_shape() {
+        let now = bson::DateTime::from_chrono(chrono::Utc::now());
+        let mut mode = std::collections::HashMap::new();
+        mode.insert("user-1".to_string(), vec!["svc-1".to_string()]);
+        let filter = build_grants_filter("user-1", &[], &mode, now);
+        assert_eq!(filter.get_str("user_id").unwrap(), "user-1");
+        assert!(filter.get("$or").is_none());
+        // Grant-mode restriction is inlined on the same document.
+        assert!(filter.get("service_id").is_some());
+    }
+
+    #[test]
+    fn build_grants_filter_keeps_grant_mode_per_owner() {
+        // The round-2 cross-owner leak: actor has svc-1 in grant mode
+        // but org-a has svc-1 in per_request mode. Org-a must not
+        // contribute any branch, so actor's grants for svc-1 show up
+        // while org-a's grants for svc-1 do not.
+        let now = bson::DateTime::from_chrono(chrono::Utc::now());
+        let mut mode = std::collections::HashMap::new();
+        mode.insert("user-1".to_string(), vec!["svc-1".to_string()]);
+        // org-a has NO entry in the map → no grants from org-a.
+
+        let filter = build_grants_filter("user-1", &[unscoped_branch("org-a")], &mode, now);
+        // Only the actor branch survives. Should be inlined, not an $or.
+        assert_eq!(filter.get_str("user_id").unwrap(), "user-1");
+        assert!(filter.get("$or").is_none());
+    }
+
+    #[test]
+    fn build_grants_filter_scoped_admin_intersects_scope_with_mode() {
+        // Admin is scoped to [svc-1, svc-2], org has svc-2 and svc-3
+        // in grant mode. Effective set = {svc-2}.
+        let now = bson::DateTime::from_chrono(chrono::Utc::now());
+        let mut mode = std::collections::HashMap::new();
+        mode.insert(
+            "org-a".to_string(),
+            vec!["svc-2".to_string(), "svc-3".to_string()],
+        );
+        let filter = build_grants_filter(
+            "user-1",
+            &[scoped_branch("org-a", &["svc-1", "svc-2"])],
+            &mode,
+            now,
+        );
+        // No actor grant-mode entries, so only the org branch is
+        // present — gets inlined since it's the sole branch.
+        assert_eq!(filter.get_str("user_id").unwrap(), "org-a");
+        assert!(filter.get_bool("org_scoped").unwrap());
+        let ids = filter
+            .get_document("service_id")
+            .unwrap()
+            .get_array("$in")
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].as_str().unwrap(), "svc-2");
+    }
+
+    #[test]
+    fn build_grants_filter_no_owners_in_grant_mode_returns_empty_match() {
+        // Neither the actor nor the admin org has any service in
+        // grant mode → the filter must match nothing, not leak
+        // unrelated grants via a degenerate $or.
+        let now = bson::DateTime::from_chrono(chrono::Utc::now());
+        let mode: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        let filter = build_grants_filter("user-1", &[unscoped_branch("org-a")], &mode, now);
+        // Empty-match sentinel on _id keeps the query valid and
+        // indexed while matching zero rows.
+        let id_clause = filter.get_document("_id").unwrap();
+        let in_arr = id_clause.get_array("$in").unwrap();
+        assert_eq!(in_arr.len(), 0);
     }
 }

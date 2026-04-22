@@ -41,10 +41,21 @@ export function ChallengeCard({
   const modeLabel = challenge.approval_mode === "grant" ? "Grant mode" : "Per-request";
   const durationLabel = challenge.approval_mode === "grant" ? ` · ${grantDurationLabel}` : "";
   const timeAgo = formatTimeAgo(challenge.created_at);
+  // Render an org chip when the backend marks the request as
+  // created under an org approval policy. The label falls back to
+  // a generic "Org" when the server omitted the name, so old
+  // backends still render something meaningful.
+  const showOrgChip = challenge.from_org_policy === true;
+  const orgChipLabel = challenge.org_name
+    ? `Org · ${challenge.org_name}`
+    : "Org";
 
   return (
     <Pressable style={styles.card} onPress={onPress} disabled={isMutating}>
       <View style={styles.chipRow}>
+        {showOrgChip ? (
+          <StatusBadge variant="orgChip" label={orgChipLabel} />
+        ) : null}
         <StatusBadge variant={riskVariant} label={challenge.risk_level.toUpperCase()} />
         <StatusBadge variant="modeChip" label={modeLabel} />
       </View>

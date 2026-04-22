@@ -41,6 +41,20 @@ pub struct ApprovalRequestItem {
     pub created_at: String,
     pub decided_at: Option<String>,
     pub decision_channel: Option<String>,
+    /// True when this request was created under an org's per-service
+    /// approval policy. Clients use this to render an "Org" badge and
+    /// the `on behalf of {org_name}` context line.
+    #[serde(default)]
+    pub from_org_policy: bool,
+    /// Owning org id, present only when `from_org_policy` is true.
+    /// For org-policy requests this equals `ApprovalRequest.user_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    /// Owning org display name, resolved at list time via `org_service`.
+    /// May be absent even when `from_org_policy` is true if the org row
+    /// is missing a display name or the lookup failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +75,19 @@ pub struct ApprovalGrantItem {
     pub requester_label: Option<String>,
     pub granted_at: String,
     pub expires_at: String,
+    /// True when the grant is owned by an org (reusable by any member of
+    /// that org). Clients render an "Org" chip when set.
+    #[serde(default)]
+    pub org_scoped: bool,
+    /// Owning org id, present only when `org_scoped` is true.
+    /// For org-scoped grants this equals `ApprovalGrant.user_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    /// Owning org display name, resolved at list time via `org_service`.
+    /// May be absent even when `org_scoped` is true if the org row
+    /// is missing a display name or the lookup failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,7 +137,15 @@ pub struct CreateApprovalResponse {
 
 fn to_approval_request_item(
     request: crate::models::approval_request::ApprovalRequest,
+    org_name: Option<String>,
 ) -> ApprovalRequestItem {
+    let from_org_policy = request.from_org_policy;
+    let org_id = if from_org_policy {
+        Some(request.user_id.clone())
+    } else {
+        None
+    };
+    let resolved_org_name = if from_org_policy { org_name } else { None };
     ApprovalRequestItem {
         id: request.id,
         service_name: request.service_name,
@@ -128,7 +163,156 @@ fn to_approval_request_item(
         created_at: request.created_at.to_rfc3339(),
         decided_at: request.decided_at.map(|d| d.to_rfc3339()),
         decision_channel: request.decision_channel,
+        from_org_policy,
+        org_id,
+        org_name: resolved_org_name,
     }
+}
+
+/// Map an `ApprovalGrant` to its API representation, stamping the org
+/// context fields when the grant is org-scoped. `org_name` is passed in
+/// after a batch lookup by the caller so we never issue per-row queries.
+fn to_approval_grant_item(
+    grant: crate::models::approval_grant::ApprovalGrant,
+    org_name: Option<String>,
+) -> ApprovalGrantItem {
+    let org_scoped = grant.org_scoped;
+    let org_id = if org_scoped {
+        Some(grant.user_id.clone())
+    } else {
+        None
+    };
+    let resolved_org_name = if org_scoped { org_name } else { None };
+    ApprovalGrantItem {
+        id: grant.id,
+        service_id: grant.service_id,
+        service_name: grant.service_name,
+        requester_type: grant.requester_type,
+        requester_id: grant.requester_id,
+        requester_label: grant.requester_label,
+        granted_at: grant.granted_at.to_rfc3339(),
+        expires_at: grant.expires_at.to_rfc3339(),
+        org_scoped,
+        org_id,
+        org_name: resolved_org_name,
+    }
+}
+
+/// Translate a scoped admin's `allowed_service_ids` (which live in
+/// `UserService.id` space) into the concrete set of storage-space
+/// `service_id`s that can match an `ApprovalRequest` or
+/// `ApprovalGrant` row under the supplied org. The stored
+/// `service_id` may be either a `UserService.id` (custom services)
+/// or the `catalog_service_id` from the underlying `UserService`
+/// (catalog-backed services), so we union both for every allowed
+/// UserService that still exists.
+///
+/// This is the inverse direction of `scope_user_service_ids_for_config`:
+/// that helper maps a stored row to the UserService.ids the scope is
+/// written against; this one maps the scope forward into the space
+/// the stored rows actually live in, so we can push the whole filter
+/// into Mongo and keep pagination correct.
+///
+/// Returns an empty Vec when no supplied id resolves to a UserService
+/// owned by the org (deleted services, or a mis-scoped membership).
+/// Callers use an empty result to short-circuit the whole org branch.
+async fn resolve_scope_storage_service_ids(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    allowed_user_service_ids: &[String],
+) -> AppResult<Vec<String>> {
+    use futures::TryStreamExt;
+    if allowed_user_service_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut ids_bson = mongodb::bson::Array::new();
+    for id in allowed_user_service_ids {
+        ids_bson.push(mongodb::bson::Bson::String(id.clone()));
+    }
+    let rows: Vec<UserService> = db
+        .collection::<UserService>(USER_SERVICES)
+        .find(mongodb::bson::doc! {
+            "_id": { "$in": ids_bson },
+            "user_id": org_user_id,
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in rows {
+        out.insert(row.id.clone());
+        if let Some(cat) = row.catalog_service_id {
+            out.insert(cat);
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
+/// Build the `OrgFilterBranch` list the service layer consumes, given
+/// the caller's current active admin memberships. Scoped admins get
+/// their `allowed_service_ids` pre-resolved into storage-space ids so
+/// the Mongo filter applies scope at query time (rather than post-
+/// fetch, which would break pagination). Unscoped admins get
+/// `service_id_scope: None`.
+///
+/// Returns an empty Vec when the caller has no admin memberships.
+async fn resolve_admin_org_branches(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+) -> AppResult<Vec<approval_service::OrgFilterBranch>> {
+    let memberships = crate::services::org_service::list_memberships_for_member(
+        db,
+        actor_user_id,
+        false, // active only
+    )
+    .await?;
+
+    let mut branches: Vec<approval_service::OrgFilterBranch> =
+        Vec::with_capacity(memberships.len());
+    for m in memberships {
+        if !matches!(m.role, crate::models::org_membership::OrgRole::Admin) {
+            continue;
+        }
+        let service_id_scope: Option<Vec<String>> = match m.allowed_service_ids {
+            None => None,
+            Some(ids) => Some(resolve_scope_storage_service_ids(db, &m.org_user_id, &ids).await?),
+        };
+        branches.push(approval_service::OrgFilterBranch {
+            org_id: m.org_user_id,
+            service_id_scope,
+        });
+    }
+    Ok(branches)
+}
+
+/// Resolve a map of `org_id -> display_name` for the supplied set of
+/// org ids. Looks each id up via `org_service::get_org_user` (reuse;
+/// no new helper) and skips any that fail to resolve — missing org
+/// names on the response are permitted and the client renders a
+/// generic "Org" fallback. De-dupes inputs so each distinct org is
+/// fetched at most once per list call.
+async fn resolve_org_names(
+    db: &mongodb::Database,
+    org_ids: impl IntoIterator<Item = String>,
+) -> std::collections::HashMap<String, String> {
+    let mut unique: Vec<String> = org_ids.into_iter().collect();
+    unique.sort();
+    unique.dedup();
+    let mut out = std::collections::HashMap::with_capacity(unique.len());
+    for id in unique {
+        match crate::services::org_service::get_org_user(db, &id).await {
+            Ok(user) => {
+                if let Some(name) = user.display_name.clone() {
+                    out.insert(id, name);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(org_id = %id, error = %e, "Failed to resolve org display name for approvals listing");
+            }
+        }
+    }
+    out
 }
 
 /// Legacy strict ownership check kept for the existing unit tests. The
@@ -218,6 +402,13 @@ pub struct ApprovalRequestsQuery {
     /// org. Without this filter the endpoint returns the actor's personal
     /// approval history (existing behavior).
     pub org_id: Option<String>,
+    /// Opt-in union: when `true` (and `org_id` is not set), also include
+    /// org-policy requests owned by every org the caller is currently an
+    /// active admin of. Default `false` keeps the existing personal-only
+    /// behavior so web clients that distinguish personal vs org pages are
+    /// unaffected. Mobile sets this so the unified Activity inbox can
+    /// show personal + admin-org items together (see ChronoAIProject/NyxID#376).
+    pub include_admin_orgs: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,6 +420,9 @@ pub struct GrantsQuery {
     /// org. Org-policy approvals create grants under the org's user_id,
     /// so this is the only way for org admins to see them.
     pub org_id: Option<String>,
+    /// Opt-in union for active grants. Same semantics as the field on
+    /// `ApprovalRequestsQuery`. Default `false`.
+    pub include_admin_orgs: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,12 +448,26 @@ pub async fn list_requests(
 ) -> AppResult<Json<ApprovalRequestsResponse>> {
     let actor = auth_user.user_id.to_string();
 
-    if let Some(ref status) = query.status
-        && !["pending", "approved", "rejected", "expired"].contains(&status.as_str())
-    {
-        return Err(crate::errors::AppError::ValidationError(
-            "status must be one of: pending, approved, rejected, expired".to_string(),
-        ));
+    // `status` accepts one value ("pending") or a comma-separated list
+    // ("approved,rejected,expired") so the history view can ask for
+    // "everything except pending" in one query. Each token is validated
+    // against the canonical set; whitespace around tokens is tolerated.
+    let allowed_statuses = ["pending", "approved", "rejected", "expired"];
+    let parsed_statuses: Vec<String> = match query.status.as_deref() {
+        None => Vec::new(),
+        Some(raw) => raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    };
+    for s in &parsed_statuses {
+        if !allowed_statuses.contains(&s.as_str()) {
+            return Err(crate::errors::AppError::ValidationError(
+                "status must be one of: pending, approved, rejected, expired (comma-separated list allowed)"
+                    .to_string(),
+            ));
+        }
     }
 
     // org_id query param scopes the listing to org-policy approvals.
@@ -276,23 +484,61 @@ pub async fn list_requests(
         }
         target_org_id.to_string()
     } else {
-        actor
+        actor.clone()
     };
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(20).min(100);
 
+    // Opt-in union: resolve admin-org branches (scope pre-translated
+    // into storage-space service ids) so scope is enforced in the
+    // Mongo filter itself. This keeps pagination correct for scoped
+    // admins — post-fetch filtering could leave a scoped admin's
+    // first page empty while later pages held in-scope rows, which
+    // the mobile Activity inbox would treat as end-of-list. Union
+    // only runs on the default personal listing; when `?org_id=` is
+    // supplied the caller already pinned the scope to one org and the
+    // existing single-owner path stays in charge.
+    let admin_branches = if query.org_id.is_none() && query.include_admin_orgs.unwrap_or(false) {
+        resolve_admin_org_branches(&state.db, &actor).await?
+    } else {
+        Vec::new()
+    };
+
+    let status_refs: Vec<&str> = parsed_statuses.iter().map(|s| s.as_str()).collect();
     let (requests, total) = approval_service::list_requests(
         &state.db,
         &listing_user_id,
-        query.status.as_deref(),
+        &admin_branches,
+        &status_refs,
         page,
         per_page,
     )
     .await?;
 
-    let items: Vec<ApprovalRequestItem> =
-        requests.into_iter().map(to_approval_request_item).collect();
+    // Batch-resolve org display names for rows backed by an org policy.
+    // When `?org_id=` is set every returned row shares the same owning
+    // org, so this collapses to a single fetch; on the personal inbox
+    // this fetches one name per distinct org the caller is an admin
+    // for, bounded by the page size.
+    let org_ids: Vec<String> = requests
+        .iter()
+        .filter(|r| r.from_org_policy)
+        .map(|r| r.user_id.clone())
+        .collect();
+    let org_names = resolve_org_names(&state.db, org_ids).await;
+
+    let items: Vec<ApprovalRequestItem> = requests
+        .into_iter()
+        .map(|r| {
+            let name = if r.from_org_policy {
+                org_names.get(&r.user_id).cloned()
+            } else {
+                None
+            };
+            to_approval_request_item(r, name)
+        })
+        .collect();
 
     Ok(Json(ApprovalRequestsResponse {
         requests: items,
@@ -317,7 +563,17 @@ pub async fn get_request_by_id(
 
     ensure_caller_can_decide(&state.db, &request, &user_id).await?;
 
-    Ok(Json(to_approval_request_item(request)))
+    // Single-row path: look up the owning org name directly when the
+    // request was created under an org policy so the detail response
+    // carries the same org context as the list endpoint.
+    let org_name = if request.from_org_policy {
+        resolve_org_names(&state.db, std::iter::once(request.user_id.clone()))
+            .await
+            .remove(&request.user_id)
+    } else {
+        None
+    };
+    Ok(Json(to_approval_request_item(request, org_name)))
 }
 
 /// GET /api/v1/approvals/requests/{request_id}/status
@@ -546,23 +802,41 @@ pub async fn list_grants(
         }
         target_org_id.to_string()
     } else {
-        actor
+        actor.clone()
+    };
+
+    // Mirror `list_requests`: opt-in union only kicks in on the
+    // personal listing path. Scope + per-owner grant-mode filtering
+    // happens in the Mongo filter via `OrgFilterBranch`.
+    let admin_branches = if query.org_id.is_none() && query.include_admin_orgs.unwrap_or(false) {
+        resolve_admin_org_branches(&state.db, &actor).await?
+    } else {
+        Vec::new()
     };
 
     let (grants, total) =
-        approval_service::list_grants(&state.db, &listing_user_id, page, per_page).await?;
+        approval_service::list_grants(&state.db, &listing_user_id, &admin_branches, page, per_page)
+            .await?;
+
+    // Same batching strategy as `list_requests`: resolve each distinct
+    // owning org id once per call. Personal grants (`org_scoped=false`)
+    // contribute nothing to the lookup.
+    let org_ids: Vec<String> = grants
+        .iter()
+        .filter(|g| g.org_scoped)
+        .map(|g| g.user_id.clone())
+        .collect();
+    let org_names = resolve_org_names(&state.db, org_ids).await;
 
     let items: Vec<ApprovalGrantItem> = grants
         .into_iter()
-        .map(|g| ApprovalGrantItem {
-            id: g.id,
-            service_id: g.service_id,
-            service_name: g.service_name,
-            requester_type: g.requester_type,
-            requester_id: g.requester_id,
-            requester_label: g.requester_label,
-            granted_at: g.granted_at.to_rfc3339(),
-            expires_at: g.expires_at.to_rfc3339(),
+        .map(|g| {
+            let name = if g.org_scoped {
+                org_names.get(&g.user_id).cloned()
+            } else {
+                None
+            };
+            to_approval_grant_item(g, name)
         })
         .collect();
 
@@ -1285,7 +1559,7 @@ mod tests {
         let expected_service = request.service_name.clone();
         let expected_status = request.status.clone();
 
-        let item = to_approval_request_item(request);
+        let item = to_approval_request_item(request, None);
 
         assert_eq!(item.id, expected_id);
         assert_eq!(item.service_name, expected_service);
@@ -1304,12 +1578,87 @@ mod tests {
         request.tool_arguments = Some(r#"{"service_id":"svc_1"}"#.to_string());
         request.is_destructive = Some(true);
 
-        let item = to_approval_request_item(request);
+        let item = to_approval_request_item(request, None);
 
         assert_eq!(item.tool_name.as_deref(), Some("invoke_service"));
         assert_eq!(item.tool_call_id.as_deref(), Some("call_abc"));
         assert!(item.tool_arguments.is_some());
         assert_eq!(item.is_destructive, Some(true));
+    }
+
+    #[test]
+    fn to_approval_request_item_stamps_org_fields_when_from_org_policy() {
+        let mut request = sample_request("org_abc");
+        request.from_org_policy = true;
+
+        let item = to_approval_request_item(request, Some("Acme Inc.".to_string()));
+
+        assert!(item.from_org_policy);
+        assert_eq!(item.org_id.as_deref(), Some("org_abc"));
+        assert_eq!(item.org_name.as_deref(), Some("Acme Inc."));
+    }
+
+    #[test]
+    fn to_approval_request_item_omits_org_fields_for_personal_requests() {
+        let request = sample_request("user_1");
+        // Even if a caller mistakenly passes an org_name for a personal
+        // request, the mapper must not stamp org fields — from_org_policy
+        // is the authoritative signal.
+        let item = to_approval_request_item(request, Some("Irrelevant".to_string()));
+
+        assert!(!item.from_org_policy);
+        assert!(item.org_id.is_none());
+        assert!(item.org_name.is_none());
+    }
+
+    #[test]
+    fn to_approval_grant_item_stamps_org_fields_when_org_scoped() {
+        use crate::models::approval_grant::ApprovalGrant;
+        let grant = ApprovalGrant {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: "org_abc".to_string(),
+            service_id: uuid::Uuid::new_v4().to_string(),
+            service_name: "OpenAI".to_string(),
+            requester_type: "service_account".to_string(),
+            requester_id: "sa_123".to_string(),
+            requester_label: Some("CI bot".to_string()),
+            approval_request_id: uuid::Uuid::new_v4().to_string(),
+            granted_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::days(30),
+            revoked: false,
+            org_scoped: true,
+        };
+
+        let item = to_approval_grant_item(grant, Some("Acme Inc.".to_string()));
+
+        assert!(item.org_scoped);
+        assert_eq!(item.org_id.as_deref(), Some("org_abc"));
+        assert_eq!(item.org_name.as_deref(), Some("Acme Inc."));
+    }
+
+    #[test]
+    fn to_approval_grant_item_omits_org_fields_for_personal_grants() {
+        use crate::models::approval_grant::ApprovalGrant;
+        let grant = ApprovalGrant {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: "user_1".to_string(),
+            service_id: uuid::Uuid::new_v4().to_string(),
+            service_name: "OpenAI".to_string(),
+            requester_type: "service_account".to_string(),
+            requester_id: "sa_123".to_string(),
+            requester_label: None,
+            approval_request_id: uuid::Uuid::new_v4().to_string(),
+            granted_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::days(30),
+            revoked: false,
+            org_scoped: false,
+        };
+
+        let item = to_approval_grant_item(grant, Some("Leaked name".to_string()));
+
+        assert!(!item.org_scoped);
+        assert!(item.org_id.is_none());
+        assert!(item.org_name.is_none());
     }
 
     #[test]
