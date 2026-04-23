@@ -220,10 +220,11 @@ pub async fn telemetry_mw(req: Request, next: Next) -> Response;
 pub fn scrub_string(s: &str) -> Cow<'_, str>;
 pub fn scrub_value(v: &mut serde_json::Value);
 
-/// Samples per event by hashing the event_uuid. Uses a stable hasher
-/// (NOT std::collections::hash_map::DefaultHasher — that's randomized per
-/// process and sampling decisions wouldn't be reproducible). Use siphasher.
-pub fn sample_per_event(event_uuid: Uuid, percent: u8) -> bool;
+// Deterministic per-event sampling (`sample_per_event`) is deferred to
+// the follow-up PR that introduces the first sampled emission. Shape:
+// `pub fn sample_per_event(event_uuid: Uuid, percent: u8) -> bool;` —
+// implementation will use `siphasher::SipHasher24` so decisions are
+// stable across processes.
 ```
 
 **Handler call pattern:**
@@ -627,7 +628,7 @@ These are non-code prerequisites for turning on production telemetry:
 
 ### Backend
 - `backend/src/telemetry/mod.rs` (new) — `TelemetryClient`, reqwest fire-and-forget, 2s timeout, bounded mpsc for backpressure
-- `backend/src/telemetry/scrub.rs` (new) — `scrub_string`, `scrub_value`, `sample_per_event(event_uuid, percent)` using siphasher for deterministic sampling
+- `backend/src/telemetry/scrub.rs` (new) — `scrub_string`, `scrub_value` (sampling helper deferred to the first sampled-emission PR)
 - `backend/src/telemetry/schema.rs` (new) — Rust struct per event
 - `backend/src/mw/telemetry.rs` (new) — derive `surface`, stash `TelemetryContext`
 - `backend/src/routes.rs` — register middleware before auth
@@ -703,7 +704,6 @@ These are non-code prerequisites for turning on production telemetry:
 
 | Surface | Package | Version | Purpose |
 |---|---|---|---|
-| Backend | `siphasher` | `1` | Deterministic per-event sampling (stable across processes). |
 | CLI | `is-terminal` | `0.4` | TTY detection for first-run consent prompt. |
 | Frontend | `posthog-js` | `^1.280.1` | Vendor SDK — imported only by `frontend/src/lib/telemetry.ts` (no caller references it, per §5.0 hot-swap contract). |
 | Mobile | `posthog-react-native` | `^4.2.0` | Vendor SDK — imported only by `mobile/src/lib/telemetry.ts`. |

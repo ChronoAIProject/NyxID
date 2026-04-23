@@ -1,22 +1,14 @@
-//! Egress scrubber + deterministic sampling helpers.
+//! Egress scrubber.
 //!
 //! Every string-valued property passed to the vendor is run through
 //! [`scrub_string`] (or [`scrub_value`] recursively for nested JSON) so
 //! that no matter how a handler constructs props, the §6 redaction rules
 //! are enforced at the single point of egress.
-//!
-//! Sampling uses SipHash-2-4 from the `siphasher` crate — NOT
-//! `std::collections::hash_map::DefaultHasher`, which is randomized
-//! per-process. Deterministic hashing is required so sampling decisions
-//! can be multiplied back up to full volume in analysis.
 
-use std::hash::{Hash, Hasher};
 use std::sync::LazyLock;
 
 use regex::Regex;
 use serde_json::Value;
-use siphasher::sip::SipHasher24;
-use uuid::Uuid;
 
 // --- Regex patterns applied to every string value at egress ------------
 //
@@ -106,29 +98,6 @@ pub fn scrub_value(v: &mut Value) {
     }
 }
 
-/// Deterministic per-event sampling using SipHash-2-4.
-///
-/// Returns `true` if the event should be kept at the given `percent` rate
-/// (0..=100). Identical `event_id` + `percent` inputs always yield the
-/// same decision across processes and restarts, so sampled volume can be
-/// multiplied by `100 / percent` to estimate the full volume in analysis.
-#[allow(dead_code)] // exposed via telemetry::should_sample for future emissions
-pub fn sample_per_event(event_id: Uuid, percent: u8) -> bool {
-    if percent >= 100 {
-        return true;
-    }
-    if percent == 0 {
-        return false;
-    }
-    // Fixed keys so the hash is stable across processes. These bytes are
-    // not secret — swap them only if a sampling re-roll is deliberately
-    // wanted (e.g. after a cardinality-bomb incident).
-    let mut hasher = SipHasher24::new_with_keys(0x5e1e_c71e_5a3f_f1e0, 0xd1e7_ab1e_c0de_b0b0);
-    event_id.hash(&mut hasher);
-    let bucket = (hasher.finish() % 100) as u8;
-    bucket < percent
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,20 +144,5 @@ mod tests {
             "expected token redaction in {s}"
         );
         assert!(s.contains("42"), "expected numeric value preserved in {s}");
-    }
-
-    #[test]
-    fn sample_is_deterministic() {
-        let id = Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
-        let a = sample_per_event(id, 10);
-        let b = sample_per_event(id, 10);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn sample_honors_boundaries() {
-        let id = Uuid::new_v4();
-        assert!(sample_per_event(id, 100));
-        assert!(!sample_per_event(id, 0));
     }
 }

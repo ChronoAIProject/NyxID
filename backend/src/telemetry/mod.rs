@@ -23,7 +23,6 @@ use std::time::Duration;
 use reqwest::Client;
 use serde_json::json;
 use tokio::sync::mpsc::{self, Sender};
-use uuid::Uuid;
 
 use crate::config::AppConfig;
 
@@ -249,20 +248,4 @@ async fn drain_loop(mut rx: mpsc::Receiver<CaptureJob>, http: Client, dsn: Strin
             }
         }
     }
-}
-
-/// Convenience for `scrub::sample_per_event`. Handlers that emit sampled
-/// events (`channel.message_received`, `channel.reply_sent`) call this
-/// before constructing the event.
-///
-/// ```ignore
-/// if telemetry::should_sample(uuid, 10) {
-///     emit_event(state.telemetry.as_deref(), &auth.user_id.to_string(),
-///                auth.api_key_id.as_deref(), &tele,
-///                TelemetryEvent::ChannelMessageReceived { ... });
-/// }
-/// ```
-#[allow(dead_code)] // exposed for upcoming channel/proxy emissions (§5.1)
-pub fn should_sample(event_id: Uuid, percent: u8) -> bool {
-    scrub::sample_per_event(event_id, percent)
 }

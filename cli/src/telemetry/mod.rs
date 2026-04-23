@@ -39,8 +39,6 @@ const NYXID_PUBLIC_TELEMETRY_HOST: &str = "https://us.i.posthog.com";
 const DEFAULT_HOST: &str = "https://us.i.posthog.com";
 const ANON_ID_FILE_NAME: &str = "anon_id";
 const TRACK_TIMEOUT_MS: u64 = 1000;
-#[allow(dead_code)] // used by track_sync_blocking (reserved for panic hooks)
-const FLUSH_TIMEOUT_MS: u64 = 500;
 
 /// Canonical CLI-originated event. Only one variant today — the command
 /// invocation wrapper. All other per-domain events are emitted by the
@@ -147,30 +145,6 @@ impl TelemetryClient {
         let url = format!("{host}/capture/", host = self.host);
         let fut = self.http.post(&url).json(&body).send();
         let _ = tokio::time::timeout(std::time::Duration::from_millis(TRACK_TIMEOUT_MS), fut).await;
-    }
-
-    /// Blocking variant with a short timeout. Used from panic hooks and
-    /// at end-of-main wrappers where the process is about to exit and
-    /// we want a real chance of the event landing.
-    #[allow(dead_code)] // reserved for panic-hook integration in a follow-up
-    pub fn track_sync_blocking(&self, event: CliEvent) {
-        let body = self.build_capture_body(event.name(), event.properties());
-        let url = format!("{host}/capture/", host = self.host);
-        let http = self.http.clone();
-        // Build a small blocking runtime on the current thread — we are
-        // on the way out, no async runtime is guaranteed to be alive.
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(_) => return,
-        };
-        rt.block_on(async {
-            let fut = http.post(&url).json(&body).send();
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_millis(FLUSH_TIMEOUT_MS), fut).await;
-        });
     }
 
     /// Associate the currently-active anon identity with `user_id`.
