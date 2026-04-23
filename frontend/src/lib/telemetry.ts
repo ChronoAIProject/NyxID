@@ -241,3 +241,34 @@ export function captureException(err: unknown): void {
   posthog.captureException?.(err as Error);
 }
 
+/**
+ * Runtime teardown. Call when the user opts out of telemetry from the
+ * Settings page after a prior opt-in, to stop further event capture
+ * without requiring a page reload.
+ *
+ * Resets the PostHog client's anon distinct_id and flips the vendor
+ * into opt-out mode (double-safety: `before_send` already short-circuits
+ * via the `inited` guard on each emit helper, and PostHog's
+ * `opt_out_capturing` prevents any network call even for code that
+ * reaches past us into the vendor SDK directly).
+ *
+ * After this call, the module is back to its pre-init state — another
+ * call to `initTelemetry` (e.g. user toggles back on) will run cleanly.
+ *
+ * No-op when telemetry was never inited.
+ */
+export function disableTelemetry(): void {
+  if (!inited) return;
+  try {
+    posthog.opt_out_capturing();
+    posthog.reset();
+  } catch {
+    // Tolerate vendor errors during teardown. The state resets below
+    // are the source of truth for the rest of the app (api-client.ts
+    // etc. read `isTelemetryActive()`), so even a partial vendor
+    // failure leaves the app in the correct "off" posture.
+  }
+  inited = false;
+  telemetryActive = false;
+}
+

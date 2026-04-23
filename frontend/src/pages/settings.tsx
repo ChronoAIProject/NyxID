@@ -4,8 +4,10 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
+import { useConsentStore } from "@/stores/consent-store";
 import { useUser, useMfaDisable } from "@/hooks/use-auth";
 import { api, ApiError } from "@/lib/api-client";
+import { disableTelemetry, isTelemetryActive } from "@/lib/telemetry";
 import type { User, Session } from "@/types/api";
 import {
   changePasswordSchema,
@@ -91,6 +93,7 @@ export function SettingsPage() {
           <TabsTrigger value="security">Security</TabsTrigger>
           <TabsTrigger value="sessions">Sessions</TabsTrigger>
           <TabsTrigger value="mcp">MCP</TabsTrigger>
+          <TabsTrigger value="privacy">Privacy</TabsTrigger>
         </TabsList>
 
         <TabsContent value="profile">
@@ -104,6 +107,9 @@ export function SettingsPage() {
         </TabsContent>
         <TabsContent value="mcp">
           <McpTab />
+        </TabsContent>
+        <TabsContent value="privacy">
+          <PrivacyTab />
         </TabsContent>
       </Tabs>
     </div>
@@ -861,6 +867,74 @@ function SessionsTab() {
             </TableBody>
           </Table>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PrivacyTab() {
+  const consentEnabled = useConsentStore((s) => s.enabled);
+  const consentAsked = useConsentStore((s) => s.asked);
+  const setConsent = useConsentStore((s) => s.setConsent);
+
+  // When the user flips OFF here after a prior opt-in, tear down the
+  // running PostHog client immediately so no further events fire even
+  // while the tab stays open. The `useEffect` in main.tsx that drives
+  // `initTelemetry` already re-runs whenever `enabled` changes, so the
+  // ON path only needs to flip the store — main.tsx picks it up and
+  // re-initializes cleanly against the `inited` guard.
+  function handleToggle(next: boolean) {
+    setConsent(next);
+    if (!next) {
+      disableTelemetry();
+    }
+  }
+
+  const statusLabel = !consentAsked
+    ? "Not yet answered"
+    : consentEnabled
+      ? "Enabled"
+      : "Disabled";
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Anonymous Usage Telemetry</CardTitle>
+        <CardDescription>
+          Help us improve NyxID by sharing anonymous usage events. We never
+          capture credentials, form content, or the contents of your
+          requests. This choice applies to this browser only — other
+          devices and the CLI manage their own telemetry settings.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Switch
+              checked={consentEnabled}
+              onCheckedChange={handleToggle}
+              aria-label="Toggle anonymous usage telemetry"
+            />
+            <span className="text-sm">{statusLabel}</span>
+          </div>
+          <span className="text-xs text-muted-foreground">
+            {isTelemetryActive() ? "Active" : "Inactive"}
+          </span>
+        </div>
+        <Separator />
+        <div className="space-y-2 text-sm text-muted-foreground">
+          <p>
+            For the full disclosure of what we collect, how it's stored, and
+            retention windows, see the{" "}
+            <a
+              href="/privacy"
+              className="underline underline-offset-2 hover:text-foreground"
+            >
+              privacy policy
+            </a>
+            .
+          </p>
+        </div>
       </CardContent>
     </Card>
   );

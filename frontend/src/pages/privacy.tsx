@@ -184,11 +184,14 @@ export function PrivacyPage() {
               via the consent banner on your first visit (or the toggle in
               Settings), NyxID collects anonymous usage events (pageviews,
               clicks, uncaught errors) through a third-party analytics
-              provider (PostHog, EU region). No credentials, form content,
+              provider (PostHog, US region). No credentials, form content,
               tokens, or the body of any request you make are ever captured.
               Sensitive URL segments (reset tokens, OAuth callback codes,
               approval IDs) are dropped at the egress layer before any event
               leaves your browser.
+              {/* TODO(legal): document EU→US transfer basis (SCCs / adequacy)
+                  here before broader EU launch. Tracked in
+                  docs/TELEMETRY_CONSENT_FIX.md §9.2. */}
             </p>
             <p>
               Events are keyed to your NyxID account UUID after you sign in,
@@ -202,6 +205,16 @@ export function PrivacyPage() {
             <p>
               You can change your telemetry choice at any time from the
               Settings page. We honor the browser Do-Not-Track signal.
+            </p>
+            <p>
+              <strong>Per-device scope.</strong> Your telemetry choice is
+              stored on this browser and does not sync across the web
+              dashboard, mobile app, and CLI. Each surface manages its own
+              telemetry setting — the CLI uses{" "}
+              <code>nyxid telemetry enable|disable</code> or the{" "}
+              <code>DO_NOT_TRACK=1</code> environment variable, and the
+              mobile app exposes a matching toggle in its own Settings
+              screen.
             </p>
           </Section>
 

@@ -3,8 +3,10 @@
  *
  * Rendered by the Root component when the user has never answered the
  * consent prompt (`useConsentStore.asked === false`). Offers a binary
- * opt-in / opt-out; either choice dismisses the banner permanently for
- * this browser. Users can reverse their choice later from Settings.
+ * opt-in / opt-out; either choice dismisses the banner for this browser.
+ * Consent is scoped to the current browser — other devices, the mobile
+ * app, and the CLI manage their own telemetry state. Users can reverse
+ * their choice at any time from Settings → Privacy.
  *
  * See `docs/TELEMETRY.md` §7 + §D for privacy gate + consent model.
  */
@@ -44,7 +46,9 @@ export function ConsentBanner() {
         <div className="text-sm text-muted-foreground">
           We collect anonymous usage telemetry to help us improve NyxID.
           We never capture credentials, form content, or the contents of
-          your requests. You can change this later in Settings.
+          your requests. This choice applies to this browser only — other
+          devices and the CLI manage their own telemetry settings. You
+          can change this later in Settings.
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <Button
