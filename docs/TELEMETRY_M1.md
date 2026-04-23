@@ -36,7 +36,7 @@ Calvin owns PostHog project provisioning, DPA, consent banner copy, dashboards, 
                             │                                        │
                             ▼                                        ▼
                    ┌────────────────────────────────────────────────────┐
-                   │       PostHog Cloud EU (eu.i.posthog.com)          │
+                   │       PostHog Cloud US (us.i.posthog.com)          │
                    │   One production project for hosted deploy.        │
                    │   Separate `share-back` project for community opt- │
                    │   in (`NYXID_SHARE_ANALYTICS=true`) — isolated     │
@@ -65,7 +65,7 @@ Precedence on every surface:
 2. `*_SHARE_ANALYTICS=true` → fall back to compiled-in public ingest key (`NYXID_PUBLIC_TELEMETRY_DSN`, pointing at the **share-back** project).
 3. Otherwise → hard off, telemetry never initializes.
 
-Host default: `https://eu.i.posthog.com`.
+Host default: `https://us.i.posthog.com` (PostHog's default region for new projects). Operators on PostHog EU override via `NYXID_TELEMETRY_HOST=https://eu.i.posthog.com`. In the common case only `NYXID_TELEMETRY_DSN` needs to be set.
 
 CLI also honors `~/.nyxid/config.toml` `[telemetry]` section managed via `nyxid telemetry enable|disable|status`. Mobile in-app Settings toggle flipping off calls `reset()` (vendor-neutral wrapper verb), clears the stored anon ID, and sets the consent store `enabled=false` so subsequent `init()` calls are no-ops until the user flips it back on.
 

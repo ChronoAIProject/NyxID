@@ -38,7 +38,7 @@ use crate::config::AppConfig;
 const NYXID_PUBLIC_TELEMETRY_DSN: &str = "phc_pHHMZRXY8ymzBy9uwiGmAVDtGvGpDTiyXH2zs7bQWEgM";
 const NYXID_PUBLIC_TELEMETRY_HOST: &str = "https://us.i.posthog.com";
 
-const DEFAULT_HOST: &str = "https://eu.i.posthog.com";
+const DEFAULT_HOST: &str = "https://us.i.posthog.com";
 const CHANNEL_CAPACITY: usize = 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 

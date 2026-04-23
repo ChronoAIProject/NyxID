@@ -118,7 +118,7 @@ export function initTelemetry(args: InitTelemetryArgs): void {
     if (!host) host = NYXID_PUBLIC_TELEMETRY_HOST;
   }
   if (!dsn) return;
-  if (!host) host = 'https://eu.i.posthog.com';
+  if (!host) host = 'https://us.i.posthog.com';
 
   posthog.init(dsn, {
     api_host: host,

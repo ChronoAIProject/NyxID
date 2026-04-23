@@ -83,7 +83,7 @@ export async function initTelemetry(args: InitMobileTelemetryArgs): Promise<void
     if (!host) host = NYXID_PUBLIC_TELEMETRY_HOST;
   }
   if (!dsn) return;
-  if (!host) host = 'https://eu.i.posthog.com';
+  if (!host) host = 'https://us.i.posthog.com';
 
   const ph = new PostHog(dsn, {
     host,

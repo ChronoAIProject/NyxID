@@ -36,7 +36,7 @@ use crate::auth::validate_profile_name;
 const NYXID_PUBLIC_TELEMETRY_DSN: &str = "phc_pHHMZRXY8ymzBy9uwiGmAVDtGvGpDTiyXH2zs7bQWEgM";
 const NYXID_PUBLIC_TELEMETRY_HOST: &str = "https://us.i.posthog.com";
 
-const DEFAULT_HOST: &str = "https://eu.i.posthog.com";
+const DEFAULT_HOST: &str = "https://us.i.posthog.com";
 const ANON_ID_FILE_NAME: &str = "anon_id";
 const TRACK_TIMEOUT_MS: u64 = 1000;
 #[allow(dead_code)] // used by track_sync_blocking (reserved for panic hooks)
