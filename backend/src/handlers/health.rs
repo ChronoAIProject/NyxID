@@ -82,6 +82,39 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
         .replace("https://", "wss://")
         .replace("http://", "ws://");
 
+    // Telemetry fields are only populated when the deployment has
+    // opted in — either by setting an explicit DSN or by enabling
+    // community share-back. This keeps the default-off `/public/config`
+    // response byte-identical to a pre-telemetry deploy (no new JSON
+    // keys leak). A deploy that sets only HOST but no DSN / no
+    // share-back is treated as off.
+    let telemetry_enabled = state
+        .config
+        .telemetry_dsn
+        .as_ref()
+        .is_some_and(|s| !s.is_empty())
+        || state.config.share_analytics;
+
+    let (telemetry_dsn, telemetry_host, telemetry_share_analytics) = if telemetry_enabled {
+        (
+            state
+                .config
+                .telemetry_dsn
+                .as_ref()
+                .filter(|s| !s.is_empty())
+                .cloned(),
+            state
+                .config
+                .telemetry_host
+                .as_ref()
+                .filter(|s| !s.is_empty())
+                .cloned(),
+            state.config.share_analytics,
+        )
+    } else {
+        (None, None, false)
+    };
+
     Json(PublicConfigResponse {
         frontend_url: state.config.frontend_url.trim_end_matches('/').to_string(),
         mcp_url: format!("{base}/mcp"),
@@ -90,18 +123,8 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
         social_providers,
         invite_code_required: state.config.invite_code_required,
         email_auth_enabled: state.config.email_auth_enabled,
-        telemetry_dsn: state
-            .config
-            .telemetry_dsn
-            .as_ref()
-            .filter(|s| !s.is_empty())
-            .cloned(),
-        telemetry_host: state
-            .config
-            .telemetry_host
-            .as_ref()
-            .filter(|s| !s.is_empty())
-            .cloned(),
-        telemetry_share_analytics: state.config.share_analytics,
+        telemetry_dsn,
+        telemetry_host,
+        telemetry_share_analytics,
     })
 }

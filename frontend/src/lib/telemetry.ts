@@ -27,17 +27,32 @@ import type { UiEvent } from './telemetry-schema';
 // --- Module-level state (StrictMode-idempotent) -----------------------
 
 /**
- * Compiled-in share-back DSN. Left empty by default; the release
- * process is expected to bake in the real value before shipping a
- * version that advertises `NYXID_SHARE_ANALYTICS=true` support. A
- * zero-length value means share-back silently degrades to "off",
- * which is the safest possible default (parity with `cli/src/telemetry/mod.rs`
- * and `backend/src/telemetry/mod.rs`).
+ * Compiled-in share-back DSN for the NyxID community project. Public
+ * by design — PostHog ingest keys are write-only and project-scoped,
+ * so baking this into the open-source bundle is safe. Only used when
+ * a deploy sets `NYXID_SHARE_ANALYTICS=true` without an explicit
+ * `VITE_TELEMETRY_DSN` (now: `backend config.telemetry_dsn`). Matches
+ * parity with `cli/src/telemetry/mod.rs` and `backend/src/telemetry/mod.rs`.
  */
 const NYXID_PUBLIC_TELEMETRY_DSN = "phc_pHHMZRXY8ymzBy9uwiGmAVDtGvGpDTiyXH2zs7bQWEgM";
 const NYXID_PUBLIC_TELEMETRY_HOST = "https://us.i.posthog.com";
 
 let inited = false;
+/**
+ * Module-level "telemetry is actually active on this page load" flag.
+ * Flipped to `true` by `initTelemetry` only after a real vendor client
+ * is constructed. Consumed by `lib/api-client.ts` to decide whether to
+ * attach surface-identification headers. Keyed off runtime state (not
+ * just persisted consent) so a browser with stale consent from an
+ * earlier telemetry-on deploy doesn't leak headers after the operator
+ * turns telemetry off at the backend.
+ */
+let telemetryActive = false;
+
+/** Synchronous read of the runtime telemetry state. */
+export function isTelemetryActive(): boolean {
+  return telemetryActive;
+}
 
 // --- Privacy config helpers -------------------------------------------
 
@@ -173,6 +188,7 @@ export function initTelemetry(args: InitTelemetryArgs): void {
   });
 
   inited = true;
+  telemetryActive = true;
 }
 
 /**

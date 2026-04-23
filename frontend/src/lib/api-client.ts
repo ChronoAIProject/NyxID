@@ -1,6 +1,6 @@
 import type { ApiErrorResponse } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
-import { useConsentStore } from "@/stores/consent-store";
+import { isTelemetryActive } from "@/lib/telemetry";
 
 const API_ORIGIN = "";
 
@@ -42,13 +42,15 @@ const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
 function buildFetchConfig(options: RequestOptions): RequestInit {
   const { method = "GET", body, headers = {}, signal } = options;
 
-  // Surface identification for server-side telemetry (see
-  // docs/TELEMETRY_M1.md §3). Only attached when the user has opted
-  // in — honors the "byte-identical to pre-telemetry build" contract
-  // for users who declined consent (or where the deploy has no DSN).
-  // Zustand's `getState()` is a synchronous read; no re-render cost.
-  const telemetryOn = useConsentStore.getState().enabled;
-  const telemetryHeaders: Record<string, string> = telemetryOn
+  // Surface identification for server-side telemetry. Only attached
+  // once the runtime telemetry client has been constructed on this
+  // page load. Keying off the live `isTelemetryActive()` (not just
+  // persisted consent) means a browser with stale consent from an
+  // earlier telemetry-on deploy will NOT leak these headers after
+  // the operator turns telemetry off at the backend — the PostHog
+  // client never initialized this session, so the surface header is
+  // pointless anyway.
+  const telemetryHeaders: Record<string, string> = isTelemetryActive()
     ? {
         "X-NyxID-Client": "ui",
         "X-NyxID-Client-Version":

@@ -16,7 +16,14 @@ import { usePublicConfig } from '../hooks/use-public-config';
 export function ConsentBanner() {
   const asked = useConsentStore((s) => s.asked);
   const setConsent = useConsentStore((s) => s.setConsent);
-  const { data: cfg } = usePublicConfig();
+  // Only fetch config if the banner could possibly render. Once the
+  // user has answered (asked=true), we never render regardless of
+  // config, so the fetch would be wasted. TanStack Query dedupes,
+  // so if another consumer (main.tsx) has already fetched, this is
+  // a free cache read.
+  const { data: cfg } = usePublicConfig({ enabled: !asked });
+
+  if (asked) return null;
 
   // Default-off contract: when the backend's /public/config reports
   // no telemetry DSN AND share-back is not opted in, the app has
@@ -25,8 +32,6 @@ export function ConsentBanner() {
   // still renders normally on any deploy where telemetry could fire.
   const telemetryActive = !!(cfg?.telemetry_dsn || cfg?.telemetry_share_analytics);
   if (!telemetryActive) return null;
-
-  if (asked) return null;
 
   return (
     <div

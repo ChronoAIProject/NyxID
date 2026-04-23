@@ -36,13 +36,23 @@ const queryClient = new QueryClient({
 function Root() {
   const [ready, setReady] = useState(false);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const consentAsked = useConsentStore((s) => s.asked);
   const consentEnabled = useConsentStore((s) => s.enabled);
-  // Runtime telemetry config. TanStack Query caches this with
-  // `staleTime: Infinity` (see hooks/use-public-config.ts) — fetched
-  // once per app session, never refetched on effect re-runs or
-  // re-renders. Every other consumer of `usePublicConfig` reads from
-  // the same cache entry, so telemetry wiring adds zero extra network.
-  const { data: publicConfig } = usePublicConfig();
+
+  // Runtime telemetry config. Cached with `staleTime: Infinity`
+  // (see hooks/use-public-config.ts), so fetched at most once per
+  // session and shared with every other consumer of the hook.
+  //
+  // Skipped entirely when the user has explicitly DECLINED the
+  // consent banner (asked=true, enabled=false). In that case no
+  // telemetry will ever initialize, so fetching the config would
+  // be a wasted round-trip and — more importantly — would violate
+  // the default-off "byte-identical to pre-telemetry" contract
+  // on a deploy where the backend sends an empty config. Callers
+  // on pages that genuinely need public config (settings, login,
+  // MCP tabs) still fetch it via their own hook invocations.
+  const telemetryMightInit = !consentAsked || consentEnabled;
+  const { data: publicConfig } = usePublicConfig({ enabled: telemetryMightInit });
 
   useEffect(() => {
     useAuthStore
@@ -55,10 +65,9 @@ function Root() {
   //   1. auth has resolved (we know who the user is, if any)
   //   2. public config has landed (we know the DSN / host / share-back)
   //   3. consent is granted
-  // If config is still in-flight, skip — we'll re-run when `publicConfig`
-  // updates. Running before config lands would initialize telemetry in
-  // default-off mode and require a second `initTelemetry` call to flip
-  // on, which the internal `inited` guard in lib/telemetry.ts blocks.
+  // If the fetch was skipped because the user declined, `publicConfig`
+  // stays undefined forever and we simply never initialize — which is
+  // the correct outcome.
   useEffect(() => {
     if (!ready || !publicConfig) return;
     initTelemetry({
