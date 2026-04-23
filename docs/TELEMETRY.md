@@ -57,7 +57,7 @@ All env var names are vendor-neutral per the hot-swap contract (§5.0). The DSN 
 | Backend | `NYXID_TELEMETRY_DSN` | `NYXID_TELEMETRY_HOST` | `NYXID_SHARE_ANALYTICS` | Process env, `.env.production` |
 | Frontend | (reads from backend `/api/v1/public/config` at runtime) | — | — | No build-time env. Fetched via `usePublicConfig()`. |
 | CLI | `NYXID_TELEMETRY_DSN` | `NYXID_TELEMETRY_HOST` | `NYXID_SHARE_ANALYTICS` | User shell env per invocation |
-| Mobile (Expo) | `EXPO_PUBLIC_TELEMETRY_DSN` | `EXPO_PUBLIC_TELEMETRY_HOST` | `EXPO_PUBLIC_NYXID_SHARE_ANALYTICS` | EAS secret, baked into app binary |
+| Mobile (Expo) | `expo.extra.TELEMETRY_DSN` | `expo.extra.TELEMETRY_HOST` | `expo.extra.NYXID_SHARE_ANALYTICS` | `mobile/app.json` — edit literal values before `eas build`, or migrate to `app.config.js` reading `process.env.EXPO_PUBLIC_*` |
 
 Frontend has no `VITE_*` telemetry envs. The DSN, host, and share-back flag are fetched from the backend's `GET /api/v1/public/config` at app boot (same endpoint that already powered the login/MCP UI). Rotation = edit `.env.production` on the backend host and restart the backend container; the frontend picks up the new values on next page load with no image rebuild.
 
@@ -399,9 +399,9 @@ Autocapture via `posthog-react-native` captureAppLifecycleEvents + `$pageview`. 
 
 ```ts
 interface InitArgs {
-  dsn: string | undefined;         // from EXPO_PUBLIC_TELEMETRY_DSN
-  host: string | undefined;        // from EXPO_PUBLIC_TELEMETRY_HOST
-  shareBack: boolean;              // EXPO_PUBLIC_NYXID_SHARE_ANALYTICS
+  dsn: string | undefined;         // from Constants.expoConfig.extra.TELEMETRY_DSN
+  host: string | undefined;        // from Constants.expoConfig.extra.TELEMETRY_HOST
+  shareBack: boolean;              // from extra.NYXID_SHARE_ANALYTICS === 'true'
   consent: boolean;                // from Settings / consent store
 }
 
