@@ -43,10 +43,13 @@ pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
                 matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
             });
 
-    // The `profile` parameter is intentionally unused below. See comment
-    // above. Acknowledged to clippy via binding prefix.
-    let _profile_for_future_use = profile;
-    let user_consented = crate::telemetry::consent::resolve_consent(None).enabled;
+    // `resolve_consent_preferring_profile` honors the default profile
+    // (where v1 persists user choice) but also falls back to any
+    // explicit per-profile consent from older releases, so upgrading
+    // doesn't silently override a historical opt-out on a named
+    // profile.
+    let user_consented =
+        crate::telemetry::consent::resolve_consent_preferring_profile(profile).enabled;
 
     let mut builder = Client::builder()
         .user_agent(CLI_USER_AGENT)

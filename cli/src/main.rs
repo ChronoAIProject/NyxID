@@ -38,23 +38,19 @@ async fn main() {
         // DSN is present. Resolve consent, prompt if first-run TTY,
         // then init. Prompt refusal never bails the command.
         //
-        // Consent is deliberately read + persisted against the default
-        // profile (`None`), not the current CLI profile. This matches
-        // `api::build_cli_http_client` (which also reads `None`) and
-        // `commands::telemetry` (enable/disable/status, all None).
-        // Treating consent as user-global keeps the three paths
-        // consistent. If the first-run prompt persisted to a profile
-        // config instead, later invocations of the same profile would
-        // look up default-profile consent and find nothing → silent
-        // loss of `X-NyxID-Client` headers for that profile. Tracked
-        // as a future enhancement in docs/TELEMETRY_CONSENT_FIX.md;
-        // a proper per-profile mode also needs a `nyxid telemetry
-        // --profile` editor path, which v1 does not ship.
+        // Consent resolution honors any explicit per-profile choice
+        // persisted by older releases (via `_preferring_profile`) but
+        // otherwise defaults to the user-global (default profile)
+        // config. That keeps migration safe: upgrading will not
+        // silently override a historical opt-out on a named profile.
+        // Going forward, only the default profile is written to — the
+        // prompt and the `nyxid telemetry` editor both use `None`.
         //
-        // `TelemetryClient::init` still gets the profile so the anon
-        // distinct_id is isolated per profile (that's identity, not
+        // `TelemetryClient::init` receives `profile` so the anon
+        // distinct_id file is isolated per profile (identity, not
         // consent — different concern).
-        let mut consent = telemetry::consent::resolve_consent(None);
+        let mut consent =
+            telemetry::consent::resolve_consent_preferring_profile(profile.as_deref());
         let _ = telemetry::consent::prompt_if_needed_interactive(None, &mut consent);
         if consent.enabled {
             telemetry::TelemetryClient::init(profile.as_deref())

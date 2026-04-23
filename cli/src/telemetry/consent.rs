@@ -84,6 +84,69 @@ struct NyxidConfig {
     telemetry: TelemetrySection,
 }
 
+/// Migration-aware consent lookup. v1 consent is user-global (read +
+/// edited against the default profile), but older releases persisted
+/// explicit per-profile consent via the login prompt. Silently
+/// erasing those choices on upgrade is a privacy regression — a user
+/// who opted OUT on `--profile dev` would find their default
+/// profile's "Yes" override that explicit opt-out.
+///
+/// Resolution order:
+///   1. Env overrides (DO_NOT_TRACK / NYXID_TELEMETRY) — same as
+///      `resolve_consent`, global regardless of profile.
+///   2. If `profile` is Some AND that profile's config has
+///      `asked=true`, honor that explicit historical choice.
+///   3. Fall back to the default profile's config.
+///
+/// Going forward, only the default profile is written to (by
+/// `nyxid telemetry enable|disable` and the first-run prompt), so
+/// step 2 only matches persisted choices from pre-v1 releases.
+pub fn resolve_consent_preferring_profile(profile: Option<&str>) -> ConsentState {
+    // Env overrides win regardless of profile — these are global
+    // signals by design. `resolve_consent(None)` handles them at the
+    // top of its ladder, so if any env override is active we'll pick
+    // it up via the default-profile path without consulting the
+    // named profile's config at all.
+    if let Ok(raw) = std::env::var("DO_NOT_TRACK") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && trimmed != "0" {
+            return resolve_consent(None);
+        }
+    }
+    if std::env::var("NYXID_TELEMETRY").is_ok() {
+        return resolve_consent(None);
+    }
+
+    // No env override. If the user has an explicit per-profile
+    // choice from a prior release, honor it so we don't silently
+    // override an opt-out (or an opt-in the user remembers making
+    // on that profile).
+    if let Some(name) = profile
+        && let Some(cfg) = load_config(Some(name))
+        && cfg.telemetry.asked
+    {
+        return if cfg.telemetry.enabled {
+            ConsentState {
+                enabled: true,
+                source: ConsentSource::ConfigEnabled,
+                persisted: true,
+                needs_prompt: false,
+            }
+        } else {
+            ConsentState {
+                enabled: false,
+                source: ConsentSource::ConfigDeclined,
+                persisted: true,
+                needs_prompt: false,
+            }
+        };
+    }
+
+    // No env override, no per-profile historical choice. Fall back
+    // to the default profile's config / first-run state.
+    resolve_consent(None)
+}
+
 /// Pure function: resolve the current effective consent state. Reads
 /// env vars + config file; does not prompt, does not write.
 pub fn resolve_consent(profile: Option<&str>) -> ConsentState {
@@ -380,6 +443,62 @@ mod tests {
             // Empty = unset = fall through to normal resolution.
             assert_eq!(s.source, ConsentSource::ConfigEnabled);
             assert!(s.enabled);
+        });
+    }
+
+    #[test]
+    fn preferring_profile_honors_prior_release_profile_optout() {
+        // Simulates the migration scenario: a user of an older release
+        // opted OUT via the login prompt on `--profile dev`, which
+        // persisted `{enabled:false, asked:true}` to the profile
+        // config. They later opt IN on the default profile (v1
+        // behavior). The profile opt-out must still be honored — a
+        // silent override would be a privacy regression.
+        with_temp_home(|| {
+            persist_choice(None, true).unwrap();
+            persist_choice(Some("dev"), false).unwrap();
+            let s = resolve_consent_preferring_profile(Some("dev"));
+            assert_eq!(s.source, ConsentSource::ConfigDeclined);
+            assert!(!s.enabled);
+        });
+    }
+
+    #[test]
+    fn preferring_profile_falls_back_to_default_when_profile_unset() {
+        with_temp_home(|| {
+            persist_choice(None, true).unwrap();
+            let s = resolve_consent_preferring_profile(Some("dev"));
+            // dev profile has no config, fall through to default.
+            assert_eq!(s.source, ConsentSource::ConfigEnabled);
+            assert!(s.enabled);
+        });
+    }
+
+    #[test]
+    fn preferring_profile_env_var_beats_profile_config() {
+        with_temp_home(|| {
+            persist_choice(Some("dev"), true).unwrap();
+            // SAFETY: serialized via test_lock.
+            unsafe {
+                std::env::set_var("NYXID_TELEMETRY", "off");
+            }
+            let s = resolve_consent_preferring_profile(Some("dev"));
+            assert_eq!(s.source, ConsentSource::EnvVarOff);
+            assert!(!s.enabled);
+        });
+    }
+
+    #[test]
+    fn preferring_profile_do_not_track_beats_profile_config() {
+        with_temp_home(|| {
+            persist_choice(Some("dev"), true).unwrap();
+            // SAFETY: serialized via test_lock.
+            unsafe {
+                std::env::set_var("DO_NOT_TRACK", "1");
+            }
+            let s = resolve_consent_preferring_profile(Some("dev"));
+            assert_eq!(s.source, ConsentSource::DoNotTrack);
+            assert!(!s.enabled);
         });
     }
 }
