@@ -653,6 +653,7 @@ mod tests {
             encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            trusted_proxy_ips: vec![],
             sa_token_ttl_secs: 3600,
             cookie_domain: None,
             telegram_bot_token: None,

@@ -118,6 +118,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::Admin { .. } => ("admin", "subcommand"),
         Commands::Telemetry { .. } => ("telemetry", "subcommand"),
         Commands::Repo(_) => ("repo", "repo"),
+        Commands::Pairing { .. } => ("pairing", "subcommand"),
         Commands::Info => ("repo", "info"),
     }
 }

@@ -589,32 +589,6 @@ pub async fn update_api_key(
     Ok(())
 }
 
-
-/// Revoke an API key (sets status = "revoked", clears credential).
-pub async fn revoke_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) -> AppResult<()> {
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": key_id, "user_id": user_id },
-            doc! {
-                "$set": {
-                    "status": "revoked",
-                    "credential_encrypted": bson::Bson::Null,
-                    "access_token_encrypted": bson::Bson::Null,
-                    "refresh_token_encrypted": bson::Bson::Null,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
-            },
-        )
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("API key not found".to_string()));
-    }
-
-    Ok(())
-}
-
 /// Atomic conditional revoke used by the `only_if_pending=true`
 /// cleanup path. Flips status `pending_auth -> revoked` in a
 /// single MongoDB update with the status in the filter, so the
@@ -673,7 +647,6 @@ pub async fn revoke_api_key_if_pending(
 
     Ok(result.matched_count > 0)
 }
-
 
 /// Delete an API key. Fails if any active UserService references it.
 pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) -> AppResult<()> {

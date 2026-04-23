@@ -2269,10 +2269,9 @@ pub async fn revoke_key_if_pending(
         return Ok(false);
     }
 
-    // API key was in pending_auth and is now revoked. Tear down the
-    // owning UserService and any node binding to keep the records
-    // consistent — this mirrors the unconditional `revoke_key`
-    // order, just without the now-skipped `revoke_api_key` call.
+    // API key was in pending_auth and is now revoked (by the atomic
+    // status-filter update above). Tear down the owning UserService
+    // and any node binding to keep the records consistent.
     user_service_service::deactivate_user_service(db, user_id, actor_user_id, service_id).await?;
     node_service::sync_node_binding_for_user_service(
         db,

@@ -79,6 +79,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         encryption_key_previous: None,
         rate_limit_per_second: 10,
         rate_limit_burst: 30,
+        trusted_proxy_ips: vec![],
         sa_token_ttl_secs: 3600,
         cookie_domain: None,
         telegram_bot_token: None,
@@ -159,6 +160,13 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
         )),
         ssh_session_manager: Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user)),
         per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::new()),
+        // Production default from backend/src/main.rs — 5 claims per
+        // 60s per IP; mirror here so claim-rate-limit tests see the
+        // same shape.
+        cli_pairing_claim_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        // Tests don't exercise pairing-code HMAC verification; a
+        // zero-filled key is deterministic and never touches prod data.
+        cli_pairing_hmac_key: Arc::new(zeroize::Zeroizing::new([0u8; 32])),
         per_channel_event_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
             config.channel_event_rate_limit_per_second,
             config.channel_event_rate_limit_burst,
