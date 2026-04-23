@@ -49,7 +49,7 @@ body:
       label: Environment
       description: Relevant version info and environment details.
       placeholder: |
-        - NyxID version: v0.2.0
+        - NyxID version: v0.3.0
         - OS: macOS 15.3 / Ubuntu 24.04 / Windows 11
         - Browser: Chrome 131 (if frontend)
         - Rust: 1.93.0 (if backend)

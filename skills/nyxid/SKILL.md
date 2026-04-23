@@ -1,7 +1,7 @@
 ---
 name: NyxID
 description: Access user-connected services through NyxID's credential brokering proxy
-version: 0.2.0
+version: 0.3.0
 homepage: https://github.com/ChronoAIProject/NyxID
 user-invocable: /nyxid
 metadata:
