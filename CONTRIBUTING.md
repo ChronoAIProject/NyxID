@@ -178,6 +178,24 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 - Organize by feature/domain, not by type
 - Extract reusable components into `components/shared/`
 
+### CLI Wizard Bundle
+
+The CLI embeds a React-based wizard UI (`cli/src/wizard/assets/index.html`) into its binary via `rust_embed`, so `cargo build -p nyxid-cli` does not need a Node toolchain. The bundle is a **committed prebuilt artifact** — if you edit any of the source files feeding it, you must rebuild the bundle and commit the result in the same PR:
+
+- `frontend/src/components/cli-wizard/**`
+- `frontend/src/wizard-entry.tsx`
+- `frontend/src/pages/cli-pair/**`
+- `frontend/wizard.html`
+- `frontend/vite.wizard.config.ts`
+
+```bash
+npm --prefix frontend run build:wizard
+cp frontend/dist-wizard/wizard.html cli/src/wizard/assets/index.html
+git add cli/src/wizard/assets/index.html
+```
+
+Two CI jobs guard freshness. **CLI Wizard Bundle Touch Check** (~10s) fails fast if wizard sources changed but the bundle didn't. **CLI Wizard Bundle Freshness** (~1-2min) rebuilds in a clean environment and byte-diffs against your committed file — catches non-deterministic rebuilds and version drift.
+
 ---
 
 ## Security Requirements
@@ -280,6 +298,8 @@ Every pull request runs the following checks automatically via GitHub Actions:
 | **Rust Test** | `cargo test --workspace` with a real MongoDB service -- unit and integration tests |
 | **Rust Features** | Builds with `--features aws-kms`, `gcp-kms`, and both -- ensures KMS providers compile |
 | **Frontend** | `npm run lint`, `npm run test`, `npm run build` -- lint, test, and type-check |
+| **CLI Wizard Bundle Touch Check** | Fast <10s sentinel -- fails if wizard sources changed but `cli/src/wizard/assets/index.html` wasn't updated. See [CLI Wizard Bundle](#cli-wizard-bundle). |
+| **CLI Wizard Bundle Freshness** | Rebuilds the wizard bundle in a clean environment and byte-diffs against the committed `cli/src/wizard/assets/index.html`. |
 | **SDK Build** | `npm run build` across all SDK packages -- ensures TypeScript compiles |
 
 All checks must pass before a PR can be merged. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
