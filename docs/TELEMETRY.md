@@ -622,9 +622,9 @@ These are non-code prerequisites for turning on production telemetry:
 - `frontend/src/stores/auth-store.ts` — `identify(user_id)` on login/register/OAuth-callback success; `reset()` on logout
 - `frontend/src/stores/consent-store.ts` (new) — localStorage-backed consent state
 - `frontend/src/components/consent-banner.tsx` (new) — opt-in UI
-- `frontend/src/lib/api-client.ts` — attach `X-NyxID-Client: ui` + `X-NyxID-Client-Version`
+- `frontend/src/lib/api-client.ts` — attach `X-NyxID-Client: ui` on every request when telemetry is active. (FE does not send `X-NyxID-Client-Version`; CLI + mobile still do, using their native version strings.)
 - `frontend/src/pages/privacy.tsx` — rewrite with telemetry disclosure
-- `frontend/Dockerfile` — `ARG` + `ENV` for `VITE_TELEMETRY_DSN`, `VITE_TELEMETRY_HOST`, `VITE_NYXID_SHARE_ANALYTICS` (currently no Vite build args)
+- `frontend/Dockerfile` — no build-time telemetry env. DSN / host / share-back flag are fetched at runtime from the backend's `/api/v1/public/config`.
 
 ### Backend
 - `backend/src/telemetry/mod.rs` (new) — `TelemetryClient`, reqwest fire-and-forget, 2s timeout, bounded mpsc for backpressure

@@ -51,11 +51,7 @@ function buildFetchConfig(options: RequestOptions): RequestInit {
   // client never initialized this session, so the surface header is
   // pointless anyway.
   const telemetryHeaders: Record<string, string> = isTelemetryActive()
-    ? {
-        "X-NyxID-Client": "ui",
-        "X-NyxID-Client-Version":
-          (import.meta.env.VITE_BUILD_HASH as string | undefined) ?? "dev",
-      }
+    ? { "X-NyxID-Client": "ui" }
     : {};
 
   const config: RequestInit = {

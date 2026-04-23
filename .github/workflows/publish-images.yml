@@ -111,13 +111,11 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           # Build-args: git hash for backend/node-agent surface tagging
-          # and a matching VITE_BUILD_HASH for the frontend's client-
-          # version header. Telemetry DSN + host are fetched at runtime
+          # (stamped on /health). Telemetry config is fetched at runtime
           # from the backend's /api/v1/public/config endpoint, so no
-          # secret build-args are needed here.
+          # build-args for telemetry are needed here.
           build-args: |
             NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
-            VITE_BUILD_HASH=${{ steps.git.outputs.hash }}
           outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}-${{ matrix.platform_pair }}

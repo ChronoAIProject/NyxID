@@ -8,13 +8,10 @@ RUN npm ci
 
 COPY . .
 
-# Build hash is baked in for surface-version traceability (shows up in
-# `X-NyxID-Client-Version` on requests). Non-secret, only used for
-# debugging/observability. Telemetry DSN + host are NOT baked here —
-# they are fetched at runtime from the backend's /api/v1/public/config
-# endpoint so rotation does not require an image rebuild.
-ARG VITE_BUILD_HASH="dev"
-ENV VITE_BUILD_HASH=${VITE_BUILD_HASH}
+# Telemetry config (DSN, host, share-back flag) is fetched at runtime
+# from the backend's /api/v1/public/config endpoint — no build-time
+# env vars needed for telemetry. Rotation = edit .env.production,
+# restart backend, done.
 
 RUN npm run build
 
