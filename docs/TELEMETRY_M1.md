@@ -3,17 +3,16 @@
 | Field | Value |
 |---|---|
 | Status | Implementation ready |
-| Owner | Calvin |
 | Ticket | [ChronoAIProject/NyxID#442](https://github.com/ChronoAIProject/NyxID/issues/442) |
 | Branch | `feat/analytics-m1-discovery` |
-| Parent plan | `TELEMETRY_PLAN.md` (Calvin's draft — optionally copy into `docs/TELEMETRY.md`) |
+| Parent plan | `TELEMETRY_PLAN.md` (original draft — optionally copy into `docs/TELEMETRY.md`) |
 | Reviews | Codex session `019db3de-1090-7130-b782-13b8b2be1a1a` (two passes — both findings folded) |
 
 ## 1. Purpose
 
 Give us visibility across all four NyxID surfaces — FE, BE, CLI, Mobile — so we can see *where* users go and *how* they use the product. One PostHog **production project** consumes all surfaces' events (a second share-back project exists only for community opt-in contributions; see §3). One `distinct_id` per user across every surface. Clean data from the first production event; identity and erasure plumbed from day one.
 
-Calvin owns PostHog project provisioning, DPA, consent banner copy, dashboards, and deploy-time env wiring. This doc is the file-by-file map of the code changes.
+PostHog project provisioning, DPA, consent banner copy, dashboards, and deploy-time env wiring are operator responsibilities (out of code scope). This doc is the file-by-file map of the code changes.
 
 ## 2. Architecture
 
@@ -595,12 +594,12 @@ async fn main() -> ExitCode {
 
 **Autocapture hardening (FE + Mobile):** `mask_all_text: true`, `mask_all_element_attributes: true`. CSS denylist: `input[type="password"]`, `input[name*="password"]`, `input[name*="secret"]`, `input[name="code"][autocomplete="one-time-code"]`, `input[name*="otp"]`, `[data-sensitive]`, `[data-api-key]`, `[data-credential]`. `before_send` drops entire events on paths: `/verify-email/*`, `/reset-password/*`, `/oauth/callback`, `/approve/*`.
 
-## 7. Infrastructure + legal requirements (Calvin owns)
+## 7. Infrastructure + legal requirements (operator owns)
 
 These are non-code prerequisites for turning on production telemetry:
 
-- PostHog Cloud EU production project provisioned
-- PostHog Cloud EU **separate** share-back project provisioned (for `NYXID_SHARE_ANALYTICS=true`)
+- PostHog production project provisioned (default region: US — the Vite/Rust/TS constants default to `us.i.posthog.com`; set `NYXID_TELEMETRY_HOST=https://eu.i.posthog.com` to target PostHog EU)
+- PostHog **separate** share-back project provisioned (for `NYXID_SHARE_ANALYTICS=true`)
 - DPA signed with PostHog (required: user_id as distinct_id = pseudonymous PII)
 - Consent mechanism chosen + copy written: **opt-in banner on first FE/Mobile visit + Settings toggle + CLI first-run prompt** (default: opt-in banner; can be relaxed to legitimate-interest-with-opt-out if Legal signs a DPIA)
 - `privacy.tsx` rewritten — current text asserts "no third-party tracking cookies or analytics services," which becomes false the moment telemetry ships
@@ -676,9 +675,9 @@ These are non-code prerequisites for turning on production telemetry:
 | Q | Current answer |
 |---|---|
 | OSS Docker / Expo release ships with `SHARE_ANALYTICS=true`? | No. Default off; documented opt-in only. |
-| PostHog Cloud EU vs self-hosted for NyxID's projects? | Start on Cloud EU. Self-host when volume justifies ops. |
+| PostHog Cloud vs self-hosted for NyxID's projects? | Start on PostHog Cloud (US default; EU available via HOST override). Self-host when volume justifies ops. |
 | Consent: opt-in banner vs legitimate-interest + opt-out? | Opt-in banner (safest default). Relax if Legal greenlights LIA + DPIA. |
-| Parent `TELEMETRY_PLAN.md` → `docs/TELEMETRY.md` inside repo? | Calvin to decide. |
+| Parent `TELEMETRY_PLAN.md` → `docs/TELEMETRY.md` inside repo? | TBD. |
 | Mobile TestFlight / Android internal — same PostHog project as prod? | Separate project OR `environment=staging` prop on share-back. Pick before first TestFlight with telemetry. |
 | Emit `proxy.request` sampled? | No. Revisit after first data review if a specific question needs it. |
 | Emit backend pre-auth `anon:<ip_hash>` events? | No. Can't merge via `identify()`, creates undeletable orphans. |
@@ -690,13 +689,15 @@ These are non-code prerequisites for turning on production telemetry:
 - **2026-04-22 (first pass)** — Codex consult. Findings folded in: repo-path mismatches, `user.signed_up` handler location, CORS as hard gate, consent banner, drop backend pre-auth anon events, separate share-back project, StrictMode idempotency, session-restore identify, mobile multi-sign-out reset, PII/redaction schema, mobile feature module names, `mobile/app.json` vs `app.config.ts`.
 - **2026-04-22 (identity plumbing landed)** — `cli/src/auth.rs` JWT sub extraction + user_id file; `mobile/src/lib/auth/{jwt.ts,sessionStore.ts}` userId field + SecureStore key. 156 + 25 CLI tests pass; mobile typecheck clean.
 - **2026-04-22 (second pass)** — Codex consult resumed. Code bugs fixed: CLI save_tokens_for clears stale user_id on parse fail; CLI read_saved_user_id_for prefers JWT (canonical) over file (cache); mobile loadStoredAuthSession is read-only (no backfill race with clear); mobile orphan cleanup covers `user_id` + `expires_at`, not just `refresh_token`. Added CLI test for stale-cleanup. Added security note that JWT `sub` is unverified (telemetry-only, not identity proof).
-- **2026-04-22 (doc restructure)** — Stripped daily progress tracker, verification plan, dashboards, review cadence. Doc is now a file-by-file map. Infrastructure + legal gates consolidated into §7 as Calvin-owned prerequisites.
+- **2026-04-22 (doc restructure)** — Stripped daily progress tracker, verification plan, dashboards, review cadence. Doc is now a file-by-file map. Infrastructure + legal gates consolidated into §7 as operator-owned prerequisites.
 - **2026-04-22 (third Codex pass — final gate)** — No blockers. Three ambiguities tightened: §1 vs §2 "one project" contradiction reworded to clarify production vs share-back; §3 CLI consent gained a full precedence ladder + config schema + non-TTY behavior; §5.2 taxonomy added `ui.decision_made{decision}` for approve/deny and expanded `ui.destructive_confirmed.action` enum to include `suspend/unsuspend/disconnect/wipe`. One pre-existing (non-telemetry) CLI bug noted in §10. Implementation green-lit.
 - **2026-04-22 (utility shapes added)** — §5.1–5.4 now include concrete public-API signatures for every new module: backend `TelemetryEvent` enum + `TelemetryClient` + scrubber + middleware + erasure service; FE/Mobile discriminated-union schema + `capture()` + Zustand consent store; CLI `TelemetryClient` + inline schema + `resolve_consent` / `prompt_if_needed_interactive`. Plus implementation-ordering note (schema first, client second, middleware third, call sites last) to prevent retrofitted allowlists.
 - **2026-04-22 (hot-swap contract)** — New §5.0 codifies vendor-neutrality as non-negotiable: module filenames (`telemetry.ts` / `telemetry.rs`, never `posthog.ts`), struct names (`TelemetryClient`), env vars (`*_TELEMETRY_DSN`, never `*_POSTHOG_*`), public API verbs (`init / identify / reset / capture / captureException` — universal across vendors). Renamed throughout doc. CI rule added: vendor SDK imports forbidden outside the four `telemetry.{ts,rs}` wrapper files. Swap path becomes: rewrite 4 files, zero caller changes.
 - **2026-04-22 (fourth Codex pass — final-final gate)** — Three blockers caught and fixed: mobile wiring example still had `POSTHOG_KEY`/`POSTHOG_HOST` in `Constants.expoConfig.extra` (renamed to `TELEMETRY_DSN`/`TELEMETRY_HOST`); CLI `ConsentSource` enum was missing the `FirstRunPending` variant the 7-step ladder needs (added, plus `needs_prompt` computed flag on `ConsentState` so the caller doesn't need TTY detection); CLI public API exposed `create_alias(anon, user)` which leaked PostHog wire semantics (folded into `identify(user_id)` — wrapper reads current anon internally and hands merge to vendor invisibly). Also added missing file-map entries (`telemetry/scrub.rs`, `cli/src/telemetry/consent.rs`, `mobile/src/lib/consent.ts`) and resolved the mobile consent-storage ambiguity (AsyncStorage, not SecureStore).
 - **2026-04-22 (fifth Codex pass — semantic correctness check)** — Caught one residual bug from pass-4 fix: `ConsentSource::Default` claimed "treat as FirstRunPending" but `needs_prompt` only triggered on literal `FirstRunPending`, so a fresh user with no config file would silently skip the first-run prompt. Collapsed `Default` into `FirstRunPending` (one variant, one semantic: "no user choice yet, prompt on TTY"). Updated §3 ladder steps 5 and 6 to treat "config file doesn't exist" identically to "config exists with asked=false". No blockers remaining. Ship.
 - **2026-04-23 (implementation landed)** — Tier A (foundation files), Tier B (wiring), and Tier D (privacy / Dockerfile / mobile app.json / `.env.example`) complete across all four surfaces. Tier C landed the critical subset of backend events (`user.signed_up` + `auth.logged_in` + `auth.logged_out` in `handlers/auth.rs`; `key.created` + `key.deleted` in `handlers/keys.rs`; `user.deleted` + erasure-job enqueue in `handlers/users.rs`) plus CLI identity hooks (`run_login → identify`, `run_logout → reset`) and FE/Mobile identify on login + `reset()` on all sign-out paths. Remaining backend handler emissions (mfa, services/endpoints, catalog, api_keys/agent_bindings, approvals, nodes, channels, mcp/ssh/oauth/notifications/admin, proxy.error, api.rate_limited) + exhaustive FE/Mobile `ui.*` CTA sweep are follow-up PRs — the framework is in place and each new emission is a ~5-line additive edit in the handler/component. **No breaking changes:** with all `*_TELEMETRY_DSN` env vars unset (the default), `TelemetryClient::from_config` returns `None`, every `emit_event` / `capture` / `identify` call is a no-op, and runtime behavior is byte-identical to today. All four surfaces build green: backend `cargo check` clean, CLI 161/161 tests pass, FE `tsc -b` clean, mobile `npm run typecheck` 0 errors.
+- **2026-04-23 (post-impl live verification)** — Verified end-to-end against a live PostHog testnet project: backend `user.signed_up`/`auth.logged_in`/`user.deleted` all 200 OK with matching distinct_id; GDPR erasure worker actually called PostHog's `/person/{id}/` DELETE API (visible as `$delete_person` audit events vendor-side); default-off produces zero outbound HTTP and zero log lines; CORS preflight accepts `X-NyxID-Client[-Version]` headers. Caught and fixed one bug live that static review did not surface: CLI `track()`/`identify()` used `tokio::spawn` fire-and-forget inside `#[tokio::main]`, but the runtime teardown on main-return cancelled the spawned tasks before the TCP handshake — ~100% event loss. Switched to bounded-wait `.await` with a 1s timeout; adds ~200-500ms to CLI runtime but events now reliably land.
+- **2026-04-23 (host default flipped)** — Default `HOST` flipped from `eu.i.posthog.com` to `us.i.posthog.com` across backend/CLI/frontend/mobile. Rationale: PostHog's own default region for new signups is US, and operators were forced to set both `DSN` and `HOST` to be useful since the DSN came from a US project. After the flip, operators need exactly one env var (`NYXID_TELEMETRY_DSN`) in the common case. EU operators override via `NYXID_TELEMETRY_HOST=https://eu.i.posthog.com`. Community share-back constants (`NYXID_PUBLIC_TELEMETRY_HOST`) were already on US so unchanged.
 
 ### Dependencies added
 
