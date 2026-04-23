@@ -129,6 +129,58 @@ impl PerAgentRateLimiter {
 
 pub type SharedPerAgentRateLimiter = Arc<PerAgentRateLimiter>;
 
+/// Per-message edit limiter keyed by upstream platform message ID.
+/// Used by the channel relay edit endpoint so progressive updates on one
+/// message cannot starve the rest of the relay.
+#[derive(Clone)]
+pub struct PerMessageEditRateLimiter {
+    state: Arc<Mutex<HashMap<String, AgentBucket>>>,
+    rate_per_second: u32,
+    burst: u32,
+}
+
+impl PerMessageEditRateLimiter {
+    pub fn new(rate_per_second: u32, burst: u32) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+            rate_per_second,
+            burst,
+        }
+    }
+
+    /// Check if an edit for the given upstream message should be allowed.
+    pub fn check(&self, platform_message_id: &str) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = state
+            .entry(platform_message_id.to_string())
+            .or_insert(AgentBucket {
+                tokens: self.burst as f64,
+                last_refill: now,
+            });
+
+        let elapsed_secs = now.duration_since(entry.last_refill).as_secs_f64();
+        entry.tokens =
+            (entry.tokens + elapsed_secs * self.rate_per_second as f64).min(self.burst as f64);
+        entry.last_refill = now;
+
+        if entry.tokens < 1.0 {
+            return false;
+        }
+        entry.tokens -= 1.0;
+        true
+    }
+
+    /// Remove stale entries to prevent unbounded memory growth.
+    pub fn cleanup(&self) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.retain(|_, bucket| now.duration_since(bucket.last_refill).as_secs() < 120);
+    }
+}
+
+pub type SharedPerMessageEditRateLimiter = Arc<PerMessageEditRateLimiter>;
+
 /// Per-channel rate limiter keyed by conversation_id for the HTTP Event
 /// Gateway. Distinct from `PerAgentRateLimiter` because event-channel
 /// throttling is per-conversation, not per-API-key.

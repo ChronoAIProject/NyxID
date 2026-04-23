@@ -131,6 +131,7 @@ pub async fn store_inbound_message(
         reply_to_message_id: None,
         platform_reply_message_id: None,
         created_at: Utc::now(),
+        updated_at: None,
     };
 
     db.collection::<ChannelMessage>(COLLECTION_NAME)
@@ -156,6 +157,7 @@ pub async fn store_outbound_message(
     reply_to_message_id: Option<&str>,
     platform_message_id: Option<&str>,
 ) -> AppResult<ChannelMessage> {
+    let now = Utc::now();
     let message = ChannelMessage {
         id: uuid::Uuid::new_v4().to_string(),
         channel_bot_id: Some(channel_bot_id.to_string()),
@@ -173,7 +175,8 @@ pub async fn store_outbound_message(
         callback_status: None,
         reply_to_message_id: reply_to_message_id.map(String::from),
         platform_reply_message_id: None,
-        created_at: Utc::now(),
+        created_at: now,
+        updated_at: Some(now),
     };
 
     db.collection::<ChannelMessage>(COLLECTION_NAME)
@@ -237,6 +240,7 @@ pub async fn store_device_event_message(
         reply_to_message_id: None,
         platform_reply_message_id: None,
         created_at: Utc::now(),
+        updated_at: None,
     };
 
     db.collection::<ChannelMessage>(COLLECTION_NAME)
@@ -388,6 +392,47 @@ pub async fn get_message(db: &mongodb::Database, message_id: &str) -> AppResult<
         .find_one(doc! { "_id": message_id })
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Message not found: {message_id}")))
+}
+
+/// Get a single outbound message by its upstream platform message ID.
+pub async fn get_outbound_message_by_platform_id(
+    db: &mongodb::Database,
+    platform: &str,
+    platform_message_id: &str,
+) -> AppResult<ChannelMessage> {
+    db.collection::<ChannelMessage>(COLLECTION_NAME)
+        .find_one(doc! {
+            "platform": platform,
+            "platform_message_id": platform_message_id,
+            "direction": "outbound",
+        })
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("Outbound message not found: {platform_message_id}"))
+        })
+}
+
+/// Update the outbound row's `updated_at` timestamp after a successful edit.
+pub async fn update_outbound_message_timestamp(
+    db: &mongodb::Database,
+    message_id: &str,
+    updated_at: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    let result = db
+        .collection::<ChannelMessage>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": message_id, "direction": "outbound" },
+            doc! { "$set": { "updated_at": mongodb::bson::DateTime::from_chrono(updated_at) } },
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound(format!(
+            "Outbound message not found: {message_id}"
+        )));
+    }
+
+    Ok(())
 }
 
 /// List messages for a conversation with pagination (newest first).
@@ -739,6 +784,8 @@ mod tests {
             channel_relay_callback_timeout_secs: 5,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            channel_relay_edit_rate_limit_per_second: 10,
+            channel_relay_edit_rate_limit_burst: 20,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_capacity: 32_768,

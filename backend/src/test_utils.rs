@@ -116,6 +116,8 @@ pub(crate) fn test_app_config() -> AppConfig {
         channel_relay_callback_timeout_secs: 30,
         channel_relay_max_bots_per_user: 5,
         channel_relay_message_ttl_days: 30,
+        channel_relay_edit_rate_limit_per_second: 10,
+        channel_relay_edit_rate_limit_burst: 20,
         channel_event_rate_limit_per_second: 100,
         channel_event_rate_limit_burst: 200,
         channel_event_dedup_capacity: 32_768,
@@ -170,6 +172,10 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
         per_channel_event_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
             config.channel_event_rate_limit_per_second,
             config.channel_event_rate_limit_burst,
+        )),
+        per_message_edit_limiter: Arc::new(crate::mw::rate_limit::PerMessageEditRateLimiter::new(
+            config.channel_relay_edit_rate_limit_per_second,
+            config.channel_relay_edit_rate_limit_burst,
         )),
         event_dedup_cache: Arc::new(EventDedupCache::new(
             config.channel_event_dedup_capacity,

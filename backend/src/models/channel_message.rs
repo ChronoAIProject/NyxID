@@ -68,6 +68,8 @@ pub struct ChannelMessage {
     pub platform_reply_message_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]
@@ -98,6 +100,7 @@ mod tests {
             reply_to_message_id: None,
             platform_reply_message_id: None,
             created_at: Utc::now(),
+            updated_at: None,
         }
     }
 
@@ -140,6 +143,7 @@ mod tests {
             restored.platform_reply_message_id.as_deref(),
             Some("platform_msg_789")
         );
+        assert!(restored.updated_at.is_none());
     }
 
     #[test]
@@ -167,9 +171,23 @@ mod tests {
         doc.remove("callback_status");
         doc.remove("reply_to_message_id");
         doc.remove("platform_reply_message_id");
+        doc.remove("updated_at");
         let restored: ChannelMessage = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.platform_message_id, None);
         assert_eq!(restored.callback_status, None);
+        assert_eq!(restored.updated_at, None);
+    }
+
+    #[test]
+    fn bson_roundtrip_with_updated_at() {
+        let mut msg = make_message();
+        msg.updated_at = Some(Utc::now());
+        let doc = bson::to_document(&msg).expect("serialize");
+        let restored: ChannelMessage = bson::from_document(doc).expect("deserialize");
+        assert_eq!(
+            restored.updated_at.map(|ts| ts.timestamp_millis()),
+            msg.updated_at.map(|ts| ts.timestamp_millis())
+        );
     }
 
     #[test]

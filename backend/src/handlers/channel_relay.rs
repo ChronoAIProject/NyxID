@@ -1,8 +1,14 @@
 //! Agent-facing channel relay endpoints (API-key or reply-token authenticated).
 //!
 //! These endpoints allow agents to send asynchronous replies to platform
-//! conversations, list conversation message history, and resolve platform
-//! senders to NyxID users.
+//! conversations, edit previously-sent platform replies, list conversation
+//! message history, and resolve platform senders to NyxID users.
+//!
+//! Reply tokens are single-use for the initial `POST /reply` send: their JTI is
+//! consumed on first successful use. `POST /reply/update` reuses the same token
+//! by validating signature + bindings and requiring that the JTI was already
+//! consumed by the original send, which ties edits to a prior reply without
+//! minting a separate edit-only token.
 
 use axum::{
     Json,
@@ -11,7 +17,7 @@ use axum::{
 };
 use base64::Engine as _;
 use chrono::{Duration, Utc};
-use mongodb::bson::doc;
+use mongodb::bson::{Bson, doc};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -28,7 +34,9 @@ use crate::models::notification_channel::{
 use crate::models::reply_token_use::{COLLECTION_NAME as REPLY_TOKEN_USES, ReplyTokenUse};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::{
-    channel_bot_service, channel_platform::OutboundReply, channel_relay_service,
+    audit_service, channel_bot_service,
+    channel_platform::{OutboundEdit, OutboundReply},
+    channel_relay_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -37,6 +45,12 @@ use crate::services::{
 
 #[derive(Debug, Deserialize)]
 pub struct AsyncReplyRequest {
+    pub message_id: String,
+    pub reply: AsyncReplyBody,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateReplyRequest {
     pub message_id: String,
     pub reply: AsyncReplyBody,
 }
@@ -79,6 +93,12 @@ pub struct AsyncReplyResponse {
     pub message_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform_message_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateReplyResponse {
+    pub upstream_message_id: String,
+    pub edited_at: String,
 }
 
 /// Metadata-only message summary returned from
@@ -217,6 +237,14 @@ struct ReplyRequestContext {
     validated_bot: Option<ChannelBot>,
 }
 
+#[derive(Debug)]
+struct EditRequestContext {
+    outbound: ChannelMessage,
+    conversation: ChannelConversation,
+    bot: ChannelBot,
+    attributed_api_key_id: String,
+}
+
 fn extract_bearer_token(headers: &HeaderMap) -> AppResult<Option<String>> {
     let Some(raw) = headers.get("authorization") else {
         return Ok(None);
@@ -259,6 +287,13 @@ fn token_targets_reply_audience(token: &str) -> bool {
             .any(|aud| aud.as_str() == Some(jwt::RELAY_REPLY_AUDIENCE)),
         _ => false,
     }
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 async fn load_active_conversation(
@@ -351,6 +386,27 @@ async fn consume_reply_token_use(
     }
 }
 
+async fn reply_token_has_been_consumed(state: &AppState, jti: &str) -> AppResult<bool> {
+    Ok(state
+        .db
+        .collection::<ReplyTokenUse>(REPLY_TOKEN_USES)
+        .find_one(doc! { "_id": jti })
+        .await?
+        .is_some())
+}
+
+fn check_message_edit_rate_limit(state: &AppState, platform_message_id: &str) -> AppResult<()> {
+    if !state.per_message_edit_limiter.check(platform_message_id) {
+        tracing::warn!(
+            platform_message_id = %platform_message_id,
+            "Per-message edit rate limit exceeded"
+        );
+        return Err(AppError::RateLimited);
+    }
+
+    Ok(())
+}
+
 async fn resolve_reply_token_context(
     state: &AppState,
     token: &str,
@@ -432,6 +488,136 @@ async fn resolve_api_key_reply_context(
     })
 }
 
+async fn find_outbound_message_for_api_key(
+    state: &AppState,
+    api_key_id: &str,
+    platform_message_id: &str,
+) -> AppResult<ChannelMessage> {
+    let platforms = state
+        .db
+        .collection::<ChannelConversation>(CONVERSATIONS)
+        .distinct("platform", doc! { "agent_api_key_id": api_key_id })
+        .await?;
+
+    let mut found: Option<ChannelMessage> = None;
+
+    for platform in platforms {
+        let Bson::String(platform) = platform else {
+            continue;
+        };
+
+        match channel_relay_service::get_outbound_message_by_platform_id(
+            &state.db,
+            &platform,
+            platform_message_id,
+        )
+        .await
+        {
+            Ok(message) => {
+                if found.is_some() {
+                    return Err(AppError::Conflict(format!(
+                        "Multiple outbound messages found for platform message ID: {platform_message_id}"
+                    )));
+                }
+                found = Some(message);
+            }
+            Err(AppError::NotFound(_)) => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    found.ok_or_else(|| {
+        AppError::NotFound(format!("Outbound message not found: {platform_message_id}"))
+    })
+}
+
+async fn resolve_reply_token_edit_context(
+    state: &AppState,
+    token: &str,
+    body: &UpdateReplyRequest,
+) -> AppResult<EditRequestContext> {
+    let claims = jwt::validate_relay_reply_token(&state.jwt_keys, &state.config, token)?;
+
+    if !reply_token_has_been_consumed(state, &claims.jti).await? {
+        return Err(AppError::Unauthorized(
+            "reply token must be used to send before it can edit".to_string(),
+        ));
+    }
+
+    let outbound = channel_relay_service::get_outbound_message_by_platform_id(
+        &state.db,
+        &claims.platform,
+        &body.message_id,
+    )
+    .await?;
+
+    if outbound.reply_to_message_id.as_deref() != Some(claims.inbound_message_id.as_str()) {
+        return Err(AppError::Unauthorized(
+            "Reply token inbound_message_id mismatch".to_string(),
+        ));
+    }
+
+    let conversation = load_active_conversation(state, &outbound.conversation_id).await?;
+    if claims.conversation_id != conversation.id || outbound.conversation_id != conversation.id {
+        return Err(AppError::Unauthorized(
+            "Reply token conversation mismatch".to_string(),
+        ));
+    }
+
+    if claims.platform != outbound.platform || claims.platform != conversation.platform {
+        return Err(AppError::Unauthorized(
+            "Reply token platform mismatch".to_string(),
+        ));
+    }
+
+    if is_device_reply_forbidden(&outbound.platform, &conversation.platform) {
+        return Err(AppError::DeviceChannelReplyNotAllowed);
+    }
+
+    let api_key = load_active_api_key(state, &claims.api_key_id).await?;
+    let bot = load_active_bot(state, &outbound).await?;
+
+    Ok(EditRequestContext {
+        outbound,
+        conversation,
+        bot,
+        attributed_api_key_id: api_key.id,
+    })
+}
+
+async fn resolve_api_key_edit_context(
+    state: &AppState,
+    auth_user: &AuthUser,
+    body: &UpdateReplyRequest,
+) -> AppResult<EditRequestContext> {
+    let caller_api_key_id = auth_user.api_key_id.as_deref().ok_or_else(|| {
+        AppError::Forbidden("This endpoint requires API key authentication".to_string())
+    })?;
+
+    let outbound =
+        find_outbound_message_for_api_key(state, caller_api_key_id, &body.message_id).await?;
+    let conversation = load_active_conversation(state, &outbound.conversation_id).await?;
+
+    if conversation.agent_api_key_id != caller_api_key_id {
+        return Err(AppError::Forbidden(
+            "API key is not the assigned agent for this conversation".to_string(),
+        ));
+    }
+
+    if is_device_reply_forbidden(&outbound.platform, &conversation.platform) {
+        return Err(AppError::DeviceChannelReplyNotAllowed);
+    }
+
+    let bot = load_active_bot(state, &outbound).await?;
+
+    Ok(EditRequestContext {
+        outbound,
+        conversation,
+        bot,
+        attributed_api_key_id: caller_api_key_id.to_string(),
+    })
+}
+
 async fn resolve_reply_request_context(
     state: &AppState,
     headers: &HeaderMap,
@@ -448,6 +634,24 @@ async fn resolve_reply_request_context(
         AppError::Unauthorized("API key or relay reply token required".to_string())
     })?;
     resolve_api_key_reply_context(state, auth_user, body).await
+}
+
+async fn resolve_edit_request_context(
+    state: &AppState,
+    headers: &HeaderMap,
+    auth_user: Option<&AuthUser>,
+    body: &UpdateReplyRequest,
+) -> AppResult<EditRequestContext> {
+    if let Some(token) = extract_bearer_token(headers)?
+        && token_targets_reply_audience(&token)
+    {
+        return resolve_reply_token_edit_context(state, &token, body).await;
+    }
+
+    let auth_user = auth_user.ok_or_else(|| {
+        AppError::Unauthorized("API key or relay reply token required".to_string())
+    })?;
+    resolve_api_key_edit_context(state, auth_user, body).await
 }
 
 // ---------------------------------------------------------------------------
@@ -598,6 +802,77 @@ pub async fn async_reply(
     }))
 }
 
+/// POST /api/v1/channel-relay/reply/update
+///
+/// Edit a previously-sent asynchronous reply by its upstream platform message
+/// ID. The platform edit surface is adapter-specific; unsupported platforms
+/// return `edit_unsupported`.
+pub async fn update_reply(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    OptionalAuthUser(auth_user): OptionalAuthUser,
+    Json(body): Json<UpdateReplyRequest>,
+) -> AppResult<Json<UpdateReplyResponse>> {
+    // Deliberately rate-limit before auth/DB work so unauth floods fail on one cheap hashmap check.
+    check_message_edit_rate_limit(&state, &body.message_id)?;
+
+    let EditRequestContext {
+        outbound,
+        conversation,
+        bot,
+        attributed_api_key_id,
+    } = resolve_edit_request_context(&state, &headers, auth_user.as_ref(), &body).await?;
+
+    if is_device_reply_forbidden(&outbound.platform, &conversation.platform) {
+        return Err(AppError::DeviceChannelReplyNotAllowed);
+    }
+
+    validate_reply_for_platform(&body.reply, &bot.platform)?;
+
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
+    let edit = OutboundEdit {
+        text: body.reply.text,
+        metadata: body.reply.metadata,
+    };
+
+    adapter
+        .edit_reply(&state.http_client, &bot_token, &body.message_id, &edit)
+        .await?;
+
+    let inbound_message_id = outbound.reply_to_message_id.clone().ok_or_else(|| {
+        AppError::Internal("outbound channel relay row is missing reply_to_message_id".to_string())
+    })?;
+    let edited_at = Utc::now();
+
+    channel_relay_service::update_outbound_message_timestamp(&state.db, &outbound.id, edited_at)
+        .await?;
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(bot.user_id.clone()),
+        "channel_relay.reply.edit".to_string(),
+        Some(serde_json::json!({
+            "outbound_message_id": outbound.id,
+            "inbound_message_id": inbound_message_id,
+            "conversation_id": conversation.id,
+            "api_key_id": attributed_api_key_id.clone(),
+            "bot_id": bot.id,
+            "platform": outbound.platform,
+            "platform_message_id": body.message_id,
+        })),
+        None,
+        header_value(&headers, "user-agent"),
+        Some(attributed_api_key_id),
+        None,
+    );
+
+    Ok(Json(UpdateReplyResponse {
+        upstream_message_id: body.message_id,
+        edited_at: edited_at.to_rfc3339(),
+    }))
+}
+
 /// GET /api/v1/channel-relay/messages/{conversation_id}
 ///
 /// List messages for a conversation. The calling agent must be the assigned
@@ -718,6 +993,7 @@ mod tests {
         bot: ChannelBot,
         conversation: ChannelConversation,
         message: ChannelMessage,
+        outbound_message: ChannelMessage,
     }
 
     fn body(text: Option<&str>, metadata: Option<serde_json::Value>) -> AsyncReplyBody {
@@ -732,6 +1008,75 @@ mod tests {
             message_id: message_id.to_string(),
             reply: body(Some("hello"), None),
         }
+    }
+
+    fn update_reply_request(platform_message_id: &str) -> UpdateReplyRequest {
+        UpdateReplyRequest {
+            message_id: platform_message_id.to_string(),
+            reply: body(Some("hello"), None),
+        }
+    }
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}")
+                .parse()
+                .expect("authorization header"),
+        );
+        headers
+    }
+
+    fn api_key_auth_user(api_key: &ApiKey) -> AuthUser {
+        AuthUser {
+            user_id: Uuid::parse_str(&api_key.user_id).expect("valid api key user id"),
+            session_id: None,
+            scope: api_key.scopes.clone(),
+            acting_client_id: None,
+            approval_owner_user_id: None,
+            auth_method: crate::mw::auth::AuthMethod::ApiKey,
+            allow_all_services: api_key.allow_all_services,
+            allow_all_nodes: api_key.allow_all_nodes,
+            allowed_service_ids: api_key.allowed_service_ids.clone(),
+            allowed_node_ids: api_key.allowed_node_ids.clone(),
+            api_key_id: Some(api_key.id.clone()),
+            api_key_name: Some(api_key.name.clone()),
+            rate_limit_per_second: api_key.rate_limit_per_second,
+            rate_limit_burst: api_key.rate_limit_burst,
+        }
+    }
+
+    async fn insert_reply_token_use(
+        fixture: &ReplyTokenFixture,
+        claims: &jwt::RelayReplyClaims,
+    ) -> usize {
+        let count_before = fixture
+            .state
+            .db
+            .collection::<ReplyTokenUse>(REPLY_TOKEN_USES)
+            .count_documents(doc! {})
+            .await
+            .expect("count reply token uses before");
+
+        let exp_at =
+            chrono::DateTime::from_timestamp(claims.exp + REPLY_TOKEN_USE_TTL_BUFFER_SECS, 0)
+                .expect("valid exp_at");
+        fixture
+            .state
+            .db
+            .collection::<ReplyTokenUse>(REPLY_TOKEN_USES)
+            .insert_one(&ReplyTokenUse {
+                id: claims.jti.clone(),
+                exp_at,
+                api_key_id: claims.api_key_id.clone(),
+                conversation_id: claims.conversation_id.clone(),
+                consumed_at: Utc::now(),
+            })
+            .await
+            .expect("insert reply token use");
+
+        count_before as usize
     }
 
     fn encode_reply_claims(state: &AppState, claims: &jwt::RelayReplyClaims) -> String {
@@ -851,6 +1196,28 @@ mod tests {
             reply_to_message_id: None,
             platform_reply_message_id: None,
             created_at: now,
+            updated_at: None,
+        };
+
+        let outbound_message = ChannelMessage {
+            id: Uuid::new_v4().to_string(),
+            channel_bot_id: Some(bot.id.clone()),
+            conversation_id: conversation.id.clone(),
+            platform_conversation_id: Some(conversation.platform_conversation_id.clone()),
+            user_id: api_key.user_id.clone(),
+            direction: "outbound".to_string(),
+            platform: conversation.platform.clone(),
+            platform_message_id: Some("platform_reply_123".to_string()),
+            sender_platform_id: None,
+            sender_display_name: None,
+            content_type: "text".to_string(),
+            thread_id: None,
+            agent_api_key_id: Some(api_key.id.clone()),
+            callback_status: None,
+            reply_to_message_id: Some(message.id.clone()),
+            platform_reply_message_id: None,
+            created_at: now,
+            updated_at: Some(now),
         };
 
         db.collection::<ApiKey>(API_KEYS)
@@ -869,6 +1236,10 @@ mod tests {
             .insert_one(&message)
             .await
             .expect("insert message");
+        db.collection::<ChannelMessage>(crate::models::channel_message::COLLECTION_NAME)
+            .insert_one(&outbound_message)
+            .await
+            .expect("insert outbound message");
 
         Some(ReplyTokenFixture {
             state,
@@ -876,6 +1247,7 @@ mod tests {
             bot,
             conversation,
             message,
+            outbound_message,
         })
     }
 
@@ -1272,6 +1644,240 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(consumed, 1);
+
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_reply_token_context_happy_path_no_jti_consumption() {
+        let Some(fixture) = setup_reply_token_fixture("update_reply_token_happy_path").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+
+        let claims = valid_reply_claims(&fixture);
+        let token = encode_reply_claims(&fixture.state, &claims);
+        let count_before = insert_reply_token_use(&fixture, &claims).await;
+
+        let ctx = resolve_edit_request_context(
+            &fixture.state,
+            &bearer_headers(&token),
+            None,
+            &update_reply_request(
+                fixture
+                    .outbound_message
+                    .platform_message_id
+                    .as_deref()
+                    .expect("outbound platform message id"),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ctx.outbound.id, fixture.outbound_message.id);
+        assert_eq!(ctx.conversation.id, fixture.conversation.id);
+        assert_eq!(ctx.bot.id, fixture.bot.id);
+        assert_eq!(ctx.attributed_api_key_id, fixture.api_key.id);
+
+        let count_after = db
+            .collection::<ReplyTokenUse>(REPLY_TOKEN_USES)
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        assert_eq!(count_after as usize, count_before + 1);
+
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_reply_token_context_rejects_unused_jti() {
+        let Some(fixture) = setup_reply_token_fixture("update_reply_token_unused_jti").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+
+        let claims = valid_reply_claims(&fixture);
+        let token = encode_reply_claims(&fixture.state, &claims);
+        let err = resolve_edit_request_context(
+            &fixture.state,
+            &bearer_headers(&token),
+            None,
+            &update_reply_request(
+                fixture
+                    .outbound_message
+                    .platform_message_id
+                    .as_deref()
+                    .expect("outbound platform message id"),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, AppError::Unauthorized(msg) if msg.contains("must be used to send before it can edit"))
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_reply_rejects_mismatched_inbound_id() {
+        let Some(fixture) = setup_reply_token_fixture("update_reply_inbound_mismatch").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+
+        let claims = jwt::RelayReplyClaims {
+            inbound_message_id: Uuid::new_v4().to_string(),
+            ..valid_reply_claims(&fixture)
+        };
+        let token = encode_reply_claims(&fixture.state, &claims);
+        insert_reply_token_use(&fixture, &claims).await;
+
+        let err = resolve_edit_request_context(
+            &fixture.state,
+            &bearer_headers(&token),
+            None,
+            &update_reply_request(
+                fixture
+                    .outbound_message
+                    .platform_message_id
+                    .as_deref()
+                    .expect("outbound platform message id"),
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, AppError::Unauthorized(msg) if msg.contains("inbound_message_id mismatch"))
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_reply_rejects_device_conversation() {
+        let Some(fixture) = setup_reply_token_fixture("update_reply_device_guard").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+
+        db.collection::<ChannelConversation>(CONVERSATIONS)
+            .update_one(
+                doc! { "_id": &fixture.conversation.id },
+                doc! { "$set": { "platform": "device" } },
+            )
+            .await
+            .unwrap();
+
+        let err = update_reply(
+            State(fixture.state.clone()),
+            HeaderMap::new(),
+            OptionalAuthUser(Some(api_key_auth_user(&fixture.api_key))),
+            Json(update_reply_request(
+                fixture
+                    .outbound_message
+                    .platform_message_id
+                    .as_deref()
+                    .expect("outbound platform message id"),
+            )),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::DeviceChannelReplyNotAllowed));
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_reply_returns_501_on_telegram() {
+        let cache = std::sync::Arc::new(
+            crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
+        );
+        let adapter = resolve_adapter("telegram", &cache).expect("telegram adapter");
+
+        let err = adapter
+            .edit_reply(
+                &reqwest::Client::new(),
+                "bot-token",
+                "platform-msg-id",
+                &OutboundEdit {
+                    text: Some("hello".to_string()),
+                    metadata: None,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::ChannelPlatformEditUnsupported));
+    }
+
+    #[tokio::test]
+    async fn update_reply_returns_404_on_unknown_platform_message_id() {
+        let Some(fixture) = setup_reply_token_fixture("update_reply_unknown_msg").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+        let auth_user = api_key_auth_user(&fixture.api_key);
+
+        let err = resolve_edit_request_context(
+            &fixture.state,
+            &HeaderMap::new(),
+            Some(&auth_user),
+            &update_reply_request("missing_platform_message"),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, AppError::NotFound(msg) if msg.contains("Outbound message not found"))
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_reply_rate_limits_per_platform_message_id() {
+        let Some(fixture) = setup_reply_token_fixture("update_reply_rate_limit").await else {
+            eprintln!("skipping channel_relay reply-token test: no local MongoDB available");
+            return;
+        };
+        let db = fixture.state.db.clone();
+
+        let mut state = fixture.state.clone();
+        state.per_message_edit_limiter =
+            std::sync::Arc::new(crate::mw::rate_limit::PerMessageEditRateLimiter::new(1, 1));
+
+        let platform_message_id = fixture
+            .outbound_message
+            .platform_message_id
+            .as_deref()
+            .expect("outbound platform message id")
+            .to_string();
+
+        let first = update_reply(
+            State(state.clone()),
+            HeaderMap::new(),
+            OptionalAuthUser(Some(api_key_auth_user(&fixture.api_key))),
+            Json(update_reply_request(&platform_message_id)),
+        )
+        .await;
+        assert!(matches!(
+            first,
+            Err(AppError::ChannelPlatformEditUnsupported)
+        ));
+
+        let second = update_reply(
+            State(state),
+            HeaderMap::new(),
+            OptionalAuthUser(Some(api_key_auth_user(&fixture.api_key))),
+            Json(update_reply_request(&platform_message_id)),
+        )
+        .await;
+        assert!(matches!(second, Err(AppError::RateLimited)));
 
         db.drop().await.unwrap();
     }

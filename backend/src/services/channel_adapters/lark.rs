@@ -33,8 +33,8 @@ use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
 use crate::models::downstream_service::{CredentialFieldSpec, TokenExchangeConfig};
 use crate::services::channel_platform::{
-    BotIdentity, InboundMessage, OutboundReply, PlatformAdapter, PlatformVerifySecrets,
-    PreparedWebhook,
+    BotIdentity, InboundMessage, OutboundEdit, OutboundReply, PlatformAdapter,
+    PlatformVerifySecrets, PreparedWebhook,
 };
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
 
@@ -381,15 +381,79 @@ fn extract_text_content(content_str: &str) -> Option<String> {
 /// JSON is passed through as-is; Feishu validates it server-side.
 ///
 /// Otherwise falls back to a plain text message wrapping `reply.text`.
-fn build_message_body(reply: &OutboundReply) -> (&'static str, String) {
-    if let Some(metadata) = reply.metadata.as_ref()
+fn build_message_body(
+    text: Option<&str>,
+    metadata: Option<&serde_json::Value>,
+) -> (&'static str, String) {
+    if let Some(metadata) = metadata
         && let Some(card) = metadata.get("card")
     {
         return ("interactive", card.to_string());
     }
 
-    let text = reply.text.as_deref().unwrap_or("");
+    let text = text.unwrap_or("");
     ("text", serde_json::json!({ "text": text }).to_string())
+}
+
+fn build_send_body(reply: &OutboundReply) -> (&'static str, String) {
+    build_message_body(reply.text.as_deref(), reply.metadata.as_ref())
+}
+
+fn build_edit_request(edit: &OutboundEdit) -> (reqwest::Method, serde_json::Value) {
+    if let Some(metadata) = edit.metadata.as_ref()
+        && let Some(card) = metadata.get("card")
+    {
+        return (
+            reqwest::Method::PATCH,
+            serde_json::json!({
+                "content": card.to_string(),
+            }),
+        );
+    }
+
+    let (_msg_type, content) = build_message_body(edit.text.as_deref(), edit.metadata.as_ref());
+    (
+        reqwest::Method::PUT,
+        serde_json::json!({
+            "msg_type": "text",
+            "content": content,
+        }),
+    )
+}
+
+/// Classify documented Feishu/Lark edit errors into NyxID error buckets.
+///
+/// Verified against the current official Feishu markdown docs:
+/// - Text/post edit (`PUT /im/v1/messages/{message_id}`):
+///   https://open.feishu.cn/document/server-docs/im-v1/message/update.md
+/// - Card edit (`PATCH /im/v1/messages/{message_id}`):
+///   https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/patch.md
+///
+/// Specifically mapped codes:
+/// - `230020`: frequency limit -> `RateLimited`
+/// - `230011`, `230031`, `230050`, `230071`, `230072`, `230073`, `230074`,
+///   `230075`, `230110`: message state / editability conflicts -> `Conflict`
+/// - `230001`, `230022`, `230025`, `230028`, `230054`, `230099`: invalid
+///   request or invalid content -> `ValidationError`
+///
+/// Intentionally not specialized:
+/// - `230002` appears only in the text/post edit doc and is documented as
+///   "The bot can not be outside the group", not message-not-found.
+/// - Any code not listed above falls back to `ChannelPlatformError` so we do
+///   not invent classifications beyond what the official docs support.
+fn classify_edit_error(platform: &str, code: i64, msg: &str) -> AppError {
+    match code {
+        230020 => AppError::RateLimited,
+        230011 | 230031 | 230050 | 230071 | 230072 | 230073 | 230074 | 230075 | 230110 => {
+            AppError::Conflict(format!("{platform} refused edit (code {code}): {msg}"))
+        }
+        230001 | 230022 | 230025 | 230028 | 230054 | 230099 => {
+            AppError::ValidationError(format!("{platform} refused edit (code {code}): {msg}"))
+        }
+        _ => AppError::ChannelPlatformError(format!(
+            "{platform} edit message failed (code {code}): {msg}"
+        )),
+    }
 }
 
 /// Detect the content type from the Lark `message_type` field.
@@ -607,7 +671,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
             .get_tenant_access_token(http, app_id, app_secret)
             .await?;
 
-        let (msg_type, content) = build_message_body(reply);
+        let (msg_type, content) = build_send_body(reply);
 
         let body = serde_json::json!({
             "receive_id": conversation_id,
@@ -661,6 +725,68 @@ impl PlatformAdapter for LarkFamilyAdapter {
             .map(String::from);
 
         Ok(message_id)
+    }
+
+    async fn edit_reply(
+        &self,
+        http: &reqwest::Client,
+        bot_token: &str,
+        platform_message_id: &str,
+        edit: &OutboundEdit,
+    ) -> AppResult<()> {
+        let (app_id, app_secret) = bot_token.split_once(':').ok_or_else(|| {
+            AppError::ChannelPlatformError(format!(
+                "{} bot_token must be in app_id:app_secret format",
+                self.platform
+            ))
+        })?;
+
+        let tenant_token = self
+            .get_tenant_access_token(http, app_id, app_secret)
+            .await?;
+
+        let (method, body) = build_edit_request(edit);
+        let url = format!(
+            "{}/open-apis/im/v1/messages/{}",
+            self.base_url, platform_message_id
+        );
+
+        let request = match method {
+            reqwest::Method::PATCH => http.patch(&url),
+            _ => http.put(&url),
+        };
+
+        let resp: serde_json::Value = request
+            .header("Authorization", format!("Bearer {tenant_token}"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                AppError::ChannelPlatformError(format!(
+                    "{} edit message request failed: {e}",
+                    self.platform
+                ))
+            })?
+            .json()
+            .await
+            .map_err(|e| {
+                AppError::ChannelPlatformError(format!(
+                    "{} edit message response parse failed: {e}",
+                    self.platform
+                ))
+            })?;
+
+        let code = resp.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+        if code == 0 {
+            return Ok(());
+        }
+
+        let msg = resp
+            .get("msg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+
+        Err(classify_edit_error(&self.platform, code, msg))
     }
 
     async fn register_webhook(
@@ -717,6 +843,40 @@ mod tests {
     /// pass to the adapter constructors.
     fn test_cache() -> Arc<TokenExchangeCache> {
         Arc::new(TokenExchangeCache::new())
+    }
+
+    #[test]
+    fn build_edit_request_uses_patch_for_cards() {
+        let edit = OutboundEdit {
+            text: None,
+            metadata: Some(serde_json::json!({
+                "card": {
+                    "config": { "update_multi": true },
+                    "header": { "title": { "tag": "plain_text", "content": "Streaming" } }
+                }
+            })),
+        };
+
+        let (method, body) = build_edit_request(&edit);
+        assert_eq!(method, reqwest::Method::PATCH);
+        assert!(body.get("content").and_then(|v| v.as_str()).is_some());
+        assert!(body.get("msg_type").is_none());
+    }
+
+    #[test]
+    fn build_edit_request_uses_put_for_text() {
+        let edit = OutboundEdit {
+            text: Some("hello".to_string()),
+            metadata: None,
+        };
+
+        let (method, body) = build_edit_request(&edit);
+        assert_eq!(method, reqwest::Method::PUT);
+        assert_eq!(body.get("msg_type").and_then(|v| v.as_str()), Some("text"));
+        assert_eq!(
+            body.get("content").and_then(|v| v.as_str()),
+            Some("{\"text\":\"hello\"}")
+        );
     }
 
     fn make_test_bot(platform: &str) -> ChannelBot {
@@ -1345,7 +1505,7 @@ mod tests {
             reply_to_platform_message_id: None,
             metadata: None,
         };
-        let (msg_type, content) = build_message_body(&reply);
+        let (msg_type, content) = build_send_body(&reply);
         assert_eq!(msg_type, "text");
         assert_eq!(content, r#"{"text":"hello"}"#);
     }
@@ -1357,7 +1517,7 @@ mod tests {
             reply_to_platform_message_id: None,
             metadata: None,
         };
-        let (msg_type, content) = build_message_body(&reply);
+        let (msg_type, content) = build_send_body(&reply);
         assert_eq!(msg_type, "text");
         assert_eq!(content, r#"{"text":""}"#);
     }
@@ -1379,7 +1539,7 @@ mod tests {
             reply_to_platform_message_id: None,
             metadata: Some(serde_json::json!({ "card": card.clone() })),
         };
-        let (msg_type, content) = build_message_body(&reply);
+        let (msg_type, content) = build_send_body(&reply);
         assert_eq!(msg_type, "interactive");
         // Content is the card JSON serialized as a string
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -1393,7 +1553,7 @@ mod tests {
             reply_to_platform_message_id: None,
             metadata: Some(serde_json::json!({ "card": { "elements": [] } })),
         };
-        let (msg_type, _) = build_message_body(&reply);
+        let (msg_type, _) = build_send_body(&reply);
         assert_eq!(msg_type, "interactive");
     }
 
@@ -1404,7 +1564,7 @@ mod tests {
             reply_to_platform_message_id: None,
             metadata: Some(serde_json::json!({ "other": "value" })),
         };
-        let (msg_type, content) = build_message_body(&reply);
+        let (msg_type, content) = build_send_body(&reply);
         assert_eq!(msg_type, "text");
         assert_eq!(content, r#"{"text":"plain"}"#);
     }

@@ -197,6 +197,10 @@ pub struct AppConfig {
     pub channel_relay_max_bots_per_user: u32,
     /// TTL in days for channel messages before automatic expiry (default: 30)
     pub channel_relay_message_ttl_days: u32,
+    /// Per-message edit rate limit for channel relay replies (default: 10/s).
+    pub channel_relay_edit_rate_limit_per_second: u32,
+    /// Burst capacity for per-message edit rate limiting (default: 20).
+    pub channel_relay_edit_rate_limit_burst: u32,
 
     // HTTP Event Gateway (NyxID#221 / ADR-013)
     /// Per-channel event rate limit (events per second, default 100).
@@ -374,6 +378,14 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "channel_relay_message_ttl_days",
                 &self.channel_relay_message_ttl_days,
+            )
+            .field(
+                "channel_relay_edit_rate_limit_per_second",
+                &self.channel_relay_edit_rate_limit_per_second,
+            )
+            .field(
+                "channel_relay_edit_rate_limit_burst",
+                &self.channel_relay_edit_rate_limit_burst,
             )
             .field(
                 "channel_event_rate_limit_per_second",
@@ -661,6 +673,16 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            channel_relay_edit_rate_limit_per_second: env::var(
+                "CHANNEL_RELAY_EDIT_RATE_LIMIT_PER_SECOND",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+            channel_relay_edit_rate_limit_burst: env::var("CHANNEL_RELAY_EDIT_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
             channel_event_rate_limit_per_second: env::var("CHANNEL_EVENT_RATE_LIMIT_PER_SECOND")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -985,6 +1007,8 @@ mod tests {
             channel_relay_callback_timeout_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
+            channel_relay_edit_rate_limit_per_second: 10,
+            channel_relay_edit_rate_limit_burst: 20,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_capacity: 32_768,

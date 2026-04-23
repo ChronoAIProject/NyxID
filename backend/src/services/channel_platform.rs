@@ -53,6 +53,14 @@ pub struct OutboundReply {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// A previously-sent outbound message edit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboundEdit {
+    pub text: Option<String>,
+    /// Platform-specific metadata for edit operations (e.g. Lark cards).
+    pub metadata: Option<serde_json::Value>,
+}
+
 /// Decrypted, platform-specific webhook verification material prepared by the
 /// handler. Secrets never live on persisted model structs.
 #[derive(Clone, Default)]
@@ -133,6 +141,17 @@ pub trait PlatformAdapter: Send + Sync {
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>>;
+
+    /// Edit a previously-sent platform message.
+    async fn edit_reply(
+        &self,
+        _http: &reqwest::Client,
+        _bot_token: &str,
+        _platform_message_id: &str,
+        _edit: &OutboundEdit,
+    ) -> AppResult<()> {
+        Err(crate::errors::AppError::ChannelPlatformEditUnsupported)
+    }
 
     /// Register a webhook URL with the platform API.
     async fn register_webhook(

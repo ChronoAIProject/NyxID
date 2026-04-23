@@ -646,6 +646,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
 
     let channel_relay_routes = Router::new()
         .route("/reply", post(handlers::channel_relay::async_reply))
+        .route("/reply/update", post(handlers::channel_relay::update_reply))
         .route(
             "/messages/{conversation_id}",
             get(handlers::channel_relay::list_messages),

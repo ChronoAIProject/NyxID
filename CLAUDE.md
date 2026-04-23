@@ -261,6 +261,7 @@ All API routes under `/api/v1`:
 - `/channel-bots` -- channel bot registration CRUD + PATCH updates for platform verification material
 - `/channel-conversations` -- conversation-to-agent routing (CRUD). Maps platform conversations to agent API keys.
 - `/channel-relay/reply` -- agent async reply to a platform conversation. **Only async replies are supported** — sync 200+body replies from agent callbacks were removed per ADR-013 / NyxID#221. Agents must return 202 to the callback and post replies here. Accepts two auth modes: (a) the agent's API key (`Authorization: Bearer nyxid_ag_…`), scoped by `conversation.agent_api_key_id`; or (b) a per-callback reply token (`Authorization: Bearer <reply_token>`) delivered in the inbound callback payload's `reply_token` field. Reply tokens are RS256 JWTs with `aud="channel-relay/reply"`, bound to one `inbound_message_id` + `conversation_id` + `api_key_id` + `platform`, single-use (enforced via MongoDB `reply_token_uses`), and valid for `JWT_RELAY_REPLY_TTL_SECS` (default 30 min). Intended for downstream runtimes (e.g. Aevatar) that want to reply without persisting agent API keys.
+- `/channel-relay/reply/update` -- agent edit of a previously-sent platform reply, addressed by the upstream `platform_message_id` returned from `/channel-relay/reply`. Accepts the same dual auth as `/channel-relay/reply`: agent API key or the original per-callback reply token. Reply tokens remain `aud="channel-relay/reply"` and single-use for the initial send; edit requests revalidate the same token and require its JTI to already exist in `reply_token_uses`, which proves the token was previously used to send before it can edit. V1 platform support: Lark / Feishu only; other bot platforms return `edit_unsupported`.
 - `/channel-relay/messages/{conversation_id}` -- message history for agents
 - `/channel-relay/resolve-sender` -- resolve platform sender to NyxID user
 - `/channel-events/{conversation_id}` -- HTTP Event Gateway ingress (NyxID#221, ADR-013). Accepts device event envelopes `{event_id, source, type, timestamp, payload, metadata}`, converts to `CallbackPayload` with `platform="device"`, and forwards through the channel relay pipeline. Per-channel rate limited (default 100/s), idempotent via in-memory LRU dedup (5min TTL), metadata-only logging to `channel_event_logs` (no payload persistence).
@@ -344,6 +345,13 @@ CLI_PAIRING_HMAC_KEY=                   # 64 hex chars; keys `CliPairing.code_ha
                                         # key PEM. Both are stable per-worker so
                                         # multi-instance deployments stay in sync
                                         # without extra config. See docs/ENV.md.
+
+# Channel Relay (optional, all have defaults)
+CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS=30          # Callback timeout for inbound agent delivery (default: 30)
+CHANNEL_RELAY_MAX_BOTS_PER_USER=5               # Maximum bots a user can register (default: 5)
+CHANNEL_RELAY_MESSAGE_TTL_DAYS=30               # Channel message TTL in MongoDB (default: 30 days)
+CHANNEL_RELAY_EDIT_RATE_LIMIT_PER_SECOND=10     # Per-platform-message edit rate limit (default: 10)
+CHANNEL_RELAY_EDIT_RATE_LIMIT_BURST=20          # Per-platform-message edit burst capacity (default: 20)
 
 # Telegram / Approval System (optional)
 TELEGRAM_BOT_TOKEN=                     # From @BotFather

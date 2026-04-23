@@ -981,6 +981,19 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    channel_msgs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "platform": 1, "platform_message_id": 1, "direction": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("channel_messages_platform_msg_idx".to_string())
+                        .sparse(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── reply_token_uses ──
     let reply_token_uses = db.collection::<mongodb::bson::Document>("reply_token_uses");
