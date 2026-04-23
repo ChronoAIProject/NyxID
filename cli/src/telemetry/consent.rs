@@ -113,8 +113,20 @@ pub fn resolve_consent_preferring_profile(profile: Option<&str>) -> ConsentState
             return resolve_consent(None);
         }
     }
-    if std::env::var("NYXID_TELEMETRY").is_ok() {
-        return resolve_consent(None);
+    // Only treat RECOGNIZED NYXID_TELEMETRY values as a global override.
+    // A garbage value (`NYXID_TELEMETRY=maybe`) must not bypass the
+    // per-profile historical-consent check below — that would let a
+    // stray env export silently re-enable telemetry for a user who
+    // had opted out on a named profile in a prior release. Matches
+    // the set of values parsed by `resolve_consent` itself.
+    if let Ok(raw) = std::env::var("NYXID_TELEMETRY") {
+        let norm = raw.trim().to_ascii_lowercase();
+        if matches!(
+            norm.as_str(),
+            "off" | "false" | "0" | "no" | "on" | "true" | "1" | "yes"
+        ) {
+            return resolve_consent(None);
+        }
     }
 
     // No env override. If the user has an explicit per-profile
@@ -498,6 +510,26 @@ mod tests {
             }
             let s = resolve_consent_preferring_profile(Some("dev"));
             assert_eq!(s.source, ConsentSource::DoNotTrack);
+            assert!(!s.enabled);
+        });
+    }
+
+    #[test]
+    fn preferring_profile_ignores_garbage_telemetry_env_and_honors_profile_optout() {
+        // A stray `NYXID_TELEMETRY=maybe` in the environment must not
+        // bypass the per-profile consent check. Otherwise a user who
+        // opted OUT on `--profile dev` in a prior release could have
+        // their explicit choice silently overridden by an unrelated
+        // env export.
+        with_temp_home(|| {
+            persist_choice(Some("dev"), false).unwrap();
+            persist_choice(None, true).unwrap();
+            // SAFETY: serialized via test_lock.
+            unsafe {
+                std::env::set_var("NYXID_TELEMETRY", "maybe");
+            }
+            let s = resolve_consent_preferring_profile(Some("dev"));
+            assert_eq!(s.source, ConsentSource::ConfigDeclined);
             assert!(!s.enabled);
         });
     }
