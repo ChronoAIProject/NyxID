@@ -120,6 +120,9 @@ pub(crate) fn test_app_config() -> AppConfig {
         invite_code_required: false,
         email_auth_enabled: false,
         auto_verify_email: false,
+        telemetry_dsn: None,
+        telemetry_host: None,
+        share_analytics: false,
     }
 }
 
