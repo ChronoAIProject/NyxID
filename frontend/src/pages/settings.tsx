@@ -7,7 +7,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
 import { useUser, useMfaDisable } from "@/hooks/use-auth";
 import { api, ApiError } from "@/lib/api-client";
-import { disableTelemetry, isTelemetryActive } from "@/lib/telemetry";
+import { disableTelemetry } from "@/lib/telemetry";
 import type { User, Session } from "@/types/api";
 import {
   changePasswordSchema,
@@ -908,18 +908,13 @@ function PrivacyTab() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Switch
-              checked={consentEnabled}
-              onCheckedChange={handleToggle}
-              aria-label="Toggle anonymous usage telemetry"
-            />
-            <span className="text-sm">{statusLabel}</span>
-          </div>
-          <span className="text-xs text-muted-foreground">
-            {isTelemetryActive() ? "Active" : "Inactive"}
-          </span>
+        <div className="flex items-center gap-3">
+          <Switch
+            checked={consentEnabled}
+            onCheckedChange={handleToggle}
+            aria-label="Toggle anonymous usage telemetry"
+          />
+          <span className="text-sm">{statusLabel}</span>
         </div>
         <Separator />
         <div className="space-y-2 text-sm text-muted-foreground">

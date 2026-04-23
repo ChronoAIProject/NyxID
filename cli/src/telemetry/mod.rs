@@ -106,8 +106,17 @@ impl TelemetryClient {
     ///
     /// Does NOT prompt — see [`consent::prompt_if_needed_interactive`]
     /// which must run before this on an interactive TTY.
+    ///
+    /// Consent is read against the default profile (`None`) regardless
+    /// of the current `profile` argument, matching
+    /// `api::build_cli_http_client` and the `main.rs` first-run prompt.
+    /// Making consent per-profile would require a matching
+    /// `nyxid telemetry --profile ...` editor path, which v1 does not
+    /// ship. The `profile` argument is still used below for the anon
+    /// distinct_id file path — that's identity isolation (a per-profile
+    /// concern), not consent (a user-global concern).
     pub fn init(profile: Option<&str>) -> Option<Self> {
-        let state = consent::resolve_consent(profile);
+        let state = consent::resolve_consent(None);
         if !state.enabled {
             return None;
         }
