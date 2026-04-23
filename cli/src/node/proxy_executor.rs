@@ -105,11 +105,12 @@ pub async fn execute_proxy_request(
             metrics.record_error();
             let _ = send_ws_message(
                 tx,
-                proxy_error_response(
+                proxy_error_response_with_reason(
                     request_id,
                     &format!("No credentials configured for service '{service_slug}'"),
                     502,
                     true,
+                    Some("credential_missing"),
                 ),
             )
             .await;
@@ -412,14 +413,37 @@ fn extract_response_headers(response: &reqwest::Response) -> serde_json::Value {
 }
 
 fn proxy_error_response(request_id: &str, error: &str, status: u16, retryable: bool) -> String {
-    serde_json::json!({
+    proxy_error_response_with_reason(request_id, error, status, retryable, None)
+}
+
+/// Like `proxy_error_response` but also emits a machine-readable
+/// `reason` tag so the backend can distinguish specific classes of
+/// failure (e.g. a locally-missing credential) from generic node/proxy
+/// errors without string-matching. Older backends that don't know
+/// about the tag simply ignore the extra field.
+fn proxy_error_response_with_reason(
+    request_id: &str,
+    error: &str,
+    status: u16,
+    retryable: bool,
+    reason: Option<&str>,
+) -> String {
+    let mut payload = serde_json::json!({
         "type": "proxy_error",
         "request_id": request_id,
         "error": error,
         "status": status,
         "retryable": retryable,
-    })
-    .to_string()
+    });
+    if let Some(reason) = reason
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert(
+            "reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+    }
+    payload.to_string()
 }
 
 pub fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String {

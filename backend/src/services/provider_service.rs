@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
+use crate::models::default_request_header::DefaultRequestHeader;
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
 };
@@ -576,6 +577,58 @@ pub async fn seed_default_providers(
         };
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "github", "Seeded default provider: GitHub");
+        seeded_count += 1;
+    }
+
+    // 10b. GitHub (Personal Access Token)
+    if !slug_exists!("github-pat") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "github-pat".to_string(),
+            name: "GitHub (API Key)".to_string(),
+            description: Some(
+                "GitHub REST API access using a Personal Access Token \
+                 (classic or fine-grained) instead of OAuth."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a classic token at https://github.com/settings/tokens \
+                 or a fine-grained token at \
+                 https://github.com/settings/personal-access-tokens. \
+                 Grant only the scopes you need."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://github.com/settings/tokens".to_string()),
+            icon_url: None,
+            documentation_url: Some(
+                "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens"
+                    .to_string(),
+            ),
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "github-pat", "Seeded default provider: GitHub PAT");
         seeded_count += 1;
     }
 
@@ -1509,6 +1562,26 @@ struct DefaultServiceSeed {
     /// Optional rich description for the catalog entry. When `None`, a
     /// generic description is generated from the service name.
     description: Option<&'static str>,
+    /// Required / recommended HTTP headers to inject on every proxy
+    /// request for this service (e.g. `anthropic-version` on Anthropic).
+    /// Applied at insert time and reconciled on every restart -- missing
+    /// names are added back so a removed system header cannot
+    /// permanently break proxy calls. Admin edits to the *value* of a
+    /// seeded name are preserved (see
+    /// `ensure_seeded_default_request_headers`).
+    default_request_headers: Option<&'static [SeededHeader]>,
+}
+
+/// Static, serializable form of `DefaultRequestHeader` for seed tables.
+/// Kept separate so the seed can live in a `const` without allocating.
+struct SeededHeader {
+    name: &'static str,
+    value: &'static str,
+    /// When `true`, a caller-supplied value (or any lower-precedence
+    /// layer) wins over this default. Use `true` for headers the client
+    /// is expected to set themselves (e.g. versioned API headers).
+    overridable: bool,
+    sensitive: bool,
 }
 
 /// Per-slug capability overrides for seeded services.
@@ -1541,6 +1614,28 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
     }
 }
 
+/// Required Anthropic API headers. `anthropic-version` is mandatory on every
+/// request (rejected with 400 if missing); `content-type` is required for
+/// the JSON-bodied endpoints that make up the vast majority of the API.
+/// Both are `overridable: true` so SDKs that send their own
+/// `anthropic-version` (every official SDK) and clients that already set
+/// `content-type` continue to win -- the defaults only kick in when the
+/// caller omits them.
+const ANTHROPIC_DEFAULT_HEADERS: &[SeededHeader] = &[
+    SeededHeader {
+        name: "anthropic-version",
+        value: "2023-06-01",
+        overridable: true,
+        sensitive: false,
+    },
+    SeededHeader {
+        name: "content-type",
+        value: "application/json",
+        overridable: true,
+        sensitive: false,
+    },
+];
+
 const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     DefaultServiceSeed {
         provider_slug: "openai",
@@ -1552,6 +1647,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "openai-codex",
@@ -1563,6 +1659,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "anthropic",
@@ -1574,6 +1671,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: Some(ANTHROPIC_DEFAULT_HEADERS),
     },
     DefaultServiceSeed {
         provider_slug: "google-ai",
@@ -1585,6 +1683,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "mistral",
@@ -1596,6 +1695,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "cohere",
@@ -1607,6 +1707,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "deepseek",
@@ -1618,6 +1719,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "twitter",
@@ -1629,6 +1731,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "google",
@@ -1640,6 +1743,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "github",
@@ -1651,6 +1755,22 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "github-pat",
+        service_slug: "api-github-pat",
+        service_name: "GitHub API (Personal Access Token)",
+        base_url: "https://api.github.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("bearer"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "GitHub REST API access using a Personal Access Token (classic or fine-grained). \
+             Use this when you want a long-lived static credential instead of OAuth.",
+        ),
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "facebook",
@@ -1662,6 +1782,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "discord",
@@ -1673,6 +1794,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "spotify",
@@ -1684,6 +1806,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "slack",
@@ -1700,6 +1823,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              For bot-level access with a long-lived `xoxb-` token, use \
              `api-slack-bot` instead.",
         ),
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "microsoft",
@@ -1711,6 +1835,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "tiktok",
@@ -1722,6 +1847,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "twitch",
@@ -1733,6 +1859,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "reddit",
@@ -1744,6 +1871,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "lark",
@@ -1759,6 +1887,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              Use this when the bot should act on behalf of a real Lark user. \
              For bot/tenant-level access, use `api-lark-bot` instead.",
         ),
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "lark-bot",
@@ -1778,6 +1907,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              Call any Lark open API path (`/open-apis/im/v1/chats`, `/open-apis/contact/v3/users`, etc.) \
              directly through the proxy.",
         ),
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "telegram-bot",
@@ -1796,6 +1926,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              yourself; that would double-prefix the path. Works for messages, files, \
              webhooks, payments, mini apps -- all Bot API methods use the same shape.",
         ),
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "feishu",
@@ -1811,6 +1942,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              Use this when the bot should act on behalf of a real Feishu user. \
              For bot/tenant-level access, use `api-feishu-bot` instead.",
         ),
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "feishu-bot",
@@ -1827,6 +1959,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              NyxID caches the `tenant_access_token` and injects it as a Bearer header on every \
              outbound request. Call any Feishu open API path directly through the proxy.",
         ),
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "discord-bot",
@@ -1843,6 +1976,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              Bot tokens are persistent and never expire. Use for sending channel messages, \
              managing guilds, and any other Discord bot operations.",
         ),
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "slack-bot",
@@ -1862,6 +1996,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
              `conversations.history`, `users.info`, and any other Web API method \
              outside the channel-relay flow.",
         ),
+        default_request_headers: None,
     },
     DefaultServiceSeed {
         provider_slug: "openclaw",
@@ -1875,6 +2010,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: None,
+        default_request_headers: None,
     },
 ];
 
@@ -2000,6 +2136,209 @@ async fn backfill_seeded_capability_overrides(
     Ok(())
 }
 
+/// Backfill missing `ServiceProviderRequirement` rows for provider-delegated
+/// seeded services. Idempotent: inserts only when no SPR exists for the
+/// DownstreamService's id.
+///
+/// The catalog builder reads `injection_method` / `injection_key` off the SPR
+/// to fill in `auth_method` on `auth_method = "none"` services; without the
+/// SPR the frontend renders the entry as no-auth and users cannot attach a
+/// credential. The main seed loop only creates the SPR when inserting a new
+/// service, so deployments whose service row predates or has drifted from
+/// the SPR never recover on their own.
+async fn backfill_missing_service_provider_requirements(
+    provider_col: &mongodb::Collection<ProviderConfig>,
+    service_col: &mongodb::Collection<DownstreamService>,
+    req_col: &mongodb::Collection<ServiceProviderRequirement>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    let mut backfilled: u32 = 0;
+
+    for seed in DEFAULT_SERVICE_SEEDS {
+        // Direct-auth seeds (body / bot_bearer / path / ...) intentionally
+        // have no SPR -- credentials live on the user's UserApiKey and are
+        // injected via the static `auth_method` on the DownstreamService.
+        if seed.service_auth_method.is_some() {
+            continue;
+        }
+
+        let Some(service) = service_col
+            .find_one(doc! { "slug": seed.service_slug })
+            .await?
+        else {
+            continue;
+        };
+
+        let existing = req_col.find_one(doc! { "service_id": &service.id }).await?;
+        if existing.is_some() {
+            continue;
+        }
+
+        // Prefer the service's own provider_config_id so we never link the
+        // SPR to a different provider than the service itself points at.
+        // Fall back to a slug lookup for legacy rows missing the reference.
+        let provider_id = match service.provider_config_id.clone() {
+            Some(id) => id,
+            None => match provider_col
+                .find_one(doc! { "slug": seed.provider_slug })
+                .await?
+            {
+                Some(p) => p.id,
+                None => continue,
+            },
+        };
+
+        let requirement = ServiceProviderRequirement {
+            id: Uuid::new_v4().to_string(),
+            service_id: service.id.clone(),
+            provider_config_id: provider_id,
+            required: true,
+            scopes: None,
+            injection_method: seed.injection_method.to_string(),
+            injection_key: Some(seed.injection_key.to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        req_col.insert_one(&requirement).await?;
+
+        tracing::info!(
+            slug = seed.service_slug,
+            provider = seed.provider_slug,
+            injection_method = seed.injection_method,
+            injection_key = seed.injection_key,
+            "Backfilled missing ServiceProviderRequirement"
+        );
+        backfilled += 1;
+    }
+
+    if backfilled > 0 {
+        tracing::info!(
+            count = backfilled,
+            "ServiceProviderRequirement backfill complete"
+        );
+    }
+
+    Ok(())
+}
+
+fn seeded_header_to_model(seed: &SeededHeader) -> DefaultRequestHeader {
+    DefaultRequestHeader {
+        name: seed.name.to_string(),
+        value: seed.value.to_string(),
+        overridable: seed.overridable,
+        sensitive: seed.sensitive,
+    }
+}
+
+/// Pure merge step for the seeded-header reconciler. Returns `Some(new_list)`
+/// when the stored list must be updated, or `None` when no change is needed.
+///
+/// Missing / empty stored lists receive every seeded entry. Non-empty stored
+/// lists keep all existing entries (including admin-edited values) and only
+/// gain seeded entries whose names are absent (case-insensitive).
+fn reconcile_seeded_headers(
+    stored: Option<&[DefaultRequestHeader]>,
+    seeded: &[SeededHeader],
+) -> Option<Vec<DefaultRequestHeader>> {
+    if seeded.is_empty() {
+        return None;
+    }
+    let existing = stored.unwrap_or(&[]);
+
+    let mut merged: Vec<DefaultRequestHeader> = existing.to_vec();
+    let mut added = false;
+    for entry in seeded {
+        let already_present = merged
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case(entry.name));
+        if !already_present {
+            merged.push(seeded_header_to_model(entry));
+            added = true;
+        }
+    }
+
+    if !added {
+        return None;
+    }
+    Some(merged)
+}
+
+/// Reconcile seeded `default_request_headers` onto every seeded
+/// `DownstreamService` whose seed declares required headers. Runs on every
+/// restart so admins cannot permanently drop a system-required header.
+///
+/// Policy:
+///   - Missing / null `default_request_headers` OR empty list on the stored
+///     row -> write the full seeded list.
+///   - Non-empty stored list -> append any seeded header whose name (case-
+///     insensitive) is not already present. Existing entries (including
+///     admin-edited values, overridable flags, added custom headers) are
+///     left untouched.
+///   - Only issues a Mongo write when the resulting list actually differs
+///     from what is stored.
+///
+/// Idempotent: a second run on a reconciled row is a no-op.
+async fn ensure_seeded_default_request_headers(
+    service_col: &mongodb::Collection<DownstreamService>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    let mut updated: u32 = 0;
+
+    for seed in DEFAULT_SERVICE_SEEDS {
+        let Some(seeded) = seed.default_request_headers else {
+            continue;
+        };
+        let Some(service) = service_col
+            .find_one(doc! { "slug": seed.service_slug })
+            .await?
+        else {
+            continue;
+        };
+
+        let existing_len = service
+            .default_request_headers
+            .as_ref()
+            .map(|h| h.len())
+            .unwrap_or(0);
+        let Some(merged) =
+            reconcile_seeded_headers(service.default_request_headers.as_deref(), seeded)
+        else {
+            continue;
+        };
+
+        let headers_bson = bson::to_bson(&merged).map_err(|e| {
+            AppError::Internal(format!("Failed to serialize default_request_headers: {e}"))
+        })?;
+
+        service_col
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": {
+                    "default_request_headers": headers_bson,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+
+        tracing::info!(
+            slug = seed.service_slug,
+            added = merged.len().saturating_sub(existing_len),
+            had_existing = existing_len > 0,
+            "Reconciled seeded default_request_headers"
+        );
+        updated += 1;
+    }
+
+    if updated > 0 {
+        tracing::info!(
+            count = updated,
+            "Seeded default_request_headers reconcile complete"
+        );
+    }
+
+    Ok(())
+}
+
 /// Seed downstream services for each default provider (idempotent).
 ///
 /// Creates a `DownstreamService` and a `ServiceProviderRequirement` for each
@@ -2048,6 +2387,28 @@ pub async fn seed_default_services(
     // `streaming_supported: false` even after the seed is upgraded.
     // See ChronoAIProject/NyxID#160.
     backfill_seeded_capability_overrides(&service_col, now).await?;
+
+    // Backfill `ServiceProviderRequirement` rows for provider-delegated
+    // seeded services (`service_auth_method: None`) that exist in
+    // `downstream_services` but are missing their SPR. Without the SPR,
+    // `catalog_service::build_catalog_entry` falls back to
+    // `auth_method = "none"`, so the AI Services dialog renders the
+    // service as no-auth and the user cannot attach a credential. The
+    // main seed loop below only creates the SPR when it inserts a fresh
+    // DownstreamService, so pre-existing deployments that lost (or
+    // never had) the SPR are otherwise stuck.
+    backfill_missing_service_provider_requirements(&provider_col, &service_col, &req_col, now)
+        .await?;
+
+    // Reconcile seeded `default_request_headers` on every restart so a
+    // system-required header (e.g. `anthropic-version`, required by the
+    // Anthropic API on every request) can't be permanently removed by an
+    // admin or lost by a pre-existing seed row created before the field
+    // was introduced. Missing / empty lists receive the full seed;
+    // non-empty lists keep admin edits and only gain entries whose names
+    // are absent. See `ensure_seeded_default_request_headers` for the
+    // full policy.
+    ensure_seeded_default_request_headers(&service_col, now).await?;
 
     for seed in DEFAULT_SERVICE_SEEDS {
         // Find the provider by slug
@@ -2114,6 +2475,10 @@ pub async fn seed_default_services(
             None => (None, false),
         };
 
+        let default_request_headers = seed
+            .default_request_headers
+            .map(|entries| entries.iter().map(seeded_header_to_model).collect());
+
         let service = DownstreamService {
             id: service_id.clone(),
             name: seed.service_name.to_string(),
@@ -2154,7 +2519,7 @@ pub async fn seed_default_services(
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
-            default_request_headers: None,
+            default_request_headers,
             developer_app_ids: None,
             token_exchange_config,
             created_at: now,
@@ -2990,10 +3355,21 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SERVICE_SEEDS, normalize_telegram_bot_token, normalize_telegram_bot_username,
+        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, SeededHeader,
+        normalize_telegram_bot_token, normalize_telegram_bot_username, reconcile_seeded_headers,
         seed_capability_override,
     };
     use crate::errors::AppError;
+    use crate::models::default_request_header::DefaultRequestHeader;
+
+    fn hdr(name: &str, value: &str) -> DefaultRequestHeader {
+        DefaultRequestHeader {
+            name: name.to_string(),
+            value: value.to_string(),
+            overridable: false,
+            sensitive: false,
+        }
+    }
 
     #[test]
     fn telegram_bot_seed_uses_direct_path_auth() {
@@ -3091,5 +3467,131 @@ mod tests {
             AppError::ValidationError(message)
                 if message == "Telegram bot token must not contain whitespace"
         ));
+    }
+
+    #[test]
+    fn anthropic_seed_carries_required_headers() {
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|s| s.service_slug == "llm-anthropic")
+            .expect("llm-anthropic seed should exist");
+
+        let headers = seed
+            .default_request_headers
+            .expect("llm-anthropic must carry seeded default headers");
+        let names: Vec<&str> = headers.iter().map(|h| h.name).collect();
+        assert!(
+            names.contains(&"anthropic-version"),
+            "anthropic-version must be seeded (required on every Anthropic API call); got {names:?}"
+        );
+        assert!(
+            names.contains(&"content-type"),
+            "content-type must be seeded; got {names:?}"
+        );
+
+        let version = headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("anthropic-version"))
+            .expect("anthropic-version present");
+        assert!(
+            version.overridable,
+            "anthropic-version must be overridable so SDK-supplied versions win"
+        );
+    }
+
+    #[test]
+    fn reconcile_inserts_full_list_when_stored_is_missing() {
+        let merged = reconcile_seeded_headers(None, ANTHROPIC_DEFAULT_HEADERS)
+            .expect("missing stored list must be filled from seed");
+        assert_eq!(merged.len(), ANTHROPIC_DEFAULT_HEADERS.len());
+    }
+
+    #[test]
+    fn reconcile_inserts_full_list_when_stored_is_empty() {
+        let stored: Vec<DefaultRequestHeader> = Vec::new();
+        let merged = reconcile_seeded_headers(Some(&stored), ANTHROPIC_DEFAULT_HEADERS)
+            .expect("empty stored list counts as 'backfill required'");
+        assert_eq!(merged.len(), ANTHROPIC_DEFAULT_HEADERS.len());
+    }
+
+    #[test]
+    fn reconcile_preserves_admin_values_and_adds_only_missing_seeded() {
+        // Admin has kept `anthropic-version` and customized its value; we
+        // must not overwrite that. Admin also added an unrelated header.
+        // `content-type` is missing, so only that one should be appended.
+        let stored = vec![
+            DefaultRequestHeader {
+                name: "Anthropic-Version".to_string(),
+                value: "2024-10-22".to_string(),
+                overridable: true,
+                sensitive: false,
+            },
+            hdr("x-admin-custom", "keep"),
+        ];
+        let merged = reconcile_seeded_headers(Some(&stored), ANTHROPIC_DEFAULT_HEADERS)
+            .expect("missing content-type should trigger a write");
+
+        assert_eq!(merged.len(), 3);
+        let version = merged
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("anthropic-version"))
+            .expect("admin's anthropic-version survives");
+        assert_eq!(
+            version.value, "2024-10-22",
+            "admin-edited value must not be clobbered by the seed default"
+        );
+        assert_eq!(version.name, "Anthropic-Version", "admin casing preserved");
+        assert!(
+            merged
+                .iter()
+                .any(|h| h.name == "x-admin-custom" && h.value == "keep"),
+            "unrelated admin headers must be preserved"
+        );
+        assert!(
+            merged
+                .iter()
+                .any(|h| h.name.eq_ignore_ascii_case("content-type")),
+            "missing seeded header must be appended"
+        );
+    }
+
+    #[test]
+    fn reconcile_returns_none_when_everything_already_present() {
+        let stored = vec![
+            hdr("anthropic-version", "2023-06-01"),
+            hdr("content-type", "application/json"),
+        ];
+        assert!(
+            reconcile_seeded_headers(Some(&stored), ANTHROPIC_DEFAULT_HEADERS).is_none(),
+            "no-op reconcile must not trigger a DB write"
+        );
+    }
+
+    #[test]
+    fn reconcile_case_insensitive_name_match_prevents_duplicates() {
+        // Admin has stored the header under a different casing; we must
+        // not append a duplicate just because the bytes differ.
+        let stored = vec![hdr("ANTHROPIC-VERSION", "2025-01-01")];
+        let merged = reconcile_seeded_headers(Some(&stored), ANTHROPIC_DEFAULT_HEADERS)
+            .expect("content-type still needs to be added");
+
+        let version_matches: Vec<&DefaultRequestHeader> = merged
+            .iter()
+            .filter(|h| h.name.eq_ignore_ascii_case("anthropic-version"))
+            .collect();
+        assert_eq!(
+            version_matches.len(),
+            1,
+            "name match must be case-insensitive; no duplicate rows"
+        );
+        assert_eq!(version_matches[0].value, "2025-01-01");
+    }
+
+    #[test]
+    fn reconcile_empty_seed_list_is_noop() {
+        let stored = vec![hdr("x-custom", "v")];
+        let seeded: &[SeededHeader] = &[];
+        assert!(reconcile_seeded_headers(Some(&stored), seeded).is_none());
+        assert!(reconcile_seeded_headers(None, seeded).is_none());
     }
 }

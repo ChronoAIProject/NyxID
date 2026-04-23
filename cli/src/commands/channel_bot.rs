@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::{ChannelBotCommands, ChannelRouteCommands, OutputFormat};
+use crate::commands::lark_permission::print_permission_block;
 
 pub async fn run(command: ChannelBotCommands) -> Result<()> {
     match command {
@@ -17,6 +18,8 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             app_id,
             app_secret,
             app_secret_env,
+            verification_token,
+            encrypt_key,
             public_key,
             org,
             auth,
@@ -24,6 +27,21 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             let token = resolve_secret(bot_token.as_deref(), token_env.as_deref(), "bot token")?;
             let resolved_app_secret =
                 resolve_optional_secret(app_secret.as_deref(), app_secret_env.as_deref())?;
+            let resolved_verification_token =
+                verification_token.or_else(|| env_secret("NYXID_LARK_VERIFICATION_TOKEN"));
+            let resolved_encrypt_key = encrypt_key.or_else(|| env_secret("NYXID_LARK_ENCRYPT_KEY"));
+
+            if matches!(platform.as_str(), "lark" | "feishu")
+                && resolved_verification_token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+            {
+                bail!(
+                    "--verification-token is required for Lark/Feishu (or set NYXID_LARK_VERIFICATION_TOKEN)"
+                );
+            }
 
             let mut api = ApiClient::from_auth(&auth)?;
 
@@ -38,6 +56,20 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             }
             if let Some(secret) = resolved_app_secret {
                 body["app_secret"] = Value::String(secret);
+            }
+            if let Some(token) = resolved_verification_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                body["verification_token"] = Value::String(token.to_string());
+            }
+            if let Some(key) = resolved_encrypt_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                body["encrypt_key"] = Value::String(key.to_string());
             }
             if let Some(key) = public_key {
                 body["public_key"] = Value::String(key);
@@ -63,6 +95,97 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     eprintln!("Platform: {platform}");
                     eprintln!("Username: {username}");
                     eprintln!("Status:   {status}");
+                    print_permission_block(&result);
+                }
+            }
+            Ok(())
+        }
+
+        ChannelBotCommands::Update {
+            id,
+            label,
+            verification_token,
+            encrypt_key,
+            app_id,
+            app_secret,
+            auth,
+        } => {
+            let resolved_verification_token =
+                verification_token.or_else(|| env_secret("NYXID_LARK_VERIFICATION_TOKEN"));
+            let resolved_encrypt_key = match encrypt_key {
+                Some(value) => Some(value),
+                None => env_secret("NYXID_LARK_ENCRYPT_KEY"),
+            };
+
+            if resolved_verification_token
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                bail!("--verification-token cannot be blank");
+            }
+
+            let mut body = serde_json::json!({});
+            let mut changed = false;
+
+            if let Some(value) = label
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                body["label"] = Value::String(value.to_string());
+                changed = true;
+            }
+            if let Some(value) = resolved_verification_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                body["verification_token"] = Value::String(value.to_string());
+                changed = true;
+            }
+            // encrypt_key uses three-state semantics: omitted = no change;
+            // explicit empty string = clear; non-empty = set.
+            // Other fields (label, verification_token, app_id, app_secret)
+            // only accept non-empty values.
+            if let Some(value) = resolved_encrypt_key {
+                body["encrypt_key"] = Value::String(value);
+                changed = true;
+            }
+            if let Some(value) = app_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                body["app_id"] = Value::String(value.to_string());
+                changed = true;
+            }
+            if let Some(value) = app_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                body["app_secret"] = Value::String(value.to_string());
+                changed = true;
+            }
+
+            if !changed {
+                bail!("No update fields provided");
+            }
+
+            let mut api = ApiClient::from_auth(&auth)?;
+            let result: Value = api.patch(&format!("/channel-bots/{id}"), &body).await?;
+
+            match auth.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                OutputFormat::Table => {
+                    eprintln!("Bot updated.");
+                    eprintln!("ID:       {}", result["id"].as_str().unwrap_or(&id));
+                    eprintln!("Platform: {}", result["platform"].as_str().unwrap_or("-"));
+                    eprintln!("Label:    {}", result["label"].as_str().unwrap_or("-"));
+                    eprintln!("Status:   {}", result["status"].as_str().unwrap_or("-"));
+                    print_permission_block(&result);
                 }
             }
             Ok(())
@@ -162,6 +285,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     eprintln!("Conversations:  {conversations}");
                     eprintln!("Created:        {created}");
                     eprintln!("Updated:        {updated}");
+                    print_permission_block(&bot);
                 }
             }
             Ok(())
@@ -450,4 +574,11 @@ fn resolve_optional_secret(inline: Option<&str>, env_var: Option<&str>) -> Resul
         return Ok(Some(val));
     }
     Ok(None)
+}
+
+fn env_secret(var: &str) -> Option<String> {
+    std::env::var(var)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }

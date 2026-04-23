@@ -13,7 +13,8 @@ type BadgeVariant =
   | "decisionApproved"
   | "decisionDenied"
   | "decisionExpired"
-  | "modeChip";
+  | "modeChip"
+  | "orgChip";
 
 type StatusBadgeProps = {
   variant: BadgeVariant;
@@ -31,6 +32,10 @@ function getVariantStyles(c: ThemeColors): Record<BadgeVariant, { bg: string; te
     decisionDenied: { bg: c.dangerSoftBg, text: c.danger, border: c.riskHigh.border },
     decisionExpired: { bg: c.ghostBg, text: c.textMuted, border: c.borderSoft },
     modeChip: { bg: c.primaryGlow, text: c.primary, border: c.primaryGlow },
+    // Org chip reuses the muted ghost palette so it reads as
+    // structural context (whose decision is this?) rather than risk
+    // or status. Keeps DESIGN.md tokens; no new colors introduced.
+    orgChip: { bg: c.ghostBg, text: c.textSecondary, border: c.borderSoft },
   };
 }
 

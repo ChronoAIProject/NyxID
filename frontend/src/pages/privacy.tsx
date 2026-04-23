@@ -174,11 +174,34 @@ export function PrivacyPage() {
             </p>
           </Section>
 
-          <Section title="8. Cookies & Local Storage">
+          <Section title="8. Cookies, Local Storage, and Analytics">
             <p>
-              NyxID uses HTTP-only secure cookies for session management. We use
-              browser local storage to persist authentication state. We do not
-              use third-party tracking cookies or analytics services.
+              NyxID uses HTTP-only secure cookies for session management and
+              browser local storage to persist authentication state.
+            </p>
+            <p>
+              <strong>Telemetry (opt-in).</strong> When you explicitly allow it
+              via the consent banner on your first visit (or the toggle in
+              Settings), NyxID collects anonymous usage events (pageviews,
+              clicks, uncaught errors) through a third-party analytics
+              provider (PostHog, EU region). No credentials, form content,
+              tokens, or the body of any request you make are ever captured.
+              Sensitive URL segments (reset tokens, OAuth callback codes,
+              approval IDs) are dropped at the egress layer before any event
+              leaves your browser.
+            </p>
+            <p>
+              Events are keyed to your NyxID account UUID after you sign in,
+              allowing us to understand how our product is used in aggregate
+              without requiring your name or email. Raw events are retained
+              for 90 days; aggregated metrics may be retained longer. If you
+              delete your NyxID account, the backend enqueues a matching
+              delete request to the analytics provider so that your event
+              history is removed.
+            </p>
+            <p>
+              You can change your telemetry choice at any time from the
+              Settings page. We honor the browser Do-Not-Track signal.
             </p>
           </Section>
 

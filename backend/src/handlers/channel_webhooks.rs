@@ -20,7 +20,31 @@ use mongodb::bson::doc;
 use crate::AppState;
 use crate::handlers::channel_bots::resolve_adapter;
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+use crate::services::channel_platform::PlatformVerifySecrets;
 use crate::services::{channel_bot_service, channel_relay_service, channel_routing_service};
+
+struct WebhookHandlerDeps<'a> {
+    db: &'a crate::db::DbHandle,
+    config: &'a crate::config::AppConfig,
+    jwt_keys: &'a crate::crypto::jwt::JwtKeys,
+    http_client: &'a reqwest::Client,
+    encryption_keys: &'a crate::crypto::aes::EncryptionKeys,
+    token_exchange_cache:
+        &'a std::sync::Arc<crate::services::provider_token_exchange_service::TokenExchangeCache>,
+}
+
+impl<'a> From<&'a AppState> for WebhookHandlerDeps<'a> {
+    fn from(value: &'a AppState) -> Self {
+        Self {
+            db: &value.db,
+            config: &value.config,
+            jwt_keys: &value.jwt_keys,
+            http_client: &value.http_client,
+            encryption_keys: value.encryption_keys.as_ref(),
+            token_exchange_cache: &value.token_exchange_cache,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Platform-specific webhook handlers
@@ -115,61 +139,53 @@ pub async fn discord_webhook(
 /// POST /api/v1/webhooks/channel/lark/{bot_id}
 ///
 /// Receives event callbacks from Lark (international) for a specific channel bot.
-/// Lark url_verification challenges are answered immediately with the challenge value.
+/// Lark url_verification challenges are answered only after bot lookup and
+/// Verification Token validation, and may require decrypting the body first.
 pub async fn lark_webhook(
     State(state): State<AppState>,
     Path(bot_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let adapter = match resolve_adapter("lark", &state.token_exchange_cache) {
-        Ok(a) => a,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".to_string()).into_response(),
-    };
-
-    if let Some(challenge_response) = adapter.handle_challenge(&body) {
-        return (StatusCode::OK, Json(challenge_response)).into_response();
+    match handle_webhook_inner(&state, &bot_id, "lark", &headers, &body).await {
+        Ok(Some(challenge_response)) => (StatusCode::OK, Json(challenge_response)).into_response(),
+        Ok(None) => (StatusCode::OK, "".to_string()).into_response(),
+        Err(e) => {
+            tracing::warn!(
+                bot_id = %bot_id,
+                platform = "lark",
+                error = %e,
+                "channel webhook processing error (suppressed)"
+            );
+            (StatusCode::OK, "".to_string()).into_response()
+        }
     }
-
-    if let Err(e) = handle_webhook_inner(&state, &bot_id, "lark", &headers, &body).await {
-        tracing::warn!(
-            bot_id = %bot_id,
-            platform = "lark",
-            error = %e,
-            "channel webhook processing error (suppressed)"
-        );
-    }
-    (StatusCode::OK, "".to_string()).into_response()
 }
 
 /// POST /api/v1/webhooks/channel/feishu/{bot_id}
 ///
 /// Receives event callbacks from Feishu (China mainland) for a specific channel bot.
-/// Feishu url_verification challenges are answered immediately with the challenge value.
+/// Feishu url_verification challenges are answered only after bot lookup and
+/// Verification Token validation, and may require decrypting the body first.
 pub async fn feishu_webhook(
     State(state): State<AppState>,
     Path(bot_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let adapter = match resolve_adapter("feishu", &state.token_exchange_cache) {
-        Ok(a) => a,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".to_string()).into_response(),
-    };
-
-    if let Some(challenge_response) = adapter.handle_challenge(&body) {
-        return (StatusCode::OK, Json(challenge_response)).into_response();
+    match handle_webhook_inner(&state, &bot_id, "feishu", &headers, &body).await {
+        Ok(Some(challenge_response)) => (StatusCode::OK, Json(challenge_response)).into_response(),
+        Ok(None) => (StatusCode::OK, "".to_string()).into_response(),
+        Err(e) => {
+            tracing::warn!(
+                bot_id = %bot_id,
+                platform = "feishu",
+                error = %e,
+                "channel webhook processing error (suppressed)"
+            );
+            (StatusCode::OK, "".to_string()).into_response()
+        }
     }
-
-    if let Err(e) = handle_webhook_inner(&state, &bot_id, "feishu", &headers, &body).await {
-        tracing::warn!(
-            bot_id = %bot_id,
-            platform = "feishu",
-            error = %e,
-            "channel webhook processing error (suppressed)"
-        );
-    }
-    (StatusCode::OK, "".to_string()).into_response()
 }
 
 /// POST /api/v1/webhooks/channel/slack/{bot_id}
@@ -233,13 +249,30 @@ async fn handle_webhook_inner(
     expected_platform: &str,
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+    handle_webhook_inner_with_deps(
+        WebhookHandlerDeps::from(state),
+        bot_id,
+        expected_platform,
+        headers,
+        body,
+    )
+    .await
+}
+
+async fn handle_webhook_inner_with_deps(
+    state: WebhookHandlerDeps<'_>,
+    bot_id: &str,
+    expected_platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
     // Look up the bot
-    let bot = match channel_bot_service::get_bot(&state.db, bot_id).await {
+    let bot = match channel_bot_service::get_bot(state.db, bot_id).await {
         Ok(b) => b,
         Err(_) => {
             tracing::debug!(bot_id = %bot_id, "webhook for unknown bot");
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -251,13 +284,13 @@ async fn handle_webhook_inner(
             actual = %bot.platform,
             "webhook platform mismatch"
         );
-        return Ok(());
+        return Ok(None);
     }
 
     // Reject if bot is inactive
     if !bot.is_active {
         tracing::debug!(bot_id = %bot_id, status = %bot.status, "webhook for inactive bot");
-        return Ok(());
+        return Ok(None);
     }
 
     // Allow pending_webhook bots through to verification -- they'll be promoted
@@ -265,43 +298,31 @@ async fn handle_webhook_inner(
     let is_pending_webhook = bot.status == "pending_webhook";
     if !is_pending_webhook && bot.status != "active" {
         tracing::debug!(bot_id = %bot_id, status = %bot.status, "webhook for non-active bot");
-        return Ok(());
+        return Ok(None);
     }
 
-    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache).map_err(
+    let adapter = resolve_adapter(&bot.platform, state.token_exchange_cache).map_err(
         |e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("unsupported platform {}: {e}", bot.platform).into()
         },
     )?;
 
-    // For Lark/Feishu/Slack, the adapter needs the raw signing material, not
-    // its hash. We store the encrypted secret in `app_secret_encrypted` and
-    // decrypt + inject it into `webhook_secret_hash` on a cloned bot here so
-    // the adapter's verify_webhook can use it as the HMAC key.
-    let bot_for_verify = if matches!(bot.platform.as_str(), "lark" | "feishu" | "slack") {
-        if let Some(ref encrypted) = bot.app_secret_encrypted {
-            match state.encryption_keys.decrypt(encrypted).await {
-                Ok(decrypted) => {
-                    let mut cloned = bot.clone();
-                    cloned.webhook_secret_hash = String::from_utf8_lossy(&decrypted).to_string();
-                    cloned
-                }
-                Err(_) => bot.clone(),
-            }
-        } else {
-            bot.clone()
-        }
-    } else {
-        bot.clone()
-    };
+    let verify_secrets = build_verify_secrets(&state, &bot).await.map_err(
+        |e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("failed to prepare webhook secrets: {e}").into()
+        },
+    )?;
 
-    // Verify webhook signature
-    adapter
-        .verify_webhook(&bot_for_verify, headers, body)
+    let prepared = adapter
+        .prepare_webhook(&bot, Some(&verify_secrets), headers, body)
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("webhook verification failed: {e}").into()
         })?;
+
+    if let Some(challenge_response) = prepared.challenge_response {
+        return Ok(Some(challenge_response));
+    }
 
     // Auto-promote pending_webhook bots AFTER successful signature verification.
     // This proves the user correctly configured the webhook URL on the platform.
@@ -325,14 +346,14 @@ async fn handle_webhook_inner(
     }
 
     // Parse inbound messages
-    let messages = adapter.parse_inbound(body).await.map_err(
+    let messages = adapter.parse_inbound(&prepared.body).await.map_err(
         |e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("failed to parse inbound messages: {e}").into()
         },
     )?;
 
     if messages.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     // Parse bot owner UUID once (used for relay token generation per-message)
@@ -345,7 +366,7 @@ async fn handle_webhook_inner(
     for inbound in &messages {
         // Resolve which agent should handle this message
         let route = match channel_routing_service::resolve_agent(
-            &state.db,
+            state.db,
             &bot.id,
             &inbound.conversation_id,
             Some(&inbound.sender_platform_id),
@@ -373,7 +394,7 @@ async fn handle_webhook_inner(
 
         // Store the inbound message
         let stored_message = match channel_relay_service::store_inbound_message(
-            &state.db,
+            state.db,
             &bot.id,
             &route.conversation.id,
             &bot.user_id,
@@ -404,7 +425,7 @@ async fn handle_webhook_inner(
                     "API key not found for callback signing"
                 );
                 let _ = channel_relay_service::update_callback_status(
-                    &state.db,
+                    state.db,
                     &stored_message.id,
                     "failed",
                 )
@@ -418,13 +439,10 @@ async fn handle_webhook_inner(
         // key's service/node scope restrictions.
         let user_access_token = {
             let scope = crate::services::token_service::FIRST_PARTY_ACCESS_SCOPES;
-            let rbac_data = crate::services::rbac_helpers::build_rbac_claim_data(
-                &state.db,
-                &bot.user_id,
-                scope,
-            )
-            .await
-            .ok();
+            let rbac_data =
+                crate::services::rbac_helpers::build_rbac_claim_data(state.db, &bot.user_id, scope)
+                    .await
+                    .ok();
             let agent_scope = crate::crypto::jwt::RelayAgentScope {
                 api_key_id: api_key.id.clone(),
                 api_key_name: api_key.name.clone(),
@@ -434,14 +452,39 @@ async fn handle_webhook_inner(
                 allow_all_nodes: api_key.allow_all_nodes,
             };
             crate::crypto::jwt::generate_relay_access_token(
-                &state.jwt_keys,
-                &state.config,
+                state.jwt_keys,
+                state.config,
                 &bot_owner_uuid,
                 scope,
                 rbac_data.as_ref(),
                 &agent_scope,
             )
             .ok()
+        };
+
+        let reply_token = match crate::crypto::jwt::generate_relay_reply_token(
+            state.jwt_keys,
+            state.config,
+            &api_key.id,
+            &route.conversation.id,
+            &stored_message.id,
+            &route.conversation.platform,
+        ) {
+            Ok(token) => token,
+            Err(e) => {
+                tracing::error!(
+                    message_id = %stored_message.id,
+                    error = %e,
+                    "failed to generate relay reply token"
+                );
+                let _ = channel_relay_service::update_callback_status(
+                    state.db,
+                    &stored_message.id,
+                    "failed",
+                )
+                .await;
+                continue;
+            }
         };
 
         // Build the callback payload
@@ -451,12 +494,13 @@ async fn handle_webhook_inner(
             &route.api_key_id,
             &api_key.name,
             inbound,
+            Some(reply_token),
         );
 
         // Forward to the agent's callback URL
         let delivery = channel_relay_service::forward_to_agent(
-            &state.http_client,
-            &state.config,
+            state.http_client,
+            state.config,
             &route.callback_url,
             &payload,
             &api_key.key_hash,
@@ -471,7 +515,7 @@ async fn handle_webhook_inner(
         match delivery.result {
             Ok(()) => {
                 let _ = channel_relay_service::update_callback_status(
-                    &state.db,
+                    state.db,
                     &stored_message.id,
                     "delivered",
                 )
@@ -485,7 +529,7 @@ async fn handle_webhook_inner(
                     "callback delivery failed"
                 );
                 let _ = channel_relay_service::update_callback_status(
-                    &state.db,
+                    state.db,
                     &stored_message.id,
                     "failed",
                 )
@@ -494,9 +538,438 @@ async fn handle_webhook_inner(
         }
 
         // Touch conversation last_message_at timestamp
-        let _ =
-            channel_routing_service::touch_conversation(&state.db, &route.conversation.id).await;
+        let _ = channel_routing_service::touch_conversation(state.db, &route.conversation.id).await;
     }
 
-    Ok(())
+    Ok(None)
+}
+
+async fn decrypt_secret_field(
+    state: &WebhookHandlerDeps<'_>,
+    field_name: &str,
+    value: Option<&Vec<u8>>,
+) -> crate::errors::AppResult<Option<String>> {
+    let Some(encrypted) = value else {
+        return Ok(None);
+    };
+
+    let decrypted = state
+        .encryption_keys
+        .decrypt(encrypted)
+        .await
+        .map_err(|e| {
+            crate::errors::AppError::Internal(format!("failed to decrypt {field_name}: {e}"))
+        })?;
+
+    let text = String::from_utf8(decrypted).map_err(|e| {
+        crate::errors::AppError::Internal(format!(
+            "{field_name} decryption produced invalid UTF-8: {e}"
+        ))
+    })?;
+
+    Ok(Some(text))
+}
+
+async fn build_verify_secrets(
+    state: &WebhookHandlerDeps<'_>,
+    bot: &crate::models::channel_bot::ChannelBot,
+) -> crate::errors::AppResult<PlatformVerifySecrets> {
+    let mut secrets = PlatformVerifySecrets::default();
+
+    match bot.platform.as_str() {
+        "slack" => {
+            secrets.slack_signing_secret = decrypt_secret_field(
+                state,
+                "Slack signing secret",
+                bot.app_secret_encrypted.as_ref(),
+            )
+            .await?;
+        }
+        "lark" | "feishu" => {
+            secrets.lark_verification_token = decrypt_secret_field(
+                state,
+                "Lark verification token",
+                bot.lark_verification_token_encrypted.as_ref(),
+            )
+            .await?;
+            secrets.lark_encrypt_key = decrypt_secret_field(
+                state,
+                "Lark encrypt key",
+                bot.lark_encrypt_key_encrypted.as_ref(),
+            )
+            .await?;
+        }
+        _ => {}
+    }
+
+    Ok(secrets)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use axum::{Router, body::Bytes, http::StatusCode, routing::post};
+    use chrono::Utc;
+    use mongodb::bson::doc;
+    use tokio::sync::{Mutex, oneshot};
+    use tokio::time::{Duration, timeout};
+
+    fn test_config(
+        database_url: String,
+        key_dir: &std::path::Path,
+        encryption_key: &str,
+    ) -> crate::config::AppConfig {
+        crate::config::AppConfig {
+            port: 3001,
+            base_url: "http://localhost:3001".to_string(),
+            frontend_url: "http://localhost:3000".to_string(),
+            cors_allowed_origins: vec![],
+            csrf_trusted_origins: vec![],
+            database_url,
+            database_max_connections: 10,
+            environment: "development".to_string(),
+            jwt_private_key_path: key_dir.join("private.pem").display().to_string(),
+            jwt_public_key_path: key_dir.join("public.pem").display().to_string(),
+            jwt_issuer: "http://localhost:3001".to_string(),
+            jwt_access_ttl_secs: 900,
+            jwt_relay_reply_ttl_secs: 1800,
+            jwt_refresh_ttl_secs: 604800,
+            google_client_id: None,
+            google_client_secret: None,
+            github_client_id: None,
+            github_client_secret: None,
+            apple_client_id: None,
+            apple_team_id: None,
+            apple_key_id: None,
+            apple_private_key_path: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_username: None,
+            smtp_password: None,
+            smtp_from_address: None,
+            encryption_key: Some(encryption_key.to_string()),
+            encryption_key_previous: None,
+            rate_limit_per_second: 10,
+            rate_limit_burst: 30,
+            trusted_proxy_ips: vec![],
+            sa_token_ttl_secs: 3600,
+            cookie_domain: None,
+            telegram_bot_token: None,
+            telegram_webhook_secret: None,
+            telegram_webhook_url: None,
+            telegram_bot_username: None,
+            approval_expiry_interval_secs: 5,
+            fcm_service_account_path: None,
+            fcm_project_id: None,
+            apns_key_path: None,
+            apns_key_id: None,
+            apns_team_id: None,
+            apns_topic: None,
+            apns_sandbox: true,
+            key_provider: "local".to_string(),
+            aws_kms_key_arn: None,
+            aws_kms_key_arn_previous: None,
+            gcp_kms_key_name: None,
+            gcp_kms_key_name_previous: None,
+            node_heartbeat_interval_secs: 30,
+            node_heartbeat_timeout_secs: 90,
+            node_proxy_timeout_secs: 30,
+            node_registration_token_ttl_secs: 3600,
+            node_max_per_user: 10,
+            node_max_ws_connections: 100,
+            node_max_stream_duration_secs: 300,
+            node_hmac_signing_enabled: true,
+            proxy_max_body_size: 100 * 1024 * 1024,
+            proxy_stream_idle_timeout_secs: 60,
+            ssh_max_sessions_per_user: 4,
+            ssh_connect_timeout_secs: 10,
+            ssh_max_tunnel_duration_secs: 3600,
+            ws_passthrough_max_connections: 200,
+            channel_relay_callback_timeout_secs: 30,
+            channel_relay_max_bots_per_user: 5,
+            channel_relay_message_ttl_days: 30,
+            channel_event_rate_limit_per_second: 100,
+            channel_event_rate_limit_burst: 200,
+            channel_event_dedup_capacity: 32_768,
+            channel_event_dedup_ttl_secs: 300,
+            invite_code_required: true,
+            email_auth_enabled: false,
+            auto_verify_email: false,
+            telemetry_dsn: None,
+            telemetry_host: None,
+            share_analytics: false,
+        }
+    }
+
+    async fn connect_test_database() -> Option<mongodb::Database> {
+        let db_name = format!("nyxid_test_channel_webhooks_{}", uuid::Uuid::new_v4());
+        let candidates = [
+            format!(
+                "mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/{db_name}?authSource=admin"
+            ),
+            format!("mongodb://127.0.0.1:27017/{db_name}"),
+        ];
+
+        for uri in candidates {
+            let Ok(client) = mongodb::Client::with_uri_str(&uri).await else {
+                continue;
+            };
+            let db = client.database(&db_name);
+            if db.run_command(doc! { "ping": 1 }).await.is_ok() {
+                return Some(db);
+            }
+        }
+
+        None
+    }
+
+    fn lark_event_body(token: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "ev_123",
+                "event_type": "im.message.receive_v1",
+                "create_time": "1700000000",
+                "token": token
+            },
+            "event": {
+                "sender": {
+                    "sender_id": {
+                        "open_id": "ou_user123",
+                        "name": "Alice"
+                    }
+                },
+                "message": {
+                    "message_id": "om_msg456",
+                    "chat_id": "oc_chat789",
+                    "chat_type": "p2p",
+                    "message_type": "text",
+                    "content": "{\"text\":\"Hello bot\"}"
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    async fn spawn_mock_callback_server() -> (
+        String,
+        Arc<Mutex<Vec<serde_json::Value>>>,
+        oneshot::Sender<()>,
+    ) {
+        let received_requests = Arc::new(Mutex::new(Vec::new()));
+        let route_requests = received_requests.clone();
+        let app = Router::new().route(
+            "/callback",
+            post(move |body: Bytes| {
+                let route_requests = route_requests.clone();
+                async move {
+                    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    route_requests.lock().await.push(parsed);
+                    StatusCode::ACCEPTED
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+
+        (
+            format!("http://{address}/callback"),
+            received_requests,
+            shutdown_tx,
+        )
+    }
+
+    #[tokio::test]
+    async fn valid_lark_event_promotes_pending_webhook_bot_and_stores_message() {
+        let Some(db) = connect_test_database().await else {
+            eprintln!("skipping channel_webhooks integration test: no local MongoDB available");
+            return;
+        };
+
+        let key_dir = tempfile::tempdir().unwrap();
+        let config = test_config(
+            "mongodb://ignored-for-test".to_string(),
+            key_dir.path(),
+            &"11".repeat(32),
+        );
+        let jwt_keys = crate::crypto::jwt::JwtKeys::from_config(&config).unwrap();
+        let encryption_keys = crate::crypto::aes::EncryptionKeys::from_config(&config);
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        let api_key_id = uuid::Uuid::new_v4().to_string();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let (callback_url, received_requests, shutdown_tx) = spawn_mock_callback_server().await;
+
+        let verification_token_encrypted = encryption_keys.encrypt(b"verify_token").await.unwrap();
+
+        let bot = crate::models::channel_bot::ChannelBot {
+            id: bot_id.clone(),
+            user_id: user_id.clone(),
+            platform: "lark".to_string(),
+            label: "Lark Bot".to_string(),
+            bot_token_encrypted: vec![0; 16],
+            platform_bot_id: "cli_test".to_string(),
+            platform_bot_username: "lark_bot".to_string(),
+            webhook_registered: false,
+            webhook_secret_hash: "unused".to_string(),
+            app_id: Some("cli_test".to_string()),
+            app_secret_encrypted: None,
+            lark_verification_token_encrypted: Some(verification_token_encrypted),
+            lark_encrypt_key_encrypted: None,
+            public_key: None,
+            status: "pending_webhook".to_string(),
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let api_key = crate::models::api_key::ApiKey {
+            id: api_key_id.clone(),
+            user_id: user_id.clone(),
+            name: "agent".to_string(),
+            key_prefix: "nyxid_ag".to_string(),
+            key_hash: "deadbeef".repeat(8),
+            scopes: "read write".to_string(),
+            last_used_at: None,
+            expires_at: None,
+            is_active: true,
+            created_at: Utc::now(),
+            description: None,
+            allowed_service_ids: vec![],
+            allowed_node_ids: vec![],
+            allow_all_services: true,
+            allow_all_nodes: true,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            platform: Some("codex".to_string()),
+            callback_url: Some(callback_url),
+        };
+
+        let conversation = crate::models::channel_conversation::ChannelConversation {
+            id: conversation_id.clone(),
+            user_id: user_id.clone(),
+            channel_bot_id: Some(bot_id.clone()),
+            platform: "lark".to_string(),
+            platform_conversation_id: "oc_chat789".to_string(),
+            platform_conversation_type: "private".to_string(),
+            platform_sender_id: None,
+            agent_api_key_id: api_key_id.clone(),
+            default_agent: false,
+            is_active: true,
+            last_message_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        db.collection::<crate::models::channel_bot::ChannelBot>(
+            crate::models::channel_bot::COLLECTION_NAME,
+        )
+        .insert_one(&bot)
+        .await
+        .unwrap();
+        db.collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(&api_key)
+            .await
+            .unwrap();
+        db.collection::<crate::models::channel_conversation::ChannelConversation>(
+            crate::models::channel_conversation::COLLECTION_NAME,
+        )
+        .insert_one(&conversation)
+        .await
+        .unwrap();
+
+        let http_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(1))
+            .timeout(std::time::Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let token_exchange_cache = std::sync::Arc::new(
+            crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
+        );
+        let deps = WebhookHandlerDeps {
+            db: &db,
+            config: &config,
+            jwt_keys: &jwt_keys,
+            http_client: &http_client,
+            encryption_keys: &encryption_keys,
+            token_exchange_cache: &token_exchange_cache,
+        };
+
+        let result = handle_webhook_inner_with_deps(
+            deps,
+            &bot_id,
+            "lark",
+            &HeaderMap::new(),
+            &lark_event_body("verify_token"),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.is_none());
+
+        let updated_bot = db
+            .collection::<crate::models::channel_bot::ChannelBot>(
+                crate::models::channel_bot::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": &bot_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_bot.status, "active");
+        assert!(updated_bot.webhook_registered);
+
+        let stored_count = db
+            .collection::<crate::models::channel_message::ChannelMessage>(
+                crate::models::channel_message::COLLECTION_NAME,
+            )
+            .count_documents(doc! { "channel_bot_id": &bot_id, "direction": "inbound" })
+            .await
+            .unwrap();
+        assert_eq!(stored_count, 1);
+
+        let delivered = timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = received_requests.lock().await.clone();
+                if !snapshot.is_empty() {
+                    return snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("agent callback should be delivered");
+        assert_eq!(delivered.len(), 1);
+        let payload = &delivered[0];
+        let reply_token = payload
+            .get("reply_token")
+            .and_then(|value| value.as_str())
+            .expect("callback payload should include reply_token");
+        let claims =
+            crate::crypto::jwt::validate_relay_reply_token(&jwt_keys, &config, reply_token)
+                .expect("reply_token should validate");
+        assert_eq!(claims.api_key_id, api_key_id);
+        assert_eq!(claims.conversation_id, conversation_id);
+        assert_eq!(
+            claims.inbound_message_id,
+            payload["message_id"].as_str().expect("payload message id")
+        );
+        assert_eq!(claims.platform, "lark");
+
+        let _ = shutdown_tx.send(());
+
+        db.drop().await.unwrap();
+    }
 }

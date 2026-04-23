@@ -278,6 +278,8 @@ erDiagram
         string status "pending | active | failed | invalid"
         string app_id "Lark/Feishu only"
         bytes app_secret_encrypted "Lark/Feishu only"
+        bytes lark_verification_token_encrypted "Lark/Feishu only"
+        bytes lark_encrypt_key_encrypted "Lark/Feishu only, optional"
         string public_key "Discord only"
         bool is_active
         datetime created_at
@@ -343,12 +345,12 @@ classDiagram
     class PlatformAdapter {
         <<trait>>
         +platform_id() str
-        +verify_webhook(bot, headers, body) Result
+        +prepare_webhook(bot, secrets, headers, body) PreparedWebhook
+        +verify_webhook(bot, secrets, headers, body) Result
         +parse_inbound(body) Result~Vec~InboundMessage~~
         +send_reply(http, bot, conversation_id, reply) Result~String~
         +register_webhook(http, bot, url, secret) Result
         +verify_bot_token(http, token) Result~BotIdentity~
-        +handle_challenge(body) Option~JSON~
     }
 
     class TelegramAdapter {
@@ -368,8 +370,9 @@ classDiagram
     class LarkFamilyAdapter {
         -base_url: String
         +platform_id() "lark" or "feishu"
-        -HMAC-SHA256 verification
-        -url_verification challenge
+        -Verification Token check
+        -Optional Encrypt Key signature + AES-256-CBC decrypt
+        -url_verification handled after bot lookup
         -App access token caching
     }
 
@@ -386,8 +389,15 @@ classDiagram
 |---|---|---|---|---|
 | **Telegram** | Bot token (`123:ABC...`) | `X-Telegram-Bot-Api-Secret-Token` header (constant-time) | None | `POST /bot{token}/sendMessage` |
 | **Discord** | Bot token + Application ID | Ed25519 signature (`X-Signature-Ed25519` + `X-Signature-Timestamp`) | `PING` -> `PONG` interaction response | `POST /channels/{id}/messages` with `Authorization: Bot {token}` |
-| **Lark** | App ID + App Secret | HMAC-SHA256 on `X-Lark-Signature` header | `url_verification` event -> echo `challenge` | `POST /im/v1/messages` with tenant access token |
-| **Feishu** | App ID + App Secret (same as Lark) | Same as Lark | Same as Lark | Same as Lark, different base URL (`open.feishu.cn`) |
+| **Lark** | App ID + App Secret for tenant access token; Verification Token for inbound webhook auth; optional Encrypt Key for signed/encrypted delivery | Always verify Verification Token. If Encrypt Key is configured, also require `X-Lark-Signature` with `hex(SHA256(timestamp + nonce + encrypt_key + raw_body))`, then decrypt `{\"encrypt\":\"...\"}` using AES-256-CBC, PKCS7, IV = first 16 bytes, key = `SHA256(encrypt_key)` | `url_verification` -> verify token first, then echo `challenge` | `POST /im/v1/messages` with tenant access token |
+| **Feishu** | Same as Lark | Same as Lark | Same as Lark | Same as Lark, different base URL (`open.feishu.cn`) |
+
+For the Lark/Feishu platform family, `register_webhook()` remains a no-op. Configure the webhook URL and subscribe to both `im.message.receive_v1` and `card.action.trigger` only in the Lark/Feishu Developer Console. The console inputs map to NyxID fields as follows:
+
+- **App ID** -> `ChannelBot.app_id`
+- **App Secret** -> `ChannelBot.app_secret_encrypted`
+- **Verification Token** -> `ChannelBot.lark_verification_token_encrypted`
+- **Encrypt Key** -> `ChannelBot.lark_encrypt_key_encrypted` (optional)
 
 ### Adding New Platforms
 
@@ -445,6 +455,7 @@ NyxID sends a normalized message to the agent's callback URL.
   "reply_to_message_id": null,
   "thread_id": null,
   "timestamp": "2026-03-31T12:00:00Z",
+  "reply_token": "eyJhbGciOiJSUzI1NiIsImtpZCI6...",
   "raw_platform_data": { "update_id": 123, "message": { "...": "full Telegram/Discord/Lark JSON" } }
 }
 ```
@@ -478,6 +489,7 @@ The payload normalizes messages into a common format so agents can handle all pl
 | `reply_to_message_id` | UUID | Yes | NyxID `message_id` of the message being replied to. `null` for standalone messages. |
 | `thread_id` | string | Yes | Platform-native thread ID (Discord threads, Lark threads). `null` if not in a thread. |
 | `timestamp` | ISO 8601 | No | When the message was sent on the platform (not when NyxID received it). |
+| `reply_token` | string | Yes | Per-callback RS256 JWT the agent can send back as `Authorization: Bearer <reply_token>` on `POST /api/v1/channel-relay/reply` instead of its full API key. See [Reply Token](#reply-token). `null` only if token generation failed on NyxID — agents that receive `null` must fall back to API-key auth on the reply call. |
 | `raw_platform_data` | object | Yes | The full original webhook payload from the platform (Telegram Update, Discord Interaction, Lark Event, etc.). Use this for platform-specific features like inline keyboards, embeds, interactive cards, or any data not captured by the normalized fields. `null` only if the raw data could not be preserved. |
 
 **Headers:**
@@ -551,11 +563,11 @@ Agent returns a reply in the callback response body:
 
 ### Agent -> NyxID (Async, HTTP 202 then POST later)
 
-If the agent needs more time (LLM inference, tool calls, etc.), it returns `202 Accepted` with an empty body, then calls back when ready:
+If the agent needs more time (LLM inference, tool calls, etc.), it returns `202 Accepted` with an empty body, then calls back when ready. The reply endpoint accepts either the agent's API key or the per-callback reply token minted with the inbound payload:
 
 ```
 POST /api/v1/channel-relay/reply
-Authorization: Bearer nyxid_ag_xxxxx
+Authorization: Bearer <nyxid_ag_xxxxx OR reply_token from callback>
 Content-Type: application/json
 
 {
@@ -574,6 +586,26 @@ Content-Type: application/json
 | `message_id` | UUID | No | The `message_id` from the original inbound callback payload. Identifies which message this reply is for, so NyxID can resolve the correct conversation and platform to send the reply to. |
 | `reply.text` | string | Yes | The text response to send back to the chat. |
 | `reply.metadata` | object | Yes | Platform-specific extras, same as sync reply. |
+
+<a id="reply-token"></a>
+#### Reply Token
+
+Each inbound callback carries a short-lived `reply_token` (RS256 JWT) that lets the agent post its async reply without holding the full agent API key. Intended for downstream runtimes (e.g. Aevatar) that would otherwise need to persist agent credentials and take on the associated secret-management burden.
+
+| Property | Value |
+|---|---|
+| `aud` | `channel-relay/reply` (rejected everywhere else) |
+| `token_type` | `relay_reply` |
+| TTL | `JWT_RELAY_REPLY_TTL_SECS` (default 1800 = 30 min) |
+| Max uses | `1` (duplicate `jti` → `401 "Reply token already used"`) |
+| Claim bindings | `api_key_id`, `conversation_id`, `inbound_message_id`, `platform` — all four must match the reply request; body's `message_id` must equal `inbound_message_id` |
+| Revocation coupling | At reply time NyxID re-checks that the bound `api_key_id` is still active; a revoked key invalidates all outstanding tokens immediately |
+| Replay store | MongoDB `reply_token_uses` collection, TTL-indexed on `exp_at` |
+| Clock skew | 60s tolerance on both `iat` and `exp` |
+
+The reply-token path skips the API-key branch's "caller must be the assigned agent for this conversation" check: the token was minted for a specific inbound message, so allowing the original callback recipient to complete its reply even after the conversation is reassigned is intentional. Narrowness is enforced by the four claim bindings above.
+
+A leaked reply token's blast radius is a single reply to a single message for at most 30 minutes. Contrast with a leaked `full_key`, which grants unbounded access to everything the agent key can do until manually revoked.
 
 ### Callback Flow Decision
 
@@ -609,6 +641,7 @@ flowchart TD
 | `POST` | `/api/v1/channel-bots` | Register a new bot |
 | `GET` | `/api/v1/channel-bots` | List user's bots |
 | `GET` | `/api/v1/channel-bots/{id}` | Get bot details |
+| `PATCH` | `/api/v1/channel-bots/{id}` | Update bot label or platform verification material |
 | `DELETE` | `/api/v1/channel-bots/{id}` | Delete bot (deregisters webhook) |
 | `POST` | `/api/v1/channel-bots/{id}/verify` | Re-verify bot token and webhook |
 
@@ -622,13 +655,13 @@ flowchart TD
 | `PUT` | `/api/v1/channel-conversations/{id}` | Update route (change agent) |
 | `DELETE` | `/api/v1/channel-conversations/{id}` | Delete route |
 
-### Relay (API-key authenticated)
+### Relay (agent-authenticated)
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/v1/channel-relay/reply` | Agent sends async reply to a message |
-| `GET` | `/api/v1/channel-relay/messages/{conversation_id}` | Get conversation message history |
-| `GET` | `/api/v1/channel-relay/resolve-sender` | Resolve a platform sender to a NyxID user (query params: `platform`, `platform_id`) |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/channel-relay/reply` | API key **or** reply token | Agent sends async reply to a message. See [Reply Token](#reply-token). |
+| `GET` | `/api/v1/channel-relay/messages/{conversation_id}` | API key | Get conversation message history |
+| `GET` | `/api/v1/channel-relay/resolve-sender` | API key | Resolve a platform sender to a NyxID user (query params: `platform`, `platform_id`) |
 
 ### Platform Webhooks (unauthenticated, signature-verified)
 
@@ -677,10 +710,25 @@ graph TD
 |---|---|
 | **SSRF** | Callback URLs validated: HTTPS-only in production, block RFC 1918/loopback ranges, optional domain allowlist |
 | **Bot token storage** | AES-256 encrypted at rest (same pattern as `UserApiKey.credential_encrypted`). Never returned in API responses. Only `platform_bot_username` is exposed. |
-| **Webhook forgery** | Per-platform verification: Telegram secret header, Discord Ed25519, Lark HMAC-SHA256. All constant-time comparison. |
+| **Webhook forgery** | Per-platform verification: Telegram secret header, Discord Ed25519, Lark / Feishu Verification Token checks plus optional Encrypt Key signature verification and AES decryption. All comparisons use constant-time equality where applicable. |
+
+### Migrating a stuck Lark / Feishu bot
+
+Bots created before issue #455 may have the right App ID / App Secret but still remain in `pending_webhook` because the inbound Verification Token and optional Encrypt Key were never stored separately.
+
+To self-heal an existing bot:
+
+1. Read the bot's Event Subscriptions settings in the Lark / Feishu console.
+2. Update the bot with its Verification Token and, if enabled in the console, its Encrypt Key.
+3. Wait for the next verified inbound webhook or `url_verification` challenge. NyxID will auto-promote the bot from `pending_webhook` to `active` after successful verification.
+
+You can update the bot either via the API or the CLI:
+
+- `PATCH /api/v1/channel-bots/{id}` with `{ "verification_token": "...", "encrypt_key": "..." }`
+- `nyxid channel-bot update <BOT_ID> --verification-token ... [--encrypt-key ...]`
 | **Replay attacks** | Callbacks include `X-NyxID-Timestamp`. Agents should reject messages older than 5 minutes. |
 | **Callback authentication** | `X-NyxID-Signature` is HMAC-SHA256 of the request body, keyed with the API key's hash. Agents verify this to confirm the request came from NyxID. |
-| **Agent impersonation** | Async reply endpoint requires the calling API key to match the conversation's `agent_api_key_id`. |
+| **Agent impersonation** | Async reply endpoint accepts two auth paths: (a) the agent API key, which must match the conversation's `agent_api_key_id`; or (b) a per-callback reply token bound to a specific `inbound_message_id`, `conversation_id`, `api_key_id`, and `platform`, single-use, 30-min TTL, and revalidated against live `api_key.is_active` on every call. See [Reply Token](#reply-token). |
 | **Rate limiting** | Per-bot rate limiting on inbound webhooks. Per-agent rate limiting on callback dispatch (reuses `PerAgentRateLimiter` from agent isolation). |
 
 ---

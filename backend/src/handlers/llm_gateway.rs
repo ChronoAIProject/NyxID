@@ -88,13 +88,22 @@ pub async fn llm_proxy_request(
     //   2. Fall back to the legacy `DownstreamService` + `UserProviderToken`
     //      path (`resolve_proxy_target` + `resolve_delegated_credentials`)
     //      for users who still have legacy provider tokens.
+    // Resolve against the UserService by catalog_service_id only. The URL's
+    // `provider_slug` (e.g. "anthropic", "deepseek") is the ProviderConfig
+    // slug and has no relation to UserService.slug, which is user-chosen
+    // when the service is added via AI Services. Passing it here would make
+    // `lookup_user_service` run `find_by_slug(user_id, "anthropic")` against
+    // user-picked slugs like "llm-anthropic" or "my-anthropic-prod" --
+    // always None -- and then fall through to the legacy delegation path
+    // with the "Provider ... connection required" error, even though the
+    // user has a perfectly valid UserService linked by catalog_service_id.
     let (target, resolved_via_user_service) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
             &state.encryption_keys,
             &state.node_ws_manager,
             &user_id_str,
-            Some(&provider_slug),
+            None,
             Some(&service_id),
         )
         .await?
@@ -102,13 +111,13 @@ pub async fn llm_proxy_request(
             Some(resolution) => (resolution.target, true),
             None => {
                 // Before the legacy fallback, block org viewers whose
-                // org has any presence for this slug so they cannot
+                // org has any presence for this service so they cannot
                 // slip into the LLM gateway approval flow via the
                 // legacy path (see ChronoAIProject/NyxID#375).
                 proxy_service::guard_slug_against_viewer_orgs(
                     &state.db,
                     &user_id_str,
-                    Some(&provider_slug),
+                    None,
                     Some(&service_id),
                 )
                 .await?;
@@ -381,13 +390,16 @@ pub async fn gateway_request(
     // resolutions the owner is the org's user_id, otherwise it falls
     // through to the actor.
     let mut effective_owner_for_approval: Option<String> = None;
+    // See `llm_proxy_request` for why we pass `None` as the slug here
+    // instead of `provider_slug` -- the URL's provider slug does not
+    // match UserService.slug, which is user-chosen at provision time.
     let (target, resolved_via_user_service) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
             &state.encryption_keys,
             &state.node_ws_manager,
             &user_id_str,
-            Some(&provider_slug),
+            None,
             Some(&service_id),
         )
         .await?

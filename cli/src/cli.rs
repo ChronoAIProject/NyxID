@@ -142,6 +142,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: AdminCommands,
     },
+    /// Manage telemetry consent on this machine (see `docs/TELEMETRY.md` §3)
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommands,
+    },
     /// Show the NyxID project repository URL
     Repo(RepoArgs),
     /// Resume a `--no-wait` remote pairing and pick up the result
@@ -436,6 +441,22 @@ pub enum SessionCommands {
     },
 }
 
+// ---- Telemetry ----
+
+/// Subcommands under `nyxid telemetry`. Canonical editor for the
+/// persisted consent flag at `~/.nyxid/config.toml`. See
+/// `docs/TELEMETRY.md` §3 for the full precedence ladder.
+#[derive(Subcommand)]
+pub enum TelemetryCommands {
+    /// Opt in: persist `{enabled=true, asked=true}` to config.
+    Enable,
+    /// Opt out: persist `{enabled=false, asked=true}` and clear the
+    /// local anon UUID so a future re-enable starts fresh.
+    Disable,
+    /// Print the resolved consent state and its source.
+    Status,
+}
+
 // ---- Catalog ----
 
 #[derive(Subcommand)]
@@ -490,7 +511,7 @@ pub enum ServiceCommands {
         /// Label for this service
         #[arg(long)]
         label: Option<String>,
-        /// Auth method: bearer, bot_bearer (Discord-style "Bot " prefix), header, query, path, basic, body (inject credential into JSON body), none
+        /// Auth method: bearer, bot_bearer (Discord-style "Bot " prefix), header, query, path, basic, body (inject credential into JSON body), none (skips credential entry)
         #[arg(long)]
         auth_method: Option<String>,
         /// Auth key name (e.g. Authorization, X-API-Key, or for body auth
@@ -2071,6 +2092,14 @@ pub enum ChannelBotCommands {
         /// Read app secret from this environment variable
         #[arg(long)]
         app_secret_env: Option<String>,
+        /// Lark/Feishu verification token. Falls back to
+        /// NYXID_LARK_VERIFICATION_TOKEN when omitted.
+        #[arg(long)]
+        verification_token: Option<String>,
+        /// Optional Lark/Feishu Encrypt Key. Falls back to
+        /// NYXID_LARK_ENCRYPT_KEY when omitted.
+        #[arg(long)]
+        encrypt_key: Option<String>,
         /// Platform public key (required for Discord)
         #[arg(long)]
         public_key: Option<String>,
@@ -2078,6 +2107,30 @@ pub enum ChannelBotCommands {
         /// that org). Omit for a personal bot.
         #[arg(long, value_name = "ORG_ID")]
         org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update an existing bot's label or platform verification material
+    Update {
+        /// Bot ID
+        id: String,
+        /// New label
+        #[arg(long)]
+        label: Option<String>,
+        /// Lark/Feishu verification token. Falls back to
+        /// NYXID_LARK_VERIFICATION_TOKEN when omitted.
+        #[arg(long)]
+        verification_token: Option<String>,
+        /// Optional Lark/Feishu Encrypt Key. Falls back to
+        /// NYXID_LARK_ENCRYPT_KEY when omitted.
+        #[arg(long)]
+        encrypt_key: Option<String>,
+        /// Lark/Feishu App ID
+        #[arg(long)]
+        app_id: Option<String>,
+        /// Lark/Feishu App Secret or Slack signing secret
+        #[arg(long, hide = true)]
+        app_secret: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

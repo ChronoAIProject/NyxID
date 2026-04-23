@@ -12,7 +12,9 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::mw::auth::AuthUser;
-use crate::services::{org_service, user_api_key_service, user_service_service};
+use crate::services::{
+    credential_push_service, org_service, user_api_key_service, user_service_service,
+};
 
 /// Look up the external API key without an ownership filter and check
 /// whether the actor may modify it (directly or as an org admin).
@@ -139,6 +141,70 @@ pub async fn update_external_api_key(
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
 
+    // Preflight scope check for credential rotations: when this
+    // external key is shared across multiple node-routed services and
+    // any of them is outside the caller's API-key scope OR the caller
+    // doesn't own the destination node, the follow-up fan-out would
+    // silently skip those services — the new secret would be
+    // persisted, but those nodes would keep serving the old one and
+    // their services would start failing until someone with full
+    // access re-pushed. Reject the PUT up front so the caller sees
+    // an explicit error instead of a silent partial apply
+    // (thirty-third-round Codex P2).
+    let rotating_credential = body.credential.as_deref().is_some_and(|c| !c.is_empty());
+    if rotating_credential {
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use futures::TryStreamExt;
+        let routed_services: Vec<UserService> = state
+            .db
+            .collection::<UserService>(USER_SERVICES)
+            .find(doc! {
+                "user_id": &owner_id,
+                "api_key_id": &key_id,
+                "node_id": { "$ne": null },
+                "is_active": true,
+                "auth_method": { "$ne": "none" },
+            })
+            .await?
+            .try_collect()
+            .await?;
+        for svc in &routed_services {
+            if !auth_user.allow_all_services && !auth_user.allowed_service_ids.contains(&svc.id) {
+                return Err(AppError::ApiKeyScopeForbidden(format!(
+                    "API key scope does not cover service '{}', which shares this credential. \
+                     Rotating here would leave that service's node on the old secret. \
+                     Ask an operator with full service scope to rotate, or restrict the rotation \
+                     to this service via `PUT /keys/{{id}}` instead.",
+                    svc.slug
+                )));
+            }
+            if let Some(node_id) = svc.node_id.as_deref().filter(|n| !n.is_empty()) {
+                if !auth_user.allow_all_nodes
+                    && !auth_user.allowed_node_ids.contains(&node_id.to_string())
+                {
+                    return Err(AppError::ApiKeyScopeForbidden(format!(
+                        "API key scope does not include node '{}', which hosts service '{}'. \
+                         Rotating here would leave that node on the old secret.",
+                        node_id, svc.slug
+                    )));
+                }
+                // Ownership check: mirrors the per-node guard the
+                // push fan-out applies. Failing here is
+                // Forbidden rather than silently-skipped.
+                use crate::services::node_service;
+                node_service::ensure_node_writable_by_actor(&state.db, &actor, node_id)
+                    .await
+                    .map_err(|_| {
+                        AppError::Forbidden(format!(
+                            "Actor does not own node '{}', which hosts service '{}' using this credential. \
+                             Rotating here would leave that node on the old secret.",
+                            node_id, svc.slug
+                        ))
+                    })?;
+            }
+        }
+    }
+
     user_api_key_service::update_api_key(
         &state.db,
         &state.encryption_keys,
@@ -149,8 +215,61 @@ pub async fn update_external_api_key(
     )
     .await?;
 
-    let key = user_api_key_service::get_api_key(&state.db, &owner_id, &key_id).await?;
-    Ok(Json(external_api_key_response(key)))
+    // When the caller rotated the secret and this external API key
+    // backs one or more node-routed `UserService`s using the server-
+    // held credential model (NyxID#418), fire-and-forget deliver the
+    // new value to those nodes. Without this, rotating from the
+    // External API Keys UI would leave the node serving the stale
+    // credential until some unrelated `/keys` update next reconciled
+    // (seventeenth-round Codex P1). Not strict: if the node is
+    // offline, the server copy remains available to retry — the
+    // canonical rotation happens in `PUT /keys/:id` anyway.
+    //
+    // Provider-backed keys (`provider_config_id.is_some()`) are
+    // excluded: the `PUT /keys` + `promote_node_managed_api_key` path
+    // explicitly forbids copying provider OAuth/API credentials onto
+    // a node ("Node-routed provider-backed services must be authorized
+    // on the node agent"). The External API Keys UI must honor the
+    // same contract — otherwise it would be a back door for installing
+    // a server-held provider secret on a node (eighteenth-round Codex
+    // P2).
+    //
+    // Use the ownership-aware push variant so org admins or scoped key
+    // editors can't rewrite credentials on nodes they don't own via
+    // this endpoint — `PUT /keys` gates the same write with
+    // `ensure_node_writable_by_actor` (twenty-first-round Codex P1).
+    let refreshed = user_api_key_service::get_api_key(&state.db, &owner_id, &key_id).await?;
+    if body.credential.as_deref().is_some_and(|c| !c.is_empty())
+        && refreshed.provider_config_id.is_none()
+    {
+        let db = state.db.clone();
+        let enc = state.encryption_keys.clone();
+        let ws = state.node_ws_manager.clone();
+        let uid = owner_id.clone();
+        let act = actor.clone();
+        let ak = key_id.clone();
+        // Propagate the caller's API-key scope (both node and service
+        // dims) into the background push. Without the service-dim
+        // filter, a scoped key whose `allowed_service_ids` authorizes
+        // only one of several siblings sharing this credential could
+        // use external-key rotation to overwrite node-local secrets
+        // for the out-of-scope siblings (thirty-first-round Codex
+        // P1). The node-dim filter was added in the previous round.
+        let scope = credential_push_service::ActorScope {
+            allow_all_nodes: auth_user.allow_all_nodes,
+            allowed_node_ids: auth_user.allowed_node_ids.clone(),
+            allow_all_services: auth_user.allow_all_services,
+            allowed_service_ids: auth_user.allowed_service_ids.clone(),
+        };
+        tokio::spawn(async move {
+            credential_push_service::push_credential_to_node_if_owned(
+                &db, &enc, &ws, &uid, &act, &ak, scope,
+            )
+            .await;
+        });
+    }
+
+    Ok(Json(external_api_key_response(refreshed)))
 }
 
 #[utoipa::path(

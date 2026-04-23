@@ -157,6 +157,9 @@ pub enum AppError {
     #[error("Node registration failed: {0}")]
     NodeRegistrationFailed(String),
 
+    #[error("Node credential missing: {0}")]
+    NodeCredentialMissing(String),
+
     #[error("API key scope forbidden: {0}")]
     ApiKeyScopeForbidden(String),
 
@@ -261,6 +264,7 @@ impl AppError {
             Self::NodeOffline(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NodeProxyTimeout => StatusCode::GATEWAY_TIMEOUT,
             Self::NodeRegistrationFailed(_) => StatusCode::BAD_REQUEST,
+            Self::NodeCredentialMissing(_) => StatusCode::BAD_GATEWAY,
             Self::ApiKeyScopeForbidden(_) => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeInactive => StatusCode::FORBIDDEN,
             Self::ApiKeyScopeNotFound(_) => StatusCode::NOT_FOUND,
@@ -329,6 +333,7 @@ impl AppError {
             Self::NodeOffline(_) => 8001,
             Self::NodeProxyTimeout => 8002,
             Self::NodeRegistrationFailed(_) => 8003,
+            Self::NodeCredentialMissing(_) => 8004,
             Self::ApiKeyScopeForbidden(_) => 9000,
             Self::ApiKeyScopeInactive => 9001,
             Self::ApiKeyScopeNotFound(_) => 9002,
@@ -427,6 +432,7 @@ impl AppError {
             Self::NodeOffline(_) => "node_offline",
             Self::NodeProxyTimeout => "node_proxy_timeout",
             Self::NodeRegistrationFailed(_) => "node_registration_failed",
+            Self::NodeCredentialMissing(_) => "node_credential_missing",
             Self::ApiKeyScopeForbidden(_) => "api_key_scope_forbidden",
             Self::ApiKeyScopeInactive => "api_key_scope_inactive",
             Self::ApiKeyScopeNotFound(_) => "api_key_scope_not_found",
@@ -690,6 +696,10 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
+            AppError::NodeCredentialMissing("x".into()).status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
             AppError::ApiKeyScopeForbidden("x".into()).status_code(),
             StatusCode::FORBIDDEN
         );
@@ -792,6 +802,7 @@ mod tests {
             AppError::NodeOffline("".into()).error_code(),
             AppError::NodeProxyTimeout.error_code(),
             AppError::NodeRegistrationFailed("".into()).error_code(),
+            AppError::NodeCredentialMissing("".into()).error_code(),
             AppError::ApiKeyScopeForbidden("".into()).error_code(),
             AppError::ApiKeyScopeInactive.error_code(),
             AppError::ApiKeyScopeNotFound("".into()).error_code(),
@@ -956,6 +967,14 @@ mod tests {
         assert_eq!(
             AppError::NodeRegistrationFailed("".into()).error_key(),
             "node_registration_failed"
+        );
+        assert_eq!(
+            AppError::NodeCredentialMissing("".into()).error_key(),
+            "node_credential_missing"
+        );
+        assert_eq!(
+            AppError::NodeCredentialMissing("".into()).error_code(),
+            8004
         );
         assert_eq!(
             AppError::ApiKeyScopeForbidden("".into()).error_key(),

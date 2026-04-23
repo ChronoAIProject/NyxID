@@ -59,7 +59,9 @@ import {
   Terminal,
   Copy,
   Shield,
+  ShieldCheck,
   Code,
+  ExternalLink,
   FileJson,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -79,6 +81,64 @@ function statusVariant(
     default:
       return "outline";
   }
+}
+
+/**
+ * Renders the Lark / Feishu developer-console permission deep link the
+ * backend attaches to `permission_setup_url`. Shown only for AI Services
+ * keys backed by the `api-lark`, `api-lark-bot`, `api-feishu`, or
+ * `api-feishu-bot` catalog entries when the credential carries a usable
+ * `app_id`. The deep link lands the user on the matching app's
+ * "Permissions & Scopes" page with the catalog's required scopes
+ * pre-selected, ready for "Bulk Enable".
+ */
+function LarkPermissionSetupCard({
+  url,
+  scopes,
+}: {
+  readonly url: string;
+  readonly scopes: readonly string[];
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4 text-text-tertiary" />
+          <CardTitle className="text-sm">Configure Permissions</CardTitle>
+        </div>
+        <CardDescription>
+          Open this link to grant the scopes this service needs in the Lark /
+          Feishu developer console. The required scopes are pre-selected —
+          confirm and bulk-enable them so NyxID can call the API on your
+          behalf.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {scopes.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
+              Scopes pre-selected
+            </p>
+            <ul className="mt-2 flex flex-wrap gap-2">
+              {scopes.map((scope) => (
+                <li key={scope}>
+                  <Badge variant="outline" className="font-mono text-xs">
+                    {scope}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <Button asChild size="sm">
+          <a href={url} target="_blank" rel="noopener noreferrer">
+            Open Permissions Page
+            <ExternalLink className="ml-2 h-4 w-4" />
+          </a>
+        </Button>
+      </CardContent>
+    </Card>
+  );
 }
 
 function EndpointSection({
@@ -1673,6 +1733,13 @@ export function KeyDetailPage() {
               }
               catalogHeaders={catalogHeaders}
               readOnly={readOnly}
+            />
+          )}
+
+          {keyInfo.permission_setup_url && (
+            <LarkPermissionSetupCard
+              url={keyInfo.permission_setup_url}
+              scopes={keyInfo.permission_setup_scopes ?? []}
             />
           )}
 

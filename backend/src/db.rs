@@ -982,6 +982,21 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── reply_token_uses ──
+    let reply_token_uses = db.collection::<mongodb::bson::Document>("reply_token_uses");
+    reply_token_uses
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "exp_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── channel_event_logs ──
     // ADR-013 metadata-only event forwarding ledger. No payload content is
     // stored; see models::channel_event_log::ChannelEventLog.
@@ -1097,6 +1112,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .keys(doc! { "org_user_id": 1 })
                 .build(),
         )
+        .await?;
+
+    // ── telemetry erasure queue (docs/TELEMETRY.md §8) ──
+    // The drain worker atomically claims the oldest pending job; the
+    // `status + created_at` compound index matches that query. `user_id`
+    // helps operator queries after dead-lettering.
+    let telemetry_erasure_jobs =
+        db.collection::<bson::Document>(crate::models::telemetry_erasure_job::COLLECTION_NAME);
+    telemetry_erasure_jobs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "status": 1, "created_at": 1 })
+                .build(),
+        )
+        .await?;
+    telemetry_erasure_jobs
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
     backfill_downstream_service_types(db).await?;

@@ -7,6 +7,12 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
+
+# Telemetry config (DSN, host, share-back flag) is fetched at runtime
+# from the backend's /api/v1/public/config endpoint — no build-time
+# env vars needed for telemetry. Rotation = edit .env.production,
+# restart backend, done.
+
 RUN npm run build
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────

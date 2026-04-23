@@ -110,6 +110,10 @@ jobs:
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Build-args: git hash for backend/node-agent surface tagging
+          # (stamped on /health). Telemetry config is fetched at runtime
+          # from the backend's /api/v1/public/config endpoint, so no
+          # build-args for telemetry are needed here.
           build-args: |
             NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
           outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true

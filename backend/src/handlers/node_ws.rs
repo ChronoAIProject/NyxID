@@ -13,11 +13,11 @@ use crate::models::node::{NodeMetadata, NodeStatus};
 use crate::services::{
     audit_service, node_service,
     node_ws_manager::{
-        NodeOutboundMessage, NodeProxyResponse, NodeSshExecResult, NodeWsManager,
-        WsProxyBinaryInbound, WsProxyClosedInbound, WsProxyErrorInbound, WsProxyOpenedInbound,
-        WsProxyResponseChunkMsg, WsProxyResponseEndMsg, WsProxyResponseStartMsg,
-        WsProxyTextInbound, WsSshExecResultMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg,
-        WsSshTunnelOpenedMsg, WsWebTerminalClosedMsg, WsWebTerminalDataMsg,
+        NodeCapabilitiesMsg, NodeOutboundMessage, NodeProxyResponse, NodeSshExecResult,
+        NodeWsManager, WsProxyBinaryInbound, WsProxyClosedInbound, WsProxyErrorInbound,
+        WsProxyOpenedInbound, WsProxyResponseChunkMsg, WsProxyResponseEndMsg,
+        WsProxyResponseStartMsg, WsProxyTextInbound, WsSshExecResultMsg, WsSshTunnelClosedMsg,
+        WsSshTunnelDataMsg, WsSshTunnelOpenedMsg, WsWebTerminalClosedMsg, WsWebTerminalDataMsg,
         WsWebTerminalStartedMsg,
     },
 };
@@ -70,6 +70,15 @@ enum NodeMessage {
         agent_version: Option<String>,
         #[allow(dead_code)]
         services_ready: Option<Vec<String>>,
+        /// Capabilities this node agent supports. When present and true,
+        /// the backend enables features that require the node to
+        /// cooperate with a new protocol contract. Old agents omit the
+        /// field and default to `None` → backend treats the capability
+        /// as unsupported and falls back to the legacy behavior
+        /// (twenty-seventh-round Codex P2: capability negotiation so
+        /// backend + node don't need a lockstep upgrade).
+        #[serde(default)]
+        capabilities: Option<NodeCapabilitiesMsg>,
     },
     #[serde(rename = "ssh_tunnel_opened")]
     SshTunnelOpened(WsSshTunnelOpenedMsg),
@@ -85,8 +94,12 @@ enum NodeMessage {
     WebTerminalClosed(WsWebTerminalClosedMsg),
     #[serde(rename = "ssh_exec_result")]
     SshExecResult(WsSshExecResultMsg),
+    // Placed before CredentialUpdateAck for serde ordering stability. Actual
+    // capability type is shared with `node_ws_manager`.
     #[serde(rename = "credential_update_ack")]
     CredentialUpdateAck {
+        #[serde(default)]
+        request_id: Option<String>,
         #[serde(default)]
         service_slug: Option<String>,
         #[serde(default)]
@@ -148,6 +161,7 @@ fn handle_proxy_response_chunk(
             "invalid_base64_payload",
             502,
             false,
+            None,
         );
     }
 }
@@ -483,6 +497,7 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                         "invalid_base64_payload",
                         502,
                         false,
+                        None,
                     );
                     continue;
                 };
@@ -515,6 +530,7 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                     &err.error,
                     status,
                     err.retryable,
+                    err.reason.as_deref(),
                 );
             }
             NodeMessage::ProxyResponseStart(start) => {
@@ -549,8 +565,23 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
             NodeMessage::ProxyResponseEnd(end) => {
                 ws_manager.deliver_stream_end(&node_id_reader, &end.request_id);
             }
-            NodeMessage::StatusUpdate { .. } => {
-                // Future: update node metadata / ready services
+            NodeMessage::StatusUpdate { capabilities, .. } => {
+                // Record capability flags so `push_credential_to_node_strict`
+                // can decide between strict ack-wait and legacy fire-and-
+                // forget delivery. Old agents omit the field → `caps` is
+                // `None` → flags default to all-false → strict mode stays
+                // off for them (twenty-seventh-round Codex P2).
+                if let Some(caps) = capabilities {
+                    ws_manager.record_capabilities(&node_id_reader, &caps);
+                }
+                // Always mark capability state "resolved" on any
+                // status_update, regardless of whether `capabilities`
+                // was present. This releases strict-push waiters
+                // parked in `await_capability_resolution` — the
+                // flag's value (present vs. absent) is what they
+                // want to observe, and it's now final for this
+                // connection (twenty-ninth-round Codex P2).
+                ws_manager.mark_status_update_received(&node_id_reader);
                 tracing::debug!(node_id = %node_id_reader, "Received status_update");
             }
             NodeMessage::SshTunnelOpened(opened) => {
@@ -643,6 +674,7 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                 );
             }
             NodeMessage::CredentialUpdateAck {
+                request_id,
                 service_slug,
                 status,
                 error,
@@ -663,6 +695,22 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                         error = %err,
                         "Node failed to apply credential update"
                     );
+                }
+                // Resolve any strict-push waiter registered for this
+                // `request_id`. Legacy node agents don't echo
+                // `request_id`; the ack is still logged but no waiter
+                // is woken up. New CLIs echo it back so the backend
+                // knows whether the node-side apply actually landed.
+                if let Some(req_id) = request_id {
+                    use crate::services::node_ws_manager::CredentialAckOutcome;
+                    let outcome = if st == "ok" {
+                        CredentialAckOutcome::Ok
+                    } else {
+                        CredentialAckOutcome::Err(
+                            error.unwrap_or_else(|| "unknown node error".to_string()),
+                        )
+                    };
+                    ws_manager.deliver_credential_ack(&node_id_reader, &req_id, outcome);
                 }
             }
             NodeMessage::WsProxyOpened(msg) => {

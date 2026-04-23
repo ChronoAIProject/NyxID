@@ -33,6 +33,7 @@ import {
 } from "../lib/notifications/pushNotifications";
 import { startPushPolling } from "../lib/notifications/pushPollingSignal";
 import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
+import { MobileConsentProvider } from "../lib/consent";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import type { BottomNavV2Tab } from "../components/BottomNavV2";
 // import { NyxSheet } from "../features/nyx/NyxSheet"; // TODO: re-enable when chat is ready
@@ -210,16 +211,18 @@ export default function App() {
         <SafeAreaProvider>
           <QueryClientProvider client={queryClient}>
             <ThemeProvider>
-              <AuthSessionProvider>
-                <ThemedAppShell
-                  navigationRef={navigationRef}
-                  currentRouteName={currentRouteName}
-                  setCurrentRouteName={setCurrentRouteName}
-                  flushPendingChallengeTapNavigation={flushPendingChallengeTapNavigation}
-                  isNyxOpen={isNyxOpen}
-                  setIsNyxOpen={setIsNyxOpen}
-                />
-              </AuthSessionProvider>
+              <MobileConsentProvider>
+                <AuthSessionProvider>
+                  <ThemedAppShell
+                    navigationRef={navigationRef}
+                    currentRouteName={currentRouteName}
+                    setCurrentRouteName={setCurrentRouteName}
+                    flushPendingChallengeTapNavigation={flushPendingChallengeTapNavigation}
+                    isNyxOpen={isNyxOpen}
+                    setIsNyxOpen={setIsNyxOpen}
+                  />
+                </AuthSessionProvider>
+              </MobileConsentProvider>
             </ThemeProvider>
           </QueryClientProvider>
         </SafeAreaProvider>

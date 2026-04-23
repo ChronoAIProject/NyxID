@@ -86,6 +86,35 @@ pub struct Claims {
     pub relay_allow_all_nodes: Option<bool>,
 }
 
+pub const RELAY_REPLY_AUDIENCE: &str = "channel-relay/reply";
+pub const RELAY_REPLY_TOKEN_TYPE: &str = "relay_reply";
+const RELAY_REPLY_CLOCK_SKEW_SECS: i64 = 60;
+
+/// Dedicated claims for `/api/v1/channel-relay/reply`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RelayReplyClaims {
+    /// Issuer
+    pub iss: String,
+    /// Audience
+    pub aud: String,
+    /// Expiration time (Unix timestamp)
+    pub exp: i64,
+    /// Issued at (Unix timestamp)
+    pub iat: i64,
+    /// JWT ID (unique per token)
+    pub jti: String,
+    /// Token type: always "relay_reply"
+    pub token_type: String,
+    /// Agent API key bound to this reply attempt.
+    pub api_key_id: String,
+    /// Conversation bound to this reply attempt.
+    pub conversation_id: String,
+    /// Inbound message bound to this reply attempt.
+    pub inbound_message_id: String,
+    /// Platform bound to this reply attempt.
+    pub platform: String,
+}
+
 /// Actor claim per RFC 8693 Section 4.1.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ActorClaim {
@@ -326,6 +355,37 @@ pub fn generate_relay_access_token(
 
     encode(&header, &claims, &keys.encoding)
         .map_err(|e| AppError::Internal(format!("Failed to encode relay access token: {e}")))
+}
+
+/// Generate a short-lived reply token scoped to a single inbound callback.
+pub fn generate_relay_reply_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    api_key_id: &str,
+    conversation_id: &str,
+    inbound_message_id: &str,
+    platform: &str,
+) -> Result<String, AppError> {
+    let now = Utc::now().timestamp();
+
+    let claims = RelayReplyClaims {
+        iss: config.jwt_issuer.clone(),
+        aud: RELAY_REPLY_AUDIENCE.to_string(),
+        exp: now + config.jwt_relay_reply_ttl_secs,
+        iat: now,
+        jti: Uuid::new_v4().to_string(),
+        token_type: RELAY_REPLY_TOKEN_TYPE.to_string(),
+        api_key_id: api_key_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        inbound_message_id: inbound_message_id.to_string(),
+        platform: platform.to_string(),
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
+
+    encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode relay reply token: {e}")))
 }
 
 /// Generate a refresh token for the given user.
@@ -628,10 +688,81 @@ pub fn verify_token(keys: &JwtKeys, config: &AppConfig, token: &str) -> Result<C
     Ok(token_data.claims)
 }
 
+/// Verify and decode a relay reply token.
+pub fn validate_relay_reply_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    token: &str,
+) -> Result<RelayReplyClaims, AppError> {
+    let mut validation = Validation::new(Algorithm::RS256);
+    // Expiry, audience, and required-claim enforcement is done manually below
+    // against `RelayReplyClaims` so the ordering matches the locked design in
+    // issue #469 and we can apply a symmetric clock-skew window to `exp`.
+    validation.validate_exp = false;
+    validation.validate_nbf = false;
+    validation.validate_aud = false;
+    validation.required_spec_claims.clear();
+
+    let token_data = decode::<RelayReplyClaims>(token, &keys.decoding, &validation)
+        .map_err(|_| AppError::Unauthorized("Invalid relay reply token".to_string()))?;
+
+    let claims = token_data.claims;
+    let now = Utc::now().timestamp();
+
+    if claims.exp + RELAY_REPLY_CLOCK_SKEW_SECS <= now {
+        return Err(AppError::TokenExpired);
+    }
+    if claims.iat > now + RELAY_REPLY_CLOCK_SKEW_SECS {
+        return Err(AppError::Unauthorized(
+            "Invalid relay reply token".to_string(),
+        ));
+    }
+    if claims.exp < claims.iat
+        || claims.exp - claims.iat > config.jwt_relay_reply_ttl_secs + RELAY_REPLY_CLOCK_SKEW_SECS
+    {
+        return Err(AppError::Unauthorized(
+            "Invalid relay reply token".to_string(),
+        ));
+    }
+
+    if claims.token_type != RELAY_REPLY_TOKEN_TYPE
+        || claims.aud != RELAY_REPLY_AUDIENCE
+        || claims.iss != config.jwt_issuer
+    {
+        return Err(AppError::Unauthorized(
+            "Invalid relay reply token".to_string(),
+        ));
+    }
+
+    Ok(claims)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rsa::pkcs1::EncodeRsaPrivateKey;
+
+    fn reply_claims(config: &AppConfig) -> RelayReplyClaims {
+        let now = Utc::now().timestamp();
+        RelayReplyClaims {
+            iss: config.jwt_issuer.clone(),
+            aud: RELAY_REPLY_AUDIENCE.to_string(),
+            exp: now + config.jwt_relay_reply_ttl_secs,
+            iat: now,
+            jti: Uuid::new_v4().to_string(),
+            token_type: RELAY_REPLY_TOKEN_TYPE.to_string(),
+            api_key_id: Uuid::new_v4().to_string(),
+            conversation_id: Uuid::new_v4().to_string(),
+            inbound_message_id: Uuid::new_v4().to_string(),
+            platform: "lark".to_string(),
+        }
+    }
+
+    fn encode_reply_claims(keys: &JwtKeys, claims: &RelayReplyClaims) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(keys.kid.clone());
+        encode(&header, claims, &keys.encoding).expect("encode relay reply claims")
+    }
 
     /// Generate a test RSA key pair (2048-bit for speed) and return JwtKeys + AppConfig.
     fn test_keys_and_config() -> (JwtKeys, AppConfig) {
@@ -669,6 +800,7 @@ mod tests {
             jwt_public_key_path: "keys/public.pem".to_string(),
             jwt_issuer: "http://localhost:3001".to_string(),
             jwt_access_ttl_secs: 900,
+            jwt_relay_reply_ttl_secs: 1800,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,
             google_client_secret: None,
@@ -689,6 +821,9 @@ mod tests {
             rate_limit_burst: 30,
             trusted_proxy_ips: vec![],
             sa_token_ttl_secs: 3600,
+            telemetry_dsn: None,
+            telemetry_host: None,
+            share_analytics: false,
             cookie_domain: None,
             telegram_bot_token: None,
             telegram_webhook_secret: None,
@@ -708,6 +843,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             cors_allowed_origins: vec![],
+            csrf_trusted_origins: vec![],
             node_heartbeat_interval_secs: 30,
             node_heartbeat_timeout_secs: 90,
             node_proxy_timeout_secs: 30,
@@ -1051,5 +1187,96 @@ mod tests {
         // Verify the JSON doesn't include "sa" when None
         let json = serde_json::to_string(&claims).unwrap();
         assert!(!json.contains("\"sa\""));
+    }
+
+    #[test]
+    fn generate_and_validate_relay_reply_token_round_trip() {
+        let (keys, config) = test_keys_and_config();
+        let api_key_id = Uuid::new_v4().to_string();
+        let conversation_id = Uuid::new_v4().to_string();
+        let inbound_message_id = Uuid::new_v4().to_string();
+
+        let token = generate_relay_reply_token(
+            &keys,
+            &config,
+            &api_key_id,
+            &conversation_id,
+            &inbound_message_id,
+            "telegram",
+        )
+        .unwrap();
+
+        let claims = validate_relay_reply_token(&keys, &config, &token).unwrap();
+        assert_eq!(claims.api_key_id, api_key_id);
+        assert_eq!(claims.conversation_id, conversation_id);
+        assert_eq!(claims.inbound_message_id, inbound_message_id);
+        assert_eq!(claims.platform, "telegram");
+        assert_eq!(claims.aud, RELAY_REPLY_AUDIENCE);
+        assert_eq!(claims.token_type, RELAY_REPLY_TOKEN_TYPE);
+    }
+
+    #[test]
+    fn relay_reply_token_rejects_wrong_audience() {
+        let (keys, config) = test_keys_and_config();
+        let mut claims = reply_claims(&config);
+        claims.aud = config.base_url.clone();
+        let token = encode_reply_claims(&keys, &claims);
+
+        let result = validate_relay_reply_token(&keys, &config, &token);
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    }
+
+    #[test]
+    fn relay_reply_token_rejects_wrong_signature() {
+        let (_other_keys, config) = test_keys_and_config();
+        let (keys_a, _) = test_keys_and_config();
+        let (keys_b, _) = test_keys_and_config();
+        let claims = reply_claims(&config);
+        let token = encode_reply_claims(&keys_a, &claims);
+
+        let result = validate_relay_reply_token(&keys_b, &config, &token);
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
+    }
+
+    #[test]
+    fn relay_reply_token_rejects_expired_token() {
+        let (keys, config) = test_keys_and_config();
+        let now = Utc::now().timestamp();
+        // Past the clock-skew tolerance window, so it's unambiguously expired.
+        let claims = RelayReplyClaims {
+            exp: now - RELAY_REPLY_CLOCK_SKEW_SECS - 5,
+            iat: now - RELAY_REPLY_CLOCK_SKEW_SECS - 15,
+            ..reply_claims(&config)
+        };
+        let token = encode_reply_claims(&keys, &claims);
+
+        let result = validate_relay_reply_token(&keys, &config, &token);
+        assert!(matches!(result, Err(AppError::TokenExpired)));
+    }
+
+    #[test]
+    fn relay_reply_token_accepts_within_clock_skew_of_exp() {
+        let (keys, config) = test_keys_and_config();
+        let now = Utc::now().timestamp();
+        let claims = RelayReplyClaims {
+            exp: now - 1,
+            iat: now - 10,
+            ..reply_claims(&config)
+        };
+        let token = encode_reply_claims(&keys, &claims);
+
+        validate_relay_reply_token(&keys, &config, &token)
+            .expect("token just past exp but within skew should still validate");
+    }
+
+    #[test]
+    fn relay_reply_token_rejects_wrong_token_type() {
+        let (keys, config) = test_keys_and_config();
+        let mut claims = reply_claims(&config);
+        claims.token_type = "access".to_string();
+        let token = encode_reply_claims(&keys, &claims);
+
+        let result = validate_relay_reply_token(&keys, &config, &token);
+        assert!(matches!(result, Err(AppError::Unauthorized(_))));
     }
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useChannelBots, useCreateChannelBot, useDeleteChannelBot } from "@/hooks/use-channel-bots";
 import {
@@ -64,6 +64,7 @@ function statusBadgeVariant(
     case "active":
       return "success";
     case "pending":
+    case "pending_webhook":
       return "warning";
     case "failed":
       return "destructive";
@@ -215,8 +216,8 @@ function CreateBotDialog({
   const {
     register,
     handleSubmit,
-    watch,
     setValue,
+    control,
     reset,
     formState: { errors },
   } = useForm<CreateChannelBotFormData>({
@@ -225,6 +226,8 @@ function CreateBotDialog({
       platform: "telegram",
       bot_token: "",
       label: "",
+      verification_token: "",
+      encrypt_key: "",
       target_org_id: defaultOrgId ?? undefined,
     },
   });
@@ -241,12 +244,14 @@ function CreateBotDialog({
       platform: "telegram",
       bot_token: "",
       label: "",
+      verification_token: "",
+      encrypt_key: "",
       target_org_id: defaultOrgId ?? undefined,
     });
   }, [open, defaultOrgId, reset]);
 
-  const platform = watch("platform");
-  const targetOrgId = watch("target_org_id") ?? null;
+  const platform = useWatch({ control, name: "platform" });
+  const targetOrgId = useWatch({ control, name: "target_org_id" }) ?? null;
 
   function onSubmit(data: CreateChannelBotFormData) {
     // Empty strings from the form should not be sent as target_org_id.
@@ -384,6 +389,55 @@ function CreateBotDialog({
                     {errors.app_secret.message}
                   </p>
                 )}
+              </div>
+              <div className="rounded-lg border border-border/70 bg-muted/30 p-4">
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">Lark webhook verification</p>
+                  <p className="text-xs text-muted-foreground">
+                    In Lark/Feishu Event Subscriptions, copy the
+                    Verification Token from Security settings. Encrypt Key is
+                    optional and should match the Encrypt Key field from the
+                    same panel if you enabled encrypted callbacks.
+                  </p>
+                </div>
+
+                <div className="mt-4 space-y-2">
+                  <Label htmlFor="verification_token">Verification Token</Label>
+                  <Input
+                    id="verification_token"
+                    type="password"
+                    placeholder="Event Subscriptions Verification Token"
+                    {...register("verification_token")}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Required. Lark sends this back on every webhook as
+                    `header.token` or `token`.
+                  </p>
+                  {errors.verification_token && (
+                    <p className="text-xs text-destructive">
+                      {errors.verification_token.message}
+                    </p>
+                  )}
+                </div>
+
+                <div className="mt-4 space-y-2">
+                  <Label htmlFor="encrypt_key">Encrypt Key</Label>
+                  <Input
+                    id="encrypt_key"
+                    type="password"
+                    placeholder="Optional Event Subscriptions Encrypt Key"
+                    {...register("encrypt_key")}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Optional. Only enter this if encrypted webhook payloads
+                    are enabled in the Lark/Feishu Event Subscriptions console.
+                  </p>
+                  {errors.encrypt_key && (
+                    <p className="text-xs text-destructive">
+                      {errors.encrypt_key.message}
+                    </p>
+                  )}
+                </div>
               </div>
             </>
           )}

@@ -4,14 +4,19 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{CredentialFieldSpec, ServiceCapabilities};
+use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+use crate::models::user_service::UserService;
 use crate::mw::auth::AuthUser;
-use crate::services::{api_docs_service, catalog_service, openapi_parser};
+use crate::services::{
+    api_docs_service, catalog_service, openapi_parser, org_service, user_service_service,
+};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogEntryResponse {
@@ -279,6 +284,36 @@ fn parsed_endpoint_to_response(p: openapi_parser::ParsedEndpoint) -> CatalogEndp
     }
 }
 
+async fn find_readable_user_service_by_slug(
+    state: &AppState,
+    actor_user_id: &str,
+    slug: &str,
+) -> AppResult<Option<UserService>> {
+    if let Some(service) =
+        user_service_service::find_by_slug(&state.db, actor_user_id, slug).await?
+    {
+        return Ok(Some(service));
+    }
+
+    let memberships =
+        org_service::list_memberships_for_member(&state.db, actor_user_id, false).await?;
+    for membership in memberships {
+        let Some(service) =
+            user_service_service::find_by_slug(&state.db, &membership.org_user_id, slug).await?
+        else {
+            continue;
+        };
+
+        let access =
+            org_service::resolve_owner_access(&state.db, actor_user_id, &service.user_id).await?;
+        if access.can_read() && access.allows_resource(&service.id) {
+            return Ok(Some(service));
+        }
+    }
+
+    Ok(None)
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/catalog/{slug}/endpoints",
@@ -299,9 +334,54 @@ pub async fn list_catalog_endpoints(
     Path(slug): Path<String>,
 ) -> AppResult<Json<CatalogEndpointsListResponse>> {
     let user_id = auth_user.user_id.to_string();
-    let svc = catalog_service::get_downstream_service_by_slug(&state.db, &slug, &user_id).await?;
+    let svc =
+        match catalog_service::get_downstream_service_by_slug(&state.db, &slug, &user_id).await {
+            Ok(service) => Some(service),
+            Err(AppError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
 
-    let Some(ref spec_url) = svc.openapi_spec_url else {
+    if let Some(svc) = svc {
+        let Some(ref spec_url) = svc.openapi_spec_url else {
+            return Ok(Json(CatalogEndpointsListResponse {
+                slug,
+                openapi_spec_url: None,
+                endpoints: vec![],
+            }));
+        };
+
+        // Use the hardened fetch path (DNS pinning, 5MB size limit, redirect policy, 60s cache)
+        // instead of raw reqwest to prevent SSRF and resource exhaustion.
+        let spec = api_docs_service::fetch_spec_json(spec_url).await?;
+        let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
+        let endpoints = parsed
+            .into_iter()
+            .map(parsed_endpoint_to_response)
+            .collect();
+
+        return Ok(Json(CatalogEndpointsListResponse {
+            slug,
+            openapi_spec_url: Some(spec_url.clone()),
+            endpoints,
+        }));
+    }
+
+    let Some(user_service) = find_readable_user_service_by_slug(&state, &user_id, &slug).await?
+    else {
+        return Err(AppError::NotFound("Catalog entry not found".to_string()));
+    };
+
+    let user_endpoint = state
+        .db
+        .collection::<UserEndpoint>(USER_ENDPOINTS)
+        .find_one(doc! {
+            "_id": &user_service.endpoint_id,
+            "user_id": &user_service.user_id,
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
+
+    let Some(ref spec_url) = user_endpoint.openapi_spec_url else {
         return Ok(Json(CatalogEndpointsListResponse {
             slug,
             openapi_spec_url: None,
@@ -309,9 +389,7 @@ pub async fn list_catalog_endpoints(
         }));
     };
 
-    // Use the hardened fetch path (DNS pinning, 5MB size limit, redirect policy, 60s cache)
-    // instead of raw reqwest to prevent SSRF and resource exhaustion.
-    let spec = api_docs_service::fetch_spec_json(spec_url).await?;
+    let spec = api_docs_service::fetch_spec_json_scoped(spec_url, &user_endpoint.user_id).await?;
     let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
     let endpoints = parsed
         .into_iter()
@@ -323,4 +401,321 @@ pub async fn list_catalog_endpoints(
         openapi_spec_url: Some(spec_url.clone()),
         endpoints,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::list_catalog_endpoints;
+    use crate::errors::AppError;
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+    use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
+    use crate::models::user::COLLECTION_NAME as USERS;
+    use crate::models::user::UserType;
+    use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::services::api_docs_service::{cache_test_spec, clear_test_spec_cache};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+        test_user_endpoint, test_user_service,
+    };
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+    use uuid::Uuid;
+
+    const CUSTOM_SPEC_URL: &str = "https://example.com/custom-openapi.json";
+    const CATALOG_SPEC_URL: &str = "https://example.com/catalog-openapi.json";
+
+    fn openapi_spec() -> serde_json::Value {
+        serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "Spec", "version": "1.0.0" },
+            "paths": {
+                "/widgets": {
+                    "get": {
+                        "operationId": "listWidgets",
+                        "summary": "List widgets",
+                        "responses": {
+                            "200": {
+                                "description": "ok"
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    fn catalog_service(service_id: &str, slug: &str) -> DownstreamService {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = service_id.to_string();
+        service.slug = slug.to_string();
+        service.name = "Catalog Service".to_string();
+        service.base_url = "https://catalog.example.com".to_string();
+        service.openapi_spec_url = Some(CATALOG_SPEC_URL.to_string());
+        service
+    }
+
+    #[tokio::test]
+    async fn list_catalog_endpoints_returns_custom_service_operations() {
+        let Some(db) = connect_test_database("catalog_endpoints_custom").await else {
+            eprintln!("skipping catalog integration test: no local MongoDB available");
+            return;
+        };
+        clear_test_spec_cache();
+
+        let caller_id = Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "Custom API",
+            "https://custom.example.com",
+            Some(CUSTOM_SPEC_URL),
+            None,
+        );
+        let user_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "custom-api",
+            &endpoint.id,
+            None,
+            None,
+        );
+
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&caller_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint.clone())
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .unwrap();
+        cache_test_spec(CUSTOM_SPEC_URL, Some(&caller_id), openapi_spec());
+
+        let state = test_app_state(db);
+        let Json(response) = list_catalog_endpoints(
+            State(state),
+            test_auth_user(&caller_id),
+            Path("custom-api".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.slug, "custom-api");
+        assert_eq!(response.openapi_spec_url.as_deref(), Some(CUSTOM_SPEC_URL));
+        assert_eq!(response.endpoints.len(), 1);
+        assert_eq!(response.endpoints[0].method, "GET");
+        assert_eq!(response.endpoints[0].path, "/widgets");
+    }
+
+    #[tokio::test]
+    async fn list_catalog_endpoints_returns_empty_for_custom_service_without_spec() {
+        let Some(db) = connect_test_database("catalog_endpoints_empty").await else {
+            eprintln!("skipping catalog integration test: no local MongoDB available");
+            return;
+        };
+
+        let caller_id = Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "Custom API",
+            "https://custom.example.com",
+            None,
+            None,
+        );
+        let user_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "custom-api",
+            &endpoint.id,
+            None,
+            None,
+        );
+
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&caller_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let Json(response) = list_catalog_endpoints(
+            State(state),
+            test_auth_user(&caller_id),
+            Path("custom-api".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.slug, "custom-api");
+        assert!(response.openapi_spec_url.is_none());
+        assert!(response.endpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_catalog_endpoints_hides_other_users_custom_services() {
+        let Some(db) = connect_test_database("catalog_endpoints_hidden").await else {
+            eprintln!("skipping catalog integration test: no local MongoDB available");
+            return;
+        };
+
+        let caller_id = Uuid::new_v4().to_string();
+        let owner_id = Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &owner_id,
+            "Other API",
+            "https://other.example.com",
+            Some(CUSTOM_SPEC_URL),
+            None,
+        );
+        let user_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &owner_id,
+            "other-api",
+            &endpoint.id,
+            None,
+            None,
+        );
+
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(&caller_id, UserType::Person),
+                test_user(&owner_id, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let err = list_catalog_endpoints(
+            State(state),
+            test_auth_user(&caller_id),
+            Path("other-api".to_string()),
+        )
+        .await
+        .expect_err("other user's custom service should be hidden");
+
+        assert!(matches!(err, AppError::NotFound(message) if message == "Catalog entry not found"));
+    }
+
+    #[tokio::test]
+    async fn list_catalog_endpoints_prefers_catalog_entries_when_slug_exists_in_catalog() {
+        let Some(db) = connect_test_database("catalog_endpoints_catalog").await else {
+            eprintln!("skipping catalog integration test: no local MongoDB available");
+            return;
+        };
+        clear_test_spec_cache();
+
+        let caller_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&caller_id, UserType::Person))
+            .await
+            .unwrap();
+
+        let catalog = catalog_service(&Uuid::new_v4().to_string(), "catalog-api");
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        cache_test_spec(CATALOG_SPEC_URL, None, openapi_spec());
+
+        let state = test_app_state(db);
+        let Json(response) = list_catalog_endpoints(
+            State(state),
+            test_auth_user(&caller_id),
+            Path("catalog-api".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.slug, "catalog-api");
+        assert_eq!(response.openapi_spec_url.as_deref(), Some(CATALOG_SPEC_URL));
+        assert_eq!(response.endpoints.len(), 1);
+        assert_eq!(response.endpoints[0].name, "listWidgets");
+    }
+
+    #[tokio::test]
+    async fn list_catalog_endpoints_allows_org_shared_custom_services() {
+        let Some(db) = connect_test_database("catalog_endpoints_org").await else {
+            eprintln!("skipping catalog integration test: no local MongoDB available");
+            return;
+        };
+        clear_test_spec_cache();
+
+        let member_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "Org API",
+            "https://org.example.com",
+            Some(CUSTOM_SPEC_URL),
+            None,
+        );
+        let user_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "org-api",
+            &endpoint.id,
+            None,
+            None,
+        );
+
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(&member_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<crate::models::org_membership::OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &member_id, OrgRole::Member, None))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .unwrap();
+        cache_test_spec(CUSTOM_SPEC_URL, Some(&org_id), openapi_spec());
+
+        let state = test_app_state(db);
+        let Json(response) = list_catalog_endpoints(
+            State(state),
+            test_auth_user(&member_id),
+            Path("org-api".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.slug, "org-api");
+        assert_eq!(response.endpoints.len(), 1);
+        assert_eq!(response.endpoints[0].path, "/widgets");
+    }
 }

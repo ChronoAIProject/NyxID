@@ -63,6 +63,15 @@ export interface KeyInfo {
    * as read-only.
    */
   readonly credential_source?: CredentialSource;
+  /**
+   * Lark / Feishu only: deep link to the developer console permissions
+   * page for this key's underlying app, with the catalog's required
+   * scopes pre-selected. `null` for non-Lark services or when no
+   * `app_id` could be derived from the stored credential.
+   */
+  readonly permission_setup_url?: string | null;
+  /** Scope keys encoded in `permission_setup_url`. */
+  readonly permission_setup_scopes?: readonly string[] | null;
 }
 
 export interface KeyListResponse {

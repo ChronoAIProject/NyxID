@@ -28,6 +28,8 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct CallbackPayload {
     pub message_id: String,
     pub platform: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_token: Option<String>,
     pub agent: CallbackAgent,
     pub conversation: CallbackConversation,
     pub sender: CallbackSender,
@@ -441,6 +443,7 @@ pub fn build_callback_payload(
     api_key_id: &str,
     api_key_name: &str,
     inbound: &InboundMessage,
+    reply_token: Option<String>,
 ) -> CallbackPayload {
     let attachments: Vec<CallbackAttachment> = inbound
         .attachments
@@ -457,6 +460,7 @@ pub fn build_callback_payload(
     CallbackPayload {
         message_id: message.id.clone(),
         platform: message.platform.clone(),
+        reply_token,
         agent: CallbackAgent {
             api_key_id: api_key_id.to_string(),
             name: api_key_name.to_string(),
@@ -521,6 +525,7 @@ mod tests {
         let payload = CallbackPayload {
             message_id: "msg-1".to_string(),
             platform: "telegram".to_string(),
+            reply_token: None,
             agent: CallbackAgent {
                 api_key_id: "key-1".to_string(),
                 name: "test-agent".to_string(),
@@ -552,8 +557,44 @@ mod tests {
         assert_eq!(json["conversation"]["type"], "private");
         assert_eq!(json["content"]["type"], "text");
         // Optional None fields should be absent
+        assert!(json.get("reply_token").is_none());
         assert!(json.get("reply_to_message_id").is_none());
         assert!(json.get("thread_id").is_none());
+    }
+
+    #[test]
+    fn callback_payload_includes_reply_token_when_present() {
+        let payload = CallbackPayload {
+            message_id: "msg-1".to_string(),
+            platform: "telegram".to_string(),
+            reply_token: Some("reply-token".to_string()),
+            agent: CallbackAgent {
+                api_key_id: "key-1".to_string(),
+                name: "test-agent".to_string(),
+            },
+            conversation: CallbackConversation {
+                id: "conv-1".to_string(),
+                platform_id: "12345".to_string(),
+                conversation_type: "private".to_string(),
+            },
+            sender: CallbackSender {
+                platform_id: "user-1".to_string(),
+                display_name: None,
+            },
+            content: CallbackContent {
+                content_type: "text".to_string(),
+                text: Some("Hello".to_string()),
+                attachments: vec![],
+            },
+            reply_to_message_id: None,
+            reply_to_platform_message_id: None,
+            thread_id: None,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            raw_platform_data: None,
+        };
+
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["reply_token"], "reply-token");
     }
 
     #[test]
@@ -596,6 +637,7 @@ mod tests {
         CallbackPayload {
             message_id: "msg-test".to_string(),
             platform: "device".to_string(),
+            reply_token: None,
             agent: CallbackAgent {
                 api_key_id: "key-1".to_string(),
                 name: "test-agent".to_string(),
@@ -630,6 +672,7 @@ mod tests {
             base_url: "http://localhost".to_string(),
             frontend_url: "http://localhost".to_string(),
             cors_allowed_origins: vec![],
+            csrf_trusted_origins: vec![],
             database_url: String::new(),
             database_max_connections: 1,
             environment: "test".to_string(),
@@ -637,6 +680,7 @@ mod tests {
             jwt_public_key_path: String::new(),
             jwt_issuer: "test".to_string(),
             jwt_access_ttl_secs: 900,
+            jwt_relay_reply_ttl_secs: 1800,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,
             google_client_secret: None,
@@ -657,6 +701,9 @@ mod tests {
             rate_limit_burst: 30,
             trusted_proxy_ips: vec![],
             sa_token_ttl_secs: 3600,
+            telemetry_dsn: None,
+            telemetry_host: None,
+            share_analytics: false,
             cookie_domain: None,
             telegram_bot_token: None,
             telegram_webhook_secret: None,

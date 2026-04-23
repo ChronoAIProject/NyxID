@@ -43,14 +43,21 @@ export const createChannelBotSchema = z
       .max(128, "Label must be at most 128 characters"),
     app_id: z.string().max(256).optional(),
     app_secret: z.string().max(512).optional(),
+    verification_token: z.string().max(512).optional(),
+    encrypt_key: z.string().max(512).optional(),
     public_key: z.string().max(256).optional(),
     /** When set, create this bot under the given org (caller must be admin). */
     target_org_id: z.string().optional(),
   })
   .superRefine((data, ctx) => {
+    const appId = data.app_id?.trim();
+    const appSecret = data.app_secret?.trim();
+    const verificationToken = data.verification_token?.trim();
+    const publicKey = data.public_key?.trim();
+
     if (
       (data.platform === "lark" || data.platform === "feishu") &&
-      !data.app_id
+      !appId
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -60,7 +67,7 @@ export const createChannelBotSchema = z
     }
     if (
       (data.platform === "lark" || data.platform === "feishu") &&
-      !data.app_secret
+      !appSecret
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -68,14 +75,24 @@ export const createChannelBotSchema = z
         path: ["app_secret"],
       });
     }
-    if (data.platform === "discord" && !data.public_key) {
+    if (
+      (data.platform === "lark" || data.platform === "feishu") &&
+      !verificationToken
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Verification Token is required for Lark/Feishu",
+        path: ["verification_token"],
+      });
+    }
+    if (data.platform === "discord" && !publicKey) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "Public Key is required for Discord",
         path: ["public_key"],
       });
     }
-    if (data.platform === "slack" && !data.app_secret) {
+    if (data.platform === "slack" && !appSecret) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "Signing Secret is required for Slack",
@@ -85,6 +102,16 @@ export const createChannelBotSchema = z
   });
 
 export type CreateChannelBotFormData = z.infer<typeof createChannelBotSchema>;
+
+export const updateChannelBotSchema = z.object({
+  label: z.string().max(128, "Label must be at most 128 characters").optional(),
+  verification_token: z.string().max(512).optional(),
+  encrypt_key: z.string().max(512).optional(),
+  app_id: z.string().max(256).optional(),
+  app_secret: z.string().max(512).optional(),
+});
+
+export type UpdateChannelBotFormData = z.infer<typeof updateChannelBotSchema>;
 
 export const createChannelConversationSchema = z.object({
   channel_bot_id: z.string().uuid("Invalid bot ID"),

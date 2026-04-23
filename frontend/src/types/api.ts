@@ -392,6 +392,9 @@ export interface PublicConfig {
   readonly social_providers: readonly string[];
   readonly invite_code_required: boolean;
   readonly email_auth_enabled: boolean;
+  readonly telemetry_dsn?: string;
+  readonly telemetry_host?: string;
+  readonly telemetry_share_analytics?: boolean;
 }
 
 export type CredentialMode = "admin" | "user" | "both";

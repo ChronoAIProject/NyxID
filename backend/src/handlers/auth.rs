@@ -16,6 +16,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
 use crate::services::{audit_service, auth_service, invite_code_service, token_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
 
@@ -395,6 +396,25 @@ pub async fn register(
         "Check your email for a verification link to complete registration.".to_string()
     };
 
+    // Telemetry: user.signed_up. Pre-auth path, so surface comes from
+    // the `X-NyxID-Client` header rather than from `AuthUser`.
+    let tele = TelemetryContext::from_headers(
+        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-nyxid-client-version")
+            .and_then(|v| v.to_str().ok()),
+    );
+    emit_event(
+        state.telemetry.as_deref(),
+        &result.user_id,
+        None,
+        &tele,
+        TelemetryEvent::UserSignedUp {
+            method: "email".to_string(),
+            invite_code_used: body.invite_code.is_some(),
+        },
+    );
+
     Ok(Json(RegisterResponse {
         user_id: result.user_id,
         message,
@@ -462,6 +482,18 @@ pub async fn login(
 
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
+
+    // Telemetry context is derived here from the X-NyxID-Client headers
+    // so both match arms can emit `auth.logged_in` AFTER their
+    // state-changing session/token creation succeeds. Emitting
+    // before-the-match risked reporting "logged in" on a request that
+    // later failed inside `create_session*`.
+    let tele_login = TelemetryContext::from_headers(
+        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-nyxid-client-version")
+            .and_then(|v| v.to_str().ok()),
+    );
     let client_mode = resolve_auth_client_mode(&headers, body.client.as_deref());
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
@@ -490,6 +522,17 @@ pub async fn login(
                 secure,
                 domain,
             )?;
+
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id.to_string(),
+                None,
+                &tele_login,
+                TelemetryEvent::AuthLoggedIn {
+                    method: "password".to_string(),
+                    mfa_required: body.mfa_code.is_some(),
+                },
+            );
 
             Ok((
                 response_headers,
@@ -523,6 +566,17 @@ pub async fn login(
                 None,
             );
 
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id.to_string(),
+                None,
+                &tele_login,
+                TelemetryEvent::AuthLoggedIn {
+                    method: "password".to_string(),
+                    mfa_required: body.mfa_code.is_some(),
+                },
+            );
+
             Ok((
                 response_headers,
                 Json(LoginResponse {
@@ -543,6 +597,7 @@ pub async fn logout(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     headers: HeaderMap,
 ) -> AppResult<(HeaderMap, Json<LogoutResponse>)> {
     if let Some(session_id) = auth_user.session_id {
@@ -553,6 +608,14 @@ pub async fn logout(
         )
         .await?;
     }
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AuthLoggedOut,
+    );
 
     audit_service::log_async(
         state.db.clone(),

@@ -219,6 +219,34 @@ impl CredentialConfig {
             oauth_client_id_param_name: None,
         }
     }
+
+    /// Create a no-auth placeholder config. The entry exists so the
+    /// node can resolve `target_url` and accept proxy requests, but
+    /// no credential gets injected. Used when a server-held service
+    /// is downgraded to `auth_method: "none"` — we cannot drop the
+    /// entry outright because `proxy_executor` 502s with
+    /// "No credentials configured" before it even considers
+    /// `base_url` (thirty-third-round Codex P1).
+    pub fn new_no_auth(target_url: Option<String>) -> Self {
+        Self {
+            injection_method: "none".to_string(),
+            target_url,
+            header_name: None,
+            header_value_encrypted: None,
+            param_name: None,
+            param_value_encrypted: None,
+            oauth_managed: false,
+            oauth_token_url: None,
+            oauth_access_token_encrypted: None,
+            oauth_refresh_token_encrypted: None,
+            oauth_token_expires_at: None,
+            oauth_client_id_encrypted: None,
+            oauth_client_secret_encrypted: None,
+            oauth_scopes: None,
+            oauth_token_endpoint_auth_method: None,
+            oauth_client_id_param_name: None,
+        }
+    }
 }
 
 impl NodeConfig {
@@ -344,6 +372,31 @@ impl NodeConfig {
         Ok(())
     }
 
+    /// Three-state resolution for `target_url` on an incoming
+    /// `credential_update` frame:
+    ///
+    /// - `Some("url")`: set target to that URL.
+    /// - `Some("")`: explicit clear — drop the stored URL so the node
+    ///   falls back to its local config. The NyxID backend emits this
+    ///   when a service's `endpoint_url` is reset to `""` (switching
+    ///   back to node-local target resolution).
+    /// - `None`: field omitted — preserve whatever URL is already
+    ///   stored. Used on pure credential rotations where the backend
+    ///   isn't touching the endpoint URL; without this fallback,
+    ///   `self.credentials.insert` would replace the whole
+    ///   `CredentialConfig` and silently clear the node-local
+    ///   downstream URL that services like HA Supervisor depend on.
+    fn resolve_target_url(&self, service_slug: &str, incoming: Option<&str>) -> Option<String> {
+        match incoming {
+            Some("") => None,
+            Some(url) => Some(url.to_string()),
+            None => self
+                .credentials
+                .get(service_slug)
+                .and_then(|c| c.target_url.clone()),
+        }
+    }
+
     /// Add a header credential using the configured secret backend.
     pub fn add_header_credential_via(
         &mut self,
@@ -354,13 +407,10 @@ impl NodeConfig {
         backend: &SecretBackend,
     ) -> Result<()> {
         let encrypted = backend.store_credential_value(service_slug, header_value)?;
+        let resolved_target_url = self.resolve_target_url(service_slug, target_url);
         self.credentials.insert(
             service_slug.to_string(),
-            CredentialConfig::new_header(
-                header_name.to_string(),
-                encrypted,
-                target_url.map(String::from),
-            ),
+            CredentialConfig::new_header(header_name.to_string(), encrypted, resolved_target_url),
         );
         Ok(())
     }
@@ -375,12 +425,13 @@ impl NodeConfig {
         backend: &SecretBackend,
     ) -> Result<()> {
         let encrypted = backend.store_credential_value(service_slug, param_value)?;
+        let resolved_target_url = self.resolve_target_url(service_slug, target_url);
         self.credentials.insert(
             service_slug.to_string(),
             CredentialConfig::new_query_param(
                 param_name.to_string(),
                 encrypted,
-                target_url.map(String::from),
+                resolved_target_url,
             ),
         );
         Ok(())
@@ -396,13 +447,10 @@ impl NodeConfig {
         backend: &SecretBackend,
     ) -> Result<()> {
         let encrypted = backend.store_credential_value(service_slug, credential)?;
+        let resolved_target_url = self.resolve_target_url(service_slug, target_url);
         self.credentials.insert(
             service_slug.to_string(),
-            CredentialConfig::new_path_prefix(
-                prefix.to_string(),
-                encrypted,
-                target_url.map(String::from),
-            ),
+            CredentialConfig::new_path_prefix(prefix.to_string(), encrypted, resolved_target_url),
         );
         Ok(())
     }
@@ -419,6 +467,35 @@ impl NodeConfig {
             )));
         }
         backend.delete_credential(service_slug)?;
+        Ok(())
+    }
+
+    /// Set a no-auth placeholder entry for a service: preserves (or
+    /// resolves) the target URL but drops any previously-stored
+    /// secret. Used when NyxID pushes a `credential_update` after the
+    /// user downgrades `auth_method` to `none` on a server-held
+    /// service. Cleans up the secret-backend entry if one was present
+    /// so stale material doesn't linger (thirty-third-round Codex P1).
+    pub fn set_no_auth_via(
+        &mut self,
+        service_slug: &str,
+        target_url: Option<&str>,
+        backend: &SecretBackend,
+    ) -> Result<()> {
+        let resolved_target_url = self.resolve_target_url(service_slug, target_url);
+        let had_secret = self.credentials.get(service_slug).is_some_and(|c| {
+            c.header_value_encrypted.is_some() || c.param_value_encrypted.is_some()
+        });
+        self.credentials.insert(
+            service_slug.to_string(),
+            CredentialConfig::new_no_auth(resolved_target_url),
+        );
+        if had_secret {
+            // Best-effort: a stale secret left behind wouldn't be
+            // injected (the new entry is injection_method="none"),
+            // but cleaning up keeps the backend tidy.
+            let _ = backend.delete_credential(service_slug);
+        }
         Ok(())
     }
 }

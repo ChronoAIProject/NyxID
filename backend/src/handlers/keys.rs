@@ -8,12 +8,14 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::user_api_key::UserApiKey;
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    credential_push_service, node_service, org_service, unified_key_service, user_api_key_service,
-    user_endpoint_service, user_service_service,
+    catalog_service, credential_push_service, lark_permission, node_service, org_service,
+    unified_key_service, user_api_key_service, user_endpoint_service, user_service_service,
 };
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 /// Resolve which user_id owns this unified key (= UserService) and whether
 /// the actor may modify it. Returns the effective owner_id (which may be an
@@ -290,6 +292,17 @@ pub struct KeyResponse {
     /// Mirrors the same field on the `/user-services` response so the
     /// frontend can group AI Services by personal vs each org section.
     pub credential_source: crate::handlers::user_services_handler::CredentialSourceResponse,
+    /// Lark / Feishu only: deep link to the developer console permissions
+    /// page with the catalog's required scopes pre-selected. Surfaced for
+    /// `api-lark-bot` / `api-feishu-bot` keys whose stored credential
+    /// includes an `app_id`. `None` for every other service so the field
+    /// is omitted from the JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_setup_url: Option<String>,
+    /// Scope keys encoded in `permission_setup_url`, echoed so the UI
+    /// can render the list of scopes that will be granted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_setup_scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -309,6 +322,14 @@ pub struct UpdateKeyRequest {
     pub auth_key_name: Option<String>,
     /// Node ID for routing ("" to clear, Some(id) to set)
     pub node_id: Option<String>,
+    /// Credential to store on the server (bearer token / api key / basic
+    /// auth string / etc.) for this service. When set alongside a
+    /// credential-bearing `auth_method`, provisions a `UserApiKey` if the
+    /// service was created with `auth_method: "none"` and has no stored
+    /// credential yet (#419), or rotates the existing credential. When the
+    /// service is node-routed, the server encrypts the credential and
+    /// pushes it to the target node agent on the next WS heartbeat (#418).
+    pub credential: Option<String>,
     /// Activate or deactivate
     pub is_active: Option<bool>,
     /// Identity propagation mode: "none" | "headers" | "jwt" | "both"
@@ -352,6 +373,112 @@ pub struct DeleteKeyResponse {
     pub deleted: bool,
 }
 
+/// Extract the Lark / Feishu `app_id` from a plaintext credential string.
+///
+/// `api-lark-bot` and `api-feishu-bot` keys store the credential as a JSON
+/// object `{"app_id": "...", "app_secret": "..."}` (the
+/// `lark_family_token_exchange_config` credential schema). For OAuth-based
+/// `api-lark` / `api-feishu` keys with BYO app credentials the app id
+/// arrives via `user_oauth_client_id_encrypted` instead — that path is
+/// handled separately by `extract_app_id_from_api_key`.
+///
+/// Returns `None` when the credential isn't valid JSON or doesn't contain
+/// a non-empty `app_id` field, so the caller can short-circuit cleanly
+/// instead of treating a parse failure as an error.
+fn extract_app_id_from_credential(credential: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(credential).ok()?;
+    let app_id = value.get("app_id")?.as_str()?.trim();
+    if app_id.is_empty() {
+        None
+    } else {
+        Some(app_id.to_string())
+    }
+}
+
+/// Decrypt a `UserApiKey` and pull out the Lark / Feishu app id, checking
+/// both the `token_exchange` JSON credential blob and the BYO OAuth client
+/// id field. All decrypt / parse failures are silently dropped to `None`
+/// because this is best-effort metadata for a UI deep link, not a security
+/// boundary — a missing URL just degrades to the manual setup flow.
+async fn extract_app_id_from_api_key(
+    encryption_keys: &crate::crypto::aes::EncryptionKeys,
+    api_key: &UserApiKey,
+) -> Option<String> {
+    if let Some(blob) = api_key.credential_encrypted.as_ref()
+        && !blob.is_empty()
+        && let Ok(bytes) = encryption_keys.decrypt(blob).await
+        && let Ok(plaintext) = String::from_utf8(bytes)
+        && let Some(app_id) = extract_app_id_from_credential(&plaintext)
+    {
+        return Some(app_id);
+    }
+
+    if let Some(blob) = api_key.user_oauth_client_id_encrypted.as_ref()
+        && !blob.is_empty()
+        && let Ok(bytes) = encryption_keys.decrypt(blob).await
+        && let Ok(plaintext) = String::from_utf8(bytes)
+    {
+        let trimmed = plaintext.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
+}
+
+/// Derive the Lark / Feishu permission setup URL for an AI Services key,
+/// or `(None, None)` when the key isn't a Lark variant or we can't
+/// resolve an app id. This is best-effort surface metadata: any I/O or
+/// decryption failure resolves to "no URL" so the rest of the response
+/// still ships.
+async fn derive_lark_permission_for_key(
+    state: &AppState,
+    user_id: &str,
+    catalog_service_id: Option<&str>,
+    catalog_service_slug: Option<&str>,
+    api_key_id: Option<&str>,
+) -> (Option<String>, Option<Vec<String>>) {
+    let region = catalog_service_slug.and_then(lark_permission::region_for_catalog_service_slug);
+    let region = match region {
+        Some(r) => r,
+        None => return (None, None),
+    };
+
+    let api_key_id = match api_key_id {
+        Some(id) => id,
+        None => return (None, None),
+    };
+    let api_key = match user_api_key_service::get_api_key(&state.db, user_id, api_key_id).await {
+        Ok(k) => k,
+        Err(_) => return (None, None),
+    };
+
+    let app_id = match extract_app_id_from_api_key(&state.encryption_keys, &api_key).await {
+        Some(id) => id,
+        None => return (None, None),
+    };
+
+    let scopes = match catalog_service_id {
+        Some(id) => catalog_service::get_required_permissions(&state.db, id).await,
+        None => Vec::new(),
+    };
+    let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let url = lark_permission::build_permission_setup_url(region, &app_id, &scope_refs);
+    (Some(url), Some(scopes))
+}
+
+fn validate_optional_label_for_update(label: Option<&str>) -> AppResult<()> {
+    if let Some(label) = label
+        && (label.is_empty() || label.len() > 200)
+    {
+        return Err(AppError::ValidationError(
+            "Label must be between 1 and 200 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/keys",
@@ -368,6 +495,7 @@ pub struct DeleteKeyResponse {
 pub async fn create_key(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<CreateKeyRequest>,
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
@@ -511,6 +639,46 @@ pub async fn create_key(
             allowed: true,
         };
     }
+
+    // Telemetry: key.created. `source` is "catalog" when a catalog slug
+    // drove the bootstrap, else "custom".
+    let catalog_slug = response.catalog_service_slug.clone();
+    let source = if catalog_slug.is_some() {
+        "catalog"
+    } else {
+        "custom"
+    };
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::KeyCreated {
+            source: source.to_string(),
+            catalog_slug,
+            has_node_binding: response.node_id.is_some(),
+        },
+    );
+
+    // For Lark/Feishu services, derive the developer-console permission
+    // setup deep link so the create response can hand it back to the
+    // CLI / UI in the same round-trip. `key_response_from_result` leaves
+    // `catalog_service_slug` empty (it has no catalog row to look up), so
+    // fall back to the request's `service_slug` to drive the region check.
+    let (permission_url, permission_scopes) = derive_lark_permission_for_key(
+        &state,
+        &user_id_str,
+        response.catalog_service_id.as_deref(),
+        response
+            .catalog_service_slug
+            .as_deref()
+            .or(body.service_slug.as_deref()),
+        response.api_key_id.as_deref(),
+    )
+    .await;
+    response.permission_setup_url = permission_url;
+    response.permission_setup_scopes = permission_scopes;
+
     Ok(Json(response))
 }
 
@@ -564,7 +732,22 @@ pub async fn get_key(
     // the only layer that knows whether the actor is the direct owner or
     // accessing via an org membership.
     view.credential_source = access.source;
-    Ok(Json(key_response_from_view(view)))
+    let owner_id = access.owner_id.clone();
+    let catalog_id = view.catalog_service_id.clone();
+    let catalog_slug = view.catalog_service_slug.clone();
+    let api_key_id = view.api_key_id.clone();
+    let mut response = key_response_from_view(view);
+    let (permission_url, permission_scopes) = derive_lark_permission_for_key(
+        &state,
+        &owner_id,
+        catalog_id.as_deref(),
+        catalog_slug.as_deref(),
+        api_key_id.as_deref(),
+    )
+    .await;
+    response.permission_setup_url = permission_url;
+    response.permission_setup_scopes = permission_scopes;
+    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -601,14 +784,504 @@ pub async fn update_key(
         ));
     }
 
-    // Update label on UserApiKey if provided (skip for auto-connected no-auth services)
+    // NOTE: label writes are intentionally deferred past the strict
+    // node push below. A label change combined with a node-routed
+    // credential update must be atomic — committing the label before
+    // the push succeeds leaves the API returning a failed `PUT /keys`
+    // while the label has already changed, so a retry wouldn't be
+    // idempotent and callers can't tell which parts of the update
+    // actually applied (thirty-first-round Codex P2). The deferred
+    // label-write block lives after the strict push succeeds, right
+    // alongside the `endpoint_url` / `openapi_spec_url` commits.
+    //
+    // But the *validation* still has to happen up front. Otherwise an
+    // invalid label on an existing service would let the handler rotate
+    // a credential and even push it to a node, then fail only when the
+    // deferred label write runs — returning an error despite the
+    // credential change having already applied.
+    validate_optional_label_for_update(body.label.as_deref())?;
+
+    // NOTE: `body.endpoint_url` is intentionally NOT written to the DB
+    // here. For node-routed services we must keep the endpoint URL and
+    // the strict node push atomic — if the push fails (node offline /
+    // WS buffer full), the DB must not already show the new URL while
+    // the node keeps serving the old `target_url`. The actual
+    // `update_endpoint` call lives below, right after
+    // `push_credential_to_node_strict` succeeds. The push itself reads
+    // `effective_endpoint_url_for_push` directly from the incoming body
+    // (or the current view when absent), so it doesn't need the DB to
+    // reflect the new URL first. Ninth-round Codex review P2.
+
+    // NOTE: `body.openapi_spec_url` is intentionally NOT written here
+    // either. For the same atomicity reason as `endpoint_url`, deferring
+    // the spec URL commit until after the strict node push keeps
+    // `PUT /keys` retries idempotent when the push fails — a user who
+    // sends `{credential, endpoint_url, openapi_spec_url}` in the same
+    // body and hits a push error can retry without the spec URL already
+    // having been partially committed (twenty-fourth-round Codex P2).
+    // The actual `update_endpoint` call moves to after
+    // `push_credential_to_node_strict`, next to the `endpoint_url`
+    // write.
+
+    let has_identity_update = body.identity_propagation_mode.is_some()
+        || body.identity_include_user_id.is_some()
+        || body.identity_include_email.is_some()
+        || body.identity_include_name.is_some()
+        || body.identity_jwt_audience.is_some()
+        || body.forward_access_token.is_some()
+        || body.inject_delegation_token.is_some()
+        || body.delegation_token_scope.is_some();
+
+    // Provision or rotate the backing `UserApiKey` before touching the
+    // `UserService` row. Covers two cases (NyxID#418, #419):
+    //
+    //  1. Service was POSTed with `auth_method: "none"` and is now being
+    //     upgraded to bearer/basic/header/etc. A new `UserApiKey` is
+    //     created and linked to the service so the subsequent
+    //     `update_user_service` + reconcile pass the `api_key_id.is_none()`
+    //     guards instead of returning a misleading error.
+    //  2. Caller supplied a `credential` on an existing service. Rotates
+    //     the stored value (or is rejected when auth_method is still
+    //     `none`).
+    //
+    // Runs unconditionally when either field is present so the handler
+    // can decide without pre-loading current state; the helper
+    // short-circuits to no-op when nothing needs to change.
+    let credential_provided_nonempty = body.credential.as_deref().is_some_and(|c| !c.is_empty());
+
+    // Precompute the identity config we'd apply later so the pre-validator
+    // can check it against the same normalizer `update_user_service` uses.
+    // Mirrors the construction inside the `update_user_service` guarded
+    // block below — factored out to avoid a second identical block.
+    let identity_for_validate = if has_identity_update {
+        Some(user_service_service::IdentityConfig {
+            identity_propagation_mode: body
+                .identity_propagation_mode
+                .clone()
+                .unwrap_or(view.identity_propagation_mode.clone()),
+            identity_include_user_id: body
+                .identity_include_user_id
+                .unwrap_or(view.identity_include_user_id),
+            identity_include_email: body
+                .identity_include_email
+                .unwrap_or(view.identity_include_email),
+            identity_include_name: body
+                .identity_include_name
+                .unwrap_or(view.identity_include_name),
+            identity_jwt_audience: if body.identity_jwt_audience.is_some() {
+                body.identity_jwt_audience.clone()
+            } else {
+                view.identity_jwt_audience.clone()
+            },
+            forward_access_token: body
+                .forward_access_token
+                .unwrap_or(view.forward_access_token),
+            inject_delegation_token: body
+                .inject_delegation_token
+                .unwrap_or(view.inject_delegation_token),
+            delegation_token_scope: body
+                .delegation_token_scope
+                .clone()
+                .unwrap_or(view.delegation_token_scope.clone()),
+        })
+    } else {
+        None
+    };
+
+    // Pre-validate every field `update_user_service` would validate after
+    // we provision, so an invalid request can't leave an orphaned
+    // `UserApiKey` linked to a partially-updated service. Without this,
+    // a PUT that upgrades `auth_method: none` AND includes (e.g.) a
+    // bogus `custom_user_agent` or denylisted default header returns 400
+    // only after `ensure_user_api_key_for_update` has already stored a
+    // fresh credential on the server. Raised by the second Codex review
+    // (P1) of the NyxID#419 fix. The validator mirrors every rule inside
+    // `update_user_service`; keep them in sync.
+    let any_service_field = body.auth_method.is_some()
+        || body.auth_key_name.is_some()
+        || body.node_id.is_some()
+        || body.custom_user_agent.is_some()
+        || body.default_request_headers.is_some()
+        || has_identity_update
+        // Also trigger when only `credential` is present, so the
+        // token_exchange JSON-shape check inside `validate_update_inputs`
+        // runs before the rotation would otherwise persist a malformed
+        // blob on a service that already had `auth_method: token_exchange`.
+        || body.credential.is_some()
+        // `endpoint_url` is itself a node-delivery field (ends up as the
+        // node's local `target_url`), so an endpoint-only PUT must also
+        // run the validator to (a) enforce URL format, (b) gate the
+        // node-ownership check, and (c) run the token_exchange /
+        // identity cross-field guards. Without this, a service admin
+        // without node-write access could rewrite another user's
+        // node-local routing through a minimal `{endpoint_url}` body
+        // (eleventh-round Codex P1).
+        || body.endpoint_url.is_some()
+        // `openapi_spec_url` goes through the same pre-validator so a
+        // malformed spec URL is rejected before any credential
+        // mutation or node push lands (twenty-sixth-round Codex P2).
+        || body.openapi_spec_url.is_some();
+    if any_service_field {
+        let current_service =
+            user_service_service::get_user_service(&state.db, &user_id_str, &key_id).await?;
+        user_service_service::validate_update_inputs(
+            &state.db,
+            &actor,
+            &current_service,
+            body.auth_method.as_deref(),
+            body.auth_key_name.as_deref(),
+            body.node_id.as_deref(),
+            identity_for_validate.as_ref(),
+            body.custom_user_agent.as_deref(),
+            body.default_request_headers.as_ref(),
+            body.credential.as_deref(),
+            body.endpoint_url.as_deref(),
+            body.openapi_spec_url.as_deref(),
+        )
+        .await?;
+    }
+
+    if body.auth_method.is_some() || body.credential.is_some() {
+        // Preserve the user's display label (either the explicit new
+        // `label` in this request, or the current `view.label`, which on a
+        // no-auth service reflects `UserEndpoint.label`) when provisioning
+        // the first `UserApiKey`. `build_key_view` prefers `api_key.label`
+        // over `endpoint.label`, so seeding the new record with the slug
+        // would silently rename the service in GET responses. Raised as P3
+        // by the Codex review of the NyxID#419 fix.
+        let preferred_label = body.label.as_deref().unwrap_or(view.label.as_str());
+        unified_key_service::ensure_user_api_key_for_update(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            &key_id,
+            body.auth_method.as_deref(),
+            body.credential.as_deref(),
+            body.node_id.as_deref(),
+            preferred_label,
+        )
+        .await?;
+    }
+
+    // Node-routed services end up with `credential_type == "node_managed"`
+    // at rest (the node agent holds the actual secret; MCP / proxy
+    // fall-through logic keys off that invariant). When the caller just
+    // stored a fresh credential server-side, we must push it to the node
+    // *before* the subsequent reconcile wipes the encrypted blob — and
+    // we only let reconcile wipe when the push landed. If the node is
+    // offline, we fail the PUT so the credential stays on the server for
+    // the user to retry, instead of silently losing it.
+    //
+    // Push runs BEFORE `update_user_service` so a failed delivery can't
+    // partially commit routing/auth mutations (fourth-round Codex P1).
+    // Effective post-update values are computed from `body` + `view` and
+    // passed into the push so the target reflects the user's requested
+    // state, not whatever the DB still holds.
+    //
+    // Speculative push on plain `node_id` bind is intentionally omitted
+    // (third-round Codex review P2): a service downgraded to
+    // `auth_method: "none"` still retains its old `api_key_id`, and
+    // pushing that stale secret to the node would reactivate a
+    // credential the user already turned off.
+    // Normalize legacy `view.node_id == Some("")` to `None`: some rows
+    // carry the empty string instead of `None`, and a push to an
+    // empty-string node_id is always going to hit `NodeOffline`.
+    // Mirrors the same normalization in `validate_update_inputs`.
+    // Fifteenth-round Codex P1.
+    let effective_node_id_for_push: Option<String> = match body.node_id.as_deref() {
+        Some("") => None,
+        Some(n) => Some(n.to_string()),
+        None => view.node_id.clone().filter(|n| !n.is_empty()),
+    };
+    let effective_auth_method_for_push = body
+        .auth_method
+        .as_deref()
+        .unwrap_or(view.auth_method.as_str())
+        .to_string();
+    // Default `auth_key_name` to `Authorization` on bearer/basic when the
+    // caller didn't supply one. Services created with
+    // `auth_method: "none"` store an empty `auth_key_name` and services
+    // previously on `header` auth may carry a custom header name like
+    // `X-API-Key` — either would cause the node-side push to inject
+    // `Bearer …` / `Basic …` under the wrong header. The backend's
+    // direct-routing path already hardcodes `Authorization` for bearer
+    // auth, so defaulting here keeps node-routed and direct behavior
+    // consistent with `create_key`'s custom HTTP defaults (sixteenth-
+    // round Codex P1).
+    let bearer_like = matches!(effective_auth_method_for_push.as_str(), "bearer" | "basic");
+    // Compute the auth_key_name the handler should use, both for the
+    // strict node push and for persistence in `update_user_service`
+    // (eighteenth-round Codex P2). Two cases synthesize a default of
+    // `Authorization` when the caller didn't supply one:
+    //   - `view.auth_key_name` is empty (services originally created
+    //     with `auth_method: "none"` store an empty string)
+    //   - The caller is actively switching auth_method to bearer/basic
+    //     and the stored name is for another scheme (e.g., `X-API-Key`
+    //     left over from `header` auth).
+    // Otherwise fall through to the existing DB value.
+    let effective_auth_key_name_for_push = match body.auth_key_name.as_deref() {
+        Some(name) => name.to_string(),
+        None => {
+            // Synthesize `Authorization` whenever the effective auth is
+            // bearer/basic AND the stored name is empty or wrong (not
+            // `Authorization`). Covers three cases:
+            //   (a) caller is switching auth_method to bearer/basic,
+            //   (b) service was already bearer/basic with empty name
+            //       (e.g., originally created with auth_method=none),
+            //   (c) node-only rebind on an existing bearer/basic whose
+            //       stored name is stale (e.g., `X-API-Key` left over
+            //       from a previous `header` auth). Without this, the
+            //       push on move-to-node would write `Bearer …` under
+            //       the wrong header and direct routing would recover
+            //       only by virtue of the hardcoded `Authorization`
+            //       fallback in the proxy (twentieth-round Codex P2).
+            let needs_default =
+                bearer_like && !view.auth_key_name.eq_ignore_ascii_case("Authorization");
+            if needs_default {
+                "Authorization".to_string()
+            } else {
+                view.auth_key_name.clone()
+            }
+        }
+    };
+    // Feed the same normalized value into `update_user_service` so the
+    // DB row stays in sync with what we push to the node. Without this,
+    // the next rotation (whether via `PUT /keys` or `/api-keys/external`)
+    // would rebuild the push from a stale `auth_key_name` and inject
+    // `Bearer …` under the wrong header again.
+    //
+    // Fires whenever we need to persist an `Authorization` override so
+    // subsequent rotations (via `PUT /keys` or `/api-keys/external`)
+    // don't rebuild the push from a stale stored header name:
+    //   (a) caller is switching auth_method to bearer/basic and the
+    //       stored name is not `Authorization`;
+    //   (b) caller is not touching auth_method but is rotating the
+    //       credential on an existing bearer/basic service whose stored
+    //       name is empty/wrong;
+    //   (c) caller is rebinding the node on an existing bearer/basic
+    //       service whose stored name is stale (twentieth-round Codex
+    //       P2). Without this, a `PUT /keys {node_id: X}` push would
+    //       write to the wrong header on the new node and the DB would
+    //       stay inconsistent with what the push just sent.
+    let wrong_stored_header = !view.auth_key_name.eq_ignore_ascii_case("Authorization");
+    let current_is_bearer_like = matches!(view.auth_method.as_str(), "bearer" | "basic");
+    let node_id_in_body = body.node_id.is_some();
+    let persisted_auth_key_name_override: Option<String> = match body.auth_key_name.as_deref() {
+        Some(_) => None, // caller supplied; update_user_service uses body.auth_key_name
+        None if bearer_like && body.auth_method.is_some() && wrong_stored_header => {
+            Some("Authorization".to_string())
+        }
+        None if current_is_bearer_like
+            && body.auth_method.is_none()
+            && wrong_stored_header
+            && (credential_provided_nonempty || node_id_in_body) =>
+        {
+            Some("Authorization".to_string())
+        }
+        _ => None,
+    };
+    // Effective endpoint URL semantics for the credential-update frame:
+    //   * body has `endpoint_url: "some-url"` → Some("some-url"): push sets target
+    //   * body has `endpoint_url: ""`         → Some(""):          push *clears*
+    //     target and the node falls back to its local config
+    //   * body omits `endpoint_url`           → Some(view.url) when view has a
+    //     non-empty URL (re-assert current), None when view's URL is empty
+    //     (don't touch the node's locally-configured target)
+    //
+    // The "explicit clear vs. omit-to-preserve" distinction matters after
+    // twelfth-round Codex P2: collapsing empty strings to `None`
+    // uniformly meant the node could never be told to drop a
+    // stale server-managed URL once an endpoint was switched back to
+    // `endpoint_url: ""`.
+    let old_effective_node_id = view.node_id.as_deref().filter(|n| !n.is_empty());
+    let new_effective_node_id = match body.node_id.as_deref() {
+        Some("") => None,
+        Some(n) => Some(n),
+        None => old_effective_node_id,
+    };
+    let is_node_reassignment = body.node_id.is_some()
+        && new_effective_node_id != old_effective_node_id
+        && new_effective_node_id.is_some();
+
+    let effective_endpoint_url_for_push: Option<String> = match body.endpoint_url.as_deref() {
+        Some("") => Some(String::new()),
+        Some(url) => Some(url.to_string()),
+        None => {
+            let v = view.endpoint_url.as_str();
+            if v.is_empty() {
+                // On a pure rotation (same node, no URL change), omit
+                // `target_url` so the node preserves its local
+                // `nyxid node credentials add --url` value — HA
+                // Supervisor and similar setups depend on that.
+                // On a reassignment to a different node, force an
+                // explicit clear instead: the destination node may have
+                // a stale entry for the same slug from a prior binding,
+                // and the "None = preserve" branch on the node side
+                // would otherwise inherit that old URL
+                // (thirtieth-round Codex P2).
+                if is_node_reassignment {
+                    Some(String::new())
+                } else {
+                    None
+                }
+            } else {
+                Some(v.to_string())
+            }
+        }
+    };
+
+    // Decide whether this PUT should push to a node. Two triggers:
+    //  1. The caller supplied a fresh `credential` in this body — the
+    //     canonical "store server-side + deliver to node" flow.
+    //  2. The caller is touching a node-delivery field (`node_id`,
+    //     `auth_method`, `auth_key_name`, `endpoint_url`) on a service
+    //     that already holds a server credential that hasn't been
+    //     delivered yet. Covers the retry path after a previous
+    //     `PUT /keys/:id` with `credential + node_id` failed at push
+    //     time: `ensure_user_api_key_for_update` provisioned the
+    //     credential server-side, but `update_user_service` hadn't
+    //     committed the routing yet. On resubmit (say, without
+    //     `credential` but with `node_id + auth_method`) the handler
+    //     now re-delivers that stored secret to the node.
+    //
+    // Crucially scoped: unrelated edits like `label`, `is_active`,
+    // identity props, or `default_request_headers` must NOT trigger a
+    // push — they don't affect what the node has to know, and forcing
+    // a push on them would (a) fail those edits whenever the node is
+    // offline and (b) bypass the node-ownership check since the
+    // request body has no `credential` (ninth-round Codex P1).
+    let refreshed_api_key_id = unified_key_service::get_key(&state.db, &user_id_str, &key_id)
+        .await?
+        .api_key_id;
+    let touches_node_delivery_field = body.node_id.is_some()
+        || body.auth_method.is_some()
+        || body.auth_key_name.is_some()
+        || body.endpoint_url.is_some();
+    let stored_credential_ready_to_push = match refreshed_api_key_id.as_deref() {
+        Some(ak_id)
+            if !credential_provided_nonempty
+                && touches_node_delivery_field
+                && effective_auth_method_for_push != "none" =>
+        {
+            let ak = user_api_key_service::get_api_key(&state.db, &user_id_str, ak_id).await?;
+            // Provider-backed credentials (OAuth / device-code / master
+            // API key configured at the catalog level) must NEVER be
+            // copied to a node. `create_key` rejects the equivalent
+            // `{node_id, provider_config_id, credential}` combination at
+            // creation time with "Node-routed provider services must be
+            // authorized on the node agent"; the PUT retry-push path
+            // must respect the same contract. Twelfth-round Codex P2.
+            let is_provider_backed = ak.provider_config_id.is_some();
+            !is_provider_backed && user_api_key_service::has_server_credential(&ak)
+        }
+        _ => false,
+    };
+
+    // Provider-backed + node-routed credential writes are already
+    // rejected upstream in `validate_update_inputs` (before any key
+    // mutation), so we don't need to re-check here — the request has
+    // aborted with 400 long before reaching this point.
+
+    let should_push = (credential_provided_nonempty || stored_credential_ready_to_push)
+        && effective_node_id_for_push.is_some();
+
+    if should_push
+        && let Some(ref node_id) = effective_node_id_for_push
+        && let Some(ref ak_id) = refreshed_api_key_id
+    {
+        credential_push_service::push_credential_to_node_strict(
+            &state.db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &user_id_str,
+            ak_id,
+            credential_push_service::StrictPushTarget {
+                target_node_id: node_id,
+                service_slug: view.slug.as_str(),
+                auth_method: effective_auth_method_for_push.as_str(),
+                auth_key_name: effective_auth_key_name_for_push.as_str(),
+                target_url: effective_endpoint_url_for_push.as_deref(),
+            },
+        )
+        .await?;
+    }
+
+    // Same-node downgrade to `auth_method: "none"` is pushed BEFORE
+    // any endpoint/service mutations so the PUT stays atomic: if the
+    // node rejects the no-auth placeholder (offline, ack timeout,
+    // legacy agent without `credential_ack_correlation`), we abort
+    // with no partial commit and the old secret keeps working until
+    // the user retries — instead of the previous best-effort ordering
+    // where a failed push left the DB saying "none" while the node
+    // kept injecting the old bearer token (PR #437 review).
+    //
+    // `effective_endpoint_url_for_push` is the same body-preferred
+    // value used by the strict credential push above: it reads
+    // `body.endpoint_url` first and only falls back to
+    // `view.endpoint_url` when the caller didn't touch it, fixing the
+    // stale-URL bug where a combined `{auth_method: "none",
+    // endpoint_url: "<new>"}` used to push the old view URL (PR #437
+    // review).
+    let auth_downgraded_to_none =
+        body.auth_method.as_deref() == Some("none") && view.auth_method != "none";
+    let stays_on_same_node = {
+        let new_effective = match body.node_id.as_deref() {
+            Some("") => None,
+            Some(n) => Some(n),
+            None => view.node_id.as_deref().filter(|n| !n.is_empty()),
+        };
+        let old_effective = view.node_id.as_deref().filter(|n| !n.is_empty());
+        old_effective.is_some() && old_effective == new_effective
+    };
+    if auth_downgraded_to_none
+        && stays_on_same_node
+        && let Some(current_nid) = view.node_id.as_deref().filter(|n| !n.is_empty())
+    {
+        // Mirror the strict credential push's target-URL semantics
+        // exactly:
+        //   * `Some("new-url")` from body → Some("new-url")
+        //   * `Some("")`       from body → Some("")  (explicit clear)
+        //   * body omitted, view has URL → Some(view.url) (reassert)
+        //   * body omitted, view empty   → None (preserve node's local
+        //     config, since same-node)
+        // Previously this only read `view.endpoint_url`, so a combined
+        // `{auth_method: "none", endpoint_url: "<new>"}` pushed the
+        // stale URL and left the node disagreeing with the DB — the
+        // stale-URL bug flagged in the PR #437 review.
+        let target_url_for_no_auth = effective_endpoint_url_for_push.as_deref();
+        credential_push_service::push_no_auth_to_node_strict(
+            &state.node_ws_manager,
+            current_nid,
+            view.slug.as_str(),
+            target_url_for_no_auth,
+        )
+        .await?;
+    }
+
+    // Deferred label write. See the matching note at the top of the
+    // handler: committing the label up front would break the atomic
+    // semantics we now guarantee for node-routed credential updates —
+    // the strict push above aborts with `NodeOffline`/ack-error on
+    // failure, and we want a failed `PUT /keys` to leave the service
+    // untouched so retries are idempotent (thirty-first-round Codex
+    // P2). For a newly-provisioned `UserApiKey` (via
+    // `ensure_user_api_key_for_update`) the label was already seeded
+    // from `preferred_label`, so `update_api_key` is a no-op in that
+    // case — we still run it so the legacy "update existing api_key"
+    // path stays covered. The endpoint-fallback branch writes through
+    // `UserEndpoint.label` when the service has no backing api_key
+    // (legacy auto-connected shape).
     if let Some(ref label) = body.label {
-        if let Some(ref ak_id) = view.api_key_id {
+        let refreshed_api_key_id_for_label =
+            unified_key_service::get_key(&state.db, &user_id_str, &key_id)
+                .await?
+                .api_key_id;
+        if let Some(ak_id) = refreshed_api_key_id_for_label {
             user_api_key_service::update_api_key(
                 &state.db,
                 &state.encryption_keys,
                 &user_id_str,
-                ak_id,
+                &ak_id,
                 Some(label.as_str()),
                 None,
             )
@@ -626,45 +1299,36 @@ pub async fn update_key(
         }
     }
 
-    // Update endpoint URL if provided
-    if let Some(ref url) = body.endpoint_url {
+    // Commit `endpoint_url` and `openapi_spec_url` to the DB now that
+    // the node push (if any) has landed. Holding both writes until
+    // after the strict push keeps server state and node state in sync:
+    // a failed push aborts the PUT early with no partial DB commit, and
+    // a successful push means both sides now agree. See the matching
+    // notes where the early `update_endpoint` calls used to live.
+    // Combined into a single `update_endpoint` call so the two fields
+    // land atomically rather than in two separate writes.
+    let spec_url_update = match body.openapi_spec_url.as_deref() {
+        Some(s) if s.trim().is_empty() => user_endpoint_service::OpenApiSpecUrlUpdate::Clear,
+        Some(s) => user_endpoint_service::OpenApiSpecUrlUpdate::Set(s),
+        None => user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
+    };
+    let url_update = body.endpoint_url.as_deref();
+    if url_update.is_some()
+        || !matches!(
+            spec_url_update,
+            user_endpoint_service::OpenApiSpecUrlUpdate::Leave
+        )
+    {
         user_endpoint_service::update_endpoint(
             &state.db,
             &user_id_str,
             &view.endpoint_id,
-            Some(url.as_str()),
+            url_update,
             None,
-            user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
+            spec_url_update,
         )
         .await?;
     }
-
-    // Update OpenAPI spec URL if provided. Empty string clears.
-    if let Some(ref spec_url) = body.openapi_spec_url {
-        let update = if spec_url.trim().is_empty() {
-            user_endpoint_service::OpenApiSpecUrlUpdate::Clear
-        } else {
-            user_endpoint_service::OpenApiSpecUrlUpdate::Set(spec_url.as_str())
-        };
-        user_endpoint_service::update_endpoint(
-            &state.db,
-            &user_id_str,
-            &view.endpoint_id,
-            None,
-            None,
-            update,
-        )
-        .await?;
-    }
-
-    let has_identity_update = body.identity_propagation_mode.is_some()
-        || body.identity_include_user_id.is_some()
-        || body.identity_include_email.is_some()
-        || body.identity_include_name.is_some()
-        || body.identity_jwt_audience.is_some()
-        || body.forward_access_token.is_some()
-        || body.inject_delegation_token.is_some()
-        || body.delegation_token_scope.is_some();
 
     // Update UserService fields if any are provided.
     //
@@ -679,6 +1343,13 @@ pub async fn update_key(
         || body.custom_user_agent.is_some()
         || body.default_request_headers.is_some()
         || has_identity_update
+        // Credential-only PUTs still need to run `update_user_service`
+        // when we're synthesizing an Authorization override for an
+        // existing bearer/basic service with a stale stored
+        // `auth_key_name`; otherwise the DB row stays wrong and the
+        // next `/api-keys/external` rotation pushes the stale header
+        // name again.
+        || persisted_auth_key_name_override.is_some()
     {
         let identity = if has_identity_update {
             Some(user_service_service::IdentityConfig {
@@ -713,13 +1384,17 @@ pub async fn update_key(
             None
         };
 
+        let auth_key_name_for_update = body
+            .auth_key_name
+            .as_deref()
+            .or(persisted_auth_key_name_override.as_deref());
         user_service_service::update_user_service(
             &state.db,
             &user_id_str,
             &actor,
             &key_id,
             body.auth_method.as_deref(),
-            body.auth_key_name.as_deref(),
+            auth_key_name_for_update,
             body.node_id.as_deref(),
             None,
             body.is_active,
@@ -728,35 +1403,136 @@ pub async fn update_key(
             body.default_request_headers.as_ref(),
         )
         .await?;
+    }
 
-        if body.node_id.is_some() || body.auth_method.is_some() {
-            unified_key_service::reconcile_provider_key_for_service_routing(
-                &state.db,
-                &user_id_str,
-                &key_id,
-            )
-            .await?;
-        }
+    // Run reconcile when routing or auth state changed. Reconcile
+    // preserves server-held credentials on node-routed services (see
+    // `reconcile_provider_key_for_service_routing`), so it's idempotent
+    // and safe regardless of push outcome — no need to gate on a
+    // push_confirmed flag.
+    if body.node_id.is_some() || body.auth_method.is_some() {
+        unified_key_service::reconcile_provider_key_for_service_routing(
+            &state.db,
+            &user_id_str,
+            &key_id,
+        )
+        .await?;
+    }
 
-        // Auto-sync NodeServiceBinding when node_id changes. The actor
-        // owns the node, so it must be the one validated -- the binding
-        // owner (`user_id_str`) may be an org.
-        if body.node_id.is_some() {
-            node_service::sync_node_binding_for_user_service(
-                &state.db,
-                &user_id_str,
-                &actor,
-                view.catalog_service_id.as_deref(),
-                body.node_id.as_deref(),
-                view.node_id.as_deref(),
-            )
-            .await?;
+    // Auto-sync NodeServiceBinding when node_id changes. The actor owns
+    // the node, so it must be the one validated -- the binding owner
+    // (`user_id_str`) may be an org.
+    if body.node_id.is_some() {
+        node_service::sync_node_binding_for_user_service(
+            &state.db,
+            &user_id_str,
+            &actor,
+            view.catalog_service_id.as_deref(),
+            body.node_id.as_deref(),
+            view.node_id.as_deref(),
+        )
+        .await?;
+    }
+
+    // When `node_id` actually changed (or was cleared), tell the
+    // previous node to drop its locally-cached credential for this
+    // service. Otherwise reassigning a service from node A to node B
+    // leaves the secret persisted on A, which is a security regression
+    // whenever a user moves a routed service between nodes
+    // (seventeenth-round Codex P1). Fire-and-forget: if the old node
+    // is offline, nothing we can do right now; when it reconnects it
+    // won't see the service in `NodeServiceBinding` either.
+    if let Some(ref new_node_id_raw) = body.node_id {
+        let new_effective = if new_node_id_raw.is_empty() {
+            None
+        } else {
+            Some(new_node_id_raw.as_str())
+        };
+        let old_effective = view.node_id.as_deref().filter(|n| !n.is_empty());
+        if let Some(old_nid) = old_effective
+            && old_effective != new_effective
+        {
+            // Old-node writability was pre-validated by
+            // `validate_update_inputs` before the commit — so if we got
+            // here the actor is authorized. The post-commit cleanup
+            // itself is best-effort: the reassignment is already
+            // durable, and returning an error now would leave clients
+            // staring at a failed PUT while the stored routing has
+            // actually moved (twenty-ninth-round Codex P1). Log ack /
+            // queue failures and surface them to the operator through
+            // structured logs instead.
+            //
+            // Capability gating: `credential_remove` was introduced
+            // alongside `credential_ack_correlation`, so legacy agents
+            // that did not advertise that flag also do not implement
+            // the remove frame — sending it to them would be silently
+            // dropped as an unknown message. Instead of pretending a
+            // queue success meant the secret was cleared, log a
+            // warning with an explicit operator hint so the residual
+            // credential gets removed manually (thirtieth-round Codex
+            // P1). Wait briefly for the post-reconnect capability
+            // handshake to complete, otherwise an upgraded agent
+            // could be misclassified as legacy here
+            // (twenty-ninth-round Codex P2).
+            state
+                .node_ws_manager
+                .await_capability_resolution(old_nid, std::time::Duration::from_millis(500))
+                .await;
+            if state
+                .node_ws_manager
+                .supports_credential_ack_correlation(old_nid)
+            {
+                if let Err(e) = state
+                    .node_ws_manager
+                    .send_credential_remove_and_wait(
+                        old_nid,
+                        view.slug.as_str(),
+                        std::time::Duration::from_secs(10),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        node_id = %old_nid,
+                        service_slug = %view.slug,
+                        error = %e,
+                        "credential_remove on previous node did not ack cleanly — secret may linger; run `nyxid node credentials remove` on that node to clean up"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    node_id = %old_nid,
+                    service_slug = %view.slug,
+                    "previous node is a legacy agent without credential_remove support — secret likely remains in its local config. Run `nyxid node credentials remove {}` on that node to clean up, then upgrade the node agent",
+                    view.slug
+                );
+            }
         }
     }
 
+    // The same-node `auth_method: "none"` downgrade used to push a
+    // no-auth placeholder here, post-commit and best-effort. That
+    // block has moved up to run BEFORE any DB mutations (next to
+    // `push_credential_to_node_strict`) so a failed node push leaves
+    // the service untouched and the PUT is retry-idempotent (see
+    // comment at the strict push site for the full rationale).
+
     // Return refreshed view
     let updated = unified_key_service::get_key(&state.db, &user_id_str, &key_id).await?;
-    Ok(Json(key_response_from_view(updated)))
+    let catalog_id = updated.catalog_service_id.clone();
+    let catalog_slug = updated.catalog_service_slug.clone();
+    let api_key_id = updated.api_key_id.clone();
+    let mut response = key_response_from_view(updated);
+    let (permission_url, permission_scopes) = derive_lark_permission_for_key(
+        &state,
+        &user_id_str,
+        catalog_id.as_deref(),
+        catalog_slug.as_deref(),
+        api_key_id.as_deref(),
+    )
+    .await;
+    response.permission_setup_url = permission_url;
+    response.permission_setup_scopes = permission_scopes;
+    Ok(Json(response))
 }
 
 /// Query params for `DELETE /api/v1/keys/{key_id}`. The browser
@@ -791,6 +1567,7 @@ pub struct DeleteKeyQuery {
 pub async fn delete_key(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(key_id): Path<String>,
     Query(query): Query<DeleteKeyQuery>,
 ) -> AppResult<Json<DeleteKeyResponse>> {
@@ -827,6 +1604,21 @@ pub async fn delete_key(
     }
 
     unified_key_service::revoke_key(&state.db, &user_id_str, &actor, &key_id).await?;
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::KeyDeleted {
+            source: if view.catalog_service_slug.is_some() {
+                "catalog".to_string()
+            } else {
+                "custom".to_string()
+            },
+        },
+    );
+
     Ok(Json(DeleteKeyResponse {
         message: "Key revoked successfully".to_string(),
         deleted: true,
@@ -895,6 +1687,10 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         // into the actor's own user_id, not into an org.
         credential_source:
             crate::handlers::user_services_handler::CredentialSourceResponse::Personal,
+        // The Lark/Feishu permission deep link is derived in the handler
+        // after this builder runs; see `derive_lark_permission_for_key`.
+        permission_setup_url: None,
+        permission_setup_scopes: None,
     }
 }
 
@@ -943,5 +1739,200 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         ssh_certificate_ttl_minutes: view.ssh_certificate_ttl_minutes,
         openapi_spec_url: view.openapi_spec_url,
         credential_source: view.credential_source.into(),
+        permission_setup_url: None,
+        permission_setup_scopes: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{
+        extract_app_id_from_api_key, extract_app_id_from_credential,
+        validate_optional_label_for_update,
+    };
+    use crate::crypto::aes::EncryptionKeys;
+    use crate::crypto::local_key_provider::LocalKeyProvider;
+    use crate::errors::AppError;
+    use crate::models::user_api_key::UserApiKey;
+    use chrono::Utc;
+
+    fn test_encryption_keys() -> EncryptionKeys {
+        EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x22; 32], None)))
+    }
+
+    fn make_blank_api_key() -> UserApiKey {
+        UserApiKey {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            label: "test".to_string(),
+            credential_type: "api_key".to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: None,
+            source_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn extract_app_id_handles_token_exchange_credential_json() {
+        let credential = r#"{"app_id":"cli_a40bc75349bcfff1","app_secret":"shh"}"#;
+        assert_eq!(
+            extract_app_id_from_credential(credential),
+            Some("cli_a40bc75349bcfff1".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_app_id_trims_whitespace_and_rejects_empty() {
+        let credential = r#"{"app_id":"  ","app_secret":"shh"}"#;
+        assert_eq!(extract_app_id_from_credential(credential), None);
+
+        let credential = r#"{"app_id":"  cli_xyz  ","app_secret":"shh"}"#;
+        assert_eq!(
+            extract_app_id_from_credential(credential),
+            Some("cli_xyz".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_app_id_returns_none_for_non_json_credential() {
+        // Plain bearer tokens / API keys don't parse as JSON; the helper
+        // must short-circuit cleanly so non-Lark services keep working.
+        assert_eq!(extract_app_id_from_credential("sk-test-abc123"), None);
+        assert_eq!(extract_app_id_from_credential(""), None);
+        assert_eq!(extract_app_id_from_credential(r#"{"other":"value"}"#), None);
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_reads_token_exchange_credential_blob() {
+        let keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        let plaintext = r#"{"app_id":"cli_token_exchange","app_secret":"shh"}"#;
+        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
+
+        let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
+        assert_eq!(app_id, Some("cli_token_exchange".to_string()));
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_falls_back_to_byo_oauth_client_id() {
+        let keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        api_key.user_oauth_client_id_encrypted =
+            Some(keys.encrypt(b"  cli_byo_oauth  ").await.unwrap());
+
+        let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
+        assert_eq!(app_id, Some("cli_byo_oauth".to_string()));
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_prefers_credential_blob_over_byo_oauth_id() {
+        // When both fields are populated (rare but possible during
+        // migration overlap), the JSON credential wins because that's
+        // the authoritative source for token-exchange services that
+        // also happen to have a BYO OAuth client recorded.
+        let keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        let plaintext = r#"{"app_id":"cli_from_blob","app_secret":"shh"}"#;
+        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
+        api_key.user_oauth_client_id_encrypted =
+            Some(keys.encrypt(b"cli_from_oauth").await.unwrap());
+
+        let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
+        assert_eq!(app_id, Some("cli_from_blob".to_string()));
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_returns_none_when_decrypt_fails() {
+        // A blob that wasn't produced by this key set must not panic
+        // and must not fall through to a misleading partial value —
+        // best-effort means silently degrade to no URL.
+        let writer_keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        let plaintext = r#"{"app_id":"cli_xyz","app_secret":"shh"}"#;
+        api_key.credential_encrypted =
+            Some(writer_keys.encrypt(plaintext.as_bytes()).await.unwrap());
+
+        // Use a completely different key set to read it back.
+        let reader_keys =
+            EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x99; 32], None)));
+        let app_id = extract_app_id_from_api_key(&reader_keys, &api_key).await;
+        assert_eq!(app_id, None);
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_returns_none_when_credential_blob_is_invalid_utf8() {
+        let keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        // Encrypt raw bytes that aren't valid UTF-8 (eg an arbitrary
+        // binary blob someone shoved into credential_encrypted).
+        api_key.credential_encrypted = Some(keys.encrypt(&[0xff, 0xfe, 0xfd]).await.unwrap());
+
+        let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
+        assert_eq!(app_id, None);
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_returns_none_when_credential_blob_lacks_app_id() {
+        // A token-exchange JSON object missing `app_id` (or with an
+        // empty / whitespace-only one) must not produce a URL.
+        let keys = test_encryption_keys();
+        let mut api_key = make_blank_api_key();
+        let plaintext = r#"{"app_secret":"shh"}"#;
+        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
+
+        let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
+        assert_eq!(app_id, None);
+    }
+
+    #[tokio::test]
+    async fn extract_from_api_key_returns_none_for_blank_blobs_and_unset_fields() {
+        let keys = test_encryption_keys();
+        let api_key = make_blank_api_key();
+
+        // Both encrypted fields unset → None.
+        assert_eq!(extract_app_id_from_api_key(&keys, &api_key).await, None);
+
+        // Empty (zero-length) blob is treated as "absent" — exercises
+        // the `!blob.is_empty()` guard so we don't try to decrypt
+        // empty ciphertext.
+        let mut api_key_with_empty = make_blank_api_key();
+        api_key_with_empty.credential_encrypted = Some(Vec::new());
+        api_key_with_empty.user_oauth_client_id_encrypted = Some(Vec::new());
+        assert_eq!(
+            extract_app_id_from_api_key(&keys, &api_key_with_empty).await,
+            None
+        );
+    }
+
+    #[test]
+    fn update_label_validation_accepts_none_and_valid_lengths() {
+        assert!(validate_optional_label_for_update(None).is_ok());
+        assert!(validate_optional_label_for_update(Some("ok")).is_ok());
+        assert!(validate_optional_label_for_update(Some(&"x".repeat(200))).is_ok());
+    }
+
+    #[test]
+    fn update_label_validation_rejects_empty_and_too_long_values() {
+        let err = validate_optional_label_for_update(Some(""))
+            .expect_err("empty label should be rejected before any mutation");
+        assert!(matches!(err, AppError::ValidationError(_)));
+
+        let err = validate_optional_label_for_update(Some(&"x".repeat(201)))
+            .expect_err("overlong label should be rejected before any mutation");
+        assert!(matches!(err, AppError::ValidationError(_)));
     }
 }

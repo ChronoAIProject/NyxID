@@ -322,6 +322,28 @@ async fn list_catalog_filtered(
     Ok(resolved_entries)
 }
 
+/// Look up the catalog entry's `required_permissions` list by id.
+///
+/// Returns an empty `Vec` when the catalog row is missing, has the field
+/// unset, or the lookup fails. No visibility check is needed: callers
+/// already hold the `catalog_service_id` via their own `UserService`
+/// row, which is itself how access is granted to the underlying catalog
+/// entry. Used by `handlers/keys.rs` to derive the Lark / Feishu
+/// permission setup deep link without reaching directly into the
+/// `DownstreamService` collection.
+pub async fn get_required_permissions(
+    db: &mongodb::Database,
+    catalog_service_id: &str,
+) -> Vec<String> {
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": catalog_service_id })
+        .await
+        .ok()
+        .flatten()
+        .and_then(|svc| svc.required_permissions)
+        .unwrap_or_default()
+}
+
 /// Get the raw DownstreamService by slug (lightweight, no provider/encryption lookup).
 ///
 /// Enforces the same layered visibility rules as `get_catalog_entry`:

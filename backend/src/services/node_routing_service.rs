@@ -265,6 +265,26 @@ async fn load_viable_user_service_catalog_ids(
     user_id: &str,
     ws_manager: &NodeWsManager,
 ) -> AppResult<Vec<String>> {
+    load_viable_user_service_catalog_ids_filtered(db, user_id, ws_manager, |_| true).await
+}
+
+/// Scope-aware variant: a `UserService` catalog entry only counts as a
+/// viable route when its `node_id` passes `node_filter`. Used by the
+/// scoped MCP discovery path so a scoped API key doesn't see platform
+/// tools whose only user-service route is pinned to an out-of-scope
+/// node (twenty-third-round Codex P2). `execute_tool` rejects the call
+/// anyway once it sees the primary `node_id` is out of scope, so
+/// discovery and execution must agree or scoped agents get broken tool
+/// listings.
+async fn load_viable_user_service_catalog_ids_filtered<F>(
+    db: &mongodb::Database,
+    user_id: &str,
+    ws_manager: &NodeWsManager,
+    node_filter: F,
+) -> AppResult<Vec<String>>
+where
+    F: Fn(&str) -> bool,
+{
     let services: Vec<UserService> = db
         .collection::<UserService>(USER_SERVICES)
         .find(doc! {
@@ -309,6 +329,10 @@ async fn load_viable_user_service_catalog_ids(
             continue;
         };
 
+        if !node_filter(node_id) {
+            continue;
+        }
+
         if let Some(node) = online_nodes.get(node_id)
             && is_node_viable(node, ws_manager)
         {
@@ -331,6 +355,42 @@ pub async fn list_routable_service_ids(
         .map(|binding| binding.service_id)
         .collect();
     service_ids.extend(load_viable_user_service_catalog_ids(db, user_id, ws_manager).await?);
+    service_ids.sort();
+    service_ids.dedup();
+    Ok(service_ids)
+}
+
+/// Scope-aware variant: a `NodeServiceBinding` only counts as a viable
+/// route when its `node_id` passes `node_filter`. The catalog `UserService`
+/// contribution is kept because it reflects the user's own `node_id`
+/// choice (the caller applies its own scope check separately).
+///
+/// Used by MCP discovery so scoped API keys don't see tools whose only
+/// viable bindings are on nodes they can't reach (eighteenth-round
+/// Codex P2).
+pub async fn list_routable_service_ids_filtered<F>(
+    db: &mongodb::Database,
+    user_id: &str,
+    ws_manager: &NodeWsManager,
+    node_filter: F,
+) -> AppResult<Vec<String>>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut service_ids: Vec<String> = load_viable_bindings(db, user_id, None, ws_manager)
+        .await?
+        .into_iter()
+        .filter(|binding| node_filter(&binding.node_id))
+        .map(|binding| binding.service_id)
+        .collect();
+    // Pass the same scope filter into the user-service catalog path so
+    // an out-of-scope `UserService.node_id` doesn't make a platform
+    // tool look executable (twenty-third-round Codex P2). The caller's
+    // `execute_tool` would later 403 on the primary node scope check.
+    service_ids.extend(
+        load_viable_user_service_catalog_ids_filtered(db, user_id, ws_manager, &node_filter)
+            .await?,
+    );
     service_ids.sort();
     service_ids.dedup();
     Ok(service_ids)

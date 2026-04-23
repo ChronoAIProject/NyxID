@@ -26,6 +26,15 @@ pub enum CredentialInjection {
         prefix: String,
         credential: Zeroizing<String>,
     },
+    /// No credential injection. Entry exists so the node can resolve
+    /// `target_url` and accept proxy requests for this slug, but no
+    /// header/query-param/path-prefix injection is performed. Used by
+    /// server-held services that have been downgraded to
+    /// `auth_method: "none"` — removing the entry outright would make
+    /// `proxy_executor` 502 with "No credentials configured" before it
+    /// even looks at `base_url`, breaking the downstream call
+    /// (thirty-third-round Codex P1).
+    NoAuth,
 }
 
 /// A single service's decrypted credential.
@@ -43,6 +52,7 @@ impl ServiceCredential {
             CredentialInjection::Header { .. } => "header",
             CredentialInjection::QueryParam { .. } => "query_param",
             CredentialInjection::PathPrefix { .. } => "path_prefix",
+            CredentialInjection::NoAuth => "none",
         }
     }
 
@@ -52,6 +62,7 @@ impl ServiceCredential {
             CredentialInjection::Header { name, .. } => name,
             CredentialInjection::QueryParam { name, .. } => name,
             CredentialInjection::PathPrefix { prefix, .. } => prefix,
+            CredentialInjection::NoAuth => "(no auth)",
         }
     }
 
@@ -169,6 +180,17 @@ impl CredentialStore {
                         },
                     );
                 }
+                "none" => {
+                    // No-auth placeholder: entry exists for target_url
+                    // resolution but no credential gets injected.
+                    map.insert(
+                        slug.clone(),
+                        ServiceCredential {
+                            injection: CredentialInjection::NoAuth,
+                            target_url: cred_config.target_url.clone(),
+                        },
+                    );
+                }
                 other => {
                     return Err(Error::Config(format!(
                         "Unknown injection method '{other}' for credential '{slug}'"
@@ -242,6 +264,15 @@ impl CredentialStore {
                                 prefix: prefix.to_string(),
                                 credential: Zeroizing::new(value),
                             },
+                            target_url: cred_config.target_url.clone(),
+                        },
+                    );
+                }
+                "none" => {
+                    map.insert(
+                        slug.clone(),
+                        ServiceCredential {
+                            injection: CredentialInjection::NoAuth,
                             target_url: cred_config.target_url.clone(),
                         },
                     );

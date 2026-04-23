@@ -429,4 +429,62 @@ mod tests {
         let err = ensure_person_user(&user).expect_err("must reject org");
         assert!(matches!(err, AppError::OrgCannotAuthenticate));
     }
+
+    // Regression tests for issue #424 — see docs/ORG_MODEL.md "Public vs
+    // authenticated surfaces". Public auth endpoints (login, forgot-password)
+    // must make org-owner emails indistinguishable from unknown emails so
+    // unauthenticated callers cannot enumerate which emails belong to orgs.
+    // `OrgCannotAuthenticate` is intentionally NOT surfaced on these paths.
+
+    #[tokio::test]
+    async fn authenticate_user_returns_generic_failure_for_org_email() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_org").await else {
+            eprintln!("skipping auth_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let mut org = make_person();
+        org.email = "org-owner@example.com".to_string();
+        org.user_type = UserType::Org;
+        db.collection::<User>(USERS).insert_one(&org).await.unwrap();
+
+        let err = authenticate_user(&db, &org.email, "irrelevant-password")
+            .await
+            .expect_err("org email must not authenticate");
+
+        match err {
+            AppError::AuthenticationFailed(_) => {}
+            other => panic!("expected AuthenticationFailed for anti-enumeration, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn initiate_password_reset_returns_none_for_org_email_and_persists_no_token() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_org").await else {
+            eprintln!("skipping auth_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let mut org = make_person();
+        org.email = "org-owner@example.com".to_string();
+        org.user_type = UserType::Org;
+        db.collection::<User>(USERS).insert_one(&org).await.unwrap();
+
+        let result = initiate_password_reset(&db, &org.email)
+            .await
+            .expect("forgot-password must not error for org email");
+        assert!(result.is_none(), "no reset token should be issued for org");
+
+        let stored = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &org.id })
+            .await
+            .unwrap()
+            .expect("org user still exists");
+        assert!(
+            stored.password_reset_token.is_none(),
+            "no reset token should be persisted on the org user"
+        );
+        assert!(stored.password_reset_expires_at.is_none());
+    }
 }

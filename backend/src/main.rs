@@ -7,6 +7,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod api_docs;
+mod cleanup_cli;
 mod config;
 mod crypto;
 mod db;
@@ -18,6 +19,10 @@ mod mw;
 mod routes;
 mod services;
 mod ssh_cli;
+mod telemetry;
+
+#[cfg(test)]
+mod test_utils;
 
 use std::sync::Arc;
 
@@ -90,6 +95,9 @@ pub struct AppState {
     /// tenant tokens, OAuth 2.0 client_credentials, etc.) and the channel
     /// bot adapter's outbound replies.
     pub token_exchange_cache: Arc<TokenExchangeCache>,
+    /// Vendor-neutral telemetry client. `None` when no DSN is configured
+    /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
+    pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -109,6 +117,9 @@ enum Commands {
     Login(login_cli::LoginArgs),
     /// SSH client helper commands for certificate issuance and ProxyCommand integration.
     Ssh(ssh_cli::SshCli),
+    /// Scan for and hard-delete orphaned user_endpoints and user_api_keys left
+    /// over by pre-fix revoke flows. Prints a preview and prompts before deleting.
+    CleanupOrphans(cleanup_cli::CleanupArgs),
 }
 
 #[tokio::main]
@@ -127,7 +138,9 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
 
-    match cli.command {
+    // Login and Ssh don't touch the database; handle them before we connect.
+    // Other subcommands (like CleanupOrphans) fall through to the post-DB path.
+    let post_db_command = match cli.command {
         Some(Commands::Login(args)) => {
             if let Err(error) = login_cli::run(args).await {
                 eprintln!("Login failed: {error}");
@@ -142,8 +155,8 @@ async fn main() {
             }
             return;
         }
-        None => {}
-    }
+        other => other,
+    };
 
     // Load configuration
     let mut config = AppConfig::from_env();
@@ -157,6 +170,13 @@ async fn main() {
     // Handle CLI commands (exit without starting server)
     if let Some(email) = cli.promote_admin {
         run_promote_admin(&db, &email).await;
+        return;
+    }
+    if let Some(Commands::CleanupOrphans(args)) = post_db_command {
+        if let Err(error) = cleanup_cli::run(&db, args).await {
+            eprintln!("Cleanup failed: {error}");
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -229,9 +249,10 @@ async fn main() {
         .await
         .expect("Failed to seed default OAuth clients");
 
-    // Backfill `proxy` scope on dynamic-registration clients created before
-    // MCP scope enforcement landed (idempotent).
-    services::oauth_client_service::migrate_dynamic_clients_add_proxy_scope(&db)
+    // Backfill default MCP scopes on dynamic-registration clients whenever
+    // the default set grows (e.g. issue #434 added `roles`/`groups`).
+    // Idempotent.
+    services::oauth_client_service::migrate_dynamic_clients_grant_default_mcp_scopes(&db)
         .await
         .expect("Failed to migrate dynamic OAuth clients");
 
@@ -244,6 +265,13 @@ async fn main() {
     services::provider_service::seed_default_services(&db, encryption_keys.as_ref())
         .await
         .expect("Failed to seed default services");
+
+    // Heal UserService rows whose `auth_method` was snapshotted as the raw
+    // catalog `"none"` instead of the SPR-derived injection config, which
+    // stops the proxy from injecting the caller's stored credential.
+    services::user_service_service::backfill_stale_catalog_auth_snapshots(&db)
+        .await
+        .expect("Failed to backfill stale UserService auth_method snapshots");
 
     // Seed system roles for RBAC (idempotent)
     services::role_service::seed_system_roles(&db)
@@ -385,7 +413,12 @@ async fn main() {
         event_dedup_cache,
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+        telemetry: telemetry::TelemetryClient::from_config(&config),
     };
+
+    // Spawn the telemetry-erasure worker. No-op when `state.telemetry`
+    // is `None` (hard-off mode); the function logs + returns.
+    services::telemetry_erasure_service::spawn_worker(state.db.clone(), state.telemetry.clone());
 
     // Create rate limiters
     let global_rate_limiter =
@@ -604,6 +637,8 @@ async fn main() {
             "X-User-Email".parse().unwrap(),
             "X-User-Display-Name".parse().unwrap(),
             "X-API-Key".parse().unwrap(),
+            "X-NyxID-Client".parse().unwrap(),
+            "X-NyxID-Client-Version".parse().unwrap(),
         ]))
         .allow_credentials(true);
 
@@ -625,6 +660,12 @@ async fn main() {
             mw::security_headers::security_headers_middleware,
         ))
         .layer(axum_mw::from_fn(mw::rate_limit::rate_limit_middleware))
+        // Derive `TelemetryContext` from the `X-NyxID-Client` headers on
+        // every request and stash it in request extensions so handlers
+        // can read it when they emit events. Header-only; the
+        // `surface="agent"` override for api-key auth happens at emit
+        // time in `emit_event` (see `docs/TELEMETRY.md` §5.1).
+        .layer(axum_mw::from_fn(mw::telemetry::telemetry_mw))
         .layer(Extension(per_ip_rate_limiter))
         .layer(Extension(global_rate_limiter))
         .layer(TraceLayer::new_for_http());

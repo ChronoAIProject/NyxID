@@ -128,8 +128,54 @@ struct GetUpdatesResponse {
     result: Vec<TelegramUpdate>,
 }
 
+/// Build the HTML body of an approval notification. Extracted from
+/// `send_approval_message` so the template logic can be unit-tested
+/// without a Telegram client.
+fn format_approval_message(
+    service_name: &str,
+    service_slug: &str,
+    requester_label: &str,
+    operation_summary: &str,
+    expires_in_secs: u32,
+    org_name: Option<&str>,
+) -> String {
+    let svc_name = html_escape(service_name);
+    let svc_slug = html_escape(service_slug);
+    let req_label = html_escape(requester_label);
+    let op_summary = html_escape(operation_summary);
+
+    match org_name {
+        Some(org) => {
+            let org_escaped = html_escape(org);
+            format!(
+                "<b>Org Access Request — {org_escaped}</b>\n\n\
+                 <b>Org:</b> {org_escaped}\n\
+                 <b>Service:</b> {svc_name} (<code>{svc_slug}</code>)\n\
+                 <b>Requester:</b> {req_label}\n\
+                 <b>Action:</b> <code>{op_summary}</code>\n\
+                 <b>Expires:</b> {expires_in_secs}s"
+            )
+        }
+        None => format!(
+            "<b>Access Request</b>\n\n\
+             <b>Service:</b> {svc_name} (<code>{svc_slug}</code>)\n\
+             <b>Requester:</b> {req_label}\n\
+             <b>Action:</b> <code>{op_summary}</code>\n\
+             <b>Expires:</b> {expires_in_secs}s"
+        ),
+    }
+}
+
 /// Send an approval request message with Approve/Reject inline keyboard.
 /// Returns the Telegram message_id.
+///
+/// `org_name` is `Some(name)` when the request was created under an org's
+/// approval policy. In that case the header switches to `Org Access
+/// Request — {org_name}` and an extra `<b>Org:</b> {org_name}` line is
+/// prepended so admins can tell at a glance that they are deciding on
+/// behalf of the org rather than for themselves. Passing `None` keeps
+/// the message byte-identical to the pre-org wording so non-org
+/// requests are unaffected.
 #[allow(clippy::too_many_arguments)]
 pub async fn send_approval_message(
     http_client: &Client,
@@ -141,17 +187,15 @@ pub async fn send_approval_message(
     requester_label: &str,
     operation_summary: &str,
     expires_in_secs: u32,
+    org_name: Option<&str>,
 ) -> AppResult<i64> {
-    let svc_name = html_escape(service_name);
-    let svc_slug = html_escape(service_slug);
-    let req_label = html_escape(requester_label);
-    let op_summary = html_escape(operation_summary);
-    let text = format!(
-        "<b>Access Request</b>\n\n\
-         <b>Service:</b> {svc_name} (<code>{svc_slug}</code>)\n\
-         <b>Requester:</b> {req_label}\n\
-         <b>Action:</b> <code>{op_summary}</code>\n\
-         <b>Expires:</b> {expires_in_secs}s"
+    let text = format_approval_message(
+        service_name,
+        service_slug,
+        requester_label,
+        operation_summary,
+        expires_in_secs,
+        org_name,
     );
 
     // Use UUID without hyphens for callback data (32 chars + 2 prefix = 34 chars)
@@ -517,5 +561,50 @@ mod tests {
     #[test]
     fn parse_no_separator() {
         assert!(parse_callback_data("noseparator").is_none());
+    }
+
+    #[test]
+    fn format_personal_approval_message_keeps_existing_wording() {
+        let text = format_approval_message(
+            "OpenAI",
+            "openai",
+            "CI bot",
+            "POST /v1/chat/completions",
+            30,
+            None,
+        );
+        assert!(text.starts_with("<b>Access Request</b>"));
+        assert!(!text.contains("Org Access Request"));
+        assert!(!text.contains("<b>Org:</b>"));
+        assert!(text.contains("<b>Service:</b> OpenAI"));
+    }
+
+    #[test]
+    fn format_org_approval_message_uses_org_header_and_line() {
+        let text = format_approval_message(
+            "OpenAI",
+            "openai",
+            "CI bot",
+            "POST /v1/chat/completions",
+            30,
+            Some("Acme Inc."),
+        );
+        assert!(text.starts_with("<b>Org Access Request — Acme Inc.</b>"));
+        assert!(text.contains("<b>Org:</b> Acme Inc."));
+        assert!(text.contains("<b>Service:</b> OpenAI"));
+    }
+
+    #[test]
+    fn format_org_approval_message_escapes_html_in_org_name() {
+        let text = format_approval_message(
+            "OpenAI",
+            "openai",
+            "CI bot",
+            "POST /v1/chat/completions",
+            30,
+            Some("<script>&"),
+        );
+        assert!(text.contains("&lt;script&gt;&amp;"));
+        assert!(!text.contains("<script>"));
     }
 }

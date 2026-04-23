@@ -304,6 +304,33 @@ fn normalized_provider_credential_type(provider_type: &str) -> &'static str {
     }
 }
 
+/// Compute the effective `(auth_method, auth_key_name)` for a catalog service.
+///
+/// For provider-delegated services, the `DownstreamService` itself stores
+/// `auth_method = "none"` and `auth_key_name = ""` -- the real injection
+/// method/key live on the `ServiceProviderRequirement`. Callers that need
+/// to snapshot these onto a `UserService` or show them to the client must
+/// derive the effective values here, matching
+/// `catalog_service::build_catalog_entry`.
+pub(crate) fn derive_effective_auth(
+    svc: &DownstreamService,
+    spr: Option<&crate::models::service_provider_requirement::ServiceProviderRequirement>,
+) -> (String, String) {
+    let auth_method = if svc.auth_method == "none" {
+        spr.map(|r| r.injection_method.clone())
+            .unwrap_or_else(|| svc.auth_method.clone())
+    } else {
+        svc.auth_method.clone()
+    };
+    let auth_key_name = if svc.auth_key_name.is_empty() {
+        spr.and_then(|r| r.injection_key.clone())
+            .unwrap_or_else(|| "Authorization".to_string())
+    } else {
+        svc.auth_key_name.clone()
+    };
+    (auth_method, auth_key_name)
+}
+
 fn direct_credential_type_from_auth_method(auth_method: &str) -> Option<&'static str> {
     match auth_method {
         "none" => None,
@@ -376,6 +403,10 @@ pub async fn create_key(
     openapi_spec_url: OpenApiSpecUrlInput<'_>,
 ) -> AppResult<CreateKeyResult> {
     let node_id = node_id.filter(|nid| !nid.is_empty());
+
+    if let Some(node_id) = node_id {
+        node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
+    }
 
     if let Some(slug) = service_slug {
         // -- Catalog path --
@@ -578,6 +609,20 @@ pub async fn create_key(
         let catalog_identity =
             identity.unwrap_or_else(|| identity_config_from_downstream_service(&svc));
 
+        // Snapshot the *effective* auth_method / auth_key_name onto the
+        // UserService. The `DownstreamService` itself stores `auth_method
+        // = "none"` for provider-delegated catalog entries (Anthropic,
+        // OpenAI, Gemini, ...) and instead carries the real injection
+        // config on the `ServiceProviderRequirement`. The proxy reads
+        // `auth_method` directly off the UserService snapshot -- if we
+        // snapshot the raw "none" we'd never inject the credential at
+        // proxy time even though the user stored a valid `UserApiKey`.
+        // Mirrors `catalog_service::build_catalog_entry` exactly so the
+        // auth shape the frontend sees in the catalog equals what the
+        // proxy actually applies.
+        let (snap_auth_method, snap_auth_key_name) =
+            derive_effective_auth(&svc, provider_requirement.as_ref());
+
         let service = user_service_service::create_user_service(
             db,
             user_id,
@@ -585,8 +630,8 @@ pub async fn create_key(
             &unique_slug,
             &endpoint.id,
             api_key.as_ref().map(|k| k.id.as_str()),
-            &svc.auth_method,
-            &svc.auth_key_name,
+            &snap_auth_method,
+            &snap_auth_key_name,
             Some(&svc.id),
             node_id,
             0,
@@ -1631,7 +1676,36 @@ pub async fn reconcile_provider_key_for_service_routing(
     let api_key = user_api_key_service::get_api_key(db, user_id, ak_id).await?;
 
     if service.node_id.is_some() {
-        user_api_key_service::activate_node_managed_api_key(db, user_id, &api_key.id).await?;
+        // Preserve a user-supplied server credential (NyxID#418 server-
+        // held model). Routing is governed by `UserService.node_id` —
+        // MCP's `classify_credential` treats node-routed services as
+        // "node or nothing" regardless of the underlying
+        // `credential_type`, so keeping the encrypted blob here is safe
+        // and serves two purposes: (1) if a fire-and-forget WS push
+        // failed to reach the node, the server still has the credential
+        // for a retry on the next `PUT /keys` call; (2) rotation via
+        // `update_api_key` works because the record stays on a direct
+        // credential_type. Records that had no server credential to
+        // begin with (e.g., created via `{node_id, auth_method: bearer}`
+        // without a `credential`) still flip to `node_managed` so the
+        // node agent remains the sole source of truth for those.
+        //
+        // Provider-backed keys (`provider_config_id.is_some()`) are an
+        // important exception: `sync_provider_token_to_api_keys` and
+        // `push_oauth_credential_to_nodes` walk provider-linked keys by
+        // `credential_type != "node_managed"` on every OAuth refresh
+        // and push the refreshed token to any node-routed services
+        // using them. Leaving them as `oauth2` / `api_key` after a node
+        // bind would let those refreshes copy provider secrets onto
+        // the node, bypassing the "node-routed provider services must
+        // be authorized on the node agent" contract. Flip them to
+        // `node_managed` regardless of the server credential state so
+        // the provider-refresh path filters them out. Twenty-seventh-
+        // round Codex P1.
+        let provider_backed = api_key.provider_config_id.is_some();
+        if provider_backed || !user_api_key_service::has_server_credential(&api_key) {
+            user_api_key_service::activate_node_managed_api_key(db, user_id, &api_key.id).await?;
+        }
         return Ok(());
     }
 
@@ -1678,6 +1752,454 @@ pub async fn reconcile_provider_key_for_service_routing(
     .await
 }
 
+/// What PUT /keys should do with the credential / auth_method fields on a
+/// given service. Derived purely from the (current service state, new field
+/// values) pair so the decision logic is unit-testable without a database.
+///
+/// Closes NyxID#419: a service POSTed with `auth_method: "none"` could not
+/// be upgraded to bearer/basic via PUT, because `reconcile_provider_key_
+/// for_service_routing` short-circuits when `api_key_id` is missing and
+/// `update_user_service` refuses to flip `auth_method` away from `"none"`
+/// under the same condition. Both short-circuits are correct for the
+/// "no api_key yet" state — the fix is to provision one first.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UpdateCredentialAction<'a> {
+    /// Nothing to do — service already in the target state, or caller
+    /// didn't touch credential/auth_method.
+    Nothing,
+    /// Provision a new `UserApiKey` with this credential_type and
+    /// credential value, then link it to the service.
+    Provision {
+        credential_type: &'static str,
+        credential: &'a str,
+    },
+    /// Rotate the credential on the existing `UserApiKey` via
+    /// `update_api_key` (direct credential types: bearer, basic, api_key,
+    /// oauth2).
+    Rotate { credential: &'a str },
+    /// Existing `UserApiKey` is `node_managed`; caller is supplying a new
+    /// credential to be stored server-side. Transition the record to
+    /// `credential_type` and store the encrypted credential. Bypasses
+    /// `update_api_key`'s node_managed rejection because this transition
+    /// is an explicit opt-in to the NyxID#418 server-held model.
+    Promote {
+        credential_type: &'static str,
+        credential: &'a str,
+    },
+    /// Caller's inputs are inconsistent — reject up front instead of
+    /// letting the service-layer guards return a misleading error.
+    Reject(&'static str),
+}
+
+/// Pure decision: classify what a PUT /keys request intends with respect
+/// to credential state. The caller passes the current service's
+/// `(auth_method, api_key_id, credential_type)` plus the optional new
+/// values coming in from the request body; the enum tells the handler
+/// whether to provision a new `UserApiKey`, rotate an existing one,
+/// promote a node_managed record to hold a server credential, or pass
+/// through. `current_credential_type` is `None` when the service has no
+/// linked `UserApiKey` yet.
+pub(crate) fn classify_update_credential_action<'a>(
+    current_auth_method: &str,
+    current_has_api_key: bool,
+    current_credential_type: Option<&str>,
+    new_auth_method: Option<&str>,
+    new_credential: Option<&'a str>,
+    effective_node_id_is_set: bool,
+) -> UpdateCredentialAction<'a> {
+    // Reject an explicit empty-string credential. The previous behavior
+    // collapsed `Some("")` to `None`, which made blank rotations look
+    // successful (no-op) and could even provision a `node_managed`
+    // placeholder on upgrades from `auth_method: "none"` + `node_id`
+    // without any real secret. `update_api_key` already rejects empty
+    // values, but the classifier silenced them before they got that
+    // far. Surface a clear rejection so UIs / automation that submit a
+    // blank field don't get a 200 while the old credential stays in
+    // effect (twenty-second-round Codex P2).
+    if new_credential.is_some_and(|c| c.is_empty()) {
+        return UpdateCredentialAction::Reject(
+            "Credential must not be empty. Omit the field to leave the stored value \
+             unchanged, or send a non-empty value to rotate it.",
+        );
+    }
+    let credential = new_credential.filter(|c| !c.is_empty());
+    let effective_auth_method = new_auth_method.unwrap_or(current_auth_method);
+    let wants_credential_auth = effective_auth_method != "none";
+
+    // Fast path: service already has a credential record.
+    if current_has_api_key {
+        return match credential {
+            Some(value) => {
+                // Services whose effective auth_method is "none" skip
+                // credential injection entirely at proxy time, so a write
+                // here would persist an unusable secret. Reject up front
+                // (second Codex review P2) — a service that has a leftover
+                // api_key_id after being downgraded to `auth_method: none`
+                // must be re-upgraded before it can accept new credentials.
+                if !wants_credential_auth {
+                    return UpdateCredentialAction::Reject(
+                        "Cannot store a credential while auth_method is 'none'. \
+                         Set auth_method to bearer/basic/header/query first.",
+                    );
+                }
+                // Node-managed records can't be rotated via `update_api_key`
+                // (it refuses by design). Promote them to a direct type so
+                // the server owns the credential going forward (NyxID#418).
+                if current_credential_type == Some("node_managed") {
+                    let target_type = match effective_auth_method {
+                        "bearer" => "bearer",
+                        "basic" => "basic",
+                        _ => "api_key",
+                    };
+                    UpdateCredentialAction::Promote {
+                        credential_type: target_type,
+                        credential: value,
+                    }
+                } else {
+                    UpdateCredentialAction::Rotate { credential: value }
+                }
+            }
+            None => UpdateCredentialAction::Nothing,
+        };
+    }
+
+    // Service has no api_key. Four sub-cases from here:
+    // (a) caller isn't adding auth or credential — nothing to do
+    // (b) caller set a credential while keeping auth_method=none — reject
+    // (c) caller set auth_method != none without credential + no node — reject
+    // (d) caller is upgrading: provision
+    if !wants_credential_auth {
+        return match credential {
+            None => UpdateCredentialAction::Nothing,
+            Some(_) => UpdateCredentialAction::Reject(
+                "Cannot store a credential while auth_method is 'none'. \
+                 Set auth_method to bearer/basic/header/query to enable credential storage.",
+            ),
+        };
+    }
+
+    // Direct (non-node) routing: credential is mandatory.
+    if credential.is_none() && !effective_node_id_is_set {
+        return UpdateCredentialAction::Reject(
+            "Credential is required when upgrading auth_method for direct routing. \
+             Either supply `credential` or bind a `node_id` first so the node agent \
+             can inject the credential locally.",
+        );
+    }
+
+    // Provision path. Credential_type derived from auth_method so the
+    // credential plane matches what the direct-routing proxy path expects.
+    let credential_type = match effective_auth_method {
+        "bearer" => "bearer",
+        "basic" => "basic",
+        _ => "api_key",
+    };
+
+    match credential {
+        Some(value) => UpdateCredentialAction::Provision {
+            credential_type,
+            credential: value,
+        },
+        None => {
+            // node_id is set and no credential supplied — create a node_managed
+            // record. Credential flows through `nyxid node credentials add`
+            // locally, same as if the service had been created with
+            // auth_method=bearer + node_id + no credential in the POST body.
+            UpdateCredentialAction::Provision {
+                credential_type: "node_managed",
+                credential: "",
+            }
+        }
+    }
+}
+
+/// Apply the upgrade/rotation decided by `classify_update_credential_action`.
+/// Creates and links a new `UserApiKey` when transitioning from
+/// `auth_method: "none"` to a credential-bearing method, or rotates the
+/// existing credential. Returns the api_key_id now attached to the service
+/// (if any), which the caller can use to trigger a node-side credential push.
+#[allow(clippy::too_many_arguments)]
+pub async fn ensure_user_api_key_for_update(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    service_id: &str,
+    new_auth_method: Option<&str>,
+    new_credential: Option<&str>,
+    new_node_id: Option<&str>,
+    preferred_label: &str,
+) -> AppResult<Option<String>> {
+    let service = user_service_service::get_user_service(db, user_id, service_id).await?;
+
+    // Load credential_type for the classifier when an api_key is already
+    // linked — the classifier needs it to distinguish node_managed from
+    // direct types (promote vs rotate).
+    let current_credential_type: Option<String> = if let Some(ref ak_id) = service.api_key_id {
+        Some(
+            user_api_key_service::get_api_key(db, user_id, ak_id)
+                .await?
+                .credential_type,
+        )
+    } else {
+        None
+    };
+
+    // Effective node_id after the pending update: empty-string clears,
+    // Some(nid) sets, None keeps the current value. Mirrors the mapping
+    // used by `update_user_service`.
+    //
+    // Legacy `service.node_id == Some("")` is normalized to "no node"
+    // here: some rows in the wild carry the empty string instead of
+    // `None`, and the rest of the PUT flow already filters those out.
+    // Without this, a `PUT /keys/:id {"auth_method":"bearer"}` on such
+    // a row would classify as node-routed and provision a `node_managed`
+    // key, while `update_user_service` + the strict push normalize back
+    // to "no node" — leaving the service direct-routed with a
+    // `node_managed` credential it can't actually use (sixteenth-round
+    // Codex review P2).
+    let effective_node_id_is_set = match new_node_id {
+        Some("") => false,
+        Some(_) => true,
+        None => service.node_id.as_deref().is_some_and(|n| !n.is_empty()),
+    };
+
+    // Look up catalog metadata so the upgrade path honors provider-backed
+    // services: (1) preserve `provider_config_id` so the new `UserApiKey`
+    // stays in sync with `sync_provider_token_to_api_keys` / OAuth refresh
+    // callbacks; (2) allow "pending_auth" upgrades where the credential is
+    // deferred to the provider's OAuth / device-code flow, mirroring what
+    // `create_key` does on POST. Seventh-round Codex review P2.
+    let (catalog_service, provider_config, existing_provider_token): (
+        Option<DownstreamService>,
+        Option<ProviderConfig>,
+        Option<UserProviderToken>,
+    ) = if let Some(ref cat_id) = service.catalog_service_id {
+        let ds = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": cat_id })
+            .await?;
+        let provider = match ds.as_ref().and_then(|d| d.provider_config_id.as_deref()) {
+            Some(pid) => {
+                db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+                    .find_one(doc! { "_id": pid })
+                    .await?
+            }
+            None => None,
+        };
+        let token = match ds.as_ref().and_then(|d| d.provider_config_id.as_deref()) {
+            Some(pid) => find_existing_provider_token(db, user_id, pid).await?,
+            None => None,
+        };
+        (ds, provider, token)
+    } else {
+        (None, None, None)
+    };
+    let provider_type = provider_config.as_ref().map(|p| p.provider_type.as_str());
+    let deferred_auth_supported = matches!(provider_type, Some("oauth2" | "device_code"));
+
+    let mut action = classify_update_credential_action(
+        &service.auth_method,
+        service.api_key_id.is_some(),
+        current_credential_type.as_deref(),
+        new_auth_method,
+        new_credential,
+        effective_node_id_is_set,
+    );
+
+    // Upgrade-by-rejection → deferred-auth Provision when the catalog
+    // entry is backed by an OAuth / device-code provider. Matches the
+    // `pending_oauth` branch inside `create_key`'s catalog path: server
+    // stores a placeholder `oauth2` UserApiKey with status=pending_auth,
+    // and the caller is expected to complete the provider OAuth flow
+    // afterwards. The credential requirement the classifier enforces for
+    // direct routing is correct for raw-secret auth methods but wrong
+    // for provider-deferred flows.
+    //
+    // Guard: only trigger when the caller's requested `auth_method`
+    // matches the catalog's declared auth_method. Without this check an
+    // OAuth-backed catalog service could be PUT with `auth_method:
+    // "basic"` (or any other method) and get silently upgraded via the
+    // deferred branch; once authorization completes, the proxy would
+    // inject the OAuth access token using the caller-supplied auth
+    // method, leaving the service misconfigured. `create_key` never
+    // accepts arbitrary auth-method overrides for catalog services, and
+    // the PUT path shouldn't either (eighth-round Codex review P2).
+    if let UpdateCredentialAction::Reject(msg) = action
+        && msg.starts_with("Credential is required")
+        && deferred_auth_supported
+        && let Some(ref cat) = catalog_service
+        && new_auth_method.is_some_and(|am| am == cat.auth_method)
+    {
+        action = UpdateCredentialAction::Provision {
+            credential_type: "oauth2",
+            credential: "",
+        };
+    }
+
+    match action {
+        UpdateCredentialAction::Nothing => Ok(service.api_key_id.clone()),
+        UpdateCredentialAction::Reject(msg) => Err(AppError::BadRequest(msg.to_string())),
+        UpdateCredentialAction::Rotate { credential } => {
+            let ak_id = service
+                .api_key_id
+                .as_deref()
+                .expect("Rotate requires an existing api_key");
+            user_api_key_service::update_api_key(
+                db,
+                encryption_keys,
+                user_id,
+                ak_id,
+                None,
+                Some(credential),
+            )
+            .await?;
+            Ok(service.api_key_id.clone())
+        }
+        UpdateCredentialAction::Promote {
+            credential_type,
+            credential,
+        } => {
+            let ak_id = service
+                .api_key_id
+                .as_deref()
+                .expect("Promote requires an existing api_key");
+            user_api_key_service::promote_node_managed_api_key(
+                db,
+                encryption_keys,
+                user_id,
+                ak_id,
+                credential_type,
+                credential,
+            )
+            .await?;
+            Ok(service.api_key_id.clone())
+        }
+        UpdateCredentialAction::Provision {
+            credential_type,
+            credential,
+        } => {
+            // Use the caller-supplied label (current display label of the
+            // service — either `UserEndpoint.label` on a previously no-auth
+            // service, or the explicit `label` from this same PUT). Seeding
+            // with `service.slug` here would silently rename the service in
+            // GET responses because `build_key_view` prefers
+            // `api_key.label` over `endpoint.label`. Falls back to the slug
+            // when the caller passed an empty string.
+            let trimmed_label = preferred_label.trim();
+            let label = if trimmed_label.is_empty() {
+                service.slug.as_str()
+            } else {
+                trimmed_label
+            };
+
+            // Preserve the catalog-declared provider linkage so OAuth /
+            // device-code refreshes via `sync_provider_token_to_api_keys`
+            // and `push_oauth_credential_to_nodes` continue to update
+            // this service after the upgrade (seventh-round Codex review
+            // P2). Dropping `provider_config_id` here silently turned the
+            // service into an untracked manual credential.
+            let catalog_provider_config_id = catalog_service
+                .as_ref()
+                .and_then(|ds| ds.provider_config_id.as_deref());
+
+            // If the user already has an active provider token for this
+            // provider, reuse it — same semantics as `create_key`. That
+            // path attaches the existing encrypted material so the
+            // upgrade is immediately active instead of forcing a fresh
+            // OAuth handshake.
+            //
+            // Strict gating so the reuse is tied to the deferred-auth
+            // pathway:
+            //  - `credential_type == "oauth2"`: only the deferred-auth
+            //    branch upstream selects this type (see the "Upgrade-
+            //    by-rejection → deferred-auth Provision" block). A
+            //    caller-requested direct type (`bearer`/`basic`/`api_key`)
+            //    must NOT silently be replaced with an OAuth access token
+            //    — the proxy would then inject that token using the
+            //    wrong injection scheme (thirteenth-round Codex P2).
+            //  - `credential.is_empty()`: a freshly supplied secret
+            //    from the caller always wins over any existing provider
+            //    token.
+            //  - `credential_type != "node_managed"` stays implicit via
+            //    the first condition — node_managed never appears as a
+            //    direct type in Provision actions from this path.
+            let api_key = if credential_type == "oauth2"
+                && credential.is_empty()
+                && let Some(ref provider_token) = existing_provider_token
+                && let Some(pid) = catalog_provider_config_id
+                && deferred_auth_supported
+            {
+                user_api_key_service::create_api_key_from_provider_token(
+                    db,
+                    user_id,
+                    label,
+                    pid,
+                    provider_token,
+                )
+                .await?
+            } else {
+                // Pending OAuth / device-code state: store a placeholder
+                // `oauth2` record with status=pending_auth so the
+                // provider flow can populate it later. Matches the
+                // `pending_oauth` branch inside `create_key`.
+                let is_deferred_pending =
+                    credential_type == "oauth2" && credential.is_empty() && deferred_auth_supported;
+                let status = if is_deferred_pending {
+                    "pending_auth"
+                } else {
+                    "active"
+                };
+                user_api_key_service::create_api_key(
+                    db,
+                    encryption_keys,
+                    user_id,
+                    user_api_key_service::CreateApiKeyParams {
+                        label,
+                        credential_type,
+                        credential,
+                        access_token: None,
+                        refresh_token: None,
+                        token_scopes: None,
+                        expires_at: None,
+                        provider_config_id: catalog_provider_config_id,
+                        status,
+                        source: Some("user_created"),
+                        source_id: None,
+                    },
+                )
+                .await?
+            };
+
+            // Compare-and-set link. If a concurrent upgrade PUT already
+            // attached a different `UserApiKey` to this service,
+            // `link_api_key` returns `Conflict` — in that case we MUST
+            // reclaim the credential record we just provisioned so it
+            // does not linger as an orphan under external key
+            // management (twenty-ninth-round Codex P2). We delete the
+            // record directly (it's the caller's just-created row, not
+            // bound to any service yet, so `delete_api_key`'s
+            // "no active service references" check will succeed).
+            if let Err(e) =
+                user_service_service::link_api_key(db, user_id, service_id, &api_key.id).await
+            {
+                if matches!(e, AppError::Conflict(_))
+                    && let Err(cleanup_err) =
+                        user_api_key_service::delete_api_key(db, user_id, &api_key.id).await
+                {
+                    tracing::error!(
+                        user_id = %user_id,
+                        api_key_id = %api_key.id,
+                        error = %cleanup_err,
+                        "failed to reclaim orphaned UserApiKey after concurrent upgrade race"
+                    );
+                }
+                return Err(e);
+            }
+            Ok(Some(api_key.id))
+        }
+    }
+}
+
 /// DELETE /api/v1/keys/:id -- revoke key.
 ///
 /// `actor_user_id` is forwarded to `deactivate_user_service` for symmetry
@@ -1692,8 +2214,9 @@ pub async fn revoke_key(
     let svc = user_service_service::get_user_service(db, user_id, service_id).await?;
     user_service_service::deactivate_user_service(db, user_id, actor_user_id, service_id).await?;
     if let Some(ref ak_id) = svc.api_key_id {
-        user_api_key_service::revoke_api_key(db, user_id, ak_id).await?;
+        user_api_key_service::delete_api_key(db, user_id, ak_id).await?;
     }
+    user_endpoint_service::delete_endpoint(db, user_id, &svc.endpoint_id).await?;
 
     // Deactivate the node binding if this service was node-routed. The
     // delete path clears the node, so the actor only matters for the
@@ -1746,10 +2269,9 @@ pub async fn revoke_key_if_pending(
         return Ok(false);
     }
 
-    // API key was in pending_auth and is now revoked. Tear down the
-    // owning UserService and any node binding to keep the records
-    // consistent — this mirrors the unconditional `revoke_key`
-    // order, just without the now-skipped `revoke_api_key` call.
+    // API key was in pending_auth and is now revoked (by the atomic
+    // status-filter update above). Tear down the owning UserService
+    // and any node binding to keep the records consistent.
     user_service_service::deactivate_user_service(db, user_id, actor_user_id, service_id).await?;
     node_service::sync_node_binding_for_user_service(
         db,
@@ -1864,20 +2386,27 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::Utc;
+    use mongodb::bson::doc;
 
     use super::{
-        AUTO_PROVISION_SOURCE, OpenApiSpecUrlInput, auto_provision_source_id, build_key_view,
-        direct_credential_type_for_service, direct_credential_type_from_auth_method,
-        identity_config_from_downstream_service, resolve_openapi_spec_url,
-        validate_token_exchange_catalog_credential,
+        AUTO_PROVISION_SOURCE, OpenApiSpecUrlInput, UpdateCredentialAction,
+        auto_provision_source_id, build_key_view, classify_update_credential_action, create_key,
+        derive_effective_auth, direct_credential_type_for_service,
+        direct_credential_type_from_auth_method, identity_config_from_downstream_service,
+        resolve_openapi_spec_url, revoke_key, validate_token_exchange_catalog_credential,
     };
     use crate::errors::AppError;
     use crate::models::downstream_service::{
         CredentialFieldSpec, DownstreamService, TokenExchangeConfig,
     };
+    use crate::models::service_provider_requirement::ServiceProviderRequirement;
+    use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
     use crate::models::user_api_key::UserApiKey;
+    use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
     use crate::models::user_endpoint::UserEndpoint;
+    use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
     use crate::models::user_service::UserService;
+    use crate::test_utils::{connect_test_database, test_encryption_keys};
 
     fn sample_api_key(credential_type: &str) -> UserApiKey {
         UserApiKey {
@@ -1997,6 +2526,195 @@ mod tests {
         }
     }
 
+    fn sample_spr(
+        injection_method: &str,
+        injection_key: Option<&str>,
+    ) -> ServiceProviderRequirement {
+        ServiceProviderRequirement {
+            id: "spr-1".to_string(),
+            service_id: "cat-1".to_string(),
+            provider_config_id: "prov-1".to_string(),
+            required: true,
+            scopes: None,
+            injection_method: injection_method.to_string(),
+            injection_key: injection_key.map(String::from),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn derive_effective_auth_uses_spr_when_svc_is_none() {
+        // Anthropic-style catalog shape: the DownstreamService stores `none`
+        // and the real injection config lives on the SPR. The effective
+        // tuple must come from the SPR or the proxy won't inject the
+        // caller's credential.
+        let mut svc = sample_catalog_service();
+        svc.auth_method = "none".to_string();
+        svc.auth_key_name = "".to_string();
+
+        let spr = sample_spr("header", Some("x-api-key"));
+        let (method, key) = derive_effective_auth(&svc, Some(&spr));
+
+        assert_eq!(method, "header");
+        assert_eq!(key, "x-api-key");
+    }
+
+    #[test]
+    fn derive_effective_auth_preserves_non_none_svc_fields() {
+        // If the catalog already carries explicit auth config, the SPR
+        // does not override. Avoids double-derivation for services that
+        // don't use the provider-delegated pattern.
+        let mut svc = sample_catalog_service();
+        svc.auth_method = "bearer".to_string();
+        svc.auth_key_name = "Authorization".to_string();
+
+        let spr = sample_spr("header", Some("x-api-key"));
+        let (method, key) = derive_effective_auth(&svc, Some(&spr));
+
+        assert_eq!(method, "bearer");
+        assert_eq!(key, "Authorization");
+    }
+
+    #[test]
+    fn derive_effective_auth_falls_back_to_none_when_no_spr() {
+        let mut svc = sample_catalog_service();
+        svc.auth_method = "none".to_string();
+        svc.auth_key_name = "".to_string();
+
+        let (method, key) = derive_effective_auth(&svc, None);
+
+        assert_eq!(method, "none");
+        // No SPR, empty catalog -> Authorization is the safe default the
+        // build_catalog_entry logic also picks.
+        assert_eq!(key, "Authorization");
+    }
+
+    #[test]
+    fn derive_effective_auth_defaults_key_when_spr_has_no_injection_key() {
+        let mut svc = sample_catalog_service();
+        svc.auth_method = "none".to_string();
+        svc.auth_key_name = "".to_string();
+
+        let spr = sample_spr("bearer", None);
+        let (method, key) = derive_effective_auth(&svc, Some(&spr));
+
+        assert_eq!(method, "bearer");
+        assert_eq!(key, "Authorization");
+    }
+
+    #[tokio::test]
+    async fn revoke_key_hard_deletes_backing_endpoint_and_api_key() {
+        let Some(db) = connect_test_database("unified_key_service").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let created = create_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "secret-token",
+            "Custom Service",
+            Some("custom-service"),
+            Some("bearer"),
+            Some("Authorization"),
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+        )
+        .await
+        .unwrap();
+
+        revoke_key(&db, &user_id, &user_id, &created.service.id)
+            .await
+            .unwrap();
+
+        let api_key_count = db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .count_documents(doc! { "_id": &created.api_key.as_ref().unwrap().id })
+            .await
+            .unwrap();
+        let endpoint_count = db
+            .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .count_documents(doc! { "_id": &created.endpoint.id })
+            .await
+            .unwrap();
+        let service = db
+            .collection::<mongodb::bson::Document>(USER_SERVICES)
+            .find_one(doc! { "_id": &created.service.id })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(api_key_count, 0);
+        assert_eq!(endpoint_count, 0);
+        assert!(!service.get_bool("is_active").unwrap());
+    }
+
+    #[tokio::test]
+    async fn create_key_with_missing_node_fails_before_inserting_resources() {
+        let Some(db) = connect_test_database("unified_key_service").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let err = create_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &user_id,
+            None,
+            Some("https://api.example.com"),
+            "",
+            "Node Routed Service",
+            Some("node-routed-service"),
+            Some("bearer"),
+            Some("Authorization"),
+            Some("missing-node"),
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+        )
+        .await
+        .err()
+        .expect("missing node should fail");
+
+        assert!(
+            matches!(err, AppError::NodeNotFound(ref message) if message == "Node not found"),
+            "expected NodeNotFound, got {err}"
+        );
+
+        let endpoint_count = db
+            .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let api_key_count = db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let service_count = db
+            .collection::<mongodb::bson::Document>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+
+        assert_eq!(endpoint_count, 0);
+        assert_eq!(api_key_count, 0);
+        assert_eq!(service_count, 0);
+    }
+
     #[test]
     fn resolve_spec_inherit_uses_catalog_default_for_http_services() {
         let out = resolve_openapi_spec_url(
@@ -2114,6 +2832,242 @@ mod tests {
         assert_eq!(
             direct_credential_type_for_service(&key, &service, None),
             Some("bearer")
+        );
+    }
+
+    // --- classify_update_credential_action (NyxID#418, #419) ---
+
+    #[test]
+    fn classify_does_nothing_when_caller_omits_credential_and_auth_method() {
+        // Bare `PUT /keys/:id` with only node_id or label fields should leave
+        // the credential plane untouched.
+        let action = classify_update_credential_action("none", false, None, None, None, false);
+        assert_eq!(action, UpdateCredentialAction::Nothing);
+
+        let action =
+            classify_update_credential_action("bearer", true, Some("bearer"), None, None, false);
+        assert_eq!(action, UpdateCredentialAction::Nothing);
+    }
+
+    #[test]
+    fn classify_provisions_on_upgrade_from_none_with_credential() {
+        // NyxID#419 repro: service created with `auth_method: none`, PUT
+        // upgrades to bearer with credential supplied in the same body.
+        let action = classify_update_credential_action(
+            "none",
+            false,
+            None,
+            Some("bearer"),
+            Some("secret-token"),
+            false,
+        );
+        assert_eq!(
+            action,
+            UpdateCredentialAction::Provision {
+                credential_type: "bearer",
+                credential: "secret-token",
+            }
+        );
+    }
+
+    #[test]
+    fn classify_provisions_node_managed_when_upgrade_targets_node_without_credential() {
+        // HA add-on flow: the add-on POSTs `auth_method: none` to reserve
+        // the slug, then PUTs to bind a node + bearer. Credential lives on
+        // the node (pushed via `nyxid node credentials add` locally), so
+        // the server creates a `node_managed` record.
+        let action =
+            classify_update_credential_action("none", false, None, Some("bearer"), None, true);
+        assert_eq!(
+            action,
+            UpdateCredentialAction::Provision {
+                credential_type: "node_managed",
+                credential: "",
+            }
+        );
+    }
+
+    #[test]
+    fn classify_rejects_direct_upgrade_without_credential_or_node() {
+        // Pure direct routing upgrade with no credential and no node is
+        // ambiguous — reject instead of silently creating an unusable record.
+        let action =
+            classify_update_credential_action("none", false, None, Some("bearer"), None, false);
+        match action {
+            UpdateCredentialAction::Reject(msg) => {
+                assert!(msg.contains("Credential is required"));
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_rejects_credential_while_auth_method_stays_none() {
+        // Caller supplied a credential but didn't set auth_method — the
+        // resulting record would never be injected into proxy calls.
+        // Fail loudly so callers can't end up with credentials on a
+        // `auth_method: none` service.
+        let action =
+            classify_update_credential_action("none", false, None, None, Some("secret"), false);
+        match action {
+            UpdateCredentialAction::Reject(msg) => {
+                assert!(msg.contains("auth_method"));
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_rejects_credential_write_when_service_still_auth_method_none() {
+        // Second Codex review P2: a service can hold an `api_key_id` after
+        // being downgraded back to `auth_method: none` (the handler doesn't
+        // unlink). A later PUT that only supplies `credential` would
+        // otherwise rotate/promote silently, storing an unusable secret
+        // because the proxy skips injection for no-auth services.
+        let action = classify_update_credential_action(
+            "none",
+            true,
+            Some("bearer"),
+            None,
+            Some("new-secret"),
+            false,
+        );
+        match action {
+            UpdateCredentialAction::Reject(msg) => {
+                assert!(msg.contains("auth_method"));
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_rotates_credential_on_existing_direct_api_key() {
+        // Standard "rotate the stored bearer" flow on a service that already
+        // had a direct credential — mirrors `PUT /api-keys/external/:id`.
+        let action = classify_update_credential_action(
+            "bearer",
+            true,
+            Some("bearer"),
+            None,
+            Some("new-secret"),
+            false,
+        );
+        assert_eq!(
+            action,
+            UpdateCredentialAction::Rotate {
+                credential: "new-secret",
+            }
+        );
+    }
+
+    #[test]
+    fn classify_promotes_node_managed_api_key_when_caller_supplies_credential() {
+        // Codex review P1.2: existing node-routed service backed by a
+        // `node_managed` record. Supplying a fresh credential via PUT must
+        // promote the record to a direct type so the new value is actually
+        // stored — `update_api_key` refuses node_managed rotations outright.
+        let action = classify_update_credential_action(
+            "bearer",
+            true,
+            Some("node_managed"),
+            None,
+            Some("rotated-secret"),
+            true,
+        );
+        assert_eq!(
+            action,
+            UpdateCredentialAction::Promote {
+                credential_type: "bearer",
+                credential: "rotated-secret",
+            }
+        );
+    }
+
+    #[test]
+    fn classify_promote_uses_auth_method_for_target_type_when_upgrade_accompanies_rotation() {
+        // If the caller also changes auth_method in the same PUT, promote
+        // to the target auth_method's direct type rather than the current.
+        let action = classify_update_credential_action(
+            "bearer",
+            true,
+            Some("node_managed"),
+            Some("basic"),
+            Some("basic-auth-string"),
+            true,
+        );
+        assert_eq!(
+            action,
+            UpdateCredentialAction::Promote {
+                credential_type: "basic",
+                credential: "basic-auth-string",
+            }
+        );
+    }
+
+    #[test]
+    fn classify_rejects_empty_string_credential() {
+        // Blank rotations are an explicit error now (twenty-second-round
+        // Codex P2). Previously they were collapsed to `None` and could
+        // even provision a `node_managed` placeholder on upgrades — that
+        // made it look like a rotation succeeded while the old secret
+        // stayed in effect. Omit the field to leave the stored value
+        // unchanged; send a non-empty value to rotate.
+        let action = classify_update_credential_action(
+            "bearer",
+            true,
+            Some("bearer"),
+            None,
+            Some(""),
+            false,
+        );
+        match action {
+            UpdateCredentialAction::Reject(msg) => assert!(msg.contains("must not be empty")),
+            other => panic!("expected Reject, got {other:?}"),
+        }
+
+        let action =
+            classify_update_credential_action("none", false, None, Some("bearer"), Some(""), true);
+        match action {
+            UpdateCredentialAction::Reject(msg) => assert!(msg.contains("must not be empty")),
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_rejects_upgrade_when_node_id_explicitly_cleared_without_credential() {
+        // Caller sends `{"auth_method": "bearer", "node_id": ""}` — the
+        // effective node is None after the update, so the classifier must
+        // see `effective_node_id_is_set = false` and reject when credential
+        // is also missing. This test pins the caller's responsibility to
+        // compute `effective_node_id_is_set` from the empty-clears-set-keeps
+        // three-state mapping before calling the classifier.
+        let action =
+            classify_update_credential_action("none", false, None, Some("bearer"), None, false);
+        match action {
+            UpdateCredentialAction::Reject(_) => {}
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_header_auth_uses_api_key_credential_type() {
+        // `auth_method: "header"` and `"query"` fall through the default
+        // branch and should produce a generic `"api_key"` credential_type —
+        // matches the existing custom-HTTP create path.
+        let action = classify_update_credential_action(
+            "none",
+            false,
+            None,
+            Some("header"),
+            Some("xoxb-secret"),
+            false,
+        );
+        assert_eq!(
+            action,
+            UpdateCredentialAction::Provision {
+                credential_type: "api_key",
+                credential: "xoxb-secret",
+            }
         );
     }
 

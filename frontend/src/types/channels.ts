@@ -12,7 +12,12 @@ export type ChannelPlatform =
  */
 export type ConversationPlatform = ChannelPlatform | "device";
 
-export type ChannelBotStatus = "pending" | "active" | "failed" | "invalid";
+export type ChannelBotStatus =
+  | "pending"
+  | "pending_webhook"
+  | "active"
+  | "failed"
+  | "invalid";
 
 export type ConversationType = "private" | "group" | "channel" | "device";
 
@@ -54,6 +59,16 @@ export interface ChannelBotListResponse {
 
 export interface ChannelBotDetail extends ChannelBotItem {
   readonly conversations_count: number;
+  readonly app_secret_configured: boolean;
+  readonly lark_verification_token_configured: boolean;
+  readonly lark_encrypt_key_configured: boolean;
+  /** Lark/Feishu only: deep link to the developer console permissions
+   *  page with the scopes NyxID's adapter needs already pre-selected.
+   *  `null` for non-Lark platforms or when the bot has no `app_id`. */
+  readonly permission_setup_url?: string | null;
+  /** Lark/Feishu only: scope keys encoded in `permission_setup_url`,
+   *  echoed back so the UI can render the list under the link. */
+  readonly permission_setup_scopes?: readonly string[] | null;
 }
 
 export interface CreateChannelBotRequest {
@@ -64,10 +79,22 @@ export interface CreateChannelBotRequest {
   readonly app_id?: string;
   /** Lark/Feishu: app secret. Slack: app signing secret. */
   readonly app_secret?: string;
+  /** Lark/Feishu only */
+  readonly verification_token?: string;
+  /** Lark/Feishu only */
+  readonly encrypt_key?: string;
   /** Discord only */
   readonly public_key?: string;
   /** Create this bot under the given org (caller must be admin). */
   readonly target_org_id?: string;
+}
+
+export interface UpdateChannelBotRequest {
+  readonly label?: string;
+  readonly verification_token?: string;
+  readonly encrypt_key?: string;
+  readonly app_id?: string;
+  readonly app_secret?: string;
 }
 
 export interface CreateChannelBotResponse {
@@ -75,6 +102,8 @@ export interface CreateChannelBotResponse {
   readonly platform: ChannelPlatform;
   readonly platform_bot_username: string;
   readonly status: ChannelBotStatus;
+  readonly permission_setup_url?: string | null;
+  readonly permission_setup_scopes?: readonly string[] | null;
 }
 
 export interface ChannelConversationItem {

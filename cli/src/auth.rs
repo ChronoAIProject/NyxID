@@ -3,6 +3,8 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
 
 use crate::api::{CLI_USER_AGENT, build_cli_http_client};
@@ -13,7 +15,19 @@ const PROFILES_DIR_NAME: &str = "profiles";
 const TOKEN_FILE_NAME: &str = "access_token";
 const REFRESH_TOKEN_FILE_NAME: &str = "refresh_token";
 const BASE_URL_FILE_NAME: &str = "base_url";
+const USER_ID_FILE_NAME: &str = "user_id";
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
+
+/// Extract the `sub` claim (NyxID user UUID) from a JWT access token.
+/// Decodes the payload section only; does not verify the signature, since
+/// the server already verified it when issuing the token. Returns `None`
+/// for malformed tokens or tokens without a string `sub` claim.
+pub fn jwt_sub_from_token(token: &str) -> Option<String> {
+    let payload_b64 = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    json.get("sub")?.as_str().map(|s| s.to_string())
+}
 
 // ---- Profile validation ----
 
@@ -64,6 +78,10 @@ fn base_url_file_path_for(profile: Option<&str>) -> Result<PathBuf> {
     Ok(token_dir_for_profile(profile)?.join(BASE_URL_FILE_NAME))
 }
 
+fn user_id_file_path_for(profile: Option<&str>) -> Result<PathBuf> {
+    Ok(token_dir_for_profile(profile)?.join(USER_ID_FILE_NAME))
+}
+
 pub fn read_saved_token_for(profile: Option<&str>) -> Option<String> {
     let path = token_file_path_for(profile).ok()?;
     std::fs::read_to_string(path)
@@ -91,6 +109,25 @@ pub fn read_saved_refresh_token() -> Option<String> {
 
 pub fn read_saved_base_url_for(profile: Option<&str>) -> Option<String> {
     let path = base_url_file_path_for(profile).ok()?;
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+/// Return the authenticated user's NyxID UUID for the given profile, or
+/// `None` if no one is logged in. The access-token JWT `sub` claim is the
+/// canonical source; the `user_id` file is a cache that can get stale
+/// (manual edits, partial writes during logout races) so we only consult
+/// it when deriving from the current token fails.
+#[allow(dead_code)]
+pub fn read_saved_user_id_for(profile: Option<&str>) -> Option<String> {
+    if let Some(access_token) = read_saved_token_for(profile)
+        && let Some(user_id) = jwt_sub_from_token(&access_token)
+    {
+        return Some(user_id);
+    }
+    let path = user_id_file_path_for(profile).ok()?;
     std::fs::read_to_string(path)
         .ok()
         .map(|t| t.trim().to_string())
@@ -126,6 +163,10 @@ fn write_token_file(path: &std::path::Path, token: &str) -> Result<()> {
 }
 
 /// Save a new access token (and optionally a new refresh token) for a profile.
+/// Also persists the JWT `sub` claim as the user's NyxID UUID so telemetry
+/// has stable per-user attribution without re-parsing the token every call.
+/// If the new token yields no `sub`, any stale `user_id` file is removed so
+/// attribution never survives a token shape change.
 pub fn save_tokens_for(
     profile: Option<&str>,
     access_token: &str,
@@ -134,6 +175,15 @@ pub fn save_tokens_for(
     write_token_file(&token_file_path_for(profile)?, access_token)?;
     if let Some(rt) = refresh_token {
         write_token_file(&refresh_token_file_path_for(profile)?, rt)?;
+    }
+    let user_id_path = user_id_file_path_for(profile)?;
+    match jwt_sub_from_token(access_token) {
+        Some(user_id) => write_token_file(&user_id_path, &user_id)?,
+        None => {
+            if user_id_path.exists() {
+                let _ = std::fs::remove_file(&user_id_path);
+            }
+        }
     }
     Ok(())
 }
@@ -154,6 +204,11 @@ fn clear_token_for(profile: Option<&str>) -> Result<()> {
     if refresh_path.exists() {
         std::fs::remove_file(&refresh_path)
             .with_context(|| format!("Failed to remove {}", refresh_path.display()))?;
+    }
+    let user_id_path = user_id_file_path_for(profile)?;
+    if user_id_path.exists() {
+        std::fs::remove_file(&user_id_path)
+            .with_context(|| format!("Failed to remove {}", user_id_path.display()))?;
     }
     Ok(())
 }
@@ -212,6 +267,14 @@ pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
     }
 
     clear_token_for(profile)?;
+
+    // Telemetry: drop the anon id so the next command on this machine
+    // starts a fresh distinct_id (same mechanism as `posthog.reset()`
+    // on the web/mobile clients). No-op when consent is off.
+    if let Some(client) = crate::telemetry::TelemetryClient::init(profile) {
+        client.reset();
+    }
+
     eprintln!("Logged out. Token cleared.");
     Ok(())
 }
@@ -248,6 +311,16 @@ async fn run_browser_login(base_url: &str, profile: Option<&str>) -> Result<()> 
         callback.refresh_token.as_deref(),
     )?;
     save_base_url_for(profile, base_url)?;
+
+    // Telemetry: identify the now-authenticated user. `save_tokens_for`
+    // above derived + persisted `user_id` from the JWT; we read it
+    // back and hand it to the wrapper, which handles anon → user_id
+    // merge transparently. No-op when consent is off.
+    if let Some(user_id) = read_saved_user_id_for(profile)
+        && let Some(mut client) = crate::telemetry::TelemetryClient::init(profile)
+    {
+        client.identify(&user_id).await;
+    }
 
     eprintln!("Logged in successfully.");
     eprintln!("Token saved to {}", token_file_path_for(profile)?.display());
@@ -455,6 +528,14 @@ async fn run_password_login(
     save_tokens_for(profile, &login.access_token, login.refresh_token.as_deref())?;
     save_base_url_for(profile, base_url)?;
 
+    // Telemetry: identify after token persistence (see notes in
+    // `run_browser_login`).
+    if let Some(user_id) = read_saved_user_id_for(profile)
+        && let Some(mut client) = crate::telemetry::TelemetryClient::init(profile)
+    {
+        client.identify(&user_id).await;
+    }
+
     eprintln!("Logged in as {email}");
     eprintln!("Token saved to {}", token_file_path_for(profile)?.display());
 
@@ -464,7 +545,7 @@ async fn run_password_login(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cli_auth_url, callback_success_html, parse_callback_request,
+        build_cli_auth_url, callback_success_html, jwt_sub_from_token, parse_callback_request,
         refresh_token_file_path_for, token_dir_for_profile, token_file_path_for,
         validate_profile_name,
     };
@@ -599,5 +680,93 @@ mod tests {
             params.get("client_ua").map(|v| v.as_ref()),
             Some(CLI_USER_AGENT)
         );
+    }
+
+    // ---- JWT sub extraction ----
+
+    fn build_jwt(payload: &serde_json::Value) -> String {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload_json = serde_json::to_vec(payload).expect("serialize");
+        let payload_b64 = URL_SAFE_NO_PAD.encode(&payload_json);
+        format!("{header}.{payload_b64}.signature-not-verified")
+    }
+
+    #[test]
+    fn jwt_sub_extracts_user_uuid() {
+        let token = build_jwt(&serde_json::json!({
+            "sub": "7a3f1c8e-0000-4000-8000-000000000001",
+            "exp": 9999999999i64,
+        }));
+        assert_eq!(
+            jwt_sub_from_token(&token).as_deref(),
+            Some("7a3f1c8e-0000-4000-8000-000000000001")
+        );
+    }
+
+    #[test]
+    fn jwt_sub_returns_none_for_malformed_token() {
+        assert!(jwt_sub_from_token("not-a-jwt").is_none());
+        assert!(jwt_sub_from_token("").is_none());
+        assert!(jwt_sub_from_token("header.badbase64!!.sig").is_none());
+    }
+
+    #[test]
+    fn jwt_sub_returns_none_when_claim_missing() {
+        let token = build_jwt(&serde_json::json!({ "exp": 123 }));
+        assert!(jwt_sub_from_token(&token).is_none());
+    }
+
+    #[test]
+    fn jwt_sub_returns_none_when_claim_is_not_string() {
+        let token = build_jwt(&serde_json::json!({ "sub": 42, "exp": 123 }));
+        assert!(jwt_sub_from_token(&token).is_none());
+    }
+
+    #[test]
+    fn save_tokens_clears_stale_user_id_when_new_token_has_no_sub() {
+        use std::env;
+        use tempfile::tempdir;
+
+        // Serialize HOME mutations across test modules — any concurrent
+        // test touching $HOME uses the same lock.
+        let _guard = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let dir = tempdir().expect("tempdir");
+        let prev_home = env::var_os("HOME");
+        // SAFETY: guarded by `env_lock` above.
+        unsafe {
+            env::set_var("HOME", dir.path());
+        }
+
+        let profile = Some("stale-cleanup-test");
+        let good_token = build_jwt(&serde_json::json!({
+            "sub": "11111111-2222-3333-4444-555555555555",
+            "exp": 9999999999i64,
+        }));
+        super::save_tokens_for(profile, &good_token, None).expect("save good");
+        assert_eq!(
+            super::read_saved_user_id_for(profile).as_deref(),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+
+        // New token carries no `sub` — prior attribution must not linger.
+        let bad_token = build_jwt(&serde_json::json!({ "exp": 123 }));
+        super::save_tokens_for(profile, &bad_token, None).expect("save bad");
+        let user_id_path = super::user_id_file_path_for(profile).expect("path");
+        assert!(
+            !user_id_path.exists(),
+            "stale user_id should be cleared when new token has no sub"
+        );
+
+        unsafe {
+            match prev_home {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
+            }
+        }
     }
 }

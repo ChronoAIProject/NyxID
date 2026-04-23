@@ -264,6 +264,7 @@ impl PlatformAdapter for TelegramAdapter {
     async fn verify_webhook(
         &self,
         bot: &ChannelBot,
+        _secrets: Option<&crate::services::channel_platform::PlatformVerifySecrets>,
         headers: &axum::http::HeaderMap,
         _body: &[u8],
     ) -> AppResult<()> {
@@ -758,7 +759,7 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(SECRET_HEADER, secret.parse().unwrap());
 
-        let result = adapter.verify_webhook(&bot, &headers, b"").await;
+        let result = adapter.verify_webhook(&bot, None, &headers, b"").await;
         assert!(result.is_ok());
     }
 
@@ -771,7 +772,7 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(SECRET_HEADER, "wrong_secret".parse().unwrap());
 
-        let result = adapter.verify_webhook(&bot, &headers, b"").await;
+        let result = adapter.verify_webhook(&bot, None, &headers, b"").await;
         assert!(result.is_err());
     }
 
@@ -781,7 +782,7 @@ mod tests {
         let bot = make_test_bot("somehash");
         let headers = axum::http::HeaderMap::new();
 
-        let result = adapter.verify_webhook(&bot, &headers, b"").await;
+        let result = adapter.verify_webhook(&bot, None, &headers, b"").await;
         assert!(result.is_err());
     }
 
@@ -800,6 +801,8 @@ mod tests {
             webhook_secret_hash: webhook_secret_hash.to_string(),
             app_id: None,
             app_secret_encrypted: None,
+            lark_verification_token_encrypted: None,
+            lark_encrypt_key_encrypted: None,
             public_key: None,
             status: "active".to_string(),
             is_active: true,

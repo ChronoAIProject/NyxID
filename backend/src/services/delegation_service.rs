@@ -155,7 +155,17 @@ pub async fn resolve_delegated_credentials(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_delegated_injection;
+    use chrono::Utc;
+
+    use super::{normalize_delegated_injection, resolve_delegated_credentials};
+    use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+    use crate::models::service_provider_requirement::{
+        COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
+    };
+    use crate::models::user_provider_token::{
+        COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
+    };
+    use crate::test_utils::{connect_test_database, test_encryption_keys};
 
     #[test]
     fn telegram_bot_legacy_bearer_injection_is_mapped_to_path() {
@@ -180,5 +190,116 @@ mod tests {
 
         assert_eq!(method, "bearer");
         assert_eq!(key, "Authorization");
+    }
+
+    #[tokio::test]
+    async fn resolve_delegated_credentials_uses_org_owner_tokens_when_passed_owner_id() {
+        let Some(db) = connect_test_database("delegation_service").await else {
+            eprintln!("skipping delegation_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let now = Utc::now();
+        let actor_user_id = uuid::Uuid::new_v4().to_string();
+        let org_user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        let provider = ProviderConfig {
+            id: provider_id.clone(),
+            slug: "github".to_string(),
+            name: "GitHub".to_string(),
+            description: None,
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://github.com/login/oauth/authorize".to_string()),
+            token_url: Some("https://github.com/login/oauth/access_token".to_string()),
+            revocation_url: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "user".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "test".to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let requirement = ServiceProviderRequirement {
+            id: uuid::Uuid::new_v4().to_string(),
+            service_id: service_id.clone(),
+            provider_config_id: provider_id.clone(),
+            required: true,
+            scopes: None,
+            injection_method: "bearer".to_string(),
+            injection_key: Some("Authorization".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<ServiceProviderRequirement>(REQUIREMENTS)
+            .insert_one(&requirement)
+            .await
+            .unwrap();
+
+        let token = UserProviderToken {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: org_user_id.clone(),
+            provider_config_id: provider_id,
+            credential_user_id: None,
+            token_type: "oauth2".to_string(),
+            access_token_encrypted: Some(
+                encryption_keys.encrypt(b"org-access-token").await.unwrap(),
+            ),
+            refresh_token_encrypted: None,
+            token_scopes: Some("repo".to_string()),
+            expires_at: None,
+            api_key_encrypted: None,
+            status: "active".to_string(),
+            last_refreshed_at: None,
+            last_used_at: None,
+            error_message: None,
+            label: Some("Org GitHub".to_string()),
+            metadata: Some(
+                [("actor_user_id".to_string(), actor_user_id)]
+                    .into_iter()
+                    .collect(),
+            ),
+            gateway_url: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(&token)
+            .await
+            .unwrap();
+
+        let credentials =
+            resolve_delegated_credentials(&db, &encryption_keys, &org_user_id, &service_id)
+                .await
+                .unwrap();
+
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].provider_slug, "github");
+        assert_eq!(credentials[0].injection_method, "bearer");
+        assert_eq!(credentials[0].injection_key, "Authorization");
+        assert_eq!(credentials[0].credential, "org-access-token");
     }
 }

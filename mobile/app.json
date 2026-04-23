@@ -87,7 +87,10 @@
     "extra": {
       "eas": {
         "projectId": "84ed5f10-0e59-46db-bf71-799e3ddd6ba9"
-      }
+      },
+      "TELEMETRY_DSN": "",
+      "TELEMETRY_HOST": "",
+      "NYXID_SHARE_ANALYTICS": "false"
     }
   }
 }

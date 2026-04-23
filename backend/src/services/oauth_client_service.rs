@@ -14,8 +14,13 @@ pub const KNOWN_OIDC_SCOPES: &[&str] = &["openid", "profile", "email", "roles", 
 /// Default allowed scopes for new OAuth clients.
 pub const DEFAULT_ALLOWED_SCOPES: &str = "openid profile email";
 
-/// Default scopes for the built-in MCP OAuth client.
-pub const DEFAULT_MCP_ALLOWED_SCOPES: &str = "openid profile email proxy";
+/// Default scopes for the built-in MCP OAuth client and dynamic registrations.
+///
+/// Includes `roles` and `groups` so MCP clients (Cursor, Claude Code, Codex,
+/// etc.) that request RBAC claims pass scope validation. Token issuance is
+/// still gated by what the client requests at `/oauth/authorize` and what the
+/// user consents to.
+pub const DEFAULT_MCP_ALLOWED_SCOPES: &str = "openid profile email roles groups proxy";
 
 /// Validate and canonicalize `allowed_scopes`.
 ///
@@ -68,25 +73,21 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
     let collection = db.collection::<OauthClient>(OAUTH_CLIENTS);
 
     if let Some(existing) = collection.find_one(doc! { "_id": MCP_CLIENT_ID }).await? {
-        if !existing
-            .allowed_scopes
-            .split_whitespace()
-            .any(|scope| scope == "proxy")
-        {
-            let updated_scopes =
-                validate_allowed_scopes(&format!("{} proxy", existing.allowed_scopes))?;
-
+        if let Some(updated_scopes) = merge_missing_default_mcp_scopes(&existing.allowed_scopes)? {
             collection
                 .update_one(
                     doc! { "_id": MCP_CLIENT_ID },
                     doc! { "$set": {
-                        "allowed_scopes": updated_scopes,
+                        "allowed_scopes": &updated_scopes,
                         "updated_at": bson::DateTime::from_chrono(Utc::now()),
                     }},
                 )
                 .await?;
 
-            tracing::info!("Updated default MCP OAuth client to include proxy scope");
+            tracing::info!(
+                allowed_scopes = %updated_scopes,
+                "Upgraded default MCP OAuth client to include latest default scopes"
+            );
         }
 
         return Ok(());
@@ -114,37 +115,57 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
     Ok(())
 }
 
-/// Backfill the `proxy` scope onto OAuth clients created via Dynamic Client
-/// Registration before scope enforcement landed (commit 871d364).
+/// If `existing` is missing any scope from [`DEFAULT_MCP_ALLOWED_SCOPES`],
+/// returns the merged, validated, canonical scope string. Returns `None` when
+/// the existing scopes already cover the defaults (so callers can skip the
+/// write).
+fn merge_missing_default_mcp_scopes(existing: &str) -> AppResult<Option<String>> {
+    let existing_set: std::collections::HashSet<&str> = existing.split_whitespace().collect();
+    let missing: Vec<&str> = DEFAULT_MCP_ALLOWED_SCOPES
+        .split_whitespace()
+        .filter(|scope| !existing_set.contains(scope))
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(None);
+    }
+
+    let merged = format!("{existing} {}", missing.join(" "));
+    Ok(Some(validate_allowed_scopes(&merged)?))
+}
+
+/// Backfill default MCP scopes onto OAuth clients created via Dynamic Client
+/// Registration before the current scope set landed.
 ///
-/// DCR is used by MCP clients (Cursor, Claude Code, etc.) which need the
-/// `proxy` scope to call `/mcp`. Older DCR clients were registered with
-/// `openid profile email` only, so their access tokens fail the scope check
-/// in `handlers/mcp_transport.rs`. This sweep upgrades them in place so
-/// existing client_id caches keep working without re-registration.
+/// DCR is used by MCP clients (Cursor, Claude Code, Codex, etc.). Whenever
+/// [`DEFAULT_MCP_ALLOWED_SCOPES`] grows, older DCR records would otherwise
+/// fail authorization with `invalid_scope` (issue #434 was triggered by Codex
+/// requesting `roles`/`groups`). This sweep upgrades them in place so existing
+/// client_id caches keep working without re-registration.
 ///
-/// Idempotent: clients that already have `proxy` are skipped.
-pub async fn migrate_dynamic_clients_add_proxy_scope(db: &mongodb::Database) -> AppResult<()> {
+/// Idempotent: clients that already cover the default set are skipped.
+pub async fn migrate_dynamic_clients_grant_default_mcp_scopes(
+    db: &mongodb::Database,
+) -> AppResult<()> {
     let collection = db.collection::<OauthClient>(OAUTH_CLIENTS);
 
-    let stale: Vec<OauthClient> = collection
-        .find(doc! {
-            "created_by": "dynamic_registration",
-            "allowed_scopes": { "$not": { "$regex": r"(^|\s)proxy(\s|$)" } },
-        })
+    let candidates: Vec<OauthClient> = collection
+        .find(doc! { "created_by": "dynamic_registration" })
         .await?
         .try_collect()
         .await?;
 
-    if stale.is_empty() {
+    if candidates.is_empty() {
         return Ok(());
     }
 
     let now = bson::DateTime::from_chrono(Utc::now());
     let mut upgraded = 0_usize;
 
-    for client in &stale {
-        let updated_scopes = validate_allowed_scopes(&format!("{} proxy", client.allowed_scopes))?;
+    for client in &candidates {
+        let Some(updated_scopes) = merge_missing_default_mcp_scopes(&client.allowed_scopes)? else {
+            continue;
+        };
 
         collection
             .update_one(
@@ -159,10 +180,12 @@ pub async fn migrate_dynamic_clients_add_proxy_scope(db: &mongodb::Database) -> 
         upgraded += 1;
     }
 
-    tracing::info!(
-        upgraded,
-        "Backfilled `proxy` scope on dynamic-registration OAuth clients"
-    );
+    if upgraded > 0 {
+        tracing::info!(
+            upgraded,
+            "Backfilled default MCP scopes on dynamic-registration OAuth clients"
+        );
+    }
 
     Ok(())
 }
@@ -492,5 +515,164 @@ mod tests {
     fn empty_list_gets_openid() {
         let result = validate_allowed_scopes_list(&[]).unwrap();
         assert_eq!(result, "openid");
+    }
+
+    #[test]
+    fn default_mcp_scopes_include_roles_and_groups() {
+        // Issue #434: Codex requests `roles` and `groups`; the DCR default
+        // must allow both or scope validation rejects authorization.
+        let scopes: Vec<&str> = DEFAULT_MCP_ALLOWED_SCOPES.split_whitespace().collect();
+        assert!(scopes.contains(&"openid"));
+        assert!(scopes.contains(&"profile"));
+        assert!(scopes.contains(&"email"));
+        assert!(scopes.contains(&"roles"));
+        assert!(scopes.contains(&"groups"));
+        assert!(scopes.contains(&"proxy"));
+    }
+
+    #[test]
+    fn default_mcp_scopes_validate() {
+        // Guard against typos / unknown scopes ever entering the constant.
+        validate_allowed_scopes(DEFAULT_MCP_ALLOWED_SCOPES).unwrap();
+    }
+
+    #[test]
+    fn merge_returns_none_when_defaults_already_present() {
+        let merged = merge_missing_default_mcp_scopes(DEFAULT_MCP_ALLOWED_SCOPES).unwrap();
+        assert!(merged.is_none(), "no-op when nothing is missing");
+    }
+
+    #[test]
+    fn merge_adds_only_missing_scopes() {
+        // Pre-issue-#434 DCR records had `openid profile email proxy` but no
+        // `roles`/`groups`. The merge must add exactly the missing pieces and
+        // remain stable thereafter.
+        let merged = merge_missing_default_mcp_scopes("openid profile email proxy")
+            .unwrap()
+            .expect("missing scopes should be merged in");
+
+        let merged_set: std::collections::HashSet<&str> = merged.split_whitespace().collect();
+        for scope in DEFAULT_MCP_ALLOWED_SCOPES.split_whitespace() {
+            assert!(merged_set.contains(scope), "missing {scope} after merge");
+        }
+        // Idempotent: a second pass produces no change.
+        assert!(merge_missing_default_mcp_scopes(&merged).unwrap().is_none());
+    }
+
+    #[test]
+    fn merge_preserves_existing_extras_and_dedupes() {
+        // A client with everything already plus a duplicate should stay valid
+        // and not regress.
+        let merged =
+            merge_missing_default_mcp_scopes("openid profile profile email roles").unwrap();
+        let final_scopes = merged.expect("groups + proxy should be added");
+        let parts: Vec<&str> = final_scopes.split_whitespace().collect();
+        let unique: std::collections::HashSet<&str> = parts.iter().copied().collect();
+        assert_eq!(parts.len(), unique.len(), "merge must dedupe");
+    }
+
+    mod mongo {
+        use super::*;
+        use crate::test_utils::connect_test_database;
+
+        async fn insert_dcr_client(
+            db: &mongodb::Database,
+            id: &str,
+            allowed_scopes: &str,
+        ) -> OauthClient {
+            let now = Utc::now();
+            let client = OauthClient {
+                id: id.to_string(),
+                client_name: "DCR Test Client".to_string(),
+                client_secret_hash: "NONE".to_string(),
+                redirect_uris: vec![],
+                allowed_scopes: allowed_scopes.to_string(),
+                grant_types: "authorization_code".to_string(),
+                client_type: "public".to_string(),
+                is_active: true,
+                delegation_scopes: String::new(),
+                created_by: Some("dynamic_registration".to_string()),
+                created_at: now,
+                updated_at: now,
+            };
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_one(&client)
+                .await
+                .expect("insert dcr fixture");
+            client
+        }
+
+        #[tokio::test]
+        async fn migration_backfills_roles_and_groups_on_legacy_dcr_clients() {
+            let Some(db) = connect_test_database("oauth_dcr_migration").await else {
+                eprintln!("skipping oauth_dcr_migration test: no local MongoDB available");
+                return;
+            };
+
+            // Pre-#434 DCR client: has proxy but missing roles/groups.
+            insert_dcr_client(&db, "legacy-dcr", "openid profile email proxy").await;
+            // Already up-to-date client: should stay unchanged.
+            insert_dcr_client(&db, "current-dcr", DEFAULT_MCP_ALLOWED_SCOPES).await;
+
+            migrate_dynamic_clients_grant_default_mcp_scopes(&db)
+                .await
+                .expect("migration runs cleanly");
+
+            let upgraded = get_client(&db, "legacy-dcr").await.unwrap();
+            for scope in DEFAULT_MCP_ALLOWED_SCOPES.split_whitespace() {
+                assert!(
+                    upgraded
+                        .allowed_scopes
+                        .split_whitespace()
+                        .any(|s| s == scope),
+                    "legacy DCR client should have {scope} after migration"
+                );
+            }
+
+            // Idempotent: a second pass is a no-op.
+            migrate_dynamic_clients_grant_default_mcp_scopes(&db)
+                .await
+                .expect("migration is idempotent");
+        }
+
+        #[tokio::test]
+        async fn seed_upgrades_existing_mcp_client_with_missing_default_scopes() {
+            let Some(db) = connect_test_database("oauth_seed_upgrade").await else {
+                eprintln!("skipping oauth_seed_upgrade test: no local MongoDB available");
+                return;
+            };
+
+            let now = Utc::now();
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_one(&OauthClient {
+                    id: MCP_CLIENT_ID.to_string(),
+                    client_name: "NyxID MCP Client".to_string(),
+                    client_secret_hash: "NONE".to_string(),
+                    redirect_uris: vec![],
+                    allowed_scopes: "openid profile email proxy".to_string(),
+                    grant_types: "authorization_code".to_string(),
+                    client_type: "public".to_string(),
+                    is_active: true,
+                    delegation_scopes: String::new(),
+                    created_by: Some("system".to_string()),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .expect("seed legacy mcp client");
+
+            seed_default_clients(&db).await.expect("seed runs");
+
+            let upgraded = get_client(&db, MCP_CLIENT_ID).await.unwrap();
+            for scope in ["roles", "groups"] {
+                assert!(
+                    upgraded
+                        .allowed_scopes
+                        .split_whitespace()
+                        .any(|s| s == scope),
+                    "seeded mcp client should have {scope} after upgrade"
+                );
+            }
+        }
     }
 }

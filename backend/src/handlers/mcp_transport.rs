@@ -811,10 +811,14 @@ async fn handle_tools_list(
     session_id: Option<&str>,
     request: &JsonRpcRequest,
 ) -> Response {
-    let services = match mcp_service::load_user_tools(
+    // Thread API-key node scope into the discovery chain so scoped
+    // keys don't see tools whose only viable routes are all out of
+    // scope (seventeenth-round Codex review P2).
+    let services = match mcp_service::load_user_tools_scoped(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
+        mcp_node_scope(auth),
     )
     .await
     {
@@ -943,10 +947,14 @@ async fn handle_tools_call(
     // -- Service tool: verify activation (when stateful), load, resolve, execute --
     let activated = session_id.map(|sid| state.mcp_sessions.get_activated_service_ids(sid));
 
-    let services = match mcp_service::load_user_tools(
+    // Scoped discovery so resolve_tool_call can't match tools whose
+    // only viable routes fall outside the caller's API-key node scope
+    // (twentieth-round Codex P2).
+    let services = match mcp_service::load_user_tools_scoped(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
+        mcp_node_scope(auth),
     )
     .await
     {
@@ -1059,6 +1067,19 @@ fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext
     }
 }
 
+/// Derive the MCP node-scope filter from the authenticated caller.
+/// Scoped API keys get an `Allowed` scope so the discovery chain hides
+/// tools whose only viable routes are outside the allow-list (matches
+/// `execute_tool`'s runtime scope check). Non-API-key callers and keys
+/// with `allow_all_nodes` get `Unrestricted`.
+fn mcp_node_scope<'a>(auth: &'a McpAuthContext) -> mcp_service::NodeScope<'a> {
+    if auth.allow_all_nodes {
+        mcp_service::NodeScope::Unrestricted
+    } else {
+        mcp_service::NodeScope::Allowed(auth.allowed_node_ids.as_slice())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Meta-tool dispatch helpers
 // ---------------------------------------------------------------------------
@@ -1118,11 +1139,15 @@ async fn handle_meta_call_tool(
             serde_json::Value::Object(flat)
         };
 
-    // Load user tools, then drop anything outside the API key's service scope.
-    let services = match mcp_service::load_user_tools(
+    // Load user tools with API-key node scope applied so
+    // `nyx__call_tool` can't auto-invoke a tool whose only viable
+    // routes are outside the caller's allow-list (twentieth-round
+    // Codex P2). Service scope is still applied downstream below.
+    let services = match mcp_service::load_user_tools_scoped(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
+        mcp_node_scope(auth),
     )
     .await
     {
@@ -1251,11 +1276,15 @@ async fn handle_meta_search(
         return tool_result(request_id, "Search query too long (max 200 chars)", true);
     }
 
-    // Load ALL user tools including non-executable (for discovery)
-    let services = match mcp_service::load_user_tools_all(
+    // Load ALL user tools including non-executable (for discovery).
+    // Scope-aware so scoped keys don't see tools whose only viable
+    // routes are outside their node allow-list (twentieth-round Codex
+    // P2).
+    let services = match mcp_service::load_user_tools_all_scoped(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
+        mcp_node_scope(auth),
     )
     .await
     {

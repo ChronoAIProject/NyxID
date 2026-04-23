@@ -1042,6 +1042,12 @@ nyxid proxy request api-telegram-bot getWebhookInfo -m POST -d '{}'
 nyxid service add api-lark-bot
 # CLI prompts for app_id AND app_secret. NyxID stores both encrypted and
 # handles the tenant_access_token exchange transparently on every call.
+# After register, the CLI prints a `Configure Permissions:` block with a
+# deep link into the Lark developer console's Permissions & Scopes page,
+# scopes pre-selected from the catalog's `required_permissions`. The
+# same link is surfaced by `nyxid service show api-lark-bot-<id>` and on
+# the web UI key detail page. Use it instead of telling the user to
+# search for scope keys manually.
 # Just hit the Lark API path directly -- no manual token management:
 nyxid proxy request api-lark-bot /open-apis/im/v1/chats -m GET
 
@@ -1155,23 +1161,41 @@ nyxid channel-bot register --platform telegram --label "My Support Bot" --token-
 # Discord (requires public key for signature verification)
 nyxid channel-bot register --platform discord --label "My Discord Bot" --token-env DISCORD_BOT_TOKEN --public-key "ed25519_public_key_hex"
 
-# Lark / Feishu (requires app credentials)
-nyxid channel-bot register --platform lark --label "My Lark Bot" --token-env LARK_BOT_TOKEN --app-id "cli_xxx" --app-secret-env LARK_APP_SECRET
+# Lark (requires app credentials + verification token; optional encrypt key)
+nyxid channel-bot register --platform lark --label "My Lark Bot" --token-env LARK_BOT_TOKEN --app-id "cli_xxx" --app-secret-env LARK_APP_SECRET --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx"
+
+# Feishu (same flags as Lark)
+nyxid channel-bot register --platform feishu --label "My Feishu Bot" --token-env FEISHU_BOT_TOKEN --app-id "cli_xxx" --app-secret-env FEISHU_APP_SECRET --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx"
 
 # Slack (pass the xoxb- bot user token and the app's signing secret)
 nyxid channel-bot register --platform slack --label "My Slack Bot" --token-env SLACK_BOT_TOKEN --app-secret-env SLACK_SIGNING_SECRET
 ```
 
-For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. The bot auto-activates on first successful webhook delivery. For Slack, paste the URL into the app's **Event Subscriptions** page — Slack's `url_verification` handshake is answered automatically.
+For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. Telegram/Discord/Slack bots auto-activate on first successful webhook delivery. Lark/Feishu bots promote from `pending_webhook` to `active` only after inbound webhook verification passes, which requires the bot's Verification Token to be set correctly. Encrypt Key is optional, but if it is enabled in the Lark/Feishu console it must also be set on the bot. The CLI falls back to `NYXID_LARK_VERIFICATION_TOKEN` and `NYXID_LARK_ENCRYPT_KEY` when `--verification-token` or `--encrypt-key` are omitted. For Slack, paste the URL into the app's **Event Subscriptions** page — Slack's `url_verification` handshake is answered automatically.
+
+**Lark/Feishu permission setup link (NyxID#167).** For Lark/Feishu bots, every response that includes the bot's `app_id` also carries a `permission_setup_url` and `permission_setup_scopes` field. The URL deep-links into the developer console's Permissions & Scopes page with the scopes NyxID's adapter needs (`im:message`, `im:message:send_as_bot`) already pre-checked, ready for "Bulk Enable". The CLI prints it as a `Configure Permissions:` block after `nyxid channel-bot register`, `nyxid channel-bot show`, and `nyxid channel-bot update` (table mode); the web UI renders it as a "Configure Permissions" section on the bot detail page. When helping a user set up a Lark/Feishu bot, point them at this link instead of asking them to manually search for scope keys in the developer console.
 
 ### Manage bots
 
 ```bash
 nyxid channel-bot list                          # list registered bots
 nyxid channel-bot show <ID>                     # bot details + conversation count
+nyxid channel-bot update <ID> --label "New Label" --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx" --app-id "cli_xxx" --app-secret "secret_xxx"
 nyxid channel-bot verify <ID>                   # re-verify token and webhook
 nyxid channel-bot delete <ID> --yes             # deregister bot
 ```
+
+### Fix a stuck Lark / Feishu bot
+
+If an existing Lark / Feishu bot is stuck in `pending_webhook`, the owner should update the bot with the correct Verification Token and, if the Lark / Feishu console has encryption enabled, the matching Encrypt Key:
+
+```bash
+nyxid channel-bot update <ID> --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx"
+```
+
+The same fix is available in the web UI bot detail page, which uses `PATCH /api/v1/channel-bots/{id}` under the hood. After the next verified inbound webhook is received, NyxID auto-promotes the bot to `active`.
+
+If the bot is also missing required scopes (a common parallel symptom), surface the `permission_setup_url` from `nyxid channel-bot show <ID>` — clicking it opens the developer console with NyxID's required scopes pre-selected so the owner can grant them in one click.
 
 ### Configure conversation routing
 
@@ -1216,12 +1240,13 @@ For Telegram, `conversation_id` is the `chat.id` (a number like `-1001234567890`
 
 Slack specifics: inbound events land on `/api/v1/webhooks/channel/slack/{bot_id}` and are HMAC-verified against the app's signing secret (`v0:{ts}:{body}` with a 5-minute replay window). NyxID ACKs with HTTP 200 inside Slack's 3-second window and processes in a background task. Outbound replies go through `chat.postMessage`; threaded replies anchor on the thread root via `metadata.thread_ts`. Rate-limit signals (HTTP 429 with `Retry-After`, or `{"ok":false,"error":"ratelimited"}`) surface as a clearly-labeled error so the agent can decide when to retry.
 
-The callback payload includes normalized fields (`content.text`, `sender`, etc.) and the full `raw_platform_data` (original Telegram/Discord/Lark/Slack JSON). The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
+The callback payload includes normalized fields (`content.text`, `sender`, etc.), the full `raw_platform_data` (original Telegram/Discord/Lark/Slack JSON), and a per-callback `reply_token` (RS256 JWT) the agent can use to post its async reply without holding the agent API key. The callback is the **only** place the message body exists inside NyxID — it's built in-memory from the live webhook parse and once the callback returns, NyxID retains nothing but metadata.
 
-### Agent-facing endpoints (API-key authenticated)
+### Agent-facing endpoints
 
 ```bash
-# Async reply — this is the only way for an agent to respond
+# Async reply — this is the only way for an agent to respond.
+# Authorization: Bearer <agent API key> OR <reply_token from the callback payload>.
 POST /api/v1/channel-relay/reply
 { "message_id": "<inbound-msg-id>", "reply": { "text": "..." } }
 
@@ -1233,6 +1258,19 @@ GET /api/v1/channel-relay/resolve-sender?platform=telegram&platform_id=12345
 ```
 
 > **ADR-013 note:** `GET /channel-relay/messages/...` returns only routing metadata (direction, platform, sender ids, delivery status, timestamps). Agents that need conversation bodies must retain their own history.
+
+#### Reply token (dual-auth on `/channel-relay/reply`)
+
+The callback payload includes a short-lived `reply_token` (RS256 JWT) the agent can present as `Authorization: Bearer <reply_token>` instead of the agent API key. Intended for runtimes that don't want to persist agent credentials (e.g. Aevatar).
+
+- **Shape:** RS256 JWT. `aud = "channel-relay/reply"` (rejected everywhere else). `token_type = "relay_reply"`.
+- **Claim bindings:** `api_key_id`, `conversation_id`, `inbound_message_id`, `platform` — all four must match the reply request, and the request body's `message_id` must equal `inbound_message_id`.
+- **TTL:** `JWT_RELAY_REPLY_TTL_SECS` (default `1800` = 30 min). 60s clock-skew tolerance on both `iat` and `exp`.
+- **Single-use:** `jti` is consumed on first successful reply; reuse returns `401 "Reply token already used"`.
+- **Revocation coupling:** On every reply NyxID re-checks that the bound `api_key_id` (and the channel bot) is still active — revoking the key invalidates all outstanding tokens immediately.
+- **Null tokens:** If NyxID failed to mint a token, `reply_token` is `null` in the callback; fall back to the agent API key on the reply call.
+
+Agents that already hold the API key can ignore `reply_token` entirely and keep using `Authorization: Bearer nyxid_ag_...`.
 
 ## HTTP Event Gateway — device/analyzer events
 
@@ -1447,4 +1485,3 @@ This skill may be invoked autonomously by the agent when a user request involves
 ## Trust Statement
 
 By using this skill, requests are sent to your configured NyxID instance. NyxID forwards those requests to downstream services using your stored credentials. Only install this skill if you trust your NyxID instance operator.
-

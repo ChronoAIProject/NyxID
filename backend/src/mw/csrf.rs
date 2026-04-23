@@ -65,9 +65,14 @@ fn parse_origin(value: &str) -> Option<String> {
         .map(|url| url.origin().ascii_serialization())
 }
 
-fn allowed_origins(frontend_url: &str, base_url: &str) -> BTreeSet<String> {
+fn allowed_origins(
+    frontend_url: &str,
+    base_url: &str,
+    extra_origins: &[String],
+) -> BTreeSet<String> {
     [frontend_url, base_url]
         .into_iter()
+        .chain(extra_origins.iter().map(String::as_str))
         .filter_map(parse_origin)
         .collect()
 }
@@ -104,7 +109,11 @@ pub async fn browser_csrf_middleware(
         ));
     };
 
-    let allowed = allowed_origins(&state.config.frontend_url, &state.config.base_url);
+    let allowed = allowed_origins(
+        &state.config.frontend_url,
+        &state.config.base_url,
+        &state.config.csrf_trusted_origins,
+    );
     if allowed.contains(&request_origin) {
         return Ok(next.run(request).await);
     }
@@ -135,11 +144,31 @@ mod tests {
 
     #[test]
     fn trusted_browser_origins_only_include_frontend_and_backend() {
-        let allowed = allowed_origins("https://app.example.com", "https://auth.example.com");
+        let allowed = allowed_origins("https://app.example.com", "https://auth.example.com", &[]);
 
         assert_eq!(allowed.len(), 2);
         assert!(allowed.contains("https://app.example.com"));
         assert!(allowed.contains("https://auth.example.com"));
+    }
+
+    #[test]
+    fn trusted_browser_origins_include_csrf_trusted_origins() {
+        let extras = vec![
+            "https://other.example.com".to_string(),
+            "https://third.example.com/".to_string(),
+            "not a url".to_string(),
+        ];
+        let allowed = allowed_origins(
+            "https://app.example.com",
+            "https://auth.example.com",
+            &extras,
+        );
+
+        assert!(allowed.contains("https://app.example.com"));
+        assert!(allowed.contains("https://auth.example.com"));
+        assert!(allowed.contains("https://other.example.com"));
+        assert!(allowed.contains("https://third.example.com"));
+        assert_eq!(allowed.len(), 4);
     }
 
     #[test]

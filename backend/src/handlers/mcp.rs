@@ -60,9 +60,24 @@ pub async fn get_mcp_config(
 
     let user_id = auth_user.user_id.to_string();
 
-    // Delegate to shared load_user_tools which merges platform + user services
-    let tool_services =
-        mcp_service::load_user_tools(&state.db, state.node_ws_manager.as_ref(), &user_id).await?;
+    // Honor the caller's API-key node scope when discovering tools —
+    // otherwise a scoped key bootstrapping from this REST endpoint
+    // would see a different tool set than the JSON-RPC `tools/list`,
+    // and could be handed tools whose only viable routes point at
+    // disallowed nodes (twenty-ninth-round Codex P2).
+    let scope = if auth_user.allow_all_nodes {
+        mcp_service::NodeScope::Unrestricted
+    } else {
+        mcp_service::NodeScope::Allowed(auth_user.allowed_node_ids.as_slice())
+    };
+
+    let tool_services = mcp_service::load_user_tools_scoped(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        &user_id,
+        scope,
+    )
+    .await?;
 
     let mcp_services: Vec<McpServiceConfig> = tool_services
         .iter()

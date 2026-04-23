@@ -421,28 +421,46 @@ fn resolve_effective_config(
     }
 }
 
+/// Cheap UUID-shape check used to short-circuit the `/nodes` round-trip when
+/// the caller already passed a node ID.
+fn looks_like_node_id(id_or_name: &str) -> bool {
+    id_or_name.len() == 36 && id_or_name.contains('-')
+}
+
+/// Look up a node by name inside a `/nodes` response. Returns `None` if the
+/// response has no matching `name` entry. Kept pure so the name-resolution
+/// logic has unit tests that do not need a live API client.
+fn find_node_id_by_name(nodes: &Value, name: &str) -> Option<String> {
+    let arr = nodes
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .or_else(|| nodes.as_array())?;
+    let node = arr.iter().find(|n| n["name"].as_str() == Some(name))?;
+    node["id"]
+        .as_str()
+        .or(node["_id"].as_str())
+        .map(str::to_string)
+}
+
 /// Resolve a node identifier (ID or name) to a node ID.
-async fn resolve_node_id(api: &mut ApiClient, id_or_name: &str) -> Result<String> {
-    // Try as UUID first (quick check)
-    if id_or_name.len() == 36 && id_or_name.contains('-') {
+///
+/// When `id_or_name` already looks like a UUID, it is returned unchanged. When
+/// it does not, we fetch the caller's node list and look for a case-sensitive
+/// `name` match — this lets users pass the friendly name shown by
+/// `nyxid node list` (e.g. `--via-node my-laptop`) instead of the UUID.
+/// Names that don't match a visible node fall through as-is so the backend
+/// can return its usual `node_not_found` error.
+pub(crate) async fn resolve_node_id(api: &mut ApiClient, id_or_name: &str) -> Result<String> {
+    if looks_like_node_id(id_or_name) {
         return Ok(id_or_name.to_string());
     }
 
-    // List nodes and find by name
     let nodes: Value = api.get("/nodes").await?;
-    let items = nodes
-        .get("nodes")
-        .and_then(|v| v.as_array())
-        .or_else(|| nodes.as_array());
-
-    if let Some(arr) = items
-        && let Some(node) = arr.iter().find(|n| n["name"].as_str() == Some(id_or_name))
-        && let Some(nid) = node["id"].as_str().or(node["_id"].as_str())
-    {
-        return Ok(nid.to_string());
+    if let Some(nid) = find_node_id_by_name(&nodes, id_or_name) {
+        return Ok(nid);
     }
 
-    // Fall back to treating it as an ID (let the server decide)
+    // Fall back to treating it as an ID (let the server decide).
     Ok(id_or_name.to_string())
 }
 
@@ -664,4 +682,63 @@ fn find_dockerfile() -> Result<std::path::PathBuf> {
         "Could not find cli/Dockerfile.node. Run this command from the NyxID project root, \
          or build the image manually:\n  docker build -f cli/Dockerfile.node -t {DOCKER_IMAGE} ."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn uuid_shape_is_detected() {
+        assert!(looks_like_node_id("dbf51e02-633d-4293-a896-ec0fb383f30b"));
+        assert!(!looks_like_node_id("wh"));
+        assert!(!looks_like_node_id("my-laptop-node"));
+        // 36 chars but no hyphen -> not a UUID shape
+        assert!(!looks_like_node_id(&"a".repeat(36)));
+    }
+
+    #[test]
+    fn find_by_name_matches_wrapped_payload() {
+        let resp = json!({
+            "nodes": [
+                {"id": "dbf51e02-633d-4293-a896-ec0fb383f30b", "name": "wh"},
+                {"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "name": "other"},
+            ]
+        });
+        assert_eq!(
+            find_node_id_by_name(&resp, "wh").as_deref(),
+            Some("dbf51e02-633d-4293-a896-ec0fb383f30b")
+        );
+    }
+
+    #[test]
+    fn find_by_name_matches_bare_array_payload() {
+        let resp = json!([
+            {"id": "dbf51e02-633d-4293-a896-ec0fb383f30b", "name": "wh"},
+        ]);
+        assert_eq!(
+            find_node_id_by_name(&resp, "wh").as_deref(),
+            Some("dbf51e02-633d-4293-a896-ec0fb383f30b")
+        );
+    }
+
+    #[test]
+    fn find_by_name_returns_none_when_missing() {
+        let resp = json!({"nodes": [{"id": "x", "name": "y"}]});
+        assert!(find_node_id_by_name(&resp, "wh").is_none());
+    }
+
+    #[test]
+    fn find_by_name_falls_back_to_legacy_mongo_id_field() {
+        let resp = json!({
+            "nodes": [
+                {"_id": "dbf51e02-633d-4293-a896-ec0fb383f30b", "name": "wh"},
+            ]
+        });
+        assert_eq!(
+            find_node_id_by_name(&resp, "wh").as_deref(),
+            Some("dbf51e02-633d-4293-a896-ec0fb383f30b")
+        );
+    }
 }

@@ -612,10 +612,15 @@ pub async fn update_user_service(
                     .to_string(),
             ));
         }
+        // Normalize legacy `current.node_id == Some("")` to `None`.
+        // Matches the normalization in `validate_update_inputs` (fifteenth-
+        // round Codex P1) and in the `PUT /keys` handler so the
+        // body/token_exchange guards don't incorrectly treat a legacy
+        // direct-routed service as node-routed (nineteenth-round Codex P2).
         let effective_node_id: Option<&str> = match node_id {
             Some("") => None,
             Some(nid) => Some(nid),
-            None => current.node_id.as_deref(),
+            None => current.node_id.as_deref().filter(|n| !n.is_empty()),
         };
         if effective_node_id.is_some() {
             return Err(AppError::ValidationError(
@@ -628,10 +633,15 @@ pub async fn update_user_service(
 
     // Same node-routing reject for token_exchange post-update.
     if effective_auth_method == "token_exchange" {
+        // Normalize legacy `current.node_id == Some("")` to `None`.
+        // Matches the normalization in `validate_update_inputs` (fifteenth-
+        // round Codex P1) and in the `PUT /keys` handler so the
+        // body/token_exchange guards don't incorrectly treat a legacy
+        // direct-routed service as node-routed (nineteenth-round Codex P2).
         let effective_node_id: Option<&str> = match node_id {
             Some("") => None,
             Some(nid) => Some(nid),
-            None => current.node_id.as_deref(),
+            None => current.node_id.as_deref().filter(|n| !n.is_empty()),
         };
         if effective_node_id.is_some() {
             return Err(AppError::ValidationError(
@@ -770,6 +780,494 @@ pub async fn update_user_service(
     Ok(())
 }
 
+/// Pre-validate the field combination a `PUT /keys` request intends to
+/// apply to a `UserService`, without touching state. Runs every rule that
+/// `update_user_service` would enforce later — auth_method string,
+/// node-write permission for the actor, body/token_exchange cross-field
+/// constraints, identity config shape, custom_user_agent length/control
+/// chars, and default_request_headers denylist/length caps — so callers
+/// can provision side-effecting records (e.g., a new `UserApiKey` via
+/// `unified_key_service::ensure_user_api_key_for_update`) only after
+/// validation passes. This prevents orphaned credentials when the request
+/// eventually fails in the service layer (NyxID#419 follow-up raised by
+/// the Codex review of the fix).
+///
+/// Mirrors the exact checks performed inside `update_user_service` for the
+/// same `(current, incoming)` pair. Keep them in sync.
+#[allow(clippy::too_many_arguments)]
+pub async fn validate_update_inputs(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    current: &UserService,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+    node_id: Option<&str>,
+    identity: Option<&IdentityConfig>,
+    custom_user_agent: Option<&str>,
+    default_request_headers: Option<
+        &Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    >,
+    credential: Option<&str>,
+    new_endpoint_url: Option<&str>,
+    new_openapi_spec_url: Option<&str>,
+) -> AppResult<()> {
+    if let Some(am) = auth_method {
+        validate_auth_method(am)?;
+    }
+
+    let effective_auth_method = auth_method.unwrap_or(&current.auth_method);
+    let effective_auth_key_name = auth_key_name.unwrap_or(&current.auth_key_name);
+    // Treat legacy `current.node_id == Some("")` as unset. Some rows
+    // in the wild still carry the empty string instead of `None`; every
+    // node-routing code path filters those out with `$ne: ""`. Without
+    // this normalization, `ensure_node_writable_by_actor("")` below
+    // would return `NodeNotFound` and block otherwise valid PUTs on
+    // legacy direct-routed services (fifteenth-round Codex P1).
+    let effective_node_id: Option<&str> = match node_id {
+        Some("") => None,
+        Some(nid) => Some(nid),
+        None => current.node_id.as_deref().filter(|n| !n.is_empty()),
+    };
+
+    if effective_auth_method == "body" {
+        if effective_auth_key_name.is_empty() {
+            return Err(AppError::ValidationError(
+                "auth_key_name is required when auth_method is 'body' \
+                 (e.g. 'app_secret' for custom body-auth services)"
+                    .to_string(),
+            ));
+        }
+        if effective_node_id.is_some() {
+            return Err(AppError::ValidationError(
+                "auth_method 'body' is not supported for node-routed services. \
+                 Credential body injection only works for direct (non-node) routing."
+                    .to_string(),
+            ));
+        }
+    }
+
+    // header / query / path all inject the credential under a caller-
+    // supplied key name; an empty key would produce an unauthenticated
+    // request (blank header, `?=<secret>` query, `/<secret>/` path).
+    // Services originally created with `auth_method: "none"` store an
+    // empty `auth_key_name`, so a PUT that upgrades them without also
+    // sending `auth_key_name` would slip through pre-existing
+    // validation. Reject here so direct routing and node pushes can
+    // both assume a non-empty injection key downstream
+    // (thirty-second-round Codex P2). bearer/basic are intentionally
+    // excluded because the handler synthesizes an `Authorization`
+    // default for them.
+    if matches!(effective_auth_method, "header" | "query" | "path")
+        && effective_auth_key_name.is_empty()
+    {
+        return Err(AppError::ValidationError(format!(
+            "auth_key_name is required when auth_method is '{effective_auth_method}'. \
+             Supply a non-empty key name (e.g. 'X-API-Key' for header, \
+             'api_key' for query, 'bot' for path)."
+        )));
+    }
+
+    if effective_auth_method == "token_exchange" {
+        if effective_node_id.is_some() {
+            return Err(AppError::ValidationError(
+                "auth_method 'token_exchange' is not supported for node-routed services. \
+                 The token exchange runs server-side and does not flow through nodes."
+                    .to_string(),
+            ));
+        }
+
+        // Match the prerequisites `create_key` enforces: the service must
+        // be catalog-backed AND the catalog entry must declare a
+        // `token_exchange_config`. A PUT that leaves the service in a
+        // token_exchange state without those would 200 the update and
+        // then fail every subsequent proxy call inside
+        // `load_token_exchange_config_for_user_service`.
+        let Some(ref cat_id) = current.catalog_service_id else {
+            return Err(AppError::ValidationError(
+                "auth_method 'token_exchange' requires a catalog-backed \
+                 service. Create the service from its catalog entry \
+                 instead of promoting a custom endpoint."
+                    .to_string(),
+            ));
+        };
+        let catalog_entry = db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": cat_id })
+            .await?
+            .ok_or_else(|| {
+                AppError::ValidationError(
+                    "Catalog service for token_exchange no longer exists".to_string(),
+                )
+            })?;
+
+        if catalog_entry.token_exchange_config.is_none() {
+            return Err(AppError::ValidationError(format!(
+                "Catalog service '{}' is not configured for token_exchange. \
+                 Contact an admin to add a `token_exchange_config` or pick \
+                 a different auth_method.",
+                catalog_entry.slug
+            )));
+        }
+
+        // If the caller is supplying a credential in the same PUT, run
+        // the same JSON-object shape check `create_key` performs via
+        // `validate_token_exchange_catalog_credential`. An empty/omitted
+        // credential is fine — it just means the caller isn't rotating
+        // the existing stored value.
+        if let Some(cred) = credential
+            && !cred.is_empty()
+        {
+            crate::services::unified_key_service::validate_token_exchange_catalog_credential(
+                &catalog_entry,
+                cred,
+            )?;
+        }
+    }
+
+    // Identity config: run the same normalize+validate pipeline so we
+    // reject bad scope / oversized audience / etc. before provisioning.
+    if let Some(cfg) = identity {
+        normalize_identity_config(cfg)?;
+    }
+
+    // Custom User-Agent: mirror the trim/length/control-char rules applied
+    // inside `update_user_service`. Empty (post-trim) is a "clear" and
+    // always valid; non-empty has caps.
+    if let Some(ua) = custom_user_agent {
+        let trimmed = ua.trim();
+        if !trimmed.is_empty() {
+            if trimmed.len() > 256 {
+                return Err(AppError::ValidationError(
+                    "custom_user_agent must not exceed 256 characters".to_string(),
+                ));
+            }
+            if trimmed.bytes().any(|b| b < 0x20 && b != b'\t') {
+                return Err(AppError::ValidationError(
+                    "custom_user_agent must not contain control characters".to_string(),
+                ));
+            }
+        }
+    }
+
+    // default_request_headers: run the same reconcile + validate pipeline
+    // against the currently-stored list. This catches denylisted names
+    // and over-length values before provisioning a credential downstream
+    // of a header-only update that would otherwise fail.
+    if let Some(Some(list)) = default_request_headers {
+        let reconciled = crate::models::default_request_header::reconcile_with_stored(
+            list.clone(),
+            current.default_request_headers.as_deref(),
+        );
+        crate::models::default_request_header::validate_headers(reconciled)?;
+    }
+
+    // Reject injection-param AND node_id changes on services whose
+    // backing key is `node_managed` — the credential lives entirely
+    // on the node agent, so the server can't re-push when the caller
+    // changes `auth_method` / `auth_key_name` / `endpoint_url` (target
+    // URL) or rebinds/clears `node_id`. Without this guard:
+    //   * `auth_method`/`auth_key_name`/`endpoint_url` edits would
+    //     leave the node serving the stale injection config with no
+    //     path back to sync (twenty-eighth-round Codex P1).
+    //   * `node_id` moves / clears skip the push path (no server-held
+    //     credential to send) but still trigger the post-commit
+    //     `credential_remove` on the old node — the only holder of the
+    //     secret — leaving the service unusable until the user
+    //     re-enters the credential on the new target
+    //     (thirty-third-round Codex P1).
+    // Users must instead run `nyxid node credentials add` on the node
+    // directly, or promote the record first.
+    //
+    // Exception: when the caller supplies a non-empty `credential` in the
+    // same request, `ensure_user_api_key_for_update` promotes the
+    // node_managed record to a server-held credential type and the
+    // subsequent push rewrites the new node's config with the fresh
+    // secret + injection params. Blocking here would make the combined
+    // migrate-and-update flow unusable (twenty-ninth-round Codex P2).
+    let node_id_actually_changes = match node_id {
+        None => false,
+        Some(new_raw) => {
+            let new_eff: Option<&str> = if new_raw.is_empty() {
+                None
+            } else {
+                Some(new_raw)
+            };
+            let old_eff = current.node_id.as_deref().filter(|n| !n.is_empty());
+            old_eff != new_eff
+        }
+    };
+    let changes_injection_params = auth_method.is_some()
+        || auth_key_name.is_some()
+        || new_endpoint_url.is_some()
+        || node_id_actually_changes;
+    let caller_is_promoting = credential.is_some_and(|c| !c.is_empty());
+    if changes_injection_params
+        && !caller_is_promoting
+        && let Some(ref ak_id) = current.api_key_id
+    {
+        let ak =
+            crate::services::user_api_key_service::get_api_key(db, &current.user_id, ak_id).await?;
+        if ak.credential_type == "node_managed" {
+            return Err(AppError::BadRequest(
+                "Cannot change auth_method/auth_key_name/endpoint_url/node_id on a \
+                 node-managed service via `PUT /keys` without also supplying a \
+                 new `credential` to promote the key to a server-held record. \
+                 Either include `credential` in the same request, or run \
+                 `nyxid node credentials add <slug> …` on the node directly."
+                    .to_string(),
+            ));
+        }
+    }
+
+    // Endpoint URL format: mirror `user_endpoint_service::validate_endpoint_url`.
+    // Skipping would let a strict node push forward an unvalidated
+    // `target_url` (e.g., `ftp://…`) to the node and only fail the
+    // backend commit afterwards — leaving server and node out of sync
+    // (tenth-round Codex review P2). Empty + SSH URLs are still allowed.
+    if let Some(url) = new_endpoint_url
+        && !url.is_empty()
+        && !url.starts_with("ssh://")
+    {
+        crate::services::url_validation::validate_base_url(url)?;
+    }
+
+    // OpenAPI spec URL format: same rationale. Without this, a PUT
+    // that rotates a credential AND sets a malformed
+    // `openapi_spec_url` would commit the credential (and push to the
+    // node) before `update_endpoint` rejects the spec URL
+    // (twenty-sixth-round Codex P2). Empty string is a valid clear.
+    if let Some(url) = new_openapi_spec_url
+        && !url.trim().is_empty()
+    {
+        crate::services::url_validation::validate_optional_spec_url(url)?;
+    }
+
+    // Node-write permission check #1: caller is explicitly setting a
+    // non-empty node_id. Matches the gated branch inside
+    // `update_user_service`; empty-string (clear) and None (keep) skip.
+    if let Some(nid) = node_id
+        && !nid.is_empty()
+    {
+        node_service::ensure_node_writable_by_actor(db, actor_user_id, nid).await?;
+    }
+
+    // Reject `PUT /keys` that binds a node onto a provider-backed
+    // service whose `UserApiKey` is shared with another active
+    // service. `create_api_key_from_provider_token` deliberately
+    // reuses one `UserApiKey` per `UserProviderToken` (see that
+    // function's doc comment), so flipping it to `node_managed` on
+    // node bind would clear the access token for every direct-routed
+    // service still using it (twenty-eighth-round Codex P1). The user
+    // must explicitly recreate the service via the catalog path
+    // (which provisions a fresh unshared `UserApiKey`) to move one
+    // instance of a provider-backed service onto a node without
+    // breaking the others.
+    let node_id_changing = match node_id {
+        Some("") => current.node_id.as_deref().is_some_and(|n| !n.is_empty()), // clearing
+        Some(nid) => current.node_id.as_deref() != Some(nid),
+        None => false,
+    };
+    if node_id_changing
+        && effective_node_id.is_some()
+        && let Some(ref ak_id) = current.api_key_id
+    {
+        let ak =
+            crate::services::user_api_key_service::get_api_key(db, &current.user_id, ak_id).await?;
+        if ak.provider_config_id.is_some() {
+            let sibling_count = db
+                .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+                .count_documents(doc! {
+                    "user_id": &current.user_id,
+                    "api_key_id": ak_id,
+                    "is_active": true,
+                    "_id": { "$ne": &current.id },
+                })
+                .await?;
+            if sibling_count > 0 {
+                return Err(AppError::BadRequest(
+                    "Cannot bind this service to a node: the underlying provider \
+                     credential is shared with other services, and moving one onto \
+                     a node would invalidate the others. Recreate this service \
+                     from its catalog entry to get a dedicated credential, or \
+                     unbind the shared provider token first."
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    // Provider-backed node-routed credential guard. `create_key`
+    // refuses `{node_id, provider_config_id, credential}` at creation
+    // time; the PUT path must do the same *before* any key mutation so
+    // a rejected request never leaves a rotated `UserApiKey` behind
+    // (fourteenth-round Codex P1). Two provider-source checks cover
+    // both "existing service has provider-linked key" and "upgrade
+    // from auth_method=none on a provider-backed catalog entry":
+    if credential.is_some_and(|c| !c.is_empty()) && effective_node_id.is_some() {
+        // (a) An already-linked api_key carrying a provider_config_id.
+        if let Some(ref ak_id) = current.api_key_id {
+            let ak =
+                crate::services::user_api_key_service::get_api_key(db, &current.user_id, ak_id)
+                    .await?;
+            if ak.provider_config_id.is_some() {
+                return Err(AppError::BadRequest(
+                    "Node-routed provider-backed services must be authorized on the node agent. \
+                     Rotate the credential through the provider's OAuth/device-code/API-key flow, \
+                     or clear `node_id` before storing a server-held credential."
+                        .to_string(),
+                ));
+            }
+        }
+        // (b) First-time upgrade: no api_key yet, but the catalog entry
+        //     is provider-backed.
+        if current.api_key_id.is_none()
+            && let Some(ref cat_id) = current.catalog_service_id
+            && let Some(cat) = db
+                .collection::<crate::models::downstream_service::DownstreamService>(
+                    crate::models::downstream_service::COLLECTION_NAME,
+                )
+                .find_one(doc! { "_id": cat_id })
+                .await?
+            && cat.provider_config_id.is_some()
+        {
+            return Err(AppError::BadRequest(
+                "Node-routed provider-backed services must be authorized on the node agent. \
+                 Use the provider flow instead of sending a credential through this endpoint, \
+                 or clear `node_id` first."
+                    .to_string(),
+            ));
+        }
+    }
+
+    // Node-write permission check #2: caller may cause a credential
+    // push to the effectively-bound node even when `node_id` itself
+    // isn't in the body. The handler pushes on any of:
+    //   (a) a new `credential` being stored server-side
+    //   (b) a node-delivery-relevant field change (`auth_method`,
+    //       `auth_key_name`, `endpoint_url`) on a service that already
+    //       holds a server credential
+    // In both cases the PUT ends up rewriting the node's local
+    // credential config, so the actor must own the node regardless of
+    // whether they touched `node_id`. Without this check, an org admin
+    // with write access to the service but not the node could push
+    // credentials into someone else's node config (tenth-round Codex
+    // review P1). Skipped when `node_id` was already verified with the
+    // same value above.
+    let credential_supplied = credential.is_some_and(|c| !c.is_empty());
+    let touches_node_delivery_field =
+        auth_method.is_some() || auth_key_name.is_some() || new_endpoint_url.is_some();
+    let may_push_to_node = credential_supplied || touches_node_delivery_field;
+    if may_push_to_node
+        && let Some(eff_node) = effective_node_id
+        && node_id != Some(eff_node)
+    {
+        node_service::ensure_node_writable_by_actor(db, actor_user_id, eff_node).await?;
+    }
+
+    // Pre-commit check: when reassigning to a different node (or clearing
+    // the binding), verify the actor can write to the *previous* node too.
+    // The handler will later send `credential_remove` to that node; if we
+    // discover the permission mismatch only after `update_user_service`
+    // has persisted the new `node_id`, the PUT returns an error while the
+    // routing change has already committed — the client sees a failure
+    // and may retry, but the service is already moved
+    // (twenty-ninth-round Codex P1). Doing the check here keeps the
+    // commit/cleanup pair all-or-nothing from the caller's perspective.
+    if let Some(new_nid_raw) = node_id {
+        let new_effective: Option<&str> = if new_nid_raw.is_empty() {
+            None
+        } else {
+            Some(new_nid_raw)
+        };
+        let old_effective: Option<&str> = current.node_id.as_deref().filter(|n| !n.is_empty());
+        if let Some(old_nid) = old_effective
+            && old_effective != new_effective
+        {
+            node_service::ensure_node_writable_by_actor(db, actor_user_id, old_nid).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Attach a newly-provisioned `UserApiKey` to an existing `UserService`.
+///
+/// Used by the PUT /keys upgrade path when a service that was created with
+/// `auth_method: "none"` is switched to a credential-bearing method or
+/// receives its first stored credential. This is the only writer that sets
+/// `api_key_id` on an existing `UserService` row — `create_user_service`
+/// already attaches the key at creation time. See `unified_key_service::
+/// ensure_user_api_key_for_update` for the full upgrade protocol and
+/// NyxID#419 for the bug this closes.
+pub async fn link_api_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+    api_key_id: &str,
+) -> AppResult<()> {
+    let ak_count = db
+        .collection::<mongodb::bson::Document>(USER_API_KEYS)
+        .count_documents(doc! { "_id": api_key_id, "user_id": user_id })
+        .await?;
+    if ak_count == 0 {
+        return Err(AppError::NotFound(
+            "API key not found or does not belong to user".to_string(),
+        ));
+    }
+
+    // Compare-and-set on `api_key_id`. Two concurrent upgrade PUTs for
+    // the same no-auth service both provision their own `UserApiKey`
+    // and race here; without the `api_key_id: null` predicate the last
+    // write wins and the earlier one is orphaned — a "leaked" credential
+    // that still appears under external key management (twenty-ninth-
+    // round Codex P2). We also accept a re-attach of the same
+    // `api_key_id` so an idempotent retry of a single request doesn't
+    // return Conflict.
+    let result = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "_id": service_id,
+                "user_id": user_id,
+                "$or": [
+                    { "api_key_id": null },
+                    { "api_key_id": { "$exists": false } },
+                    { "api_key_id": api_key_id },
+                ],
+            },
+            doc! {
+                "$set": {
+                    "api_key_id": api_key_id,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        // Distinguish "service missing" from "service already bound to a
+        // different api_key" so the caller can reclaim the orphan
+        // credential it just provisioned.
+        let existing = db
+            .collection::<UserService>(COLLECTION_NAME)
+            .find_one(doc! { "_id": service_id, "user_id": user_id })
+            .await?;
+        return match existing {
+            None => Err(AppError::NotFound("User service not found".to_string())),
+            Some(_) => Err(AppError::Conflict(
+                "User service already has an API key bound (concurrent upgrade); \
+                 the duplicate credential has been discarded. Retry the PUT to \
+                 see the current state."
+                    .to_string(),
+            )),
+        };
+    }
+
+    Ok(())
+}
+
 /// Deactivate a user service (soft delete).
 ///
 /// `actor_user_id` is the human/API key making the request -- forwarded to
@@ -801,6 +1299,104 @@ pub async fn deactivate_user_service(
     // service. Without this, the Agent Key detail page keeps showing
     // bindings pointing at a now-inactive service (issue #324).
     agent_binding_service::cleanup_bindings_for_user_service(db, user_id, service_id).await?;
+
+    Ok(())
+}
+
+/// Migrate stale `UserService.auth_method = "none"` snapshots taken from
+/// provider-delegated catalog entries (Anthropic, OpenAI, Gemini, ...)
+/// before the provisioning path derived the effective injection config
+/// from the SPR.
+///
+/// Background: `DownstreamService` rows for those services intentionally
+/// store `auth_method = "none"` on the catalog row and carry the real
+/// injection config on the `ServiceProviderRequirement`. Earlier versions
+/// of `unified_key_service::create_key` copied the raw
+/// `svc.auth_method` / `svc.auth_key_name` onto the UserService, so the
+/// proxy (which reads `auth_method` straight off the UserService) never
+/// injected the caller's credential and upstream returned
+/// `"x-api-key header is required"`.
+///
+/// Scope:
+/// - Match by `catalog_service_id` (so we never touch custom-endpoint
+///   UserServices that carry no catalog link).
+/// - Require `auth_method = "none"` AND `auth_key_name = ""` so an
+///   admin's deliberate `"none"` customization with a named key is left
+///   alone.
+/// - Require `api_key_id` to be set -- auto-provisioned no-auth rows
+///   (which have no api_key_id) are handled separately by
+///   `reconcile_stale_auto_provisions` and must not be mutated here.
+///
+/// Idempotent: once the snapshot matches the SPR, `auth_method` is no
+/// longer `"none"` and the filter no longer matches the row.
+pub async fn backfill_stale_catalog_auth_snapshots(db: &mongodb::Database) -> AppResult<()> {
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+    use crate::models::service_provider_requirement::{
+        COLLECTION_NAME as SPR_COLLECTION, ServiceProviderRequirement,
+    };
+
+    let stale_catalog_services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(doc! { "auth_method": "none", "is_active": true })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut updated: u64 = 0;
+    for svc in stale_catalog_services {
+        let Some(spr) = db
+            .collection::<ServiceProviderRequirement>(SPR_COLLECTION)
+            .find_one(doc! { "service_id": &svc.id })
+            .await?
+        else {
+            continue;
+        };
+
+        let injection_key = spr
+            .injection_key
+            .clone()
+            .unwrap_or_else(|| "Authorization".to_string());
+
+        let result = db
+            .collection::<UserService>(COLLECTION_NAME)
+            .update_many(
+                doc! {
+                    "catalog_service_id": &svc.id,
+                    "auth_method": "none",
+                    "auth_key_name": "",
+                    "api_key_id": { "$ne": null },
+                },
+                doc! {
+                    "$set": {
+                        "auth_method": &spr.injection_method,
+                        "auth_key_name": &injection_key,
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    }
+                },
+            )
+            .await?;
+
+        if result.modified_count > 0 {
+            tracing::info!(
+                catalog_slug = %svc.slug,
+                injection_method = %spr.injection_method,
+                injection_key = %injection_key,
+                matched = result.matched_count,
+                modified = result.modified_count,
+                "Migrated stale UserService auth_method snapshots"
+            );
+            updated += result.modified_count;
+        }
+    }
+
+    if updated > 0 {
+        tracing::info!(
+            count = updated,
+            "UserService auth_method snapshot migration complete"
+        );
+    }
 
     Ok(())
 }

@@ -170,11 +170,25 @@ The full flow lives in **[docs/CONNECTING_SERVICES.md](CONNECTING_SERVICES.md)**
 
 Quickstart is a **first-time install**. To reinstall — e.g. to try a new config, wipe test data, or recover from a broken state — uninstall first, then re-run [Step 2](#step-2-of-3--install-and-start).
 
+Interactive uninstall:
+
 ```bash
 cd NyxID
-./scripts/uninstall.sh               # interactive: type "wipe" to confirm
-./scripts/uninstall.sh --yes         # non-interactive (CI / repeat testing)
-./scripts/uninstall.sh --keep-config # keep .env.dev and keys/*.pem across reinstall
+./scripts/uninstall.sh
+```
+
+Non-interactive uninstall (CI / repeat testing):
+
+```bash
+cd NyxID
+./scripts/uninstall.sh --yes
+```
+
+Uninstall but keep `.env.dev` and `keys/*.pem` across reinstall:
+
+```bash
+cd NyxID
+./scripts/uninstall.sh --keep-config
 ```
 
 By default this removes:

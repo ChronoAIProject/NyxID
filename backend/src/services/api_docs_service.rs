@@ -929,6 +929,17 @@ fn cache_spec(url: &str, spec: Arc<serde_json::Value>) {
     );
 }
 
+#[cfg(test)]
+pub(crate) fn cache_test_spec(url: &str, scope: Option<&str>, spec: serde_json::Value) {
+    let cache_key = build_cache_key(url, scope);
+    cache_spec(&cache_key, Arc::new(spec));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_test_spec_cache() {
+    SPEC_CACHE.clear();
+}
+
 fn prune_stale_cache_entries(now: Instant) {
     SPEC_CACHE.retain(|_, entry| entry.is_fresh(now));
 }

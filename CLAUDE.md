@@ -258,9 +258,9 @@ All API routes under `/api/v1`:
 - `/api-keys/external` -- user's external API keys / credentials (list, update, delete)
 - `/user-services` -- user's proxy routing config (list, update, delete)
 - `/catalog` -- read-only service catalog for users (list templates, get template by slug, `?include_all=true` for full discovery including system services). Supports `/{slug}/endpoints` for OpenAPI endpoint discovery via hardened spec fetch.
-- `/channel-bots` -- channel bot registration CRUD
+- `/channel-bots` -- channel bot registration CRUD + PATCH updates for platform verification material
 - `/channel-conversations` -- conversation-to-agent routing (CRUD). Maps platform conversations to agent API keys.
-- `/channel-relay/reply` -- agent async reply to a platform conversation. **Only async replies are supported** — sync 200+body replies from agent callbacks were removed per ADR-013 / NyxID#221. Agents must return 202 to the callback and post replies here.
+- `/channel-relay/reply` -- agent async reply to a platform conversation. **Only async replies are supported** — sync 200+body replies from agent callbacks were removed per ADR-013 / NyxID#221. Agents must return 202 to the callback and post replies here. Accepts two auth modes: (a) the agent's API key (`Authorization: Bearer nyxid_ag_…`), scoped by `conversation.agent_api_key_id`; or (b) a per-callback reply token (`Authorization: Bearer <reply_token>`) delivered in the inbound callback payload's `reply_token` field. Reply tokens are RS256 JWTs with `aud="channel-relay/reply"`, bound to one `inbound_message_id` + `conversation_id` + `api_key_id` + `platform`, single-use (enforced via MongoDB `reply_token_uses`), and valid for `JWT_RELAY_REPLY_TTL_SECS` (default 30 min). Intended for downstream runtimes (e.g. Aevatar) that want to reply without persisting agent API keys.
 - `/channel-relay/messages/{conversation_id}` -- message history for agents
 - `/channel-relay/resolve-sender` -- resolve platform sender to NyxID user
 - `/channel-events/{conversation_id}` -- HTTP Event Gateway ingress (NyxID#221, ADR-013). Accepts device event envelopes `{event_id, source, type, timestamp, payload, metadata}`, converts to `CallbackPayload` with `platform="device"`, and forwards through the channel relay pipeline. Per-channel rate limited (default 100/s), idempotent via in-memory LRU dedup (5min TTL), metadata-only logging to `channel_event_logs` (no payload persistence).
@@ -275,6 +275,19 @@ All API routes under `/api/v1`:
 - `/oauth/token` -- also supports `grant_type=client_credentials` (service accounts), `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (RFC 8693 delegated access and social token exchange via `subject_token_type=id_token` for native mobile Google/GitHub login)
 
 Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`, `/llms.txt`, `/llms-full.txt`
+
+## Channel Bot Notes
+
+For Lark / Feishu channel bots, the developer console fields are used for different purposes and must not be conflated:
+
+- **App ID** + **App Secret** authenticate outbound NyxID calls to the Lark / Feishu APIs so NyxID can fetch tenant access tokens and send replies.
+- **Verification Token** is required for inbound webhook verification. NyxID compares it against `header.token` on v2 events or top-level `token` on v1 / `url_verification` payloads.
+- **Encrypt Key** is optional. When configured in the Lark / Feishu Event Subscriptions console, NyxID verifies `X-Lark-Signature`, decrypts the `encrypt` payload, and then validates the Verification Token on the decrypted JSON.
+
+If an older Lark / Feishu bot is stuck in `pending_webhook`, patch the bot with its Verification Token and optional Encrypt Key, then wait for the next verified inbound to auto-promote it to `active`:
+
+- `PATCH /api/v1/channel-bots/{id}`
+- `nyxid channel-bot update <ID> --verification-token ... [--encrypt-key ...] [--app-id ...] [--app-secret ...]`
 
 ## Environment Variables
 
@@ -302,6 +315,7 @@ JWT_PUBLIC_KEY_PATH=keys/public.pem
 JWT_ISSUER=nyxid
 JWT_ACCESS_TTL_SECS=900             # 15 minutes
 JWT_REFRESH_TTL_SECS=604800         # 7 days
+JWT_RELAY_REPLY_TTL_SECS=1800       # 30 minutes (per-callback reply token TTL)
 SA_TOKEN_TTL_SECS=3600              # 1 hour (service account tokens)
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
@@ -427,6 +441,12 @@ nyxid api-key show <ID_OR_NAME>         # Show key details + bindings
 nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>  # Credential override
 nyxid api-key rotate <ID_OR_NAME>       # Rotate API key
 nyxid api-key delete <ID_OR_NAME>       # Delete API key
+
+# Channel bots
+nyxid channel-bot register --platform telegram --label support --token-env TELEGRAM_BOT_TOKEN
+nyxid channel-bot register --platform lark --label support --token-env LARK_BOT_TOKEN --app-id cli_xxx --app-secret-env LARK_APP_SECRET --verification-token vtoken_xxx
+nyxid channel-bot update <BOT_ID> --verification-token vtoken_xxx --encrypt-key key_xxx
+NYXID_LARK_VERIFICATION_TOKEN=vtoken_xxx NYXID_LARK_ENCRYPT_KEY=key_xxx nyxid channel-bot update <BOT_ID>
 
 # Frontend (from frontend/)
 npm run dev                             # Dev server (port 3000)

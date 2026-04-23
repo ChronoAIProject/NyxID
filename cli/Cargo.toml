@@ -42,6 +42,9 @@ sha2 = "0.10"
 hmac = "0.12"
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive"] }
+
+# Telemetry (first-run consent TTY detection)
+is-terminal = "0.4"
 directories = "6"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 thiserror = "2"

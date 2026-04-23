@@ -480,6 +480,7 @@ fn build_device_callback_payload(
         // `event_id` is preserved in `ChannelMessage.platform_message_id`.
         message_id: nyxid_message_id.to_string(),
         platform: "device".to_string(),
+        reply_token: None,
         agent: CallbackAgent {
             api_key_id: api_key.id.clone(),
             name: api_key.name.clone(),

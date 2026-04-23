@@ -14,6 +14,14 @@ import {
 } from "../../lib/notifications/pushNotifications";
 import { getCurrentUserProfileRequest, refreshAccessTokenIfNeeded, setSessionInvalidationListener } from "../../lib/api/http";
 import { isEmailAllowed, ALLOWED_EMAILS } from "../../lib/env";
+import {
+  identify as telemetryIdentify,
+  initTelemetry,
+  readExpoTelemetryConfig,
+  reset as telemetryReset,
+} from "../../lib/telemetry";
+import { decodeJwtSub } from "../../lib/auth/jwt";
+import { useMobileConsent } from "../../lib/consent";
 
 const PROACTIVE_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -41,6 +49,10 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       } else {
         await clearPendingPushSyncSignal();
       }
+      // Clear telemetry identity before we wipe auth state so the
+      // very next event carries a fresh anon distinct_id rather than
+      // the ex-user's id. Safe no-op when telemetry is off.
+      telemetryReset();
       await clearStoredAuthSession();
       setIsAuthenticated(false);
     } finally {
@@ -84,6 +96,22 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
     };
   }, [isAuthenticated]);
 
+  // Initialize telemetry once the session has finished restoring AND
+  // the user has opted in. Idempotent: `initTelemetry` guards against
+  // double-invoke internally so effect re-runs are safe.
+  const { enabled: consentEnabled } = useMobileConsent();
+  useEffect(() => {
+    if (isRestoring) return;
+    if (!consentEnabled) return;
+    const cfg = readExpoTelemetryConfig();
+    void initTelemetry({
+      dsn: cfg.dsn,
+      host: cfg.host,
+      shareBack: cfg.shareBack,
+      consent: true,
+    });
+  }, [isRestoring, consentEnabled]);
+
   useEffect(() => {
     let active = true;
     const restoreTimeout = setTimeout(() => {
@@ -97,6 +125,14 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
         if (!active) return;
         setIsAuthenticated(Boolean(session));
         if (session) {
+          // If we restored an authenticated session with a known
+          // `userId` (persisted or JWT-derived by `loadStoredAuthSession`),
+          // identify to telemetry immediately so post-boot events
+          // attribute to the user rather than the anon id. Safe no-op
+          // when telemetry is off or consent not granted.
+          if (session.userId) {
+            telemetryIdentify(session.userId);
+          }
           void activatePushAfterLogin({ forceRegister: true })
             .then((result) => {
               if (__DEV__) {
@@ -148,6 +184,15 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       }
 
       setIsAuthenticated(true);
+      // Identify to telemetry as soon as the session is persisted.
+      // `persistAuthSession` derives/persists userId internally but does
+      // not mutate the passed object, so we also derive it here from
+      // the access token's JWT `sub` claim. Falls back to the caller-
+      // supplied value when present.
+      const userId = session.userId ?? decodeJwtSub(session.accessToken);
+      if (userId) {
+        telemetryIdentify(userId);
+      }
       try {
         const pushResult = await activatePushAfterLogin({ forceRegister: true });
         if (__DEV__) {

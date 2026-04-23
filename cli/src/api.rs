@@ -7,11 +7,40 @@ use serde::{Deserialize, Serialize};
 pub const CLI_USER_AGENT: &str = concat!("nyxid-cli/", env!("CARGO_PKG_VERSION"));
 
 pub fn build_cli_http_client() -> Result<Client> {
-    Client::builder()
+    // Attach `X-NyxID-Client: cli` + `X-NyxID-Client-Version` ONLY when
+    // a telemetry DSN is configured on this machine (or when share-back
+    // is opted in). Keeps the default-off CLI byte-identical to the
+    // pre-telemetry build — no new headers on the wire, no CORS-style
+    // drift visible to the backend. The backend's telemetry middleware
+    // reads these to tag events with `surface`; see
+    // docs/TELEMETRY.md §3.
+    let telemetry_configured = std::env::var("NYXID_TELEMETRY_DSN")
+        .ok()
+        .is_some_and(|s| !s.is_empty())
+        || std::env::var("NYXID_SHARE_ANALYTICS")
+            .ok()
+            .is_some_and(|v| {
+                matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
+            });
+
+    let mut builder = Client::builder()
         .user_agent(CLI_USER_AGENT)
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .context("Failed to build HTTP client")
+        .connect_timeout(std::time::Duration::from_secs(10));
+
+    if telemetry_configured {
+        let mut default_headers = reqwest::header::HeaderMap::new();
+        default_headers.insert(
+            reqwest::header::HeaderName::from_static("x-nyxid-client"),
+            reqwest::header::HeaderValue::from_static("cli"),
+        );
+        default_headers.insert(
+            reqwest::header::HeaderName::from_static("x-nyxid-client-version"),
+            reqwest::header::HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+        );
+        builder = builder.default_headers(default_headers);
+    }
+
+    builder.build().context("Failed to build HTTP client")
 }
 
 pub struct ApiClient {
@@ -492,7 +521,7 @@ pub async fn anonymous_post_empty(base_url: &str, path: &str, body: &impl Serial
 mod tests {
     use std::collections::HashMap;
     use std::io;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -500,8 +529,7 @@ mod tests {
     use super::ApiClient;
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::test_support::env_lock()
     }
 
     struct HomeGuard {

@@ -53,6 +53,41 @@ pub struct OutboundReply {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Decrypted, platform-specific webhook verification material prepared by the
+/// handler. Secrets never live on persisted model structs.
+#[derive(Clone, Default)]
+pub struct PlatformVerifySecrets {
+    pub slack_signing_secret: Option<String>,
+    pub lark_verification_token: Option<String>,
+    pub lark_encrypt_key: Option<String>,
+}
+
+impl std::fmt::Debug for PlatformVerifySecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformVerifySecrets")
+            .field(
+                "slack_signing_secret",
+                &self.slack_signing_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "lark_verification_token",
+                &self.lark_verification_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "lark_encrypt_key",
+                &self.lark_encrypt_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+/// Webhook payload after platform-specific verification and preprocessing.
+#[derive(Debug, Clone)]
+pub struct PreparedWebhook {
+    pub body: Vec<u8>,
+    pub challenge_response: Option<serde_json::Value>,
+}
+
 /// Trait that each chat platform (Telegram, Discord, Lark, Feishu) implements
 /// to normalize webhook verification, message parsing, and reply sending.
 #[async_trait::async_trait]
@@ -60,10 +95,28 @@ pub trait PlatformAdapter: Send + Sync {
     /// Platform identifier (e.g. "telegram", "discord", "lark", "feishu").
     fn platform_id(&self) -> &str;
 
+    /// Verify and preprocess the webhook payload before parsing. Adapters may
+    /// return a platform challenge response or a transformed body (for example,
+    /// an already-decrypted Lark event payload).
+    async fn prepare_webhook(
+        &self,
+        bot: &crate::models::channel_bot::ChannelBot,
+        secrets: Option<&PlatformVerifySecrets>,
+        headers: &axum::http::HeaderMap,
+        body: &[u8],
+    ) -> AppResult<PreparedWebhook> {
+        self.verify_webhook(bot, secrets, headers, body).await?;
+        Ok(PreparedWebhook {
+            body: body.to_vec(),
+            challenge_response: None,
+        })
+    }
+
     /// Verify the incoming webhook signature or secret headers.
     async fn verify_webhook(
         &self,
         bot: &crate::models::channel_bot::ChannelBot,
+        secrets: Option<&PlatformVerifySecrets>,
         headers: &axum::http::HeaderMap,
         body: &[u8],
     ) -> AppResult<()>;

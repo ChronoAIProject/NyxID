@@ -11,6 +11,13 @@ pub struct AppConfig {
     pub frontend_url: String,
     /// Additional CORS allowed origins (comma-separated, e.g. "http://localhost:5847,http://localhost:3000")
     pub cors_allowed_origins: Vec<String>,
+    /// Additional origins trusted for browser CSRF (comma-separated).
+    /// These are merged with `frontend_url` + `base_url` when checking the
+    /// `Origin` / `Referer` header on cookie-authenticated state-changing
+    /// requests. Keep this strictly narrower than `CORS_ALLOWED_ORIGINS`:
+    /// only include origins that legitimately perform cookie-authenticated
+    /// state changes. Bearer / API-key callers never need to be listed here.
+    pub csrf_trusted_origins: Vec<String>,
     /// MongoDB connection string
     pub database_url: String,
     /// Maximum database connection pool size
@@ -28,6 +35,8 @@ pub struct AppConfig {
     pub jwt_issuer: String,
     /// Access token TTL in seconds (default: 900 = 15 min)
     pub jwt_access_ttl_secs: i64,
+    /// Relay reply token TTL in seconds (default: 1800 = 30 min)
+    pub jwt_relay_reply_ttl_secs: i64,
     /// Refresh token TTL in seconds (default: 604800 = 7 days)
     pub jwt_refresh_ttl_secs: i64,
 
@@ -77,6 +86,16 @@ pub struct AppConfig {
 
     /// Service account token TTL in seconds (default: 3600 = 1 hour)
     pub sa_token_ttl_secs: i64,
+
+    /// Telemetry DSN (e.g. PostHog project API key). When unset (default)
+    /// telemetry is hard-off: `TelemetryClient::from_config` returns
+    /// `None` and no events are captured.
+    pub telemetry_dsn: Option<String>,
+    /// Telemetry ingest host (defaults to EU PostHog if unset).
+    pub telemetry_host: Option<String>,
+    /// When true AND `telemetry_dsn` is empty, fall back to the
+    /// compiled-in public share-back DSN. Self-hoster opt-in knob.
+    pub share_analytics: bool,
 
     /// Optional cookie domain for cross-subdomain auth (e.g. ".chrono-ai.fun").
     /// When set, cookies include `Domain=<value>` so they are shared across
@@ -225,6 +244,7 @@ impl std::fmt::Debug for AppConfig {
             .field("jwt_public_key_path", &self.jwt_public_key_path)
             .field("jwt_issuer", &self.jwt_issuer)
             .field("jwt_access_ttl_secs", &self.jwt_access_ttl_secs)
+            .field("jwt_relay_reply_ttl_secs", &self.jwt_relay_reply_ttl_secs)
             .field("jwt_refresh_ttl_secs", &self.jwt_refresh_ttl_secs)
             .field("google_client_id", &self.google_client_id)
             .field("google_client_secret", &"[REDACTED]")
@@ -447,6 +467,12 @@ impl AppConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            csrf_trusted_origins: env::var("CSRF_TRUSTED_ORIGINS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
             database_max_connections: env::var("DATABASE_MAX_CONNECTIONS")
                 .ok()
@@ -466,6 +492,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(900),
+            jwt_relay_reply_ttl_secs: env::var("JWT_RELAY_REPLY_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1800),
             jwt_refresh_ttl_secs: env::var("JWT_REFRESH_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -508,6 +538,14 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
+
+            telemetry_dsn: env::var("NYXID_TELEMETRY_DSN")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            telemetry_host: env::var("NYXID_TELEMETRY_HOST")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            share_analytics: parse_bool_env("NYXID_SHARE_ANALYTICS", false),
 
             cookie_domain: env::var("COOKIE_DOMAIN").ok().filter(|s| !s.is_empty()),
 
@@ -880,6 +918,7 @@ mod tests {
             base_url: base_url.to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
+            csrf_trusted_origins: vec![],
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
             database_max_connections: 10,
             environment: environment.to_string(),
@@ -887,6 +926,7 @@ mod tests {
             jwt_public_key_path: "keys/public.pem".to_string(),
             jwt_issuer: base_url.to_string(),
             jwt_access_ttl_secs: 900,
+            jwt_relay_reply_ttl_secs: 1800,
             jwt_refresh_ttl_secs: 604800,
             google_client_id: None,
             google_client_secret: None,
@@ -907,6 +947,9 @@ mod tests {
             rate_limit_burst: 30,
             trusted_proxy_ips: vec![],
             sa_token_ttl_secs: 3600,
+            telemetry_dsn: None,
+            telemetry_host: None,
+            share_analytics: false,
             cookie_domain: None,
             telegram_bot_token: None,
             telegram_webhook_secret: None,

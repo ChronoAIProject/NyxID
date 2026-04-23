@@ -31,7 +31,7 @@ NyxID stores your credentials encrypted, then proxies your AI agent's requests t
 
 The trap from issue [#298](https://github.com/ChronoAIProject/NyxID/issues/298) is wiring MCP **without** doing the three substeps. Your AI agent then sees only NyxID's `nyx__...` meta-tools and there's nothing real to call.
 
-Below you have four paths that complete the substeps. The **AI-driven path** uses an MCP-connected agent to do them itself, so MCP must be wired first. The **manual paths** (CLI, web UI, curl) don't depend on MCP at all — you can wire MCP whenever, or never. Either way, all that matters is that the three substeps actually happen.
+Below you have four paths that complete the substeps. The **AI-driven path** uses an MCP-connected agent to do them itself, so MCP setup matters there. The **manual paths** (CLI, web UI, curl) don't depend on MCP at all — you can wire MCP later, or never. Either way, all that matters is that the three substeps actually happen.
 
 ---
 
@@ -51,30 +51,71 @@ nyxid login --base-url <BASE_URL>
 
 The login command opens your browser and stores a session locally. The CLI and any subsequent `claude mcp add` / `codex mcp add` will reuse it.
 
-**Using a headless HTTP client (curl, n8n, Zapier, custom code, CI/CD):** open the web console (`https://nyx.chrono-ai.fun` for hosted, `http://localhost:3000` for self-host), sign in, go to **AI Services → API Keys → Create**, and copy the raw key. You'll pass it as an `x-api-key` header on every request. There's no `claude mcp add` for this route — your tool talks to NyxID directly.
+**Using a headless HTTP client (curl, n8n, Zapier, custom code, CI/CD):** open the web console (`https://nyx.chrono-ai.fun` for hosted, `http://localhost:3000` for self-host), sign in, go to **AI Services → API Keys → Create**, and copy the raw key. That's the recommended auth method for automation: send it as `X-API-Key: nyx_...` on every request.
+
+If you specifically want `Authorization: Bearer ...` instead of `X-API-Key`, use the login API to get a token response:
+
+```bash
+export NYXID_BASE=<BASE_URL>
+
+export NYX_TOKEN="$(
+  curl -sS -X POST "$NYXID_BASE/api/v1/auth/login" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "email": "you@example.com",
+      "password": "your-password",
+      "client": "token"
+    }' \
+  | jq -r '.access_token'
+)"
+
+curl -sS "$NYXID_BASE/api/v1/users/me" \
+  -H "Authorization: Bearer $NYX_TOKEN"
+```
+
+Web console login uses a browser session cookie, not a copyable bearer token in the response body. For curl or external HTTP clients, call `/api/v1/auth/login` with `client: "token"` and use the returned `access_token`.
+
+That token is a short-lived user session, not a long-lived automation secret. Prefer `X-API-Key` for unattended automation.
+
+There's no `claude mcp add` for this route — your tool talks to NyxID's HTTP API directly.
 
 ---
 
-## Step 2 — Wire your AI agent to NyxID's MCP endpoint
+## Step 2 — Optional: wire your AI agent to NyxID's MCP endpoint
 
-So your AI agent can see NyxID at all. Pick whichever AI tool you use:
+Only do this if you're using an MCP client such as Claude Code, Codex, or Cursor. If you're using the CLI, web UI, curl, n8n, Zapier, or custom code, skip straight to [Step 3](#step-3--connect-your-first-service).
+
+### Pick your MCP client
+
+This step makes NyxID visible to your MCP client. It does **not** connect a real downstream service by itself.
+
+### Claude Code
 
 ```bash
-# Claude Code
 claude mcp add --transport http nyxid <BASE_URL>/mcp
-
-# Codex
-codex mcp add nyxid --url <BASE_URL>/mcp
-
-# Cursor — open the web console (https://nyx.chrono-ai.fun for hosted, http://localhost:3000
-# for self-host), go to Settings → MCP, click "Install to Cursor"
 ```
+
+### Codex
+
+```bash
+codex mcp add nyxid --url <BASE_URL>/mcp
+```
+
+### Cursor
+
+Open the web console (`https://nyx.chrono-ai.fun` for hosted, `http://localhost:3000` for self-host), go to **Settings → MCP**, and click **Install to Cursor**.
 
 The first run of `claude mcp add` / `codex mcp add` opens a browser to authenticate you (OAuth) and stores a session. If you already ran `nyxid login` from Step 1, the session is reused and there's no second prompt.
 
-After this, your AI agent will see NyxID's `nyx__discover_services`, `nyx__connect_service`, `nyx__search_tools`, and `nyx__call_tool` meta-tools — but **not yet** any real downstream tools, because you haven't connected a real service yet. That's Step 3. **Don't stop here**, or you'll hit issue [#298](https://github.com/ChronoAIProject/NyxID/issues/298).
+### What you should see after this step
 
-> **Headless HTTP client?** There is no `mcp add` for n8n / Zapier / curl. Skip directly to Step 3 Path D and pass `x-api-key: <YOUR_KEY>` (from Step 1) on every request to `<BASE_URL>/api/v1/...` and `<BASE_URL>/mcp`.
+At this point, your AI client can see NyxID itself. It will expose NyxID meta-tools such as `nyx__discover_services`, `nyx__connect_service`, `nyx__search_tools`, and `nyx__call_tool`.
+
+### What you still need to do next
+
+You have **not** connected OpenAI, DeepSeek, GitHub, or any other downstream API yet. Real downstream tools only appear after Step 3 connects a service credential. If you stop here, your AI client will only show NyxID meta-tools and you'll hit issue [#298](https://github.com/ChronoAIProject/NyxID/issues/298).
+
+> **Headless HTTP client?** There is no `mcp add` for n8n / Zapier / curl. Skip this step and go directly to Step 3 Path D. Use either `X-API-Key: <YOUR_KEY>` or `Authorization: Bearer $NYX_TOKEN` on requests to `<BASE_URL>/api/v1/...`.
 
 ---
 
@@ -119,28 +160,44 @@ If you'd rather click through:
 2. Click **AI Services** in the sidebar → **Add Service**.
 3. Pick a service from the catalog (OpenAI, Anthropic, GitHub, etc.).
 4. Paste the credential it asks for.
-5. On the new service's detail page, click **Test request** (or use the "Try it" panel) to verify the proxy works. You should see a real downstream response, not an error.
+5. Open the new service's detail page and find the **API Usage** section.
+6. Copy the proxy URL or the example curl command from that section, make a real downstream request, and confirm you get a real response instead of an auth or proxy error.
 
 ### Path D — Direct API (for automation)
 
 For scripting, CI/CD, or integrating with a config-management tool, hit the REST endpoints directly:
 
 ```bash
-# Replace <TOKEN> with your bearer token (from `nyxid login`) or use x-api-key.
+# Pick one auth header.
+# Recommended for automation:
+AUTH_HEADER='X-API-Key: nyx_...'
+
+# Or, if you want a bearer token for curl:
+# Bearer tokens are short-lived user-session tokens.
+# export NYXID_BASE=<BASE_URL>
+# export NYX_TOKEN="$(
+#   curl -sS -X POST "$NYXID_BASE/api/v1/auth/login" \
+#     -H "Content-Type: application/json" \
+#     -d '{"email":"you@example.com","password":"your-password","client":"token"}' \
+#   | jq -r '.access_token'
+# )"
+# curl -sS "$NYXID_BASE/api/v1/users/me" \
+#   -H "Authorization: Bearer $NYX_TOKEN"
+# AUTH_HEADER="Authorization: Bearer $NYX_TOKEN"
 
 # Connect a service from the catalog
 curl -X POST <BASE_URL>/api/v1/keys \
-  -H "Authorization: Bearer <TOKEN>" \
+  -H "$AUTH_HEADER" \
   -H "Content-Type: application/json" \
   -d '{
-    "catalog_slug": "llm-openai",
+    "service_slug": "llm-openai",
     "credential": "sk-...",
     "label": "production-openai"
   }'
 
 # Verify the proxy works — should return a real OpenAI models response
 curl -X GET <BASE_URL>/api/v1/proxy/s/llm-openai/models \
-  -H "Authorization: Bearer <TOKEN>"
+  -H "$AUTH_HEADER"
 ```
 
 Same as the CLI path under the hood — these are the exact endpoints `nyxid service add` and `nyxid proxy request` call. Use this when you don't want a CLI dependency in your automation environment.

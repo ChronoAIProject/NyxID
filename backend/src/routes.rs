@@ -621,7 +621,9 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         )
         .route(
             "/{id}",
-            get(handlers::channel_bots::get_bot).delete(handlers::channel_bots::delete_bot),
+            get(handlers::channel_bots::get_bot)
+                .patch(handlers::channel_bots::update_bot)
+                .delete(handlers::channel_bots::delete_bot),
         )
         .route("/{id}/verify", post(handlers::channel_bots::verify_bot));
 

@@ -23,6 +23,12 @@ pub struct IdentityAssertionClaims {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub nyx_service_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<String>>,
 }
 
 /// SEC-M1: Sanitize a string for use as an HTTP header value.
@@ -81,11 +87,16 @@ pub fn build_identity_headers(user: &User, service: &DownstreamService) -> Vec<(
 
 /// Generate a short-lived signed JWT identity assertion.
 /// Used when service.identity_propagation_mode is "jwt" or "both".
-pub fn generate_identity_assertion(
+///
+/// Resolves the user's RBAC data (roles, groups, permissions) from the
+/// database and includes them in the assertion. This allows downstream
+/// services to make authorization decisions without calling back to NyxID.
+pub async fn generate_identity_assertion(
     jwt_keys: &JwtKeys,
     config: &AppConfig,
     user: &User,
     service: &DownstreamService,
+    db: &mongodb::Database,
 ) -> AppResult<String> {
     let now = Utc::now().timestamp();
 
@@ -93,6 +104,8 @@ pub fn generate_identity_assertion(
         .identity_jwt_audience
         .as_deref()
         .unwrap_or(&service.base_url);
+
+    let rbac = super::rbac_helpers::resolve_user_rbac(db, &user.id).await?;
 
     let claims = IdentityAssertionClaims {
         sub: user.id.clone(),
@@ -112,6 +125,9 @@ pub fn generate_identity_assertion(
             None
         },
         nyx_service_id: service.id.clone(),
+        roles: Some(rbac.role_slugs),
+        groups: Some(rbac.group_slugs),
+        permissions: Some(rbac.permissions),
     };
 
     let mut header = Header::new(Algorithm::RS256);

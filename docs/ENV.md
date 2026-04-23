@@ -68,6 +68,7 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `JWT_ISSUER` | `nyxid` | JWT `iss` claim value |
 | `JWT_ACCESS_TTL_SECS` | `900` (15 min) | Access token lifetime in seconds |
 | `JWT_REFRESH_TTL_SECS` | `604800` (7 days) | Refresh token lifetime in seconds |
+| `JWT_RELAY_REPLY_TTL_SECS` | `1800` (30 min) | Lifetime of the per-callback reply token issued with channel-relay inbound callbacks (see [CHANNEL_BOT_RELAY.md](CHANNEL_BOT_RELAY.md#reply-token)). Tokens are single-use, scoped to one inbound message + conversation + agent, and cannot be used against other NyxID endpoints. |
 | `SA_TOKEN_TTL_SECS` | `3600` (1 hour) | Service account token lifetime in seconds |
 
 In development mode, RSA keys are auto-generated if the files do not exist. In production, you must provide pre-generated keys:

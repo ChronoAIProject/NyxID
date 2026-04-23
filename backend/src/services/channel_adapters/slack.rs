@@ -37,6 +37,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::ChannelBot;
 use crate::services::channel_platform::{
     BotIdentity, InboundAttachment, InboundMessage, OutboundReply, PlatformAdapter,
+    PlatformVerifySecrets,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -261,7 +262,8 @@ impl PlatformAdapter for SlackAdapter {
 
     async fn verify_webhook(
         &self,
-        bot: &ChannelBot,
+        _bot: &ChannelBot,
+        secrets: Option<&PlatformVerifySecrets>,
         headers: &axum::http::HeaderMap,
         body: &[u8],
     ) -> AppResult<()> {
@@ -297,10 +299,9 @@ impl PlatformAdapter for SlackAdapter {
             ));
         }
 
-        // The webhook handler decrypts `app_secret_encrypted` (the signing
-        // secret) and injects the raw value into `webhook_secret_hash` for
-        // this verification step, mirroring the Lark/Feishu pattern.
-        let signing_secret = &bot.webhook_secret_hash;
+        let signing_secret = secrets
+            .and_then(|s| s.slack_signing_secret.as_deref())
+            .unwrap_or_default();
         if signing_secret.is_empty() {
             return Err(AppError::ChannelWebhookVerificationFailed(
                 "Slack signing secret not configured".to_string(),
@@ -530,7 +531,7 @@ impl PlatformAdapter for SlackAdapter {
 mod tests {
     use super::*;
 
-    fn make_test_bot(signing_secret: &str) -> ChannelBot {
+    fn make_test_bot(_signing_secret: &str) -> ChannelBot {
         ChannelBot {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -540,12 +541,11 @@ mod tests {
             platform_bot_id: "B12345".to_string(),
             platform_bot_username: "testbot".to_string(),
             webhook_registered: true,
-            // The webhook handler decrypts app_secret_encrypted into this
-            // field at verify time. Tests skip the decryption and inject the
-            // raw signing secret directly.
-            webhook_secret_hash: signing_secret.to_string(),
+            webhook_secret_hash: "unused_for_slack".to_string(),
             app_id: None,
             app_secret_encrypted: None,
+            lark_verification_token_encrypted: None,
+            lark_encrypt_key_encrypted: None,
             public_key: None,
             status: "active".to_string(),
             is_active: true,
@@ -611,13 +611,17 @@ mod tests {
         let body = br#"{"type":"event_callback"}"#;
         let ts = chrono::Utc::now().timestamp();
         let bot = make_test_bot(secret);
+        let secrets = PlatformVerifySecrets {
+            slack_signing_secret: Some(secret.to_string()),
+            ..PlatformVerifySecrets::default()
+        };
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(SIGNATURE_HEADER, sign(secret, ts, body).parse().unwrap());
         headers.insert(TIMESTAMP_HEADER, ts.to_string().parse().unwrap());
 
         adapter
-            .verify_webhook(&bot, &headers, body)
+            .verify_webhook(&bot, Some(&secrets), &headers, body)
             .await
             .expect("valid signature should pass");
     }
@@ -628,6 +632,10 @@ mod tests {
         let body = br#"{"type":"event_callback"}"#;
         let ts = chrono::Utc::now().timestamp();
         let bot = make_test_bot("real_secret");
+        let secrets = PlatformVerifySecrets {
+            slack_signing_secret: Some("real_secret".to_string()),
+            ..PlatformVerifySecrets::default()
+        };
 
         let mut headers = axum::http::HeaderMap::new();
         // Sign with a different secret -> mismatch.
@@ -638,7 +646,7 @@ mod tests {
         headers.insert(TIMESTAMP_HEADER, ts.to_string().parse().unwrap());
 
         let err = adapter
-            .verify_webhook(&bot, &headers, body)
+            .verify_webhook(&bot, Some(&secrets), &headers, body)
             .await
             .expect_err("mismatched signature should fail");
         assert!(matches!(err, AppError::ChannelWebhookVerificationFailed(_)));
@@ -651,7 +659,15 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(TIMESTAMP_HEADER, "1700000000".parse().unwrap());
         let err = adapter
-            .verify_webhook(&bot, &headers, b"{}")
+            .verify_webhook(
+                &bot,
+                Some(&PlatformVerifySecrets {
+                    slack_signing_secret: Some("secret".to_string()),
+                    ..PlatformVerifySecrets::default()
+                }),
+                &headers,
+                b"{}",
+            )
             .await
             .expect_err("missing signature should fail");
         assert!(matches!(err, AppError::ChannelWebhookVerificationFailed(_)));
@@ -664,7 +680,15 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(SIGNATURE_HEADER, "v0=abc".parse().unwrap());
         let err = adapter
-            .verify_webhook(&bot, &headers, b"{}")
+            .verify_webhook(
+                &bot,
+                Some(&PlatformVerifySecrets {
+                    slack_signing_secret: Some("secret".to_string()),
+                    ..PlatformVerifySecrets::default()
+                }),
+                &headers,
+                b"{}",
+            )
             .await
             .expect_err("missing timestamp should fail");
         assert!(matches!(err, AppError::ChannelWebhookVerificationFailed(_)));
@@ -678,13 +702,17 @@ mod tests {
         // 10 minutes in the past, beyond the 5-minute replay window.
         let ts = chrono::Utc::now().timestamp() - 600;
         let bot = make_test_bot(secret);
+        let secrets = PlatformVerifySecrets {
+            slack_signing_secret: Some(secret.to_string()),
+            ..PlatformVerifySecrets::default()
+        };
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(SIGNATURE_HEADER, sign(secret, ts, body).parse().unwrap());
         headers.insert(TIMESTAMP_HEADER, ts.to_string().parse().unwrap());
 
         let err = adapter
-            .verify_webhook(&bot, &headers, body)
+            .verify_webhook(&bot, Some(&secrets), &headers, body)
             .await
             .expect_err("stale timestamp should fail");
         assert!(matches!(err, AppError::ChannelWebhookVerificationFailed(_)));
@@ -703,7 +731,7 @@ mod tests {
         headers.insert(TIMESTAMP_HEADER, ts.to_string().parse().unwrap());
 
         let err = adapter
-            .verify_webhook(&bot, &headers, body)
+            .verify_webhook(&bot, None, &headers, body)
             .await
             .expect_err("missing signing secret should fail");
         assert!(matches!(err, AppError::ChannelWebhookVerificationFailed(_)));

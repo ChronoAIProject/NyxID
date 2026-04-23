@@ -6,6 +6,7 @@ import type {
   ChannelBotItem,
   CreateChannelBotRequest,
   CreateChannelBotResponse,
+  UpdateChannelBotRequest,
 } from "@/types/channels";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -89,6 +90,28 @@ export function useDeleteChannelBot() {
       return api.delete<void>(`/channel-bots/${id}`);
     },
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
+    },
+  });
+}
+
+export function useUpdateChannelBot() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      id,
+      data,
+    }: {
+      readonly id: string;
+      readonly data: UpdateChannelBotRequest;
+    }): Promise<ChannelBotDetail> => {
+      return api.patch<ChannelBotDetail>(`/channel-bots/${id}`, data);
+    },
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({
+        queryKey: channelBotsQueryKeys.detail(variables.id),
+      });
       void queryClient.invalidateQueries({ queryKey: CHANNEL_BOTS_ROOT });
     },
   });

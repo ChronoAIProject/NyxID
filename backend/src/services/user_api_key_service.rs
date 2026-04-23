@@ -319,6 +319,112 @@ pub async fn mark_provider_connection_pending(
     reset_provider_api_key_state(db, user_id, key_id, credential_type, "pending_auth").await
 }
 
+/// Promote a `node_managed` `UserApiKey` to a direct credential type and
+/// store a fresh encrypted credential. Used by PUT /keys when the caller
+/// supplies a `credential` on a service whose backing key was previously
+/// reconciled to `node_managed` (NyxID#418). `update_api_key` refuses to
+/// touch node_managed records by design — this function is the explicit
+/// opt-out for the server-held-credential flow.
+///
+/// Validates credential length and non-emptiness identically to
+/// `update_api_key` so callers get consistent error messages.
+pub async fn promote_node_managed_api_key(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    key_id: &str,
+    credential_type: &str,
+    credential: &str,
+) -> AppResult<()> {
+    if !VALID_CREDENTIAL_TYPES.contains(&credential_type) || credential_type == "node_managed" {
+        return Err(AppError::ValidationError(format!(
+            "Invalid target credential_type '{credential_type}' for promotion"
+        )));
+    }
+
+    if credential.is_empty() {
+        return Err(AppError::ValidationError(
+            "Credential must not be empty".to_string(),
+        ));
+    }
+    if credential.len() > MAX_CREDENTIAL_LENGTH {
+        return Err(AppError::ValidationError(format!(
+            "Credential exceeds maximum length of {MAX_CREDENTIAL_LENGTH} bytes"
+        )));
+    }
+
+    // Reject provider-backed records: `sync_provider_token_to_api_keys`
+    // refreshes every non-node_managed row that shares a provider_config_id
+    // with the user's active `UserProviderToken`, so flipping the type
+    // here would make the freshly stored credential eligible for
+    // clobbering on the next provider callback/refresh. Callers who want
+    // to rotate a provider-backed credential must go through the
+    // provider's own OAuth / device-code / API-key flow. (Second Codex
+    // review P2 of the NyxID#419 fix.)
+    let existing = get_api_key(db, user_id, key_id).await?;
+    if existing.credential_type != "node_managed" {
+        return Err(AppError::NotFound(
+            "Node-managed API key not found for this user".to_string(),
+        ));
+    }
+    if existing.provider_config_id.is_some() {
+        return Err(AppError::BadRequest(
+            "Cannot store a server-held credential on a provider-backed service. \
+             Use the provider's OAuth, device-code, or API-key flow to rotate \
+             the credential, or register the endpoint as a custom service."
+                .to_string(),
+        ));
+    }
+
+    let encrypted = encryption_keys.encrypt(credential.as_bytes()).await?;
+    let encrypted_bson = bson::Binary {
+        subtype: bson::spec::BinarySubtype::Generic,
+        bytes: encrypted,
+    };
+
+    // `UserApiKey.provider_config_id` is serialized with
+    // `skip_serializing_if = Option::is_none`, so normal (non-provider)
+    // rows are stored with the field *absent*, not as `null`. Match
+    // both states so promotion works for the common case where the
+    // node_managed key was created without any provider link
+    // (thirty-third-round Codex P1).
+    let result = db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "_id": key_id,
+                "user_id": user_id,
+                "credential_type": "node_managed",
+                "$or": [
+                    { "provider_config_id": bson::Bson::Null },
+                    { "provider_config_id": { "$exists": false } },
+                ],
+            },
+            doc! {
+                "$set": {
+                    "credential_type": credential_type,
+                    "credential_encrypted": encrypted_bson,
+                    "access_token_encrypted": bson::Bson::Null,
+                    "refresh_token_encrypted": bson::Bson::Null,
+                    "token_scopes": bson::Bson::Null,
+                    "expires_at": bson::Bson::Null,
+                    "status": "active",
+                    "error_message": bson::Bson::Null,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound(
+            "Node-managed API key not found for this user".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 async fn reset_provider_api_key_state(
     db: &mongodb::Database,
     user_id: &str,
@@ -473,31 +579,6 @@ pub async fn update_api_key(
         .update_one(
             doc! { "_id": key_id, "user_id": user_id },
             doc! { "$set": set_doc },
-        )
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("API key not found".to_string()));
-    }
-
-    Ok(())
-}
-
-/// Revoke an API key (sets status = "revoked", clears credential).
-pub async fn revoke_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) -> AppResult<()> {
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": key_id, "user_id": user_id },
-            doc! {
-                "$set": {
-                    "status": "revoked",
-                    "credential_encrypted": bson::Bson::Null,
-                    "access_token_encrypted": bson::Bson::Null,
-                    "refresh_token_encrypted": bson::Bson::Null,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
-            },
         )
         .await?;
 

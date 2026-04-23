@@ -43,6 +43,7 @@ impl PlatformAdapter for OpenClawAdapter {
     async fn verify_webhook(
         &self,
         _bot: &ChannelBot,
+        _secrets: Option<&crate::services::channel_platform::PlatformVerifySecrets>,
         _headers: &axum::http::HeaderMap,
         _body: &[u8],
     ) -> AppResult<()> {
@@ -156,7 +157,7 @@ mod tests {
         let adapter = OpenClawAdapter;
         let bot = make_test_bot();
         let headers = axum::http::HeaderMap::new();
-        let result = adapter.verify_webhook(&bot, &headers, b"").await;
+        let result = adapter.verify_webhook(&bot, None, &headers, b"").await;
         assert!(result.is_ok());
     }
 
@@ -285,6 +286,8 @@ mod tests {
             webhook_secret_hash: "placeholder".to_string(),
             app_id: None,
             app_secret_encrypted: None,
+            lark_verification_token_encrypted: None,
+            lark_encrypt_key_encrypted: None,
             public_key: None,
             status: "active".to_string(),
             is_active: true,

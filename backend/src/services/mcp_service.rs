@@ -119,22 +119,76 @@ pub struct McpToolDefinition {
 /// When `include_non_executable` is true, user services whose credentials are
 /// currently unavailable (node offline, key inactive) are still included so that
 /// search results show them. When false, only callable services are returned.
+#[allow(dead_code)]
 pub async fn load_user_tools(
     db: &mongodb::Database,
     node_ws_manager: &NodeWsManager,
     user_id: &str,
 ) -> AppResult<Vec<McpToolService>> {
-    load_user_tools_inner(db, node_ws_manager, user_id, false).await
+    load_user_tools_inner(db, node_ws_manager, user_id, false, NodeScope::Unrestricted).await
+}
+
+/// Like [`load_user_tools`] but honors an API-key node scope during
+/// discovery: node-routed tools whose only viable routes (primary +
+/// failovers) are all out of scope get classified as non-executable so
+/// MCP doesn't advertise tools the caller can't actually invoke. Matches
+/// the scope enforcement in `execute_tool` (seventeenth-round Codex
+/// review P2).
+pub async fn load_user_tools_scoped(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    scope: NodeScope<'_>,
+) -> AppResult<Vec<McpToolService>> {
+    load_user_tools_inner(db, node_ws_manager, user_id, false, scope).await
 }
 
 /// Like [`load_user_tools`] but includes non-executable user services for
-/// discovery via `nyx__search_tools`.
+/// discovery via `nyx__search_tools`. Prefer [`load_user_tools_all_scoped`]
+/// when the caller's API-key node scope is available — MCP transport
+/// has migrated to the scoped variant. This function is retained as the
+/// unrestricted form for parity with [`load_user_tools`] in case other
+/// callers need it, and to keep the public API symmetric.
+#[allow(dead_code)]
 pub async fn load_user_tools_all(
     db: &mongodb::Database,
     node_ws_manager: &NodeWsManager,
     user_id: &str,
 ) -> AppResult<Vec<McpToolService>> {
-    load_user_tools_inner(db, node_ws_manager, user_id, true).await
+    load_user_tools_inner(db, node_ws_manager, user_id, true, NodeScope::Unrestricted).await
+}
+
+/// Scoped variant of [`load_user_tools_all`]. Search discovery honors
+/// the caller's API-key node allow-list so `nyx__search_tools` can't
+/// surface tools whose only viable routes fall outside the caller's
+/// scope — otherwise a scoped agent would find tools it can never
+/// successfully invoke (twentieth-round Codex P2).
+pub async fn load_user_tools_all_scoped(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    scope: NodeScope<'_>,
+) -> AppResult<Vec<McpToolService>> {
+    load_user_tools_inner(db, node_ws_manager, user_id, true, scope).await
+}
+
+/// Node-scope filter used by the MCP discovery chain. `Unrestricted`
+/// means every connected node counts; `Allowed(set)` only counts node
+/// ids present in the set — the same semantic `execute_tool` enforces
+/// when trimming fallback routes for scoped API keys.
+#[derive(Clone, Copy)]
+pub enum NodeScope<'a> {
+    Unrestricted,
+    Allowed(&'a [String]),
+}
+
+impl<'a> NodeScope<'a> {
+    fn permits(&self, node_id: &str) -> bool {
+        match self {
+            NodeScope::Unrestricted => true,
+            NodeScope::Allowed(ids) => ids.iter().any(|id| id == node_id),
+        }
+    }
 }
 
 async fn load_user_tools_inner(
@@ -142,6 +196,7 @@ async fn load_user_tools_inner(
     node_ws_manager: &NodeWsManager,
     user_id: &str,
     include_non_executable: bool,
+    scope: NodeScope<'_>,
 ) -> AppResult<Vec<McpToolService>> {
     // -----------------------------------------------------------------------
     // Phase 1: Load platform (DownstreamService) services
@@ -159,8 +214,25 @@ async fn load_user_tools_inner(
         .map(|c| (c.service_id.as_str(), c))
         .collect();
 
-    let node_route_service_ids =
-        node_routing_service::list_routable_service_ids(db, user_id, node_ws_manager).await?;
+    // Scope-aware routable-service lookup: a scoped API key's platform
+    // tools shouldn't be surfaced when the only viable bindings point
+    // to nodes outside its allow-list — `execute_tool` would later
+    // reject every call with `ApiKeyScopeForbidden` (eighteenth-round
+    // Codex P2).
+    let node_route_service_ids = match scope {
+        NodeScope::Unrestricted => {
+            node_routing_service::list_routable_service_ids(db, user_id, node_ws_manager).await?
+        }
+        NodeScope::Allowed(allowed) => {
+            node_routing_service::list_routable_service_ids_filtered(
+                db,
+                user_id,
+                node_ws_manager,
+                |nid| allowed.iter().any(|id| id == nid),
+            )
+            .await?
+        }
+    };
     let node_route_set: HashSet<&str> = node_route_service_ids
         .iter()
         .map(|service_id| service_id.as_str())
@@ -237,7 +309,8 @@ async fn load_user_tools_inner(
     // -----------------------------------------------------------------------
 
     let all_user_services =
-        load_callable_user_services(db, node_ws_manager, user_id, include_non_executable).await?;
+        load_callable_user_services(db, node_ws_manager, user_id, include_non_executable, scope)
+            .await?;
 
     // Collect catalog IDs and slugs from *executable* user services for dedup
     let executable_catalog_ids: HashSet<&str> = all_user_services
@@ -248,6 +321,91 @@ async fn load_user_tools_inner(
         .iter()
         .map(|r| r.service.slug.as_str())
         .collect();
+
+    // Also block platform tools whose catalog id / slug is claimed by a
+    // node-pinned `UserService`, regardless of current executability.
+    // Without this, a user-pinned service whose node is offline would
+    // be dropped from the user-tool list, letting the auto-connected
+    // platform copy of the same catalog entry fall through the dedup
+    // and expose `execute_tool` as a direct HTTP route — defeating the
+    // user's "route via node" choice (twelfth-round Codex review P1).
+    //
+    // Scope: personal services always, org services only when the
+    // caller's membership actually allows them (`m.allows_service`).
+    // Previously this bulk-loaded the org owner's entire service table,
+    // which could suppress a platform tool for a scoped member just
+    // because some *other* service in the same org was pinned to a
+    // node — even though the member couldn't access it (thirteenth-
+    // round Codex P1). Must match `load_callable_user_services`'s
+    // scope handling.
+    let mut blocked_catalog_ids: HashSet<String> = executable_catalog_ids
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    let mut blocked_slugs: HashSet<String> =
+        executable_slugs.iter().map(|s| (*s).to_string()).collect();
+    let personal_pinned: Vec<UserService> = db
+        .collection::<UserService>(USER_SERVICES)
+        .find(doc! {
+            "user_id": user_id,
+            "is_active": true,
+            "service_type": "http",
+            "node_id": { "$type": "string", "$ne": "" },
+        })
+        .await?
+        .try_collect()
+        .await?;
+    for svc in &personal_pinned {
+        // Always block, even when the pinned `node_id` is out of the
+        // caller's API-key scope. `execute_tool` for the platform copy
+        // of the same catalog entry resolves the user's pinned
+        // `UserService` via `resolve_from_user_service` and then
+        // rejects with `ApiKeyScopeForbidden` on the out-of-scope
+        // node — so listing the platform copy here would surface a
+        // tool the scoped agent could never actually call
+        // (thirtieth-round Codex P2, reverting the twenty-ninth-
+        // round change).
+        if let Some(cat) = svc.catalog_service_id.clone() {
+            blocked_catalog_ids.insert(cat);
+        }
+        blocked_slugs.insert(svc.slug.clone());
+    }
+    {
+        use crate::services::org_service;
+        let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
+        for m in &memberships {
+            if !m.role.can_proxy() {
+                continue;
+            }
+            let org_pinned: Vec<UserService> = db
+                .collection::<UserService>(USER_SERVICES)
+                .find(doc! {
+                    "user_id": &m.org_user_id,
+                    "is_active": true,
+                    "service_type": "http",
+                    "node_id": { "$type": "string", "$ne": "" },
+                })
+                .await?
+                .try_collect()
+                .await?;
+            for svc in org_pinned {
+                if !m.allows_service(&svc.id) {
+                    continue;
+                }
+                // Mirror the personal-pinned loop: always block the
+                // platform copy even when the org-pinned node is out
+                // of the caller's API-key scope. `execute_tool` will
+                // reject with `ApiKeyScopeForbidden` on the out-of-
+                // scope node, so the platform copy cannot actually be
+                // called in that case either (thirtieth-round Codex
+                // P2, reverting the twenty-ninth-round change).
+                if let Some(cat) = svc.catalog_service_id {
+                    blocked_catalog_ids.insert(cat);
+                }
+                blocked_slugs.insert(svc.slug);
+            }
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Phase 3: Load ServiceEndpoints for both platform and user services
@@ -376,12 +534,13 @@ async fn load_user_tools_inner(
         });
     }
 
-    // 4b. Platform services (skip those covered by an executable user service)
+    // 4b. Platform services (skip those covered by an executable user
+    // service OR by a node-pinned UserService — see blocked_* sets).
     for svc in valid_platform_services {
-        if executable_catalog_ids.contains(svc.id.as_str()) {
+        if blocked_catalog_ids.contains(svc.id.as_str()) {
             continue;
         }
-        if executable_slugs.contains(svc.slug.as_str()) {
+        if blocked_slugs.contains(svc.slug.as_str()) {
             continue;
         }
 
@@ -468,6 +627,7 @@ async fn load_callable_user_services(
     node_ws_manager: &NodeWsManager,
     user_id: &str,
     include_non_executable: bool,
+    scope: NodeScope<'_>,
 ) -> AppResult<Vec<ResolvedUserService>> {
     use crate::services::org_service;
 
@@ -534,14 +694,107 @@ async fn load_callable_user_services(
         .map(|k| (k.id.as_str(), k.credential_type.as_str()))
         .collect();
 
+    // Precompute "is any routing candidate online?" per node-routed
+    // service so `classify_credential` can report a tool as executable
+    // when the pinned node is offline but a viable fallback binding is
+    // available (tenth-round Codex P2). Without this, agents lose
+    // access to a service during exactly the kind of failover that
+    // NodeServiceBinding was designed to enable. Cost is an extra DB
+    // round-trip per node-routed service; acceptable on the discovery
+    // path (not the hot proxy path).
+    let mut service_has_viable_route: HashMap<String, bool> = HashMap::new();
+    let node_routed_refs: Vec<(&UserService, &str)> = personal_services
+        .iter()
+        .map(|s| (s, user_id))
+        .chain(
+            org_services
+                .iter()
+                .map(|(s, org_user_id)| (s, org_user_id.as_str())),
+        )
+        .filter(|(s, _)| s.node_id.as_deref().is_some_and(|n| !n.is_empty()))
+        .collect();
+    for (svc, effective_owner) in node_routed_refs {
+        // Primary must be in-scope. `execute_tool`'s UserManaged path
+        // hard-rejects with `ApiKeyScopeForbidden` when the resolved
+        // primary `node_id` is not in the API key's allow-list —
+        // before trying any fallback. Advertising a tool as executable
+        // when the primary is out of scope would make every invocation
+        // 403 (eighteenth-round Codex P2). Fallbacks alone can't rescue
+        // that configuration for a scoped key.
+        let primary_in_scope = svc.node_id.as_deref().is_some_and(|nid| scope.permits(nid));
+        if !primary_in_scope {
+            service_has_viable_route.insert(svc.id.clone(), false);
+            continue;
+        }
+        let primary_online = svc
+            .node_id
+            .as_deref()
+            .is_some_and(|nid| node_ws_manager.is_connected(nid));
+        if primary_online {
+            service_has_viable_route.insert(svc.id.clone(), true);
+            continue;
+        }
+        // `NodeServiceBinding.service_id` is keyed by the catalog
+        // (`DownstreamService`) id, not the `UserService` id. Custom
+        // services have no catalog id and therefore no failover
+        // bindings — their only routing option is the primary node
+        // (eleventh-round Codex review P2).
+        //
+        // Scope-aware: fallback nodes outside the caller's API-key
+        // node allow-list are excluded here, matching the scope filter
+        // `execute_tool` applies at invocation time (seventeenth-round
+        // Codex review P2). Without this, a scoped key could see a
+        // tool as executable solely because an out-of-scope fallback
+        // is online, then every call would fail after the scope filter
+        // trimmed the fallback chain away.
+        let any_online = if let Some(ref catalog_service_id) = svc.catalog_service_id {
+            let fallbacks = node_routing_service::list_viable_binding_node_ids(
+                db,
+                effective_owner,
+                catalog_service_id,
+                node_ws_manager,
+            )
+            .await
+            .unwrap_or_default();
+            fallbacks
+                .iter()
+                .any(|nid| node_ws_manager.is_connected(nid) && scope.permits(nid))
+        } else {
+            false
+        };
+        service_has_viable_route.insert(svc.id.clone(), any_online);
+    }
+
     // Filter and assemble
     let mut result = Vec::new();
     let mut seen_slugs: HashSet<String> = HashSet::new();
 
     // Personal first (takes priority over org for same slug)
     for us in personal_services {
-        let cred_info = classify_credential(&us, &active_key_map, node_ws_manager);
+        let has_route = service_has_viable_route
+            .get(&us.id)
+            .copied()
+            .unwrap_or(false);
+        let cred_info = classify_credential(&us, &active_key_map, node_ws_manager, has_route);
         if !include_non_executable && !cred_info.is_executable {
+            continue;
+        }
+        // Scope filter applies even in `include_non_executable` search
+        // mode. A tool whose primary node is outside the caller's
+        // allow-list will hard-fail with `ApiKeyScopeForbidden` on
+        // every invocation, so surfacing it in `nyx__search_tools`
+        // misleads scoped agents into trying and retrying tools they
+        // can never call (twenty-eighth-round Codex P2). This is the
+        // pinned-primary scope check; failover nodes are already
+        // gated by `has_route` via the scope-aware
+        // `service_has_viable_route` precompute above.
+        let primary_in_scope = us
+            .node_id
+            .as_deref()
+            .filter(|n| !n.is_empty())
+            .map(|nid| scope.permits(nid))
+            .unwrap_or(true);
+        if !primary_in_scope {
             continue;
         }
         seen_slugs.insert(us.slug.clone());
@@ -557,8 +810,30 @@ async fn load_callable_user_services(
         if seen_slugs.contains(&us.slug) {
             continue;
         }
-        let cred_info = classify_credential(&us, &active_key_map, node_ws_manager);
+        let has_route = service_has_viable_route
+            .get(&us.id)
+            .copied()
+            .unwrap_or(false);
+        let cred_info = classify_credential(&us, &active_key_map, node_ws_manager, has_route);
         if !include_non_executable && !cred_info.is_executable {
+            continue;
+        }
+        // Scope filter applies even in `include_non_executable` search
+        // mode. A tool whose primary node is outside the caller's
+        // allow-list will hard-fail with `ApiKeyScopeForbidden` on
+        // every invocation, so surfacing it in `nyx__search_tools`
+        // misleads scoped agents into trying and retrying tools they
+        // can never call (twenty-eighth-round Codex P2). This is the
+        // pinned-primary scope check; failover nodes are already
+        // gated by `has_route` via the scope-aware
+        // `service_has_viable_route` precompute above.
+        let primary_in_scope = us
+            .node_id
+            .as_deref()
+            .filter(|n| !n.is_empty())
+            .map(|nid| scope.permits(nid))
+            .unwrap_or(true);
+        if !primary_in_scope {
             continue;
         }
         seen_slugs.insert(us.slug.clone());
@@ -588,7 +863,47 @@ fn classify_credential(
     us: &UserService,
     active_key_map: &HashMap<&str, &str>,
     node_ws_manager: &NodeWsManager,
+    any_routing_node_online: bool,
 ) -> CredentialClassification {
+    let node_online = us
+        .node_id
+        .as_deref()
+        .is_some_and(|nid| node_ws_manager.is_connected(nid));
+
+    // Node routing check runs BEFORE the `auth_method == "none"` fast
+    // path: a no-auth service that was explicitly bound to a node is
+    // still a "route via node" contract, and MCP must not advertise it
+    // as directly executable when the node is offline (Codex P2 of the
+    // sixth-round review). Routing is controlled by
+    // `UserService.node_id`, independent of the backing
+    // `UserApiKey.credential_type` — MCP treats node-routed services as
+    // "node or nothing" so the user's network-isolation choice holds
+    // even when the backend has the credential bytes stored
+    // (NyxID#418 server-held model).
+    //
+    // `is_executable` uses `any_routing_node_online` instead of just
+    // the primary `node_online` so failover via `NodeServiceBinding`
+    // keeps tools visible when the pinned node is offline but a viable
+    // fallback is online. `execute_tool` honors the same fallback
+    // chain via `list_viable_binding_node_ids`, so advertising only
+    // the primary's state would hide calls that would otherwise succeed
+    // (tenth-round Codex review P2).
+    //
+    // Treat `node_id: Some("")` as unset: some legacy UserService rows
+    // carry an empty string instead of `None`, and every other
+    // routing-aware path already filters those out with `$ne: ""`. A
+    // naive `is_some()` check would drop those services from MCP
+    // discovery even though their credential is perfectly usable via
+    // the direct-routing path (fourteenth-round Codex P2).
+    let has_explicit_node = us.node_id.as_deref().is_some_and(|n| !n.is_empty());
+    if has_explicit_node {
+        let _ = node_online;
+        return CredentialClassification {
+            is_executable: any_routing_node_online,
+            has_server_credential: false,
+        };
+    }
+
     if us.auth_method == "none" {
         return CredentialClassification {
             is_executable: true,
@@ -596,23 +911,20 @@ fn classify_credential(
         };
     }
 
-    let node_online = us
-        .node_id
-        .as_deref()
-        .is_some_and(|nid| node_ws_manager.is_connected(nid));
-
-    // Check if we have an active key and what type it is
+    // Direct routing (no node) — fall back to credential_type semantics.
     if let Some(ak_id) = us.api_key_id.as_deref() {
         if let Some(&cred_type) = active_key_map.get(ak_id) {
             let is_node_managed = cred_type == "node_managed" || cred_type == "ssh_certificate";
             if is_node_managed {
-                // node_managed keys require the node to be online
+                // node_managed keys require the node to be online — but
+                // we're on the no-`node_id` branch here, so this state is
+                // a stale reconcile artefact; treat it as unexecutable.
                 return CredentialClassification {
-                    is_executable: node_online,
+                    is_executable: false,
                     has_server_credential: false,
                 };
             }
-            // Real key with server-side credential
+            // Real key with server-side credential — direct injection works.
             return CredentialClassification {
                 is_executable: true,
                 has_server_credential: true,
@@ -620,14 +932,14 @@ fn classify_credential(
         }
         // Key exists in service but not in active set (inactive/revoked)
         return CredentialClassification {
-            is_executable: node_online,
+            is_executable: false,
             has_server_credential: false,
         };
     }
 
-    // No api_key_id at all -- node-only if online
+    // No api_key_id and no node — the service is inert.
     CredentialClassification {
-        is_executable: node_online,
+        is_executable: false,
         has_server_credential: false,
     }
 }
@@ -1791,22 +2103,41 @@ pub async fn execute_tool(
                 resolution.target.credential = override_cred;
             }
 
-            // Enforce node allow-list for scoped API keys on the primary node.
-            if !exec_ctx.allow_all_nodes
-                && let Some(ref nid) = resolution.node_id
-                && !exec_ctx.allowed_node_ids.contains(nid)
-            {
-                return Err(AppError::ApiKeyScopeForbidden(
-                    "API key does not have access to this node".to_string(),
-                ));
-            }
-            // Build the full NodeRoute (primary + fallbacks) from the resolution
+            // Build the full NodeRoute (primary + fallbacks) from the resolution.
             let effective_owner = resolution
                 .org_routing
                 .as_ref()
                 .map(|r| r.org_user_id.as_str())
                 .unwrap_or(user_id);
-            let nr = if let Some(ref primary_nid) = resolution.node_id {
+            // Treat legacy `resolution.node_id == Some("")` as unset:
+            // some `UserService` rows still carry the empty string
+            // instead of `None`, and building a `NodeRoute` around an
+            // empty node id would deterministically return `NodeOffline`
+            // on every call and block the direct-credential fallback.
+            // Matches the normalization applied in `classify_credential`
+            // and in the PUT /keys handler. Fifteenth-round Codex P1.
+            //
+            // This normalization runs BEFORE the scope-check below so a
+            // legacy row with `node_id: ""` is treated as "no node" by
+            // both discovery and execution. Otherwise a scoped API key
+            // would 403 on a legacy direct-routed service that
+            // `classify_credential`/`load_callable_user_services`
+            // already reported as directly executable (twenty-fifth-
+            // round Codex P2).
+            let effective_primary_node_id = resolution.node_id.as_deref().filter(|n| !n.is_empty());
+
+            // Enforce node allow-list for scoped API keys on the primary
+            // node, using the normalized value so legacy `""` rows
+            // bypass the check entirely.
+            if !exec_ctx.allow_all_nodes
+                && let Some(nid) = effective_primary_node_id
+                && !exec_ctx.allowed_node_ids.contains(&nid.to_string())
+            {
+                return Err(AppError::ApiKeyScopeForbidden(
+                    "API key does not have access to this node".to_string(),
+                ));
+            }
+            let nr = if let Some(primary_nid) = effective_primary_node_id {
                 let mut fallback_ids: Vec<String> =
                     node_routing_service::list_viable_binding_node_ids(
                         db,
@@ -1823,13 +2154,21 @@ pub async fn execute_tool(
                     fallback_ids.retain(|nid| exec_ctx.allowed_node_ids.contains(nid));
                 }
                 Some(node_routing_service::NodeRoute {
-                    node_id: primary_nid.clone(),
+                    node_id: primary_nid.to_string(),
                     fallback_node_ids: fallback_ids,
                 })
             } else {
                 None
             };
-            (resolution.target, nr, has_cred)
+            // A configured node route is a hard "route via node" contract,
+            // regardless of whether the backend also happens to hold the
+            // credential bytes server-side (NyxID#418 server-held model).
+            // Forcing `has_server_credential = false` here disables the
+            // "all nodes failed → try direct" fallback below, so MCP
+            // never bypasses the node for user-managed node-routed tools.
+            // (Sixth-round Codex review P1.)
+            let has_cred_for_fallback = has_cred && nr.is_none();
+            (resolution.target, nr, has_cred_for_fallback)
         }
         McpToolSource::Platform {
             downstream_service_id,
@@ -1881,6 +2220,15 @@ pub async fn execute_tool(
                 .await?;
                 (t, true)
             };
+            // Platform services resolve their node route through
+            // `NodeServiceBinding` rows, which are opt-in routing hints
+            // rather than an explicit `UserService.node_id` contract.
+            // The REST proxy mirrors this distinction via
+            // `user_service_has_explicit_node()` — it only hard-requires
+            // node routing for the UserManaged branch and allows direct
+            // fallback for binding-based routes. Keep the same semantic
+            // here: a transient node failure on a platform service can
+            // fall back to direct HTTP if a server credential exists.
             (t, nr, has_cred)
         }
     };
@@ -1910,7 +2258,10 @@ pub async fn execute_tool(
                     config,
                     user,
                     &target.service,
-                ) {
+                    db,
+                )
+                .await
+                {
                     Ok(assertion) => {
                         identity_headers.push(("X-NyxID-Identity-Token".to_string(), assertion));
                     }

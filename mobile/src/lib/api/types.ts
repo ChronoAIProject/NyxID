@@ -11,6 +11,13 @@ export type ChallengeItem = {
   status: ChallengeStatus;
   created_at: string;
   expires_at: string;
+  // Org context: populated when the backend reports the request was
+  // created under an org's per-service approval policy. Optional so
+  // the mobile build keeps working against backends that pre-date
+  // the org-aware response fields.
+  from_org_policy?: boolean;
+  org_id?: string | null;
+  org_name?: string | null;
 };
 
 export type ChallengeDetail = ChallengeItem & {
@@ -30,6 +37,12 @@ export type ApprovalItem = {
   requester_label?: string | null;
   granted_at: string;
   expires_at: string;
+  // Org context for grants. Mirrors the request fields above: both the
+  // flag and the org id/name are optional so the app continues to
+  // render personal-approval UI when the backend omits them.
+  org_scoped?: boolean;
+  org_id?: string | null;
+  org_name?: string | null;
 };
 
 export type PageResponse<T> = {

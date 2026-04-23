@@ -84,6 +84,8 @@ The end-to-end loop is short: connect a service to NyxID once, then any AI agent
   <img src="assets/demo.gif" alt="NyxID end-to-end demo — connect a service, wire up MCP, call through the proxy" width="80%">
 </p>
 
+<p align="center"><a href="https://cdn.godgpt-labs.workers.dev/nyx-ai-service-flow-demo.mp4" target="_blank" rel="noopener noreferrer">▶ Watch fullscreen</a></p>
+
 ## Why NyxID
 
 Other tools solve parts of this — NyxID combines credential injection, NAT traversal, and MCP tooling in one open-source gateway:
@@ -173,8 +175,8 @@ The full walkthrough is at **[docs/CONNECTING_SERVICES.md](docs/CONNECTING_SERVI
 
 - **AI-driven (recommended)** — paste a prompt into Claude Code / Codex / Cursor and let your agent use NyxID's MCP meta-tools (`nyx__discover_services`, `nyx__connect_service`, `nyx__call_tool`) to add and verify your first service end-to-end.
 - **CLI** — `nyxid service add llm-openai --credential-env OPENAI_API_KEY` then `nyxid proxy request llm-openai models` to verify.
-- **Web UI** — dashboard click-through with a "Test request" verify step.
-- **Direct API** — curl + `x-api-key` header for automation and CI.
+- **Web UI** — dashboard setup, then verify from the service detail page's **API Usage** section.
+- **Direct API** — curl with either `X-API-Key` (recommended for automation) or a Bearer token from `/api/v1/auth/login`.
 
 Whichever path you pick, the verification step (calling a real downstream tool and getting a real response back) is the gate everything hinges on. The doc also has an "Adding more services later" section, so the same guide covers your tenth service the same way it covers your first.
 
@@ -216,6 +218,7 @@ nyxid catalog endpoints my-local-api
 | SSH Tunneling | [docs/SSH_TUNNELING.md](docs/SSH_TUNNELING.md) | Remote host access over WebSocket |
 | Security | [docs/SECURITY.md](docs/SECURITY.md) | Threat model and hardening |
 | Environment Variables | [docs/ENV.md](docs/ENV.md) | Full config reference |
+| Telemetry | [docs/TELEMETRY.md](docs/TELEMETRY.md) | Opt-in usage analytics — hot-swap contract, event taxonomy, consent + GDPR erasure |
 | Developer Guide | [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | Local development setup |
 
 ## Contributing

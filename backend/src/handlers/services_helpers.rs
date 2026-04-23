@@ -11,7 +11,10 @@ use crate::models::downstream_service::{
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+use crate::models::user_service::UserService;
 use crate::mw::auth::AuthUser;
+use crate::services::{org_service, user_service_service};
 
 use super::services::{ServiceResponse, SshServiceConfigResponse};
 
@@ -65,6 +68,61 @@ pub async fn fetch_service(state: &AppState, service_id: &str) -> AppResult<Down
         .find_one(doc! { "_id": service_id })
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))
+}
+
+#[derive(Debug)]
+pub enum ResolvedService {
+    Catalog(Box<DownstreamService>),
+    Owned {
+        user_service: Box<UserService>,
+        user_endpoint: Box<UserEndpoint>,
+        owner_id: String,
+    },
+}
+
+/// Resolve either a catalog `DownstreamService` or a readable `UserService`
+/// paired with its backing `UserEndpoint`.
+pub async fn resolve_service_or_user_service(
+    state: &AppState,
+    service_id: &str,
+    caller_user_id: &str,
+) -> AppResult<ResolvedService> {
+    if let Some(service) = state
+        .db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": service_id })
+        .await?
+    {
+        return Ok(ResolvedService::Catalog(Box::new(service)));
+    }
+
+    let Some(user_service) =
+        user_service_service::find_user_service_by_id(&state.db, service_id).await?
+    else {
+        return Err(AppError::NotFound("Service not found".to_string()));
+    };
+
+    let access =
+        org_service::resolve_owner_access(&state.db, caller_user_id, &user_service.user_id).await?;
+    if !access.can_read() || !access.allows_resource(&user_service.id) {
+        return Err(AppError::NotFound("Service not found".to_string()));
+    }
+
+    let user_endpoint = state
+        .db
+        .collection::<UserEndpoint>(USER_ENDPOINTS)
+        .find_one(doc! {
+            "_id": &user_service.endpoint_id,
+            "user_id": &user_service.user_id,
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+
+    Ok(ResolvedService::Owned {
+        owner_id: user_service.user_id.clone(),
+        user_service: Box::new(user_service),
+        user_endpoint: Box::new(user_endpoint),
+    })
 }
 
 /// Build a `ServiceResponse` from a `DownstreamService` model.
@@ -190,4 +248,188 @@ pub fn require_http_service(service: &DownstreamService) -> AppResult<()> {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteServiceResponse {
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResolvedService, resolve_service_or_user_service};
+    use crate::errors::AppError;
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+    use crate::models::user::COLLECTION_NAME as USERS;
+    use crate::models::user::UserType;
+    use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_user, test_user_endpoint, test_user_service,
+    };
+    use uuid::Uuid;
+
+    fn custom_catalog_service(service_id: &str) -> DownstreamService {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = service_id.to_string();
+        service.slug = "catalog-service".to_string();
+        service.name = "Catalog Service".to_string();
+        service.base_url = "https://api.example.com".to_string();
+        service
+    }
+
+    #[tokio::test]
+    async fn resolver_returns_catalog_service_by_id() {
+        let Some(db) = connect_test_database("resolve_service_catalog").await else {
+            eprintln!("skipping services_helpers integration test: no local MongoDB available");
+            return;
+        };
+
+        let caller_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&caller_id, UserType::Person))
+            .await
+            .unwrap();
+
+        let catalog = custom_catalog_service("catalog-1");
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog.clone())
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let resolved = resolve_service_or_user_service(&state, &catalog.id, &caller_id)
+            .await
+            .unwrap();
+
+        match resolved {
+            ResolvedService::Catalog(service) => assert_eq!(service.id, catalog.id),
+            other => panic!("expected catalog service, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_returns_owned_user_service_with_endpoint() {
+        let Some(db) = connect_test_database("resolve_service_owned").await else {
+            eprintln!("skipping services_helpers integration test: no local MongoDB available");
+            return;
+        };
+
+        let caller_id = Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "Custom API",
+            "https://custom.example.com",
+            Some("https://example.com/openapi.json"),
+            None,
+        );
+        let user_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &caller_id,
+            "custom-api",
+            &endpoint.id,
+            None,
+            None,
+        );
+
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&caller_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint.clone())
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service.clone())
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let resolved = resolve_service_or_user_service(&state, &user_service.id, &caller_id)
+            .await
+            .unwrap();
+
+        match resolved {
+            ResolvedService::Owned {
+                user_service: resolved_service,
+                user_endpoint,
+                owner_id,
+            } => {
+                assert_eq!(resolved_service.id, user_service.id);
+                assert_eq!(user_endpoint.id, endpoint.id);
+                assert_eq!(owner_id, caller_id);
+            }
+            other => panic!("expected owned service, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_hides_cross_user_service_ids() {
+        let Some(db) = connect_test_database("resolve_service_cross_user").await else {
+            eprintln!("skipping services_helpers integration test: no local MongoDB available");
+            return;
+        };
+
+        let caller_id = Uuid::new_v4().to_string();
+        let owner_id = Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &owner_id,
+            "Other API",
+            "https://other.example.com",
+            Some("https://example.com/openapi.json"),
+            None,
+        );
+        let user_service = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &owner_id,
+            "other-api",
+            &endpoint.id,
+            None,
+            None,
+        );
+
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(&caller_id, UserType::Person),
+                test_user(&owner_id, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service.clone())
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let err = resolve_service_or_user_service(&state, &user_service.id, &caller_id)
+            .await
+            .expect_err("cross-user service should be hidden");
+
+        assert!(matches!(err, AppError::NotFound(message) if message == "Service not found"));
+    }
+
+    #[tokio::test]
+    async fn resolver_returns_not_found_for_missing_service_id() {
+        let Some(db) = connect_test_database("resolve_service_missing").await else {
+            eprintln!("skipping services_helpers integration test: no local MongoDB available");
+            return;
+        };
+
+        let caller_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&caller_id, UserType::Person))
+            .await
+            .unwrap();
+
+        let state = test_app_state(db);
+        let err = resolve_service_or_user_service(&state, "missing-service", &caller_id)
+            .await
+            .expect_err("missing service should 404");
+
+        assert!(matches!(err, AppError::NotFound(message) if message == "Service not found"));
+    }
 }

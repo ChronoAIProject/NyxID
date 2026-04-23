@@ -226,6 +226,11 @@ function ChallengeDetailSheet({
           </View>
 
           <ScrollView style={sheetStyles.sheetBody} contentContainerStyle={sheetStyles.sheetBodyContent}>
+            {shown.from_org_policy ? (
+              <Text style={sheetStyles.orgContext}>
+                On behalf of {shown.org_name ?? "your org"}
+              </Text>
+            ) : null}
             <View style={sheetStyles.detailCard}>
               <Text style={flowStyles.cardTitle}>Request Context</Text>
               <DetailRow label="Action" value={shown.action} flowStyles={flowStyles} />
@@ -235,6 +240,13 @@ function ChallengeDetailSheet({
               <DetailRow label="Risk Level" value={shown.risk_level.toUpperCase()} valueColor={riskColor} flowStyles={flowStyles} />
               <DetailRow label="Status" value={actionState.statusLabel} flowStyles={flowStyles} />
               {isGrantMode && <DetailRow label="Grant Duration" value={grantDurationLabel} flowStyles={flowStyles} />}
+              {shown.from_org_policy ? (
+                <DetailRow
+                  label="Org"
+                  value={shown.org_name ?? "Unnamed org"}
+                  flowStyles={flowStyles}
+                />
+              ) : null}
               <DetailRow label="Location" value={shown.request_context.location} isLast flowStyles={flowStyles} />
             </View>
 
@@ -391,8 +403,9 @@ export function ActivityScreen() {
   });
 
   const revokeMutation = useMutation({
-    mutationFn: (approvalId: string) => mobileApi.revoke(approvalId),
-    onMutate: (id) => {
+    mutationFn: ({ id, orgId }: { id: string; orgId?: string | null }) =>
+      mobileApi.revoke(id, orgId),
+    onMutate: ({ id }) => {
       setMutatingIds((prev) => new Set(prev).add(id));
     },
     onSuccess: () => {
@@ -402,7 +415,7 @@ export function ActivityScreen() {
     onError: () => {
       setToast({ message: "Failed to revoke. Try again.", kind: "error" });
     },
-    onSettled: (_, __, id) => {
+    onSettled: (_, __, { id }) => {
       setMutatingIds((prev) => {
         const next = new Set(prev);
         next.delete(id);
@@ -414,7 +427,15 @@ export function ActivityScreen() {
   const handleRevoke = useCallback((grant: ApprovalItem) => {
     Alert.alert("Revoke Access", `Revoke access for ${grant.service_name}?`, [
       { text: "Cancel", style: "cancel" },
-      { text: "Revoke", style: "destructive", onPress: () => revokeMutation.mutate(grant.id) },
+      {
+        text: "Revoke",
+        style: "destructive",
+        // Forward org_id when the grant is org-scoped so the backend
+        // pivots ownership to the owning org (otherwise DELETE 404s
+        // because the default path searches by user_id = actor).
+        onPress: () =>
+          revokeMutation.mutate({ id: grant.id, orgId: grant.org_id ?? null }),
+      },
     ]);
   }, [revokeMutation]);
 
@@ -708,6 +729,12 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
   sheetBodyContent: {
     paddingBottom: spacing.huge,
     gap: spacing.lg,
+  },
+  orgContext: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: c.textSecondary,
+    letterSpacing: 0.3,
   },
   stateNotice: {
     borderRadius: radius.sm,

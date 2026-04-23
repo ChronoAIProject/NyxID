@@ -226,6 +226,7 @@ impl PlatformAdapter for DiscordAdapter {
     async fn verify_webhook(
         &self,
         bot: &ChannelBot,
+        _secrets: Option<&crate::services::channel_platform::PlatformVerifySecrets>,
         headers: &axum::http::HeaderMap,
         body: &[u8],
     ) -> AppResult<()> {
@@ -651,7 +652,9 @@ mod tests {
         headers.insert("x-signature-ed25519", signature_hex.parse().unwrap());
         headers.insert("x-signature-timestamp", timestamp.parse().unwrap());
 
-        let result = adapter.verify_webhook(&bot, &headers, body_content).await;
+        let result = adapter
+            .verify_webhook(&bot, None, &headers, body_content)
+            .await;
         assert!(result.is_ok());
     }
 
@@ -668,7 +671,7 @@ mod tests {
         );
         headers.insert("x-signature-timestamp", "12345".parse().unwrap());
 
-        let result = adapter.verify_webhook(&bot, &headers, b"{}").await;
+        let result = adapter.verify_webhook(&bot, None, &headers, b"{}").await;
         assert!(result.is_err());
     }
 
@@ -678,7 +681,7 @@ mod tests {
         let bot = make_test_bot(None);
         let headers = axum::http::HeaderMap::new();
 
-        let result = adapter.verify_webhook(&bot, &headers, b"{}").await;
+        let result = adapter.verify_webhook(&bot, None, &headers, b"{}").await;
         assert!(result.is_err());
     }
 
@@ -688,7 +691,7 @@ mod tests {
         let bot = make_test_bot(Some(&hex::encode([1u8; 32])));
         let headers = axum::http::HeaderMap::new();
 
-        let result = adapter.verify_webhook(&bot, &headers, b"{}").await;
+        let result = adapter.verify_webhook(&bot, None, &headers, b"{}").await;
         assert!(result.is_err());
     }
 
@@ -707,6 +710,8 @@ mod tests {
             webhook_secret_hash: "unused_for_discord".to_string(),
             app_id: None,
             app_secret_encrypted: None,
+            lark_verification_token_encrypted: None,
+            lark_encrypt_key_encrypted: None,
             public_key: public_key.map(String::from),
             status: "active".to_string(),
             is_active: true,

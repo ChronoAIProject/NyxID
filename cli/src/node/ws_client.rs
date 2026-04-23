@@ -484,6 +484,22 @@ async fn connect_and_serve(
         }
     });
 
+    // Advertise supported capabilities to the server immediately after
+    // auth so the backend can enable features that require node-side
+    // cooperation (e.g., strict ack-wait on `credential_update` via
+    // `request_id` echo). Older backends ignore the `capabilities`
+    // field; newer backends only enable the feature for nodes that
+    // advertise the matching flag. Fire-and-forget — if the channel
+    // is full we'll retry on the next status_update / reconnect.
+    let caps_msg = serde_json::json!({
+        "type": "status_update",
+        "agent_version": env!("CARGO_PKG_VERSION"),
+        "capabilities": {
+            "credential_ack_correlation": true,
+        },
+    });
+    let _ = send_ws_message(&tx, caps_msg.to_string()).await;
+
     // Shared state for the reader loop
     let metrics = Arc::new(NodeMetrics::new());
     let replay_guard = Arc::new(tokio::sync::Mutex::new(ReplayGuard::new()));
@@ -655,6 +671,27 @@ async fn connect_and_serve(
                     }
                 };
                 // Send ack after backend is dropped (so we can .await)
+                if let Some(ack) = ack_msg {
+                    let _ = send_ws_message(&tx, ack).await;
+                }
+            }
+            Some("credential_remove") => {
+                // Drop the locally-stored credential for this slug. Sent
+                // when a service's `node_id` is reassigned so the prior
+                // node stops holding the secret. SecretBackend is not
+                // Send/Sync, so we scope its lifetime here and do any
+                // awaits after.
+                let ack_msg = {
+                    match SecretBackend::from_storage_backend_str(storage_backend, config_dir) {
+                        Ok(be) => {
+                            process_credential_remove(&parsed, credential_sender, config_path, &be)
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to init secret backend for credential remove");
+                            None
+                        }
+                    }
+                };
                 if let Some(ack) = ack_msg {
                     let _ = send_ws_message(&tx, ack).await;
                 }
@@ -2053,6 +2090,11 @@ fn process_credential_update(
     config_path: &std::path::Path,
     backend: &SecretBackend,
 ) -> Option<String> {
+    // Echo back `request_id` so strict-push callers on the backend can
+    // correlate the `credential_update_ack` to their pending waiter.
+    // Omitted/None preserves backward compatibility with older servers
+    // that don't attach a request id.
+    let request_id = parsed["request_id"].as_str();
     let service_slug = match parsed["service_slug"].as_str() {
         Some(s) if !s.is_empty() => s,
         _ => {
@@ -2071,6 +2113,7 @@ fn process_credential_update(
                 None => {
                     tracing::warn!(slug = %service_slug, "credential_update missing header_value");
                     return Some(build_credential_ack(
+                        request_id,
                         service_slug,
                         "error",
                         Some("missing header_value"),
@@ -2095,6 +2138,7 @@ fn process_credential_update(
                 None => {
                     tracing::warn!(slug = %service_slug, "credential_update missing param_name");
                     return Some(build_credential_ack(
+                        request_id,
                         service_slug,
                         "error",
                         Some("missing param_name"),
@@ -2106,6 +2150,7 @@ fn process_credential_update(
                 None => {
                     tracing::warn!(slug = %service_slug, "credential_update missing param_value");
                     return Some(build_credential_ack(
+                        request_id,
                         service_slug,
                         "error",
                         Some("missing param_value"),
@@ -2131,6 +2176,7 @@ fn process_credential_update(
                 None => {
                     tracing::warn!(slug = %service_slug, "credential_update missing header_value for path_prefix");
                     return Some(build_credential_ack(
+                        request_id,
                         service_slug,
                         "error",
                         Some("missing header_value"),
@@ -2149,9 +2195,26 @@ fn process_credential_update(
                 backend,
             )
         }
+        "none" => {
+            // No-auth placeholder push: drops any stored secret for
+            // this slug but preserves `target_url`, so the proxy
+            // executor can still resolve the downstream without
+            // 502ing on a missing entry. Used when NyxID downgrades
+            // `auth_method` to `none` on a server-held service
+            // (thirty-third-round Codex P1).
+            let target_url = parsed["target_url"].as_str();
+            update_no_auth_credential(
+                service_slug,
+                target_url,
+                credential_sender,
+                config_path,
+                backend,
+            )
+        }
         other => {
             tracing::warn!(method = %other, "Unknown injection_method in credential_update");
             return Some(build_credential_ack(
+                request_id,
                 service_slug,
                 "error",
                 Some("unknown injection_method"),
@@ -2162,11 +2225,63 @@ fn process_credential_update(
     match result {
         Ok(()) => {
             tracing::info!(slug = %service_slug, "Credential updated via server push");
-            Some(build_credential_ack(service_slug, "ok", None))
+            Some(build_credential_ack(request_id, service_slug, "ok", None))
         }
         Err(e) => {
             tracing::error!(slug = %service_slug, error = %e, "Failed to update credential");
             Some(build_credential_ack(
+                request_id,
+                service_slug,
+                "error",
+                Some(&e.to_string()),
+            ))
+        }
+    }
+}
+
+fn process_credential_remove(
+    parsed: &serde_json::Value,
+    credential_sender: &Arc<SharedCredentialsSender>,
+    config_path: &std::path::Path,
+    backend: &SecretBackend,
+) -> Option<String> {
+    let request_id = parsed["request_id"].as_str();
+    let service_slug = match parsed["service_slug"].as_str() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            tracing::warn!("credential_remove missing service_slug");
+            return None;
+        }
+    };
+
+    let result = (|| -> Result<()> {
+        let mut config = NodeConfig::load(config_path)?;
+        // Check presence *before* calling `remove_credential_via` so
+        // we can distinguish "nothing to remove" (slug absent — this
+        // node never held the credential, which is fine on a
+        // reassignment) from a real backend failure (keyring /
+        // filesystem deletion error). Swallowing real errors would
+        // leave the old node still serving the secret while NyxID
+        // thinks it's gone (eighteenth-round Codex P2).
+        if !config.credentials.contains_key(service_slug) {
+            return Ok(());
+        }
+        config.remove_credential_via(service_slug, backend)?;
+        config.save(config_path)?;
+        let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
+        credential_sender.update(new_store);
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            tracing::info!(slug = %service_slug, "Removed credential via server push");
+            Some(build_credential_ack(request_id, service_slug, "ok", None))
+        }
+        Err(e) => {
+            tracing::error!(slug = %service_slug, error = %e, "Failed to remove credential");
+            Some(build_credential_ack(
+                request_id,
                 service_slug,
                 "error",
                 Some(&e.to_string()),
@@ -2248,12 +2363,37 @@ fn update_path_prefix_credential(
     Ok(())
 }
 
-fn build_credential_ack(service_slug: &str, status: &str, error: Option<&str>) -> String {
+fn update_no_auth_credential(
+    service_slug: &str,
+    target_url: Option<&str>,
+    credential_sender: &Arc<SharedCredentialsSender>,
+    config_path: &std::path::Path,
+    backend: &SecretBackend,
+) -> Result<()> {
+    let mut config = NodeConfig::load(config_path)?;
+    config.set_no_auth_via(service_slug, target_url, backend)?;
+    config.save(config_path)?;
+
+    let new_store = CredentialStore::from_config_with_backend(&config, backend)?;
+    credential_sender.update(new_store);
+
+    Ok(())
+}
+
+fn build_credential_ack(
+    request_id: Option<&str>,
+    service_slug: &str,
+    status: &str,
+    error: Option<&str>,
+) -> String {
     let mut ack = serde_json::json!({
         "type": "credential_update_ack",
         "service_slug": service_slug,
         "status": status,
     });
+    if let Some(rid) = request_id {
+        ack["request_id"] = serde_json::Value::String(rid.to_string());
+    }
     if let Some(e) = error {
         ack["error"] = serde_json::Value::String(e.to_string());
     }

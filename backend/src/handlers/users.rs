@@ -10,7 +10,8 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
-use crate::services::{admin_user_service, audit_service};
+use crate::services::{admin_user_service, audit_service, telemetry_erasure_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
 
@@ -174,22 +175,64 @@ pub async fn update_me(
 pub async fn delete_me(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     headers: HeaderMap,
 ) -> AppResult<Json<DeleteAccountResponse>> {
     let user_id = auth_user.user_id.to_string();
+
+    // GDPR erasure: when telemetry is on, enqueue the PostHog
+    // person-delete job BEFORE the user row is removed. Once the user
+    // row is gone we cannot re-enqueue on failure, and emitting a
+    // `user.deleted` event without a corresponding delete job would
+    // leave dangling telemetry we could never reconcile. So: if
+    // telemetry is enabled AND enqueue fails, we abort the whole
+    // delete with an internal error rather than create that dangling
+    // state. User retries the operation once the transient issue
+    // clears.
+    //
+    // The enqueue step is skipped entirely when telemetry is hard-off
+    // (no DSN configured), keeping the default-off path identical to
+    // the pre-telemetry delete flow.
+    let telemetry_on = state.telemetry.is_some();
+    if telemetry_on {
+        telemetry_erasure_service::enqueue(&state.db, &user_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    user_id = %user_id,
+                    error = %e,
+                    "telemetry erasure enqueue failed; aborting delete to avoid dangling events"
+                );
+                e
+            })?;
+    }
 
     admin_user_service::delete_current_user_cascade(&state.db, &user_id).await?;
 
     let deleted_at = chrono::Utc::now().to_rfc3339();
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(user_id.clone()),
         "user.account.deleted".to_string(),
         Some(serde_json::json!({ "self_service": true })),
         extract_ip(&headers),
         extract_user_agent(&headers),
         None,
         None,
+    );
+
+    // Telemetry: emit user.deleted AFTER the DB cascade so the event's
+    // distinct_id is still resolvable server-side when PostHog processes
+    // it. The erasure worker will cascade the delete on PostHog's side.
+    // No-op when `state.telemetry` is None.
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::UserDeleted {
+            reason: Some("self_service".to_string()),
+        },
     );
 
     Ok(Json(DeleteAccountResponse {

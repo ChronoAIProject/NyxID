@@ -39,6 +39,8 @@ export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProp
   const grantedLabel = `Approved ${formatDate(grant.granted_at)}`;
   const expiresLabel = `Expires ${formatDate(grant.expires_at)}`;
   const requesterLabel = grant.requester_label ?? grant.requester_type;
+  const showOrgChip = grant.org_scoped === true;
+  const orgChipLabel = grant.org_name ? `Org · ${grant.org_name}` : "Org";
 
   return (
     <View style={styles.card}>
@@ -54,6 +56,11 @@ export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProp
           <Text style={styles.revokeBtnText}>Revoke</Text>
         </Pressable>
       </View>
+      {showOrgChip ? (
+        <View style={styles.chipRow}>
+          <StatusBadge variant="orgChip" label={orgChipLabel} />
+        </View>
+      ) : null}
       <Text style={styles.secondary} numberOfLines={1}>
         {grant.requester_type} · {requesterLabel}
       </Text>
@@ -80,6 +87,10 @@ const createStyles = (c: ThemeColors) =>
       justifyContent: "space-between",
       alignItems: "center",
       gap: spacing.sm,
+    },
+    chipRow: {
+      flexDirection: "row",
+      gap: 6,
     },
     title: {
       flex: 1,
