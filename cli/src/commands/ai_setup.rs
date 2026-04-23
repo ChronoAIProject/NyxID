@@ -105,7 +105,10 @@ fn substitute_urls(content: &str, base_url: &str, dashboard_url: &str) -> String
 }
 
 async fn resolve_dashboard_url(base_url: &str) -> String {
-    crate::auth::fetch_frontend_url(base_url)
+    // ai-setup is a pre-flight informational command — no profile is
+    // in scope here. Using `None` falls back to the default profile's
+    // consent, which is the right behavior for a non-profile command.
+    crate::auth::fetch_frontend_url(base_url, None)
         .await
         .unwrap_or_else(|_| base_url.to_string())
 }

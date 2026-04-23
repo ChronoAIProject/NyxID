@@ -6,14 +6,27 @@ use serde::{Deserialize, Serialize};
 /// User-Agent string sent on all CLI HTTP requests.
 pub const CLI_USER_AGENT: &str = concat!("nyxid-cli/", env!("CARGO_PKG_VERSION"));
 
-pub fn build_cli_http_client() -> Result<Client> {
+pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
     // Attach `X-NyxID-Client: cli` + `X-NyxID-Client-Version` ONLY when
-    // a telemetry DSN is configured on this machine (or when share-back
-    // is opted in). Keeps the default-off CLI byte-identical to the
-    // pre-telemetry build — no new headers on the wire, no CORS-style
-    // drift visible to the backend. The backend's telemetry middleware
-    // reads these to tag events with `surface`; see
-    // docs/TELEMETRY.md §3.
+    // BOTH conditions are true:
+    //   (a) the operator has configured a telemetry DSN (or opted into
+    //       the community share-back), AND
+    //   (b) the user on this machine has actually consented (CLI
+    //       config / `NYXID_TELEMETRY=on` / etc — see
+    //       `crate::telemetry::consent::resolve_consent`).
+    //
+    // Historically this function checked only (a), which meant that a
+    // user who had run `nyxid telemetry disable` — or set
+    // `DO_NOT_TRACK=1` — still produced surface-tagged headers on every
+    // request, and the backend emitted `surface="cli"` telemetry events
+    // for their traffic anyway. Local opt-out was partial theater.
+    // Tracked in `docs/TELEMETRY_CONSENT_FIX.md` §8.3.
+    //
+    // Profile-scoped consent: when `profile` is `Some`, the per-profile
+    // config at `~/.nyxid/profiles/{name}/config.toml` is consulted.
+    // `None` means "use the default profile's consent," which is the
+    // right fallback for pre-auth flows (register, forgot-password,
+    // reset-password) where no profile has been selected yet.
     let telemetry_configured = std::env::var("NYXID_TELEMETRY_DSN")
         .ok()
         .is_some_and(|s| !s.is_empty())
@@ -23,11 +36,13 @@ pub fn build_cli_http_client() -> Result<Client> {
                 matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
             });
 
+    let user_consented = crate::telemetry::consent::resolve_consent(profile).enabled;
+
     let mut builder = Client::builder()
         .user_agent(CLI_USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(10));
 
-    if telemetry_configured {
+    if telemetry_configured && user_consented {
         let mut default_headers = reqwest::header::HeaderMap::new();
         default_headers.insert(
             reqwest::header::HeaderName::from_static("x-nyxid-client"),
@@ -71,7 +86,7 @@ impl ApiClient {
         access_token: String,
         profile: Option<String>,
     ) -> Result<Self> {
-        let client = build_cli_http_client()?;
+        let client = build_cli_http_client(profile.as_deref())?;
 
         Ok(Self {
             client,
@@ -472,10 +487,11 @@ pub async fn anonymous_post(
     base_url: &str,
     path: &str,
     body: &impl Serialize,
+    profile: Option<&str>,
 ) -> Result<serde_json::Value> {
     let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
     let url = format!("{base}{path}");
-    let client = build_cli_http_client()?;
+    let client = build_cli_http_client(profile)?;
 
     let resp = client
         .post(&url)
@@ -496,10 +512,15 @@ pub async fn anonymous_post(
 }
 
 /// Make an unauthenticated POST request that returns no body.
-pub async fn anonymous_post_empty(base_url: &str, path: &str, body: &impl Serialize) -> Result<()> {
+pub async fn anonymous_post_empty(
+    base_url: &str,
+    path: &str,
+    body: &impl Serialize,
+    profile: Option<&str>,
+) -> Result<()> {
     let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
     let url = format!("{base}{path}");
-    let client = build_cli_http_client()?;
+    let client = build_cli_http_client(profile)?;
 
     let resp = client
         .post(&url)

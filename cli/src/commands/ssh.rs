@@ -68,6 +68,7 @@ pub async fn run(cli: SshCli) -> Result<()> {
                 &principal,
                 &certificate_file,
                 ca_public_key_file.as_deref(),
+                auth.profile.as_deref(),
             )
             .await
         }
@@ -99,6 +100,7 @@ pub async fn run(cli: SshCli) -> Result<()> {
                     &princ,
                     &cert,
                     ca_public_key_file.as_deref(),
+                    auth.profile.as_deref(),
                 )
                 .await?;
             }
@@ -325,6 +327,10 @@ struct IssueCertificateResponse {
     ca_public_key: String,
 }
 
+// Adding `profile` to honor the user's telemetry consent when building
+// the HTTP client. Refactoring these args into a struct is out of scope
+// for the consent fix; the arg count warning is acknowledged here.
+#[allow(clippy::too_many_arguments)]
 async fn issue_certificate(
     base_url: &str,
     service_id: &str,
@@ -333,6 +339,7 @@ async fn issue_certificate(
     principal: &str,
     certificate_file: &Path,
     ca_public_key_file: Option<&Path>,
+    profile: Option<&str>,
 ) -> Result<()> {
     let public_key = tokio::fs::read_to_string(public_key_file)
         .await
@@ -349,7 +356,8 @@ async fn issue_certificate(
     };
 
     let endpoint = build_issue_cert_url(base_url, service_id)?;
-    let client = build_cli_http_client().context("Failed to build SSH certificate HTTP client")?;
+    let client =
+        build_cli_http_client(profile).context("Failed to build SSH certificate HTTP client")?;
 
     let response = client
         .post(endpoint)

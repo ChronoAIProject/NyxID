@@ -32,8 +32,10 @@ pub async fn run_register(args: RegisterArgs) -> Result<()> {
         body["display_name"] = serde_json::Value::String(name.clone());
     }
 
+    // Pre-auth flow: no profile has been selected yet, so consent is
+    // resolved against the default profile's config.
     let result: serde_json::Value =
-        api::anonymous_post(&args.base_url, "/auth/register", &body).await?;
+        api::anonymous_post(&args.base_url, "/auth/register", &body, None).await?;
 
     let msg = result["message"]
         .as_str()
@@ -44,14 +46,14 @@ pub async fn run_register(args: RegisterArgs) -> Result<()> {
 
 pub async fn run_verify_email(args: VerifyEmailArgs) -> Result<()> {
     let body = serde_json::json!({ "token": args.token });
-    api::anonymous_post_empty(&args.base_url, "/auth/verify-email", &body).await?;
+    api::anonymous_post_empty(&args.base_url, "/auth/verify-email", &body, None).await?;
     eprintln!("Email verified successfully.");
     Ok(())
 }
 
 pub async fn run_forgot_password(args: ForgotPasswordArgs) -> Result<()> {
     let body = serde_json::json!({ "email": args.email });
-    api::anonymous_post_empty(&args.base_url, "/auth/forgot-password", &body).await?;
+    api::anonymous_post_empty(&args.base_url, "/auth/forgot-password", &body, None).await?;
     eprintln!(
         "If an account exists for {}, a password reset email has been sent.",
         args.email
@@ -81,7 +83,7 @@ pub async fn run_reset_password(args: ResetPasswordArgs) -> Result<()> {
         "token": args.token,
         "password": password,
     });
-    api::anonymous_post_empty(&args.base_url, "/auth/reset-password", &body).await?;
+    api::anonymous_post_empty(&args.base_url, "/auth/reset-password", &body, None).await?;
     eprintln!("Password reset successfully. You can now log in with your new password.");
     Ok(())
 }

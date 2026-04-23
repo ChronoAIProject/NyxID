@@ -30,6 +30,9 @@ pub async fn run(command: TelemetryCommands, profile: Option<&str>) -> Result<()
         TelemetryCommands::Status => {
             let state = telemetry::consent::resolve_consent(profile);
             let source = match state.source {
+                telemetry::consent::ConsentSource::DoNotTrack => {
+                    "env: DO_NOT_TRACK is set (forced disable, not persisted)"
+                }
                 telemetry::consent::ConsentSource::EnvVarOff => {
                     "env: NYXID_TELEMETRY=off (forced disable)"
                 }

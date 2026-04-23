@@ -257,7 +257,7 @@ pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
 
     // Best-effort server-side logout
     if let Some(token) = read_saved_token_for(profile) {
-        let client = build_cli_http_client()?;
+        let client = build_cli_http_client(profile)?;
 
         let _ = client
             .post(format!("{base_url}/api/v1/auth/logout"))
@@ -284,7 +284,7 @@ pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
 async fn run_browser_login(base_url: &str, profile: Option<&str>) -> Result<()> {
     let base_url = base_url.trim_end_matches('/');
 
-    let frontend_url = fetch_frontend_url(base_url).await?;
+    let frontend_url = fetch_frontend_url(base_url, profile).await?;
 
     let listener =
         TcpListener::bind("127.0.0.1:0").context("Failed to bind local callback server")?;
@@ -447,9 +447,9 @@ struct PublicConfig {
     frontend_url: String,
 }
 
-pub async fn fetch_frontend_url(base_url: &str) -> Result<String> {
+pub async fn fetch_frontend_url(base_url: &str, profile: Option<&str>) -> Result<String> {
     let config_url = format!("{base_url}/api/v1/public/config");
-    let client = build_cli_http_client()?;
+    let client = build_cli_http_client(profile)?;
 
     let config: PublicConfig = client
         .get(&config_url)
@@ -501,7 +501,7 @@ async fn run_password_login(
     let base_url = base_url.trim_end_matches('/');
     let login_url = format!("{base_url}/api/v1/auth/login");
 
-    let client = build_cli_http_client()?;
+    let client = build_cli_http_client(profile)?;
 
     let response = client
         .post(&login_url)
