@@ -52,12 +52,14 @@ Common event props: `surface`, `app_version`, `environment`, optional `client_ve
 
 All env var names are vendor-neutral per the hot-swap contract (§5.0). The DSN values are PostHog-shaped today (`phc_...`) but the variable names survive any vendor swap.
 
-| Surface | DSN var | Host var | Share-back flag |
-|---|---|---|---|
-| Frontend | `VITE_TELEMETRY_DSN` | `VITE_TELEMETRY_HOST` | `VITE_NYXID_SHARE_ANALYTICS` |
-| Backend | `NYXID_TELEMETRY_DSN` | `NYXID_TELEMETRY_HOST` | `NYXID_SHARE_ANALYTICS` |
-| CLI | `NYXID_TELEMETRY_DSN` | `NYXID_TELEMETRY_HOST` | `NYXID_SHARE_ANALYTICS` |
-| Mobile (Expo) | `EXPO_PUBLIC_TELEMETRY_DSN` | `EXPO_PUBLIC_TELEMETRY_HOST` | `EXPO_PUBLIC_NYXID_SHARE_ANALYTICS` |
+| Surface | DSN var | Host var | Share-back flag | Where it lives |
+|---|---|---|---|---|
+| Backend | `NYXID_TELEMETRY_DSN` | `NYXID_TELEMETRY_HOST` | `NYXID_SHARE_ANALYTICS` | Process env, `.env.production` |
+| Frontend | (reads from backend `/api/v1/public/config` at runtime) | — | — | No build-time env. Fetched via `usePublicConfig()`. |
+| CLI | `NYXID_TELEMETRY_DSN` | `NYXID_TELEMETRY_HOST` | `NYXID_SHARE_ANALYTICS` | User shell env per invocation |
+| Mobile (Expo) | `EXPO_PUBLIC_TELEMETRY_DSN` | `EXPO_PUBLIC_TELEMETRY_HOST` | `EXPO_PUBLIC_NYXID_SHARE_ANALYTICS` | EAS secret, baked into app binary |
+
+Frontend has no `VITE_*` telemetry envs. The DSN, host, and share-back flag are fetched from the backend's `GET /api/v1/public/config` at app boot (same endpoint that already powered the login/MCP UI). Rotation = edit `.env.production` on the backend host and restart the backend container; the frontend picks up the new values on next page load with no image rebuild.
 
 Precedence on every surface:
 1. `*_DSN` non-empty → use it (production DSN on the hosted deploy; self-hoster's DSN otherwise).
@@ -219,13 +221,9 @@ pub async fn telemetry_mw(req: Request, next: Next) -> Response;
 /// Called internally by `TelemetryEvent::properties()`. Never skipped.
 pub fn scrub_string(s: &str) -> Cow<'_, str>;
 pub fn scrub_value(v: &mut serde_json::Value);
-
-// Deterministic per-event sampling (`sample_per_event`) is deferred to
-// the follow-up PR that introduces the first sampled emission. Shape:
-// `pub fn sample_per_event(event_uuid: Uuid, percent: u8) -> bool;` —
-// implementation will use `siphasher::SipHasher24` so decisions are
-// stable across processes.
 ```
+
+Per-event sampling (for future high-volume events like `channel.message_received`) is deferred — the helper and its deterministic-hash dependency will land in the PR that introduces the first sampled emission.
 
 **Handler call pattern:**
 
@@ -466,12 +464,11 @@ impl TelemetryClient {
     /// Resolves DSN + consent per §3 precedence. None = hard-off.
     pub fn init(profile: Option<&str>) -> Option<Self>;
 
-    /// Fire-and-forget: tokio::spawn, ignore result. Good for non-critical
-    /// invocation-wrap events; accepts ~10-30% loss on short-lived commands.
-    pub fn track(&self, event: CliEvent);
-
-    /// For panic hooks and long-running commands: blocks up to 500ms.
-    pub fn track_sync_blocking(&self, event: CliEvent);
+    /// Awaits the POST up to TRACK_TIMEOUT_MS (1s). Runs inline — the
+    /// earlier fire-and-forget `tokio::spawn` design dropped ~100% of
+    /// events because `#[tokio::main]`'s runtime teardown cancelled the
+    /// spawned task before the TCP handshake completed.
+    pub async fn track(&self, event: CliEvent);
 
     /// Associates the currently-active anon identity with `user_id` for
     /// future events. Reads the current anon_id from disk internally.
@@ -712,7 +709,7 @@ These are non-code prerequisites for turning on production telemetry:
 All additions are additive; none replace or conflict with existing production deps. Mobile uses `--legacy-peer-deps` on install because of a pre-existing (unrelated) `react-native-reanimated@4.3.0` ↔ `react-native-worklets@0.7.2` peer-dep conflict that predates this work.
 
 - **2026-04-23 (post-impl Codex pass — blocker fixes)** — Codex review after the implementation landed flagged three breaking-change violations and two correctness bugs. All fixed:
-  1. **Unconditional `X-NyxID-Client` headers on FE/Mobile/CLI:** all three clients now gate the header on `VITE_TELEMETRY_DSN` / `expo.extra.TELEMETRY_DSN` / `NYXID_TELEMETRY_DSN` (+ `SHARE_ANALYTICS`) being set. With everything unset (default), no new headers hit the wire.
+  1. **Unconditional `X-NyxID-Client` headers on FE/Mobile/CLI:** all three clients now gate the header on their respective telemetry-enabled signal (backend's `/public/config` for FE, `expo.extra.TELEMETRY_DSN` for mobile, `NYXID_TELEMETRY_DSN`/share-back for CLI). With everything unset (default), no new headers hit the wire.
   2. **CLI first-run consent prompt ran even with no DSN:** `main.rs` now short-circuits consent resolution and prompt when no DSN is configured. The prompt only fires on machines where telemetry could actually run.
   3. **Backend erasure-worker startup log line:** removed. `spawn_worker` returns silently when `telemetry` is `None`.
   4. **`delete_me` enqueue-failure path emitted dangling events:** now aborts the delete with an internal error if the erasure enqueue fails (when telemetry is on). No user row is deleted and no `user.deleted` event fires without a matching erasure job.
@@ -724,6 +721,6 @@ Four-surface build still green after the fixes: backend `cargo check` + 161 test
 
 - **2026-04-23 (share-back symmetry + banner gate)** — A second post-impl Codex pass surfaced two more blockers. Fixed:
   8. **FE/Mobile share-back asymmetric with CLI:** header guards and init precedence only checked DSN; CLI already honored `DSN OR SHARE_ANALYTICS`. Added compiled-in `NYXID_PUBLIC_TELEMETRY_DSN` constants to `frontend/src/lib/telemetry.ts` and `mobile/src/lib/telemetry.ts` matching the backend/CLI pattern, and updated init to fall back to the public DSN when share-back is on + explicit DSN is empty. Header guards on `frontend/src/lib/api-client.ts` and `mobile/src/lib/api/http.ts` now also activate on share-back. All four surfaces now implement identical precedence: **explicit DSN > share-back → public DSN > off**.
-  9. **FE consent banner rendered unconditionally:** `ConsentBanner` now short-circuits when `VITE_TELEMETRY_DSN` is empty AND `VITE_NYXID_SHARE_ANALYTICS` is not `"true"`. Default-off FE deploys produce no new DOM that wasn't there pre-telemetry.
+  9. **FE consent banner rendered unconditionally:** `ConsentBanner` now short-circuits when the backend's `/public/config` response reports no `telemetry_dsn` and `telemetry_share_analytics` is not `true`. Default-off FE deploys produce no new DOM that wasn't there pre-telemetry.
 
 After these fixes, Codex's final verdict on the implementation: **Clean. Ship.** — confirmed at the end of the third post-impl review pass.

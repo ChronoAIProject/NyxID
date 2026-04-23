@@ -29,10 +29,10 @@ import type { UiEvent } from './telemetry-schema';
 /**
  * Compiled-in share-back DSN for the NyxID community project. Public
  * by design — PostHog ingest keys are write-only and project-scoped,
- * so baking this into the open-source bundle is safe. Only used when
- * a deploy sets `NYXID_SHARE_ANALYTICS=true` without an explicit
- * `VITE_TELEMETRY_DSN` (now: `backend config.telemetry_dsn`). Matches
- * parity with `cli/src/telemetry/mod.rs` and `backend/src/telemetry/mod.rs`.
+ * so baking this into the open-source bundle is safe. Used when the
+ * backend's `/public/config` reports `telemetry_share_analytics: true`
+ * with no explicit `telemetry_dsn`. Parity with
+ * `cli/src/telemetry/mod.rs` and `backend/src/telemetry/mod.rs`.
  */
 const NYXID_PUBLIC_TELEMETRY_DSN = "phc_pHHMZRXY8ymzBy9uwiGmAVDtGvGpDTiyXH2zs7bQWEgM";
 const NYXID_PUBLIC_TELEMETRY_HOST = "https://us.i.posthog.com";

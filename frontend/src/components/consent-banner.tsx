@@ -6,7 +6,7 @@
  * opt-in / opt-out; either choice dismisses the banner permanently for
  * this browser. Users can reverse their choice later from Settings.
  *
- * See `docs/TELEMETRY_M1.md` §7 + §D for privacy gate + consent model.
+ * See `docs/TELEMETRY.md` §7 + §D for privacy gate + consent model.
  */
 
 import { Button } from './ui/button';

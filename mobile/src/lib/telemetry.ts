@@ -181,8 +181,3 @@ export function readExpoTelemetryConfig(): {
   return { dsn, host, shareBack };
 }
 
-/** Test-only: reset the module-level guard so `init` can run again. */
-export function __resetForTests(): void {
-  client = null;
-  inited = false;
-}

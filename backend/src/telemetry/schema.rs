@@ -190,7 +190,8 @@ pub enum TelemetryEvent {
         platform: String,
         conversation_id_hash: String,
     },
-    /// Sampled 10% at emit time (see `scrub::sample_per_event`).
+    /// Intended to be sampled at ~10% when the first emission lands in
+    /// a follow-up PR. The sampling helper has not shipped yet.
     ChannelMessageReceived {
         platform: String,
         conversation_id_hash: String,
