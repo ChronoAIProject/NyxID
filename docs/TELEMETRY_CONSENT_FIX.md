@@ -99,6 +99,31 @@ SERVICE_APPROVAL_CONFIGS, NOTIFICATION_CHANNELS
 
 Grouped by whether the item is load-bearing for Article 7(3) / Article 17 compliance (P0) versus customary best-practice (P1) versus nice-to-have (P2). Done criterion is verifiable from code, not from docs.
 
+### 8.0 Progress — what's landed per PR
+
+| Item | Status | Landed in |
+|---|---|---|
+| §8.1 Web consent withdrawal | ✅ Done | PR #485 |
+| §8.2 Mobile consent withdrawal | ⬜ Pending | Next: mobile PR |
+| §8.3 CLI portion (header gating) | ✅ Done | PR #485 |
+| §8.3 Mobile portion (header gating) | ⬜ Pending | Next: mobile PR |
+| §8.3 Backend integration test | ⬜ Pending | Backend PR |
+| §8.4 `AUDIT_LOG` cascade + TTL | ⬜ Pending | Backend PR |
+| §8.5 Web + CLI copy fixes | ✅ Done | PR #485 |
+| §8.5 EU/US host decision (kept US + TODO for SCCs) | ✅ Done | PR #485 |
+| §8.6 Age gate | ⬜ Pending | Age gate PR (FE + backend) |
+| §8.7 Operator guidance | ⬜ Pending | Backend PR |
+| §8.8 Mobile P1 contradictions | ⬜ Pending | Mobile PR |
+| §8.9 `DO_NOT_TRACK` (CLI) | ✅ Done | PR #485 |
+| §8.9 GPC (web) | ⬜ Pending | P1 hygiene follow-up |
+| §8.9 ToS checkbox (web) | ⬜ Pending | P1 hygiene follow-up |
+| §8.9 DSAR export endpoint | ⬜ Pending | P1 hygiene follow-up |
+| §8.9 Node `last_error` sanitization | ⬜ Pending | Backend PR |
+| §8.9 Browser DNT honoring (bonus — §10) | ✅ Done | PR #485 |
+| §9.3 follow-ups (surfaced during PR #485) | ⬜ Pending | Various |
+
+Update this table as each PR lands.
+
 ### P0 — Blocking for EU launch
 
 #### 8.1 Wire consent withdrawal on web
@@ -215,6 +240,14 @@ These surfaced during the audit but don't belong in a "telemetry consent fix" ch
 - **Breach notification procedure (Art. 33/34).** 72-hour notification playbook, contact list, template. *Why parked:* pure ops/legal process, no code.
 
 The two items that *did* move from "nice to have later" into the active checklist (age gate §8.6, operator guidance §8.7) are the ones that are either already-lied-about in policy (age gate) or unique to NyxID's self-hosted positioning (operator guidance) — neither fits in a generic compliance-readiness doc.
+
+### 9.3 Follow-ups surfaced during implementation (PR #485 — web + CLI consent withdrawal)
+
+These didn't exist as checklist items before PR #485 started; codex review of the actual diff identified them and we chose to defer rather than expand scope. All three are narrow enough to belong in a follow-up; all three are documented here so they don't fall off the floor.
+
+- **`nyxid telemetry disable` anon_id scope mismatch.** v1 treats consent as user-global (read + edited against default profile), but `TelemetryClient::init(profile)` still pulls the anon distinct_id from `~/.nyxid/profiles/<name>/anon_id`. `nyxid telemetry disable` only deletes the default-profile anon_id file, so a user who disables telemetry, later re-enables, and then runs `--profile <name>` resumes the old anonymous identity instead of getting the documented "fresh trail." *Severity:* narrow (only matters for named-profile users who toggle telemetry), documentation/contract mismatch rather than consent violation. *Fix:* either globalize anon_id too, or have `nyxid telemetry disable` delete anon_id files across all profiles.
+- **Privacy policy region hardcoded vs operator-overridable `telemetry_host`.** `frontend/src/pages/privacy.tsx:187` states "PostHog, US region," which is correct for NyxID Inc's deploy but factually wrong for any self-hosted or EU-hosted operator who sets `telemetry_host` to `eu.i.posthog.com` or their own instance. *Severity:* tied into §8.7 operator guidance; operators are expected to publish their own privacy notice once §8.7 ships, which makes NyxID Inc's `privacy.tsx` copy irrelevant for them. *Fix path:* land §8.7 (operator-identity fields in `/public/config` + degraded banner when operator policy missing), then either (a) soften the region claim in NyxID Inc's copy to reference operator setting, or (b) accept that operators own their own policy once §8.7 exists.
+- **CI snapshot regression guard for false-claim strings.** §10 specifies a snapshot-on-commit check that fails if any of the known false-claim strings ("change in Settings" pointing to nowhere, "PostHog EU region" when code uses US, "no analytics SDKs" when SDK is bundled) reappear in `privacy.tsx` / `consent-banner.tsx` / `PrivacyPolicyScreen.tsx` / `TELEMETRY.md`. Unit tests in PR #485 cover code-level correctness but don't guard against future copy drift. *Severity:* prevention-only; there's no active regression today. *Fix:* a single vitest file reading the target paths and asserting literals are absent — ~15 min. Recommended to land alongside the mobile PR so both surfaces' copy are guarded at once.
 
 ## 10. Verification plan post-fix
 
