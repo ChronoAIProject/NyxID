@@ -99,7 +99,7 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
   // Initialize telemetry once the session has finished restoring AND
   // the user has opted in. Idempotent: `initTelemetry` guards against
   // double-invoke internally so effect re-runs are safe.
-  const consentEnabled = useMobileConsent((s) => s.enabled);
+  const { enabled: consentEnabled } = useMobileConsent();
   useEffect(() => {
     if (isRestoring) return;
     if (!consentEnabled) return;
