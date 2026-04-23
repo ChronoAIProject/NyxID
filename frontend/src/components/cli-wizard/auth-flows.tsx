@@ -23,8 +23,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, api } from "@/lib/api-client";
 import { Copy, ExternalLink, Loader2 } from "lucide-react";
-import type { AiKeyPairingSuccess } from "./ai-key-panel";
-import { reservePairingAction, rewindPairingAction } from "./reserve-action";
+import type { AiKeyPairingSuccess } from "./ai-key-confirm-panel";
+import {
+  reservePairingAction,
+  rewindPairingAction,
+} from "@/pages/cli-pair/reserve-action";
 
 interface FlowProps {
   readonly providerId: string;

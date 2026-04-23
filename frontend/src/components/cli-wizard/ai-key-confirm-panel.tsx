@@ -9,7 +9,7 @@
 // OAuth/device-code sub-flows live in `./ai-key-auth-flows.tsx` to
 // keep this file focused on catalog lookup + dispatch.
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,9 +17,13 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError, api } from "@/lib/api-client";
 import { ExternalLink } from "lucide-react";
-import type { AiKeyPrefill } from "./types";
-import { DeviceCodeFlow, OAuthFlow } from "./ai-key-auth-flows";
-import { reservePairingAction, withRewindOnError } from "./reserve-action";
+import type { AiKeyPrefill } from "@/pages/cli-pair/types";
+import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
+import {
+  reservePairingAction,
+  withRewindOnError,
+} from "@/pages/cli-pair/reserve-action";
+import { CatalogGrid } from "./catalog-grid";
 
 /**
  * Catalog response shape we care about. Fields beyond these are
@@ -106,6 +110,14 @@ interface AiKeyConfirmProps {
    */
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
+  /**
+   * Fired when the catalog-grid → credential-form transition happens
+   * (slug picked, either from prefill or by clicking a catalog card).
+   * Parent uses it to bump the "Step X of 3" counter in the shell
+   * header from 1 (pick a service) to 2 (enter credential). Purely
+   * cosmetic — the pairing state machine doesn't care.
+   */
+  readonly onSlugPicked?: (slug: string) => void;
 }
 
 /**
@@ -149,9 +161,25 @@ function classifyFlow(entry: CatalogEntryShape): AuthShape {
   return "other";
 }
 
-export function AiKeyConfirm({ prefill, pairingId, onSuccess }: AiKeyConfirmProps) {
+export function AiKeyConfirm({
+  prefill,
+  pairingId,
+  onSuccess,
+  onSlugPicked,
+}: AiKeyConfirmProps) {
   const [slug, setSlug] = useState(prefill.slug ?? "");
   const trimmedSlug = slug.trim();
+
+  // Signal up whenever we transition into credential-form territory
+  // (non-empty slug). Fires once on mount if the CLI prefilled the
+  // slug, and once more when the user clicks a catalog card.
+  const lastNotifiedSlug = useRef<string | null>(null);
+  useEffect(() => {
+    if (trimmedSlug && lastNotifiedSlug.current !== trimmedSlug) {
+      lastNotifiedSlug.current = trimmedSlug;
+      onSlugPicked?.(trimmedSlug);
+    }
+  }, [trimmedSlug, onSlugPicked]);
 
   const {
     data: entry,
@@ -164,7 +192,10 @@ export function AiKeyConfirm({ prefill, pairingId, onSuccess }: AiKeyConfirmProp
         `/catalog/${encodeURIComponent(trimmedSlug)}`,
       );
     },
-    enabled: Boolean(trimmedSlug),
+    // `__custom__` is the CatalogGrid sentinel for the "Custom /
+    // self-hosted…" card. It is not a real catalog entry — skip the
+    // fetch and render the CustomServiceForm below instead.
+    enabled: Boolean(trimmedSlug) && trimmedSlug !== "__custom__",
   });
 
   const entryErrorMessage = (() => {
@@ -173,20 +204,49 @@ export function AiKeyConfirm({ prefill, pairingId, onSuccess }: AiKeyConfirmProp
     return `Couldn't load catalog entry "${trimmedSlug}".`;
   })();
 
+  // When no slug is picked yet, we're effectively on "Step 1 · pick a
+  // service" (the catalog grid below). Once the user clicks a card we
+  // transition to "Step 2 · enter credential" via the per-entry form.
+  // The step-label header that wraps this panel in the shell keeps
+  // the numeric step tied to the pairing phase, so we swap the title
+  // copy here to mirror the old vanilla wizard's two-step narrative.
+  const onCatalogStep = !trimmedSlug && !entryErrorMessage;
+  const onCustomStep = trimmedSlug === "__custom__";
+  const title = onCatalogStep
+    ? "Add an AI service"
+    : onCustomStep
+      ? "Custom / self-hosted service"
+      : "Connect service";
+  const subtitle = onCatalogStep
+    ? "Pick a service to connect. Simple-bearer APIs (OpenAI, Anthropic, Gemini) land in the guided form. Anything else — self-hosted, OAuth, device code, custom endpoint — goes to the power-user form."
+    : onCustomStep
+      ? "For services not in the catalog — paste your own endpoint URL and credential."
+      : `Your CLI wants to add ${trimmedSlug || "a service"} to NyxID. Confirm the details here.`;
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-display text-xl font-semibold">
-          Add an external service
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Your CLI wants to add <strong>{trimmedSlug || "a service"}</strong>{" "}
-          to NyxID. Confirm the details here.
-        </p>
+        <h2 className="font-serif text-[28px] font-normal">{title}</h2>
+        <p className="text-sm text-muted-foreground">{subtitle}</p>
       </div>
 
-      {!trimmedSlug ? (
-        <SlugPicker onSubmit={setSlug} />
+      {onCatalogStep ? (
+        <CatalogGrid onSelect={setSlug} />
+      ) : onCustomStep ? (
+        // The "Custom / self-hosted" catalog card emits the sentinel
+        // slug `__custom__` — NOT a real catalog entry. Render a
+        // stand-alone form for endpoint URL + credential + auth
+        // method without fetching the catalog. Mirrors
+        // `appendCustomFormFields` in the old vanilla wizard.js
+        // (cli/src/wizard/assets/wizard.js:~325-400).
+        <CustomServiceForm
+          prefill={prefill}
+          pairingId={pairingId}
+          onSuccess={onSuccess}
+          onBack={() => {
+            setSlug("");
+          }}
+        />
       ) : entryLoading ? (
         <Skeleton className="h-24 w-full" />
       ) : entryErrorMessage ? (
@@ -196,7 +256,7 @@ export function AiKeyConfirm({ prefill, pairingId, onSuccess }: AiKeyConfirmProp
         // in place without re-running the CLI.
         <div className="flex flex-col gap-3">
           <ErrorLine message={entryErrorMessage} />
-          <SlugPicker onSubmit={setSlug} />
+          <CatalogGrid onSelect={setSlug} />
         </div>
       ) : entry ? (
         <CatalogConfirmForm
@@ -210,37 +270,196 @@ export function AiKeyConfirm({ prefill, pairingId, onSuccess }: AiKeyConfirmProp
   );
 }
 
-// ── no-slug fallback ────────────────────────────────────────────────
+// ── custom / self-hosted form (no catalog entry) ───────────────────
 
-function SlugPicker({ onSubmit }: { readonly onSubmit: (s: string) => void }) {
-  const [s, setS] = useState("");
+type CustomAuthMethod = "bearer" | "header" | "query" | "basic" | "none";
+
+interface CustomServiceFormProps {
+  readonly prefill: AiKeyPrefill;
+  readonly pairingId: string;
+  readonly onSuccess: (result: AiKeyPairingSuccess) => void;
+  readonly onBack: () => void;
+}
+
+function CustomServiceForm({
+  prefill,
+  pairingId,
+  onSuccess,
+  onBack,
+}: CustomServiceFormProps) {
+  const [label, setLabel] = useState(prefill.label ?? "");
+  const [endpointUrl, setEndpointUrl] = useState(prefill.endpoint_url ?? "");
+  const [credential, setCredential] = useState("");
+  const [authMethod, setAuthMethod] = useState<CustomAuthMethod>("bearer");
+  const [authKeyName, setAuthKeyName] = useState("Authorization");
+  const [slug, setSlug] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const trimmedLabel = label.trim();
+  const trimmedEndpoint = endpointUrl.trim();
+  const trimmedCredential = credential.trim();
+  const needsCredential = authMethod !== "none";
+  const submitDisabled =
+    loading ||
+    !trimmedLabel ||
+    !trimmedEndpoint ||
+    (needsCredential && !trimmedCredential);
+
+  async function submit() {
+    setLoading(true);
+    setError(null);
+    try {
+      const body: Record<string, unknown> = {
+        label: trimmedLabel,
+        endpoint_url: trimmedEndpoint,
+        auth_method: authMethod,
+      };
+      if (needsCredential) body.credential = trimmedCredential;
+      if (authMethod === "header" || authMethod === "query") {
+        body.auth_key_name = authKeyName.trim() || "Authorization";
+      }
+      const trimmedSlug = slug.trim();
+      if (trimmedSlug) body.slug = trimmedSlug;
+
+      await reservePairingAction(pairingId);
+      const res = await withRewindOnError(pairingId, () =>
+        api.post<UserServiceCreated>("/keys", body),
+      );
+      onSuccess({
+        kind: "ai-key",
+        service_id: res.id,
+        slug: res.slug,
+        label: res.label,
+      });
+    } catch (e) {
+      setError(
+        e instanceof ApiError ? e.message : (e as Error).message ?? "Failed.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
-    <div className="flex flex-col gap-3">
-      <p className="text-sm text-muted-foreground">
-        Your CLI didn't send a catalog slug. Enter one to continue (try{" "}
-        <code className="rounded bg-muted px-1 py-0.5 text-xs">llm-openai</code>
-        ), or cancel and run <code>nyxid catalog list</code> first.
-      </p>
-      <div className="flex flex-col gap-1.5">
-        <Label htmlFor="pair-aikey-slug">Catalog slug</Label>
-        <Input
-          id="pair-aikey-slug"
-          value={s}
-          onChange={(e) => {
-            setS(e.target.value);
-          }}
-          placeholder="llm-openai"
-          autoFocus
-        />
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="pair-custom-label">Label</Label>
+          <Input
+            id="pair-custom-label"
+            value={label}
+            onChange={(e) => {
+              setLabel(e.target.value);
+            }}
+            placeholder="e.g. My Self-hosted OpenAI Proxy"
+            autoFocus
+          />
+          <p className="text-xs text-muted-foreground">
+            Shown everywhere in the CLI and web UI.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="pair-custom-endpoint">Endpoint URL</Label>
+          <Input
+            id="pair-custom-endpoint"
+            value={endpointUrl}
+            onChange={(e) => {
+              setEndpointUrl(e.target.value);
+            }}
+            placeholder="https://api.example.com"
+          />
+          <p className="text-xs text-muted-foreground">
+            The base URL NyxID proxies requests to.
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="pair-custom-auth-method">Auth method</Label>
+          <select
+            id="pair-custom-auth-method"
+            value={authMethod}
+            onChange={(e) => {
+              setAuthMethod(e.target.value as CustomAuthMethod);
+            }}
+            className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <option value="bearer">bearer (Authorization: Bearer …)</option>
+            <option value="header">header (custom header)</option>
+            <option value="query">query (?key=…)</option>
+            <option value="basic">basic (Authorization: Basic …)</option>
+            <option value="none">none (no auth injection)</option>
+          </select>
+          <p className="text-xs text-muted-foreground">
+            How NyxID attaches the credential to outgoing requests.
+          </p>
+        </div>
+
+        {needsCredential ? (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="pair-custom-credential">API key / credential</Label>
+            <Input
+              id="pair-custom-credential"
+              type="password"
+              value={credential}
+              onChange={(e) => {
+                setCredential(e.target.value);
+              }}
+              placeholder={
+                authMethod === "basic" ? "user:pass" : "sk-..."
+              }
+            />
+            <p className="text-xs text-muted-foreground">
+              Pasted once, encrypted at rest.
+              {authMethod === "basic" ? " Format: user:pass." : ""}
+            </p>
+          </div>
+        ) : null}
+
+        {(authMethod === "header" || authMethod === "query") ? (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="pair-custom-auth-key-name">
+              {authMethod === "header" ? "Header name" : "Query parameter name"}
+            </Label>
+            <Input
+              id="pair-custom-auth-key-name"
+              value={authKeyName}
+              onChange={(e) => {
+                setAuthKeyName(e.target.value);
+              }}
+              placeholder="Authorization"
+            />
+          </div>
+        ) : null}
+
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="pair-custom-slug">Custom slug (optional)</Label>
+          <Input
+            id="pair-custom-slug"
+            value={slug}
+            onChange={(e) => {
+              setSlug(e.target.value);
+            }}
+            placeholder="auto-generated from label"
+          />
+          <p className="text-xs text-muted-foreground">
+            URL segment at <code>/proxy/s/&lt;slug&gt;/…</code>. Leave
+            blank to let NyxID derive it from the label.
+          </p>
+        </div>
       </div>
-      <Button
-        onClick={() => {
-          onSubmit(s.trim());
-        }}
-        disabled={!s.trim()}
-      >
-        Continue
-      </Button>
+
+      {error ? <ErrorLine message={error} /> : null}
+
+      <div className="flex items-center justify-between gap-2">
+        <Button variant="outline" onClick={onBack} disabled={loading}>
+          ← Back
+        </Button>
+        <Button onClick={() => void submit()} disabled={submitDisabled}>
+          {loading ? "Connecting…" : "Connect service"}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -359,6 +578,22 @@ function CatalogConfirmForm({
       // times out the same way it did before this fix.
     }
     if (href) {
+      // Mode A (locally-served wizard) runs on `127.0.0.1:<port>`;
+      // that axum server only serves `/wizard` + `/api/proxy/*`, so a
+      // bare relative href like `/keys?...` 404s. In that context we
+      // have no accurate way to build the frontend's absolute URL
+      // (split-origin deployments), so tell the user to open their
+      // NyxID dashboard manually and leave this tab alone — the CLI
+      // has already been cancelled.
+      if (window.__WIZARD_BOOTSTRAP__?.context === "local") {
+        alert(
+          "This auth shape isn't supported in the CLI wizard. " +
+            "Open your NyxID dashboard and complete setup on the " +
+            "Keys page (tab: External Services). " +
+            "You can close this tab now.",
+        );
+        return;
+      }
       window.location.assign(href);
     } else {
       window.history.back();

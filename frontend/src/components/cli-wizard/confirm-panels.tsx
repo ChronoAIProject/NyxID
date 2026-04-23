@@ -7,16 +7,41 @@
 // touch that endpoint.
 
 import { useState } from "react";
+import { Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { api } from "@/lib/api-client";
-import { reservePairingAction, withRewindOnError } from "./reserve-action";
+import {
+  reservePairingAction,
+  withRewindOnError,
+} from "@/pages/cli-pair/reserve-action";
 import type {
   ApiKeyCreatePrefill,
   NodeRegisterPrefill,
   RotatePrefill,
-} from "./types";
+} from "@/pages/cli-pair/types";
+import { NameInput } from "./name-input";
+import { apiKeyNameSchema, nodeNameSchema, PLATFORMS } from "@/schemas/cli-wizard";
+import { ScopePicker } from "./scope-picker";
+import {
+  AccessScopeCard,
+  type AccessScopeState,
+} from "./access-scope-card";
+import { API_KEY_SCOPES, type ApiKeyScope } from "@/schemas/api-keys";
+import { useOrgs } from "@/hooks/use-orgs";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 // ── api-key-create panel ────────────────────────────────────────────
 
@@ -37,6 +62,55 @@ interface ApiKeyCreateConfirmProps {
   readonly onSuccess: (result: ApiKeyCreateSuccess) => void;
 }
 
+/**
+ * Parse the CLI-sent space-separated scope string into an initial
+ * `Set<ApiKeyScope>`. Unknown entries are dropped so a malformed
+ * prefill doesn't leave the chip row in an impossible state.
+ */
+function initialScopeSet(prefillScopes: string | undefined): Set<ApiKeyScope> {
+  const fromPrefill = (prefillScopes ?? "read write")
+    .split(/\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean) as string[];
+  const allowed = new Set<string>(API_KEY_SCOPES);
+  return new Set(fromPrefill.filter((s) => allowed.has(s)) as ApiKeyScope[]);
+}
+
+function initialAccessScope(prefill: ApiKeyCreatePrefill): AccessScopeState {
+  const servicesCsv = prefill.allowed_services_csv;
+  const nodesCsv = prefill.allowed_nodes_csv;
+
+  const selectedServiceIds = new Set(
+    (servicesCsv ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  const selectedNodeIds = new Set(
+    (nodesCsv ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+
+  // Default to "Allow all" when the CLI didn't pass an explicit
+  // allowed_*_csv. Presence of a CSV is what tells us the user wants
+  // a scoped key (matches `nyxid api-key create --allowed-services
+  // a,b,c` CLI semantics). The raw `prefill.allow_all_*` flag from
+  // the CLI's ApiKeyCreatePrefill struct defaults to `false` in Rust,
+  // so we can't trust it as "user explicitly unticked" — we have to
+  // infer from the CSV presence instead.
+  const allowAllServices = !servicesCsv;
+  const allowAllNodes = !nodesCsv;
+
+  return {
+    allowAllServices,
+    allowAllNodes,
+    selectedServiceIds,
+    selectedNodeIds,
+  };
+}
+
 export function ApiKeyCreateConfirm({
   prefill,
   pairingId,
@@ -44,6 +118,20 @@ export function ApiKeyCreateConfirm({
 }: ApiKeyCreateConfirmProps) {
   const [name, setName] = useState(prefill.name ?? "");
   const [platform, setPlatform] = useState(prefill.platform ?? "");
+  const [nameValid, setNameValid] = useState(false);
+  const [scopes, setScopes] = useState<Set<ApiKeyScope>>(() =>
+    initialScopeSet(prefill.scopes),
+  );
+  const [access, setAccess] = useState<AccessScopeState>(() =>
+    initialAccessScope(prefill),
+  );
+  // Owner picker — an empty string means "personal account"; anything
+  // else is an org id. Prefilled from `--org` if the CLI sent one.
+  // Matches the wizard v3.2 behavior from the old vanilla JS wizard
+  // (wizard.js:1938-2040) so org admins who run the command without
+  // the flag can still switch ownership in the browser.
+  const [ownerId, setOwnerId] = useState(prefill.org_id ?? "");
+  const orgs = useOrgs();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -53,26 +141,18 @@ export function ApiKeyCreateConfirm({
     try {
       const body: Record<string, unknown> = {
         name,
-        scopes: prefill.scopes ?? "read write",
-        allow_all_services: prefill.allow_all_services ?? true,
-        allow_all_nodes: prefill.allow_all_nodes ?? true,
+        scopes: Array.from(scopes).join(" "),
+        allow_all_services: access.allowAllServices,
+        allow_all_nodes: access.allowAllNodes,
       };
       if (platform) body.platform = platform;
       if (prefill.callback_url) body.callback_url = prefill.callback_url;
-      if (prefill.org_id) body.target_org_id = prefill.org_id;
-      if (prefill.allowed_services_csv) {
-        body.allowed_service_ids = prefill.allowed_services_csv
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        body.allow_all_services = false;
+      if (ownerId) body.target_org_id = ownerId;
+      if (!access.allowAllServices) {
+        body.allowed_service_ids = Array.from(access.selectedServiceIds);
       }
-      if (prefill.allowed_nodes_csv) {
-        body.allowed_node_ids = prefill.allowed_nodes_csv
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        body.allow_all_nodes = false;
+      if (!access.allowAllNodes) {
+        body.allowed_node_ids = Array.from(access.selectedNodeIds);
       }
       // Match the terminal path's convention (`cli/src/commands/api_key.rs`):
       // a positive `expires_in_days` becomes an RFC-3339 `expires_at`; a
@@ -100,43 +180,129 @@ export function ApiKeyCreateConfirm({
     }
   }
 
+  const submitDisabled = loading || !nameValid || scopes.size === 0;
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-display text-xl font-semibold">
+        <h2 className="font-serif text-[28px] font-normal">
           Create an API key
         </h2>
         <p className="text-sm text-muted-foreground">
           Review the details your CLI sent and confirm to mint the key.
         </p>
       </div>
-      <div className="flex flex-col gap-3">
-        <Field label="Name" htmlFor="pair-api-key-name">
-          <Input
-            id="pair-api-key-name"
-            value={name}
-            onChange={(e) => {
-              setName(e.target.value);
+      <div className="flex flex-col gap-4">
+        <NameInput
+          id="pair-api-key-name"
+          label="Name"
+          schema={apiKeyNameSchema}
+          value={name}
+          onChange={setName}
+          onValidityChange={setNameValid}
+          placeholder="e.g. coding-agent"
+          hint="A short label so you can find this key in `nyxid api-key list`."
+          autoFocus
+        />
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-1.5">
+            <Label htmlFor="pair-api-key-platform">Platform</Label>
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label="About platform tags"
+                    className="text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    <Info className="h-3.5 w-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent
+                  side="right"
+                  align="start"
+                  sideOffset={8}
+                  className="max-w-[340px] whitespace-normal px-5 py-4 text-[13px] leading-[1.55]"
+                >
+                  <div className="flex flex-col gap-4">
+                    <p>
+                      <span className="font-medium text-foreground">
+                        Platform
+                      </span>{" "}
+                      tags the key with the AI agent that will use it.
+                    </p>
+                    <p className="text-muted-foreground">
+                      It controls three things: audit attribution (logs
+                      show which agent made each proxy request), per-
+                      agent rate-limit buckets, and dashboard filtering
+                      on the API Keys page.
+                    </p>
+                    <p className="text-muted-foreground">
+                      Values are a fixed allowlist —{" "}
+                      <code>claude-code</code>, <code>cursor</code>,{" "}
+                      <code>codex</code>, <code>openclaw</code>,{" "}
+                      <code>generic</code>. Custom strings are rejected
+                      by the backend.
+                    </p>
+                    <p className="text-muted-foreground">
+                      Leave as <code>— none —</code> if you don't want
+                      the tag.
+                    </p>
+                  </div>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+          <Select
+            value={platform === "" ? "__none__" : platform}
+            onValueChange={(v) => {
+              setPlatform(v === "__none__" ? "" : v);
             }}
-            autoFocus
-          />
-        </Field>
-        <Field label="Platform" htmlFor="pair-api-key-platform">
-          <Input
-            id="pair-api-key-platform"
-            value={platform}
-            placeholder="claude-code, codex, ..."
-            onChange={(e) => {
-              setPlatform(e.target.value);
-            }}
-          />
-        </Field>
+          >
+            <SelectTrigger id="pair-api-key-platform">
+              <SelectValue placeholder="— none —" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">— none —</SelectItem>
+              {PLATFORMS.map((p) => (
+                <SelectItem key={p} value={p}>
+                  {p}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Tags the key for audit attribution + per-agent rate limits.
+          </p>
+        </div>
+        {(orgs.data?.length ?? 0) > 0 ? (
+          <Field label="Owner" htmlFor="pair-api-key-owner">
+            <select
+              id="pair-api-key-owner"
+              value={ownerId}
+              onChange={(e) => {
+                setOwnerId(e.target.value);
+              }}
+              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            >
+              <option value="">Personal (your account)</option>
+              {orgs.data?.map((org) => (
+                <option key={org.id} value={org.id}>
+                  Org · {org.display_name ?? org.id}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Org-owned keys authenticate as the org; every admin of
+              the selected org can rotate or delete them.
+            </p>
+          </Field>
+        ) : null}
+        <ScopePicker value={scopes} onChange={setScopes} />
+        <AccessScopeCard value={access} onChange={setAccess} />
       </div>
       {error ? <ErrorLine message={error} /> : null}
-      <Button
-        onClick={() => void submit()}
-        disabled={loading || !name.trim()}
-      >
+      <Button onClick={() => void submit()} disabled={submitDisabled}>
         {loading ? "Creating..." : "Create key"}
       </Button>
     </div>
@@ -195,7 +361,7 @@ export function ApiKeyRotateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-display text-xl font-semibold">
+        <h2 className="font-serif text-[28px] font-normal">
           Rotate API key
         </h2>
         <p className="text-sm text-muted-foreground">
@@ -247,6 +413,7 @@ export function NodeRegisterConfirm({
   onSuccess,
 }: NodeRegisterConfirmProps) {
   const [name, setName] = useState(prefill.name ?? "");
+  const [nameValid, setNameValid] = useState(true); // empty is valid (we fall back to default)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -278,7 +445,7 @@ export function NodeRegisterConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-display text-xl font-semibold">
+        <h2 className="font-serif text-[28px] font-normal">
           Generate node registration token
         </h2>
         <p className="text-sm text-muted-foreground">
@@ -286,22 +453,20 @@ export function NodeRegisterConfirm({
           connect a new node.
         </p>
       </div>
-      <Field label="Node name (optional)" htmlFor="pair-node-name">
-        <Input
-          id="pair-node-name"
-          value={name}
-          placeholder={DEFAULT_NODE_NAME}
-          onChange={(e) => {
-            setName(e.target.value);
-          }}
-          autoFocus
-        />
-        <p className="mt-1 text-xs text-muted-foreground">
-          Leave blank to use the default <code>{DEFAULT_NODE_NAME}</code>.
-        </p>
-      </Field>
+      <NameInput
+        id="pair-node-name"
+        label="Node name (optional)"
+        schema={nodeNameSchema}
+        value={name}
+        onChange={setName}
+        onValidityChange={setNameValid}
+        placeholder={DEFAULT_NODE_NAME}
+        hint={`Lowercase letters, digits, hyphens only (max 64). Leave blank for \`${DEFAULT_NODE_NAME}\`.`}
+        optional
+        autoFocus
+      />
       {error ? <ErrorLine message={error} /> : null}
-      <Button onClick={() => void submit()} disabled={loading}>
+      <Button onClick={() => void submit()} disabled={loading || !nameValid}>
         {loading ? "Generating..." : "Generate token"}
       </Button>
     </div>
@@ -362,7 +527,7 @@ export function NodeRotateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-display text-xl font-semibold">
+        <h2 className="font-serif text-[28px] font-normal">
           Rotate node token
         </h2>
         <p className="text-sm text-muted-foreground">

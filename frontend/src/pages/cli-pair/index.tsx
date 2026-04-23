@@ -18,7 +18,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Terminal } from "lucide-react";
+import { WizardShell } from "@/components/cli-wizard/shell";
+import { DisconnectBanner } from "@/components/cli-wizard/disconnect-banner";
+import {
+  resolveStep,
+  type WizardFlow,
+  type WizardPhase,
+} from "@/components/cli-wizard/step-label";
 import type {
   AckPayload,
   AiKeyPrefill,
@@ -39,8 +45,11 @@ import {
   type ApiKeyRotateSuccess,
   type NodeRegisterSuccess,
   type NodeRotateSuccess,
-} from "./panels";
-import { AiKeyConfirm, type AiKeyPairingSuccess } from "./ai-key-panel";
+} from "@/components/cli-wizard/confirm-panels";
+import {
+  AiKeyConfirm,
+  type AiKeyPairingSuccess,
+} from "@/components/cli-wizard/ai-key-confirm-panel";
 
 type ActionResult =
   | AiKeyPairingSuccess
@@ -166,25 +175,13 @@ export function CliPairPage() {
 
   if (isLoading || !isAuthenticated) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <Skeleton className="h-40 w-96" />
-      </div>
+      <WizardShell context="pair">
+        <Skeleton className="h-40 w-full" />
+      </WizardShell>
     );
   }
 
-  return (
-    <div className="flex min-h-screen items-center justify-center p-6">
-      <div className="w-full max-w-md rounded-xl border bg-card p-8 shadow-sm">
-        <header className="mb-6 flex items-center gap-3">
-          <Terminal className="h-6 w-6 text-primary/70" />
-          <h1 className="font-display text-xl font-semibold">
-            Pair with NyxID CLI
-          </h1>
-        </header>
-        <StageRouter />
-      </div>
-    </div>
-  );
+  return <StageRouter />;
 }
 
 /**
@@ -213,6 +210,56 @@ function reconstructRotationAck(claim: ClaimResponse): AckPayload | null {
 
 function StageRouter() {
   const [stage, setStage] = useState<Stage>({ phase: "enter-code" });
+  // Pairing-side liveness. Once a claim lands, poll the backend
+  // every 4s for status so we notice when the CLI cancels or the
+  // record TTLs out without requiring the user to click a button.
+  const [pairingLost, setPairingLost] = useState<
+    "cancelled" | "expired" | null
+  >(null);
+
+  const claimId =
+    "claim" in stage ? stage.claim.id : null;
+
+  useEffect(() => {
+    if (!claimId) return;
+    // Stop polling once we've reached a terminal local state — the
+    // browser already knows the outcome and the poll just burns API
+    // calls. `secret` and `acking` keep polling so a user sitting on
+    // the DisplayOnce panel still sees "CLI cancelled" if it
+    // happens.
+    if (stage.phase === "done" || stage.phase === "resumed-create-warning") {
+      return;
+    }
+    let stopped = false;
+    async function tick() {
+      if (stopped) return;
+      try {
+        const resp = await api.get<{ readonly status: string }>(
+          `/cli-pairings/${encodeURIComponent(claimId!)}/poll`,
+        );
+        if (resp.status === "cancelled") {
+          setPairingLost("cancelled");
+        } else if (resp.status === "expired") {
+          setPairingLost("expired");
+        } else if (pairingLost && resp.status === "claimed") {
+          // Transient network hiccup that recovered. Clear banner.
+          setPairingLost(null);
+        }
+      } catch {
+        // Don't flip "lost" on transient errors — only on server-
+        // reported terminal states. Fetch failures are likely offline
+        // / reload noise; the next tick catches up.
+      }
+    }
+    const handle = window.setInterval(() => {
+      void tick();
+    }, 4_000);
+    void tick();
+    return () => {
+      stopped = true;
+      window.clearInterval(handle);
+    };
+  }, [claimId, stage.phase, pairingLost]);
 
   /**
    * Resend a reconstructed ack for a resumed rotation. Mirrors
@@ -302,7 +349,25 @@ function StageRouter() {
     }
   }
 
-  switch (stage.phase) {
+  const flow = stageFlow(stage);
+  const phase = stagePhase(stage);
+  const step = resolveStep(phase, flow);
+
+  return (
+    <WizardShell context="pair" step={step}>
+      {pairingLost ? (
+        <DisconnectBanner
+          state="disconnected"
+          context="pair"
+          pairingStatus={pairingLost}
+        />
+      ) : null}
+      {renderStage()}
+    </WizardShell>
+  );
+
+  function renderStage() {
+    switch (stage.phase) {
     case "enter-code":
       return (
         <EnterCodeForm
@@ -481,7 +546,24 @@ function StageRouter() {
       );
     case "done":
       return <DonePanel />;
+    }
   }
+}
+
+/**
+ * Extract the `WizardFlow` for a stage, if the claim is known yet.
+ * `enter-code` is pre-claim — no flow chosen, so the step label falls
+ * back to the neutral pre-flow copy.
+ */
+function stageFlow(stage: Stage): WizardFlow | undefined {
+  if ("claim" in stage) {
+    return stage.claim.kind as WizardFlow;
+  }
+  return undefined;
+}
+
+function stagePhase(stage: Stage): WizardPhase {
+  return stage.phase;
 }
 
 // ── Step 1: enter code ──────────────────────────────────────────────

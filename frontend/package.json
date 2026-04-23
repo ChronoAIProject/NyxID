@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:wizard": "tsc -b && vite build --config vite.wizard.config.ts",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
@@ -72,6 +73,7 @@
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.54.0",
     "vite": "^8.0.8",
+    "vite-plugin-singlefile": "^2.3.3",
     "vitest": "^4.1.4"
   }
 }

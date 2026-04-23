@@ -99,22 +99,27 @@ struct Assets;
 /// Overall ceiling. If a heartbeat is never missed but the user never
 /// completes, this kills the session so a walked-away tab eventually frees.
 const WIZARD_MAX_DURATION: Duration = Duration::from_secs(1800); // 30 min
-/// Browser pings `/api/proxy/heartbeat` every 10 s; miss two in a row
-/// and the CLI treats the tab as dead. Grace: 22 s (2 × 10 + jitter).
-const HEARTBEAT_DEAD_AFTER: Duration = Duration::from_secs(22);
-/// Rotation flows render a one-time secret on Step 3. Users may alt-tab
-/// into a password manager / vault / paper to copy it; chrome throttles
-/// `setInterval` in hidden tabs and visibility-change pauses our JS
-/// heartbeat sender entirely. A wider window means casual alt-tabs
-/// don't trip the watchdog and bury the panel under a "disconnected"
-/// overlay. Caveat (called out in CLI_WIZARD_V3.md §3): >60 s of
-/// silence STILL triggers cancel — this is a heuristic, not a fix.
-const HEARTBEAT_DEAD_AFTER_ROTATION: Duration = Duration::from_secs(60);
+/// Browser pings `/api/proxy/heartbeat` every 1.2 s; miss a handful in
+/// a row and the CLI treats the tab as dead. 4 s covers ~3 missed
+/// beats on loopback. The frontend's own disconnect banner fires at
+/// ~3.6 s (3 misses), so the two timings are aligned.
+const HEARTBEAT_DEAD_AFTER: Duration = Duration::from_secs(4);
+/// Rotation / DisplayOnce flows render a one-time secret. Users may
+/// alt-tab into a password manager / vault / paper to copy it, and
+/// Chrome throttles `setInterval` in hidden tabs (sometimes to once
+/// per minute). A wider window keeps casual alt-tabs from burying the
+/// panel under a "disconnected" overlay. 30 s is the compromise —
+/// down from 60 s since the shorter heartbeat + tighter dead-after
+/// makes the overall watchdog responsive elsewhere, but still tolerant
+/// of a ~25 s alt-tab to 1Password.
+const HEARTBEAT_DEAD_AFTER_ROTATION: Duration = Duration::from_secs(30);
 /// Grace period at startup before we start enforcing the heartbeat dead
 /// line. Lets the browser actually load the page.
-const HEARTBEAT_STARTUP_GRACE: Duration = Duration::from_secs(8);
-/// How often the CLI checks the last-heartbeat timestamp.
-const HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+const HEARTBEAT_STARTUP_GRACE: Duration = Duration::from_secs(5);
+/// How often the CLI checks the last-heartbeat timestamp. 500 ms is
+/// tight enough that a watchdog-triggered exit fires within ~4.5 s of
+/// the last successful beat.
+const HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 /// A single entry in the proxy allowlist. `path_template` supports literal
 /// segments and `:param` placeholders (e.g. `/api/v1/catalog/:slug`). The
@@ -184,6 +189,12 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
             // privileged fields like `target_org_id`, `identity_*`,
             // `forward_access_token`, `inject_delegation_token`, and SSH
             // flags out of reach of a compromised wizard page.
+            //
+            // `node_id` is whitelisted because the shared React confirm
+            // panel forwards the CLI's `via_node` prefill to the backend
+            // on `nyxid service add --via-node …`. Without it the
+            // wizard would create an unbound service, breaking node-only
+            // / self-hosted setups.
             ProxyRoute {
                 method: Method::POST,
                 path_template: "/api/v1/keys",
@@ -196,6 +207,7 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                     "auth_method",
                     "auth_key_name",
                     "openapi_spec_url",
+                    "node_id",
                 ],
             },
             // Needed to poll placeholder key status during OAuth/device-code.
@@ -213,6 +225,18 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
             // OAuth app credentials (client_id, client_secret) stored on the
             // provider entry. Required up-front for providers whose
             // credential_mode is "user" or "both".
+            //
+            // Both GET and PUT are in the allowlist: the React OAuth sub-
+            // flow reads existing credentials first to decide whether to
+            // render the client ID/secret form, then writes them if the
+            // user provides them. Without the GET entry, `user` and
+            // `both` credential_mode providers can't be connected via
+            // the Mode A wizard.
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/providers/:provider_id/credentials",
+                body_fields: &[],
+            },
             ProxyRoute {
                 method: Method::PUT,
                 path_template: "/api/v1/providers/:provider_id/credentials",
@@ -367,6 +391,12 @@ struct ServerState {
     /// the browser never got a chance to fire a cleanup request
     /// (e.g. tab closed while POST /keys was still in flight).
     pending_keys: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    /// JSON-serialized prefill for the flow. Baked into
+    /// `window.__WIZARD_BOOTSTRAP__.prefill` so the React bundle can
+    /// render the right confirm panel with the right values on mount.
+    /// Matches the shape of the per-kind TypeScript `*Prefill`
+    /// interfaces in `frontend/src/pages/cli-pair/types.ts`.
+    prefill: Arc<serde_json::Value>,
 }
 
 /// Mint a 32-byte random CSRF token, hex-encoded.
@@ -385,14 +415,34 @@ fn csrf_ok(headers: &HeaderMap, expected: &str) -> bool {
     constant_time_eq::constant_time_eq(provided, expected.as_bytes())
 }
 
-/// Strict CSP: self only, no remote anything, no eval, no framing.
-const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
-                   img-src 'self' data:; connect-src 'self'; font-src 'self'; \
-                   form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
+/// Strict CSP template. The nonce placeholder is substituted per
+/// request so the inline `<script>` / `<style>` tags emitted by the
+/// Vite single-file bundle (and the bootstrap `<script>` injected at
+/// serve time) are allowed, while any script the wizard page might
+/// try to inject without a nonce is still blocked.
+///
+/// `strict-dynamic` means "a nonce-trusted script can load further
+/// scripts without them needing their own nonce". Vite's bundle runs
+/// a single module script that lazily creates child modules; without
+/// strict-dynamic we'd need a nonce on every transitively-loaded
+/// chunk, which is impractical for a React app.
+const CSP_TEMPLATE: &str = "default-src 'none'; \
+     script-src 'self' 'nonce-{NONCE}' 'strict-dynamic'; \
+     style-src 'self' 'nonce-{NONCE}' 'unsafe-hashes'; \
+     img-src 'self' data:; \
+     connect-src 'self'; \
+     font-src 'self' data:; \
+     form-action 'none'; \
+     frame-ancestors 'none'; \
+     base-uri 'none'";
 
-fn base_security_headers() -> HeaderMap {
+fn base_security_headers_with_nonce(nonce: &str) -> HeaderMap {
     let mut h = HeaderMap::new();
-    h.insert("content-security-policy", HeaderValue::from_static(CSP));
+    let csp = CSP_TEMPLATE.replace("{NONCE}", nonce);
+    h.insert(
+        "content-security-policy",
+        HeaderValue::from_str(&csp).unwrap_or(HeaderValue::from_static("")),
+    );
     h.insert(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
@@ -403,26 +453,118 @@ fn base_security_headers() -> HeaderMap {
     h
 }
 
+/// Legacy non-nonce headers for non-index responses (JSON APIs, etc.)
+/// where CSP doesn't apply but the other hardening still does.
+fn base_security_headers() -> HeaderMap {
+    let mut h = HeaderMap::new();
+    h.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    h.insert("cache-control", HeaderValue::from_static("no-store"));
+    h
+}
+
+/// Mint a 128-bit random nonce, base64url-encoded. Used once per
+/// serve_index response to authorize the bundle's inline script +
+/// style + bootstrap script tags under the strict CSP.
+fn mint_nonce() -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let mut buf = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut buf);
+    URL_SAFE_NO_PAD.encode(buf)
+}
+
 async fn serve_index(State(state): State<ServerState>) -> Response {
-    let raw = match Assets::get("wizard.html") {
+    let raw = match Assets::get("index.html") {
         Some(a) => a,
         None => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "wizard.html missing").into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, "index.html missing").into_response();
         }
     };
     let flow_name = state.flow.slug();
-    // base_url_root is the NyxID origin (e.g. https://nyx-api.chrono-ai.fun).
-    // It's not secret — the user already knows what backend they logged into
-    // — and the browser needs it to render a real proxy URL on Step 3
-    // instead of a placeholder. We do NOT expose the bearer token here;
-    // that stays in CLI process memory.
-    let html = std::str::from_utf8(raw.data.as_ref())
-        .unwrap_or("")
-        .replace("{{CSRF_TOKEN}}", &state.csrf_token)
-        .replace("{{FLOW}}", flow_name)
-        .replace("{{BASE_URL}}", &state.proxy.base_url_root);
+    let html_raw = std::str::from_utf8(raw.data.as_ref()).unwrap_or("");
 
-    let mut headers = base_security_headers();
+    // Per-request CSP nonce — authorizes the single Vite-bundled
+    // `<script type="module">`, any inline `<style>` tags emitted by
+    // the single-file plugin, and the bootstrap script we inject
+    // below.
+    let nonce = mint_nonce();
+
+    // Annotate every inline `<script>` / `<style>` tag with the
+    // nonce so CSP accepts them. Mode A's bundle is built
+    // deterministically by `frontend/vite.wizard.config.ts`; observed
+    // shapes are `<script type="module" crossorigin>...</script>`
+    // and `<style rel="stylesheet" crossorigin>...</style>` (the
+    // `rel` + `crossorigin` attributes come from Vite's own
+    // single-file inlining). Both with-attributes and without
+    // forms need the nonce so the CSP `script-src` /
+    // `style-src 'nonce-…'` tokens match.
+    let annotated = html_raw
+        .replace("<script ", &format!("<script nonce=\"{nonce}\" "))
+        .replace("<script>", &format!("<script nonce=\"{nonce}\">"))
+        .replace("<style ", &format!("<style nonce=\"{nonce}\" "))
+        .replace("<style>", &format!("<style nonce=\"{nonce}\">"));
+
+    // Bootstrap payload — flow name, CSRF token, backend base URL,
+    // and per-flow prefill are baked into `window.__WIZARD_BOOTSTRAP__`
+    // so the React bundle can render the right panel on mount.
+    // base_url_root is the NyxID origin (e.g. https://nyx-api...).
+    // It's not secret — the user already knows what backend they
+    // logged into — and the browser needs it. We do NOT expose the
+    // bearer token here; that stays in CLI process memory and is
+    // attached to proxied requests server-side.
+    let bootstrap_json = serde_json::json!({
+        "flow": flow_name,
+        "csrf": state.csrf_token.as_str(),
+        "baseUrl": state.proxy.base_url_root,
+        "context": "local",
+        "prefill": state.prefill.as_ref(),
+    });
+    // HTML-safe JSON embedding. We splice the JSON directly into an
+    // inline `<script>` as an object literal, so any prefill field
+    // containing `</script>` or similar HTML-special characters would
+    // terminate the tag before JSON.stringify even matters — a stored-
+    // XSS primitive against the user's own browser, executable against
+    // `/api/proxy/*` with their bearer token.
+    //
+    // Fix: replace the four HTML-significant characters (`<`, `>`, `&`)
+    // plus the JS line-terminator characters (U+2028, U+2029, which
+    // break a JS string literal but not a JSON one) with their
+    // `\uXXXX` equivalents. These are valid inside a JS string literal
+    // *and* inside a JSON string, so the payload round-trips.
+    //
+    // Ref: https://owasp.org/www-community/attacks/xss/ "Script Tag
+    // Break", https://github.com/yahoo/serialize-javascript.
+    let bootstrap_safe = bootstrap_json
+        .to_string()
+        .replace('<', r"\u003c")
+        .replace('>', r"\u003e")
+        .replace('&', r"\u0026")
+        .replace('\u{2028}', r"\u2028")
+        .replace('\u{2029}', r"\u2029");
+    let bootstrap_script = format!(
+        "<script nonce=\"{nonce}\">window.__WIZARD_BOOTSTRAP__ = {bootstrap_safe};</script>",
+    );
+
+    // Inject the bootstrap BEFORE the main module script so
+    // `window.__WIZARD_BOOTSTRAP__` is defined by the time the
+    // React entry reads it.
+    let html = if let Some(idx) = annotated.find("<script nonce=") {
+        let (before, after) = annotated.split_at(idx);
+        format!("{before}{bootstrap_script}{after}")
+    } else {
+        // No script tag found — the bundle is malformed or the
+        // injection pattern drifted. Fall back to appending to head
+        // rather than returning an error so the user at least sees
+        // something; the NoBootstrapFallback in wizard-entry.tsx
+        // surfaces the problem.
+        annotated.replace("</head>", &format!("{bootstrap_script}</head>"))
+    };
+
+    let mut headers = base_security_headers_with_nonce(&nonce);
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),
@@ -1149,6 +1291,67 @@ fn prefill_query(prefill: &PrefillData) -> String {
     }
 }
 
+/// Build the JSON payload baked into `window.__WIZARD_BOOTSTRAP__.prefill`.
+/// Mirrors the per-kind TypeScript `*Prefill` interfaces declared in
+/// `frontend/src/pages/cli-pair/types.ts` so the React bundle's
+/// confirm panels can consume it unchanged. Only fields the React
+/// panels actually read are emitted — keep the surface narrow.
+fn prefill_to_json(prefill: &PrefillData) -> serde_json::Value {
+    use serde_json::{Map, Value};
+    let mut obj: Map<String, Value> = Map::new();
+    let put_opt = |obj: &mut Map<String, Value>, k: &str, v: &Option<String>| {
+        if let Some(val) = v.as_deref()
+            && !val.is_empty()
+        {
+            obj.insert(k.to_string(), Value::String(val.to_string()));
+        }
+    };
+    let put_str = |obj: &mut Map<String, Value>, k: &str, v: &str| {
+        if !v.is_empty() {
+            obj.insert(k.to_string(), Value::String(v.to_string()));
+        }
+    };
+    match prefill {
+        PrefillData::AiKey(p) => {
+            put_opt(&mut obj, "slug", &p.slug);
+            put_opt(&mut obj, "label", &p.label);
+            put_opt(&mut obj, "via_node", &p.via_node);
+            put_opt(&mut obj, "endpoint_url", &p.endpoint_url);
+        }
+        PrefillData::Rotate(p) => {
+            put_str(&mut obj, "resource_id", &p.resource_id);
+            put_str(&mut obj, "display_name", &p.display_name);
+        }
+        PrefillData::NodeRegister(p) => {
+            put_opt(&mut obj, "name", &p.name);
+        }
+        PrefillData::ApiKeyCreate(p) => {
+            put_opt(&mut obj, "name", &p.name);
+            put_opt(&mut obj, "platform", &p.platform);
+            put_opt(&mut obj, "scopes", &p.scopes);
+            if let Some(d) = p.expires_in_days {
+                obj.insert(
+                    "expires_in_days".to_string(),
+                    Value::Number(serde_json::Number::from(d)),
+                );
+            }
+            obj.insert(
+                "allow_all_services".to_string(),
+                Value::Bool(p.allow_all_services),
+            );
+            obj.insert(
+                "allow_all_nodes".to_string(),
+                Value::Bool(p.allow_all_nodes),
+            );
+            put_opt(&mut obj, "allowed_services_csv", &p.allowed_services_csv);
+            put_opt(&mut obj, "allowed_nodes_csv", &p.allowed_nodes_csv);
+            put_opt(&mut obj, "callback_url", &p.callback_url);
+            put_opt(&mut obj, "org_id", &p.org_id);
+        }
+    }
+    Value::Object(obj)
+}
+
 /// Flow runner. Binds, serves, opens the browser, waits for exit. The
 /// `prefill` enum carries flow-specific URL-query state — see
 /// `PrefillData` and `prefill_query`.
@@ -1184,6 +1387,7 @@ pub async fn run_flow(
         .context("reading wizard server local addr")?;
 
     let initial_token = proxy.access_token.clone();
+    let prefill_json = prefill_to_json(&prefill);
     let state = ServerState {
         csrf_token: Arc::new(csrf),
         done_tx: Arc::new(tokio::sync::Mutex::new(Some(done_tx))),
@@ -1198,6 +1402,7 @@ pub async fn run_flow(
         in_flight_mutations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         bound_port: addr.port(),
         pending_keys: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+        prefill: Arc::new(prefill_json),
     };
 
     let app = Router::new()
