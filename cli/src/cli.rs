@@ -142,6 +142,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: AdminCommands,
     },
+    /// Manage telemetry consent on this machine (see `docs/TELEMETRY_M1.md` §3)
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommands,
+    },
     /// Show the NyxID project repository URL
     Repo(RepoArgs),
     /// Show CLI version and project links
@@ -417,6 +422,22 @@ pub enum SessionCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+}
+
+// ---- Telemetry ----
+
+/// Subcommands under `nyxid telemetry`. Canonical editor for the
+/// persisted consent flag at `~/.nyxid/config.toml`. See
+/// `docs/TELEMETRY_M1.md` §3 for the full precedence ladder.
+#[derive(Subcommand)]
+pub enum TelemetryCommands {
+    /// Opt in: persist `{enabled=true, asked=true}` to config.
+    Enable,
+    /// Opt out: persist `{enabled=false, asked=true}` and clear the
+    /// local anon UUID so a future re-enable starts fresh.
+    Disable,
+    /// Print the resolved consent state and its source.
+    Status,
 }
 
 // ---- Catalog ----

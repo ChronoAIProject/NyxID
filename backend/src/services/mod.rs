@@ -53,6 +53,7 @@ pub mod sse_parser;
 pub mod ssh_service;
 pub mod telegram_poller;
 pub mod telegram_service;
+pub mod telemetry_erasure_service;
 pub mod token_exchange_service;
 pub mod token_service;
 pub mod unified_key_service;

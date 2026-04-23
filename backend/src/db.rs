@@ -1066,6 +1066,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── telemetry erasure queue (docs/TELEMETRY_M1.md §8) ──
+    // The drain worker atomically claims the oldest pending job; the
+    // `status + created_at` compound index matches that query. `user_id`
+    // helps operator queries after dead-lettering.
+    let telemetry_erasure_jobs =
+        db.collection::<bson::Document>(crate::models::telemetry_erasure_job::COLLECTION_NAME);
+    telemetry_erasure_jobs
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "status": 1, "created_at": 1 })
+                .build(),
+        )
+        .await?;
+    telemetry_erasure_jobs
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
+
     backfill_downstream_service_types(db).await?;
     purge_legacy_channel_message_content(db).await?;
 

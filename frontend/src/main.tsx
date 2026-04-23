@@ -4,6 +4,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
 import { useAuthStore } from "./stores/auth-store";
+import { useConsentStore } from "./stores/consent-store";
+import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
+import { ConsentBanner } from "./components/consent-banner";
 import "./app.css";
 
 // Clear the chunk-reload guard on successful app bootstrap.
@@ -32,6 +35,7 @@ const queryClient = new QueryClient({
 function Root() {
   const [ready, setReady] = useState(false);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const consentEnabled = useConsentStore((s) => s.enabled);
 
   useEffect(() => {
     useAuthStore
@@ -39,6 +43,26 @@ function Root() {
       .checkAuth()
       .finally(() => setReady(true));
   }, []);
+
+  // Initialize telemetry once auth resolves AND consent is granted.
+  // `initTelemetry` is internally idempotent (StrictMode-safe).
+  // When consent is false the call is a no-op, so flipping the toggle
+  // off at runtime relies on `reset()` + page reload to fully unwind.
+  useEffect(() => {
+    if (!ready) return;
+    initTelemetry({
+      dsn: import.meta.env.VITE_TELEMETRY_DSN,
+      host: import.meta.env.VITE_TELEMETRY_HOST,
+      shareBack: import.meta.env.VITE_NYXID_SHARE_ANALYTICS === "true",
+      consent: consentEnabled,
+    });
+    // If we restored an existing session, identify immediately so
+    // post-boot pageviews attribute to `user_id` rather than the anon id.
+    const user = useAuthStore.getState().user;
+    if (isAuthenticated && user?.id) {
+      telemetryIdentify(user.id);
+    }
+  }, [ready, consentEnabled, isAuthenticated]);
 
   // When auth resolves, redirect as needed:
   // - Authenticated user on landing → dashboard
@@ -81,6 +105,7 @@ function Root() {
   return (
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
+      <ConsentBanner />
     </QueryClientProvider>
   );
 }

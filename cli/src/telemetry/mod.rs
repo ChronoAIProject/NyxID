@@ -1,0 +1,315 @@
+//! CLI telemetry — vendor-neutral public API, fire-and-forget HTTPS POST.
+//!
+//! Public surface is the short verb list from `docs/TELEMETRY_M1.md`
+//! §5.0 hot-swap contract: `init / track / identify / reset`. Vendor
+//! wire format lives inside — callers never see `$identify`,
+//! `/capture/`, or `phc_…`-shaped DSNs.
+//!
+//! Privacy posture:
+//!   - `init()` returns `None` unless a DSN resolves (hard off by default)
+//!   - every invocation of `nyxid` respects `$NYXID_TELEMETRY=off`
+//!   - TTY-interactive first run prompts the user; non-TTY defaults to
+//!     off and does not persist a decision (see `consent` submodule).
+//!
+//! Hot-swap: swapping from PostHog to another vendor = replace the
+//! contents of this file. No caller (`main.rs`, `auth.rs`, etc.) holds
+//! a reference to anything PostHog-specific.
+
+pub mod consent;
+
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use reqwest::Client;
+use serde_json::json;
+
+use crate::auth::validate_profile_name;
+
+/// Compiled-in public DSN for the share-back project (isolated from
+/// production). Used when `NYXID_SHARE_ANALYTICS=true` is set with no
+/// explicit `NYXID_TELEMETRY_DSN`. Safe to publish — PostHog ingest
+/// keys cannot read or delete.
+///
+/// Left empty by default; the release process is expected to bake in
+/// the real value. A zero-length constant here means `share_analytics`
+/// silently degrades to "off", which is the safest possible default.
+const NYXID_PUBLIC_TELEMETRY_DSN: &str = "";
+const NYXID_PUBLIC_TELEMETRY_HOST: &str = "https://eu.i.posthog.com";
+
+const DEFAULT_HOST: &str = "https://eu.i.posthog.com";
+const ANON_ID_FILE_NAME: &str = "anon_id";
+const TRACK_TIMEOUT_MS: u64 = 1000;
+#[allow(dead_code)] // used by track_sync_blocking (reserved for panic hooks)
+const FLUSH_TIMEOUT_MS: u64 = 500;
+
+/// Canonical CLI-originated event. Only one variant today — the command
+/// invocation wrapper. All other per-domain events are emitted by the
+/// backend with `surface="cli"` via the `X-NyxID-Client: cli` header.
+#[derive(Debug, Clone)]
+pub enum CliEvent {
+    CommandInvoked {
+        command_group: &'static str,
+        subcommand: &'static str,
+        exit_code: i32,
+        duration_ms: u64,
+        profile: Option<String>,
+        os: &'static str,
+        arch: &'static str,
+    },
+}
+
+impl CliEvent {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::CommandInvoked { .. } => "cli.command_invoked",
+        }
+    }
+
+    fn properties(&self) -> serde_json::Value {
+        match self {
+            Self::CommandInvoked {
+                command_group,
+                subcommand,
+                exit_code,
+                duration_ms,
+                profile,
+                os,
+                arch,
+            } => json!({
+                "command_group": command_group,
+                "subcommand": subcommand,
+                "exit_code": exit_code,
+                "duration_ms": duration_ms,
+                "profile": profile,
+                "os": os,
+                "arch": arch,
+            }),
+        }
+    }
+}
+
+/// Vendor-neutral telemetry client. Hot-swappable (§5.0).
+#[derive(Clone)]
+pub struct TelemetryClient {
+    dsn: String,
+    host: String,
+    /// NyxID user UUID after login; anon UUID pre-login. Switches via
+    /// [`TelemetryClient::identify`].
+    distinct_id: String,
+    http: Client,
+    cli_version: &'static str,
+    profile: Option<String>,
+}
+
+impl TelemetryClient {
+    /// Resolve DSN + consent per §3 precedence and build a client.
+    /// Returns `None` for the hard-off case (no DSN resolvable, or user
+    /// has declined consent). Callers treat `None` as no-op.
+    ///
+    /// Does NOT prompt — see [`consent::prompt_if_needed_interactive`]
+    /// which must run before this on an interactive TTY.
+    pub fn init(profile: Option<&str>) -> Option<Self> {
+        let state = consent::resolve_consent(profile);
+        if !state.enabled {
+            return None;
+        }
+
+        let (dsn, host) = resolve_dsn()?;
+        let distinct_id = resolve_distinct_id(profile).ok()?;
+        let http = Client::builder()
+            .timeout(std::time::Duration::from_millis(TRACK_TIMEOUT_MS))
+            .user_agent(concat!("nyxid-cli/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .ok()?;
+
+        Some(Self {
+            dsn,
+            host,
+            distinct_id,
+            http,
+            cli_version: env!("CARGO_PKG_VERSION"),
+            profile: profile.map(str::to_owned),
+        })
+    }
+
+    /// Fire-and-forget emission. Short-lived commands (most of them) may
+    /// exit before the HTTP POST completes; we accept ~10–30% loss on
+    /// `cli.command_invoked`. Use [`track_sync_blocking`] for panic
+    /// hooks or long-running commands where a flush is worth the wait.
+    ///
+    /// [`track_sync_blocking`]: Self::track_sync_blocking
+    pub fn track(&self, event: CliEvent) {
+        let body = self.build_capture_body(event.name(), event.properties());
+        let url = format!("{host}/capture/", host = self.host);
+        let http = self.http.clone();
+        tokio::spawn(async move {
+            let _ = http.post(&url).json(&body).send().await;
+        });
+    }
+
+    /// Blocking variant with a short timeout. Used from panic hooks and
+    /// at end-of-main wrappers where the process is about to exit and
+    /// we want a real chance of the event landing.
+    #[allow(dead_code)] // reserved for panic-hook integration in a follow-up
+    pub fn track_sync_blocking(&self, event: CliEvent) {
+        let body = self.build_capture_body(event.name(), event.properties());
+        let url = format!("{host}/capture/", host = self.host);
+        let http = self.http.clone();
+        // Build a small blocking runtime on the current thread — we are
+        // on the way out, no async runtime is guaranteed to be alive.
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(_) => return,
+        };
+        rt.block_on(async {
+            let fut = http.post(&url).json(&body).send();
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(FLUSH_TIMEOUT_MS), fut).await;
+        });
+    }
+
+    /// Associate the currently-active anon identity with `user_id`.
+    /// Called from `run_login()` after tokens are saved. Subsequent
+    /// events use `user_id` as the distinct_id.
+    ///
+    /// The anon→user_id merge is handed to the vendor; wire protocol is
+    /// invisible to the caller. On PostHog today this posts an
+    /// `$identify` event with `$anon_distinct_id`. On a future vendor
+    /// swap the method body changes; the caller does not.
+    pub fn identify(&mut self, user_id: &str) {
+        let anon_id = self.distinct_id.clone();
+        let user_id_owned = user_id.to_string();
+        // Snapshot fields needed by the spawned task; bump our own
+        // distinct_id immediately so any subsequent `track` goes out
+        // under the user_id even before the merge POST returns.
+        self.distinct_id = user_id_owned.clone();
+
+        let dsn = self.dsn.clone();
+        let host = self.host.clone();
+        let cli_version = self.cli_version;
+        let http = self.http.clone();
+        tokio::spawn(async move {
+            let url = format!("{host}/capture/");
+            let body = json!({
+                "api_key": dsn,
+                "event": "$identify",
+                "distinct_id": user_id_owned,
+                "properties": {
+                    "$anon_distinct_id": anon_id,
+                    "surface": "cli",
+                    "app_version": cli_version,
+                },
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            });
+            let _ = http.post(&url).json(&body).send().await;
+        });
+    }
+
+    /// Clear the local anon identity — called from `run_logout` and from
+    /// `nyxid telemetry disable`. The next command invocation resumes
+    /// with a fresh anon UUID.
+    pub fn reset(&self) {
+        if let Some(path) = anon_id_path(self.profile.as_deref()) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    fn build_capture_body(
+        &self,
+        event_name: &str,
+        mut properties: serde_json::Value,
+    ) -> serde_json::Value {
+        if let Some(obj) = properties.as_object_mut() {
+            obj.insert("surface".into(), json!("cli"));
+            obj.insert("app_version".into(), json!(self.cli_version));
+        }
+        json!({
+            "api_key": self.dsn,
+            "event": event_name,
+            "distinct_id": self.distinct_id,
+            "properties": properties,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        })
+    }
+}
+
+/// Resolve DSN + host per §3 precedence.
+fn resolve_dsn() -> Option<(String, String)> {
+    // 1. Explicit user-set DSN.
+    if let Some(dsn) = std::env::var("NYXID_TELEMETRY_DSN")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        let host = std::env::var("NYXID_TELEMETRY_HOST")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_HOST.to_string())
+            .trim_end_matches('/')
+            .trim_end_matches("/capture")
+            .trim_end_matches('/')
+            .to_string();
+        return Some((dsn, host));
+    }
+    // 2. Community share-back.
+    let share = std::env::var("NYXID_SHARE_ANALYTICS")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on"))
+        .unwrap_or(false);
+    if share && !NYXID_PUBLIC_TELEMETRY_DSN.is_empty() {
+        return Some((
+            NYXID_PUBLIC_TELEMETRY_DSN.to_string(),
+            NYXID_PUBLIC_TELEMETRY_HOST.to_string(),
+        ));
+    }
+    None
+}
+
+/// Read (or lazily create) the anon UUID for the given profile. The file
+/// lives at `~/.nyxid/anon_id` (default profile) or
+/// `~/.nyxid/profiles/{name}/anon_id`. Shared with the user-id file so
+/// deleting one on logout / disable cleans both surfaces.
+fn resolve_distinct_id(profile: Option<&str>) -> Result<String> {
+    // Authenticated user_id (from prior identity plumbing in `auth.rs`)
+    // wins whenever it exists — an existing login means we already
+    // aliased anon → user_id on that machine.
+    if let Some(uid) = crate::auth::read_saved_user_id_for(profile) {
+        return Ok(uid);
+    }
+
+    let path = anon_id_path(profile).context("home directory not resolvable")?;
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    // First invocation on this profile: mint a fresh anon UUID.
+    let fresh = uuid::Uuid::new_v4().to_string();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if std::fs::write(&path, &fresh).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    Ok(fresh)
+}
+
+pub(crate) fn anon_id_path(profile: Option<&str>) -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let base = home.join(".nyxid");
+    let dir = match profile {
+        None => base,
+        Some(name) => {
+            validate_profile_name(name).ok()?;
+            base.join("profiles").join(name)
+        }
+    };
+    Some(dir.join(ANON_ID_FILE_NAME))
+}

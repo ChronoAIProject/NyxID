@@ -19,6 +19,7 @@ mod mw;
 mod routes;
 mod services;
 mod ssh_cli;
+mod telemetry;
 
 #[cfg(test)]
 mod test_utils;
@@ -77,6 +78,9 @@ pub struct AppState {
     /// tenant tokens, OAuth 2.0 client_credentials, etc.) and the channel
     /// bot adapter's outbound replies.
     pub token_exchange_cache: Arc<TokenExchangeCache>,
+    /// Vendor-neutral telemetry client. `None` when no DSN is configured
+    /// (the default hard-off state — see `docs/TELEMETRY_M1.md` §3).
+    pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
 }
 
 /// NyxID authentication and SSO platform.
@@ -371,7 +375,12 @@ async fn main() {
         event_dedup_cache,
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+        telemetry: telemetry::TelemetryClient::from_config(&config),
     };
+
+    // Spawn the telemetry-erasure worker. No-op when `state.telemetry`
+    // is `None` (hard-off mode); the function logs + returns.
+    services::telemetry_erasure_service::spawn_worker(state.db.clone(), state.telemetry.clone());
 
     // Create rate limiters
     let global_rate_limiter =
@@ -579,6 +588,8 @@ async fn main() {
             "X-User-Email".parse().unwrap(),
             "X-User-Display-Name".parse().unwrap(),
             "X-API-Key".parse().unwrap(),
+            "X-NyxID-Client".parse().unwrap(),
+            "X-NyxID-Client-Version".parse().unwrap(),
         ]))
         .allow_credentials(true);
 
@@ -600,6 +611,12 @@ async fn main() {
             mw::security_headers::security_headers_middleware,
         ))
         .layer(axum_mw::from_fn(mw::rate_limit::rate_limit_middleware))
+        // Derive `TelemetryContext` from the `X-NyxID-Client` headers on
+        // every request and stash it in request extensions so handlers
+        // can read it when they emit events. Header-only; the
+        // `surface="agent"` override for api-key auth happens at emit
+        // time in `emit_event` (see `docs/TELEMETRY_M1.md` §5.1).
+        .layer(axum_mw::from_fn(mw::telemetry::telemetry_mw))
         .layer(Extension(per_ip_rate_limiter))
         .layer(Extension(global_rate_limiter))
         .layer(TraceLayer::new_for_http());

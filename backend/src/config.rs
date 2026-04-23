@@ -69,6 +69,16 @@ pub struct AppConfig {
     /// Service account token TTL in seconds (default: 3600 = 1 hour)
     pub sa_token_ttl_secs: i64,
 
+    /// Telemetry DSN (e.g. PostHog project API key). When unset (default)
+    /// telemetry is hard-off: `TelemetryClient::from_config` returns
+    /// `None` and no events are captured.
+    pub telemetry_dsn: Option<String>,
+    /// Telemetry ingest host (defaults to EU PostHog if unset).
+    pub telemetry_host: Option<String>,
+    /// When true AND `telemetry_dsn` is empty, fall back to the
+    /// compiled-in public share-back DSN. Self-hoster opt-in knob.
+    pub share_analytics: bool,
+
     /// Optional cookie domain for cross-subdomain auth (e.g. ".chrono-ai.fun").
     /// When set, cookies include `Domain=<value>` so they are shared across
     /// subdomains. Leave unset for single-domain / localhost development.
@@ -475,6 +485,14 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
 
+            telemetry_dsn: env::var("NYXID_TELEMETRY_DSN")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            telemetry_host: env::var("NYXID_TELEMETRY_HOST")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            share_analytics: parse_bool_env("NYXID_SHARE_ANALYTICS", false),
+
             cookie_domain: env::var("COOKIE_DOMAIN").ok().filter(|s| !s.is_empty()),
 
             telegram_bot_token: env::var("TELEGRAM_BOT_TOKEN")
@@ -872,6 +890,9 @@ mod tests {
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
             sa_token_ttl_secs: 3600,
+            telemetry_dsn: None,
+            telemetry_host: None,
+            share_analytics: false,
             cookie_domain: None,
             telegram_bot_token: None,
             telegram_webhook_secret: None,

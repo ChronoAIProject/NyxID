@@ -1,3 +1,5 @@
+import Constants from "expo-constants";
+
 import { ApiError } from "./ApiError";
 import {
   clearStoredAuthSession,
@@ -495,8 +497,33 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
   const requiresAuth = options.requiresAuth ?? true;
   const retryOnAuthFailure = options.retryOnAuthFailure ?? true;
 
+  // Surface identification for server-side telemetry. Only attached
+  // when a telemetry DSN is present OR share-back is opted in via
+  // expo-config extras — keeps the default-off build byte-identical
+  // to a pre-telemetry build. Mirrors the precedence ladder on backend
+  // and CLI so all surfaces are symmetric.
+  const telemetryExtra = (Constants.expoConfig?.extra ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const dsnConfigured =
+    typeof telemetryExtra.TELEMETRY_DSN === "string" &&
+    telemetryExtra.TELEMETRY_DSN.length > 0;
+  const shareBackOn =
+    telemetryExtra.NYXID_SHARE_ANALYTICS === "true" ||
+    telemetryExtra.NYXID_SHARE_ANALYTICS === true;
+  const telemetryHeaders: Record<string, string> =
+    dsnConfigured || shareBackOn
+      ? {
+          "X-NyxID-Client": "mobile",
+          "X-NyxID-Client-Version":
+            (Constants.expoConfig?.version as string | undefined) ?? "dev",
+        }
+      : {};
+
   const headers: Record<string, string> = {
     Accept: "application/json",
+    ...telemetryHeaders,
     ...options.headers,
   };
 

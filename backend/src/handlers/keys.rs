@@ -14,6 +14,7 @@ use crate::services::{
     credential_push_service, node_service, org_service, unified_key_service, user_api_key_service,
     user_endpoint_service, user_service_service,
 };
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 /// Resolve which user_id owns this unified key (= UserService) and whether
 /// the actor may modify it. Returns the effective owner_id (which may be an
@@ -379,6 +380,7 @@ fn validate_optional_label_for_update(label: Option<&str>) -> AppResult<()> {
 pub async fn create_key(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<CreateKeyRequest>,
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
@@ -522,6 +524,27 @@ pub async fn create_key(
             allowed: true,
         };
     }
+
+    // Telemetry: key.created. `source` is "catalog" when a catalog slug
+    // drove the bootstrap, else "custom".
+    let catalog_slug = response.catalog_service_slug.clone();
+    let source = if catalog_slug.is_some() {
+        "catalog"
+    } else {
+        "custom"
+    };
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::KeyCreated {
+            source: source.to_string(),
+            catalog_slug,
+            has_node_binding: response.node_id.is_some(),
+        },
+    );
+
     Ok(Json(response))
 }
 
@@ -1366,6 +1389,7 @@ pub async fn update_key(
 pub async fn delete_key(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(key_id): Path<String>,
 ) -> AppResult<Json<DeleteKeyResponse>> {
     let actor = auth_user.user_id.to_string();
@@ -1379,6 +1403,21 @@ pub async fn delete_key(
     }
 
     unified_key_service::revoke_key(&state.db, &user_id_str, &actor, &key_id).await?;
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::KeyDeleted {
+            source: if view.catalog_service_slug.is_some() {
+                "catalog".to_string()
+            } else {
+                "custom".to_string()
+            },
+        },
+    );
+
     Ok(Json(DeleteKeyResponse {
         message: "Key revoked successfully".to_string(),
     }))

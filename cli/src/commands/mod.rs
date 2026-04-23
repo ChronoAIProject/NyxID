@@ -23,5 +23,6 @@ pub mod service_account;
 pub mod session;
 pub mod ssh;
 pub mod status;
+pub mod telemetry;
 pub mod update;
 pub mod whoami;

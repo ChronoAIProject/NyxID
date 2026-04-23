@@ -3,6 +3,9 @@ mod auth;
 mod cli;
 mod commands;
 pub mod node;
+mod telemetry;
+#[cfg(test)]
+mod test_support;
 mod wizard;
 
 use anyhow::Result;
@@ -12,15 +15,112 @@ use crate::cli::{Cli, Commands};
 
 #[tokio::main]
 async fn main() {
-    if let Err(e) = run().await {
+    // Wrap all work so we can emit one telemetry event with exit code
+    // and duration after dispatch returns, regardless of success.
+    let start = std::time::Instant::now();
+    let cli = Cli::parse();
+    let profile = extract_profile(&cli.command);
+
+    // Telemetry is hard-off by default: if no DSN is configured and
+    // share-back is not opted into, don't resolve consent and don't
+    // prompt. This keeps default-off CLI behavior byte-identical to
+    // the pre-telemetry build (no new prompts, no new files written).
+    let telemetry_dsn_configured = std::env::var("NYXID_TELEMETRY_DSN")
+        .ok()
+        .is_some_and(|s| !s.is_empty())
+        || std::env::var("NYXID_SHARE_ANALYTICS")
+            .ok()
+            .is_some_and(|v| {
+                matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
+            });
+
+    let mut tele_client: Option<telemetry::TelemetryClient> = if telemetry_dsn_configured {
+        // DSN is present. Resolve consent, prompt if first-run TTY,
+        // then init. Prompt refusal never bails the command.
+        let mut consent = telemetry::consent::resolve_consent(profile.as_deref());
+        let _ = telemetry::consent::prompt_if_needed_interactive(profile.as_deref(), &mut consent);
+        if consent.enabled {
+            telemetry::TelemetryClient::init(profile.as_deref())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let (group, sub) = command_names(&cli.command);
+    let result = run(cli).await;
+
+    if let Some(client) = tele_client.as_mut() {
+        client.track(telemetry::CliEvent::CommandInvoked {
+            command_group: group,
+            subcommand: sub,
+            exit_code: if result.is_ok() { 0 } else { 1 },
+            duration_ms: start.elapsed().as_millis() as u64,
+            profile: profile.clone(),
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+        });
+    }
+
+    if let Err(e) = result {
         eprintln!("Error: {e:#}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<()> {
-    let cli = Cli::parse();
+fn extract_profile(command: &Commands) -> Option<String> {
+    // `AuthArgs` (profile-bearing struct) is flattened into many
+    // subcommands; rather than enumerate all of them we peek at the
+    // one path we care about — the login command is the primary place
+    // profile is user-supplied. This is best-effort; telemetry tags
+    // without profile are acceptable.
+    match command {
+        Commands::Login(args) => args.profile.clone(),
+        _ => None,
+    }
+}
 
+fn command_names(command: &Commands) -> (&'static str, &'static str) {
+    match command {
+        Commands::Login(_) => ("auth", "login"),
+        Commands::Logout(_) => ("auth", "logout"),
+        Commands::Register(_) => ("auth", "register"),
+        Commands::VerifyEmail(_) => ("auth", "verify_email"),
+        Commands::ForgotPassword(_) => ("auth", "forgot_password"),
+        Commands::ResetPassword(_) => ("auth", "reset_password"),
+        Commands::Whoami(_) => ("user", "whoami"),
+        Commands::Status(_) => ("user", "status"),
+        Commands::Profile { .. } => ("user", "profile"),
+        Commands::Mfa { .. } => ("user", "mfa"),
+        Commands::Session { .. } => ("user", "session"),
+        Commands::Catalog { .. } => ("catalog", "subcommand"),
+        Commands::Service { .. } => ("service", "subcommand"),
+        Commands::ApiKey { .. } => ("api_key", "subcommand"),
+        Commands::Org { .. } => ("org", "subcommand"),
+        Commands::Node { .. } => ("node", "subcommand"),
+        Commands::Proxy { .. } => ("proxy", "subcommand"),
+        Commands::Ssh(_) => ("ssh", "subcommand"),
+        Commands::Openclaw { .. } => ("openclaw", "subcommand"),
+        Commands::Mcp { .. } => ("mcp", "subcommand"),
+        Commands::Notification { .. } => ("notification", "subcommand"),
+        Commands::Approval { .. } => ("approval", "subcommand"),
+        Commands::Endpoint { .. } => ("endpoint", "subcommand"),
+        Commands::ExternalKey { .. } => ("external_key", "subcommand"),
+        Commands::ServiceAccount { .. } => ("service_account", "subcommand"),
+        Commands::DeveloperApp { .. } => ("developer_app", "subcommand"),
+        Commands::AiSetup { .. } => ("ai_setup", "subcommand"),
+        Commands::Update(_) => ("cli", "update"),
+        Commands::ChannelBot { .. } => ("channel_bot", "subcommand"),
+        Commands::ChannelEvent { .. } => ("channel_event", "subcommand"),
+        Commands::Admin { .. } => ("admin", "subcommand"),
+        Commands::Telemetry { .. } => ("telemetry", "subcommand"),
+        Commands::Repo(_) => ("repo", "repo"),
+        Commands::Info => ("repo", "info"),
+    }
+}
+
+async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Login(args) => auth::run_login(args).await,
         Commands::Logout(args) => {
@@ -96,6 +196,9 @@ async fn run() -> Result<()> {
 
         // Admin-only operations
         Commands::Admin { command } => commands::admin::run(command).await,
+
+        // Telemetry (consent editor; also docs/TELEMETRY_M1.md §3)
+        Commands::Telemetry { command } => commands::telemetry::run(command, None).await,
 
         // Project links
         Commands::Repo(args) => commands::repo::run_repo(args).await,
