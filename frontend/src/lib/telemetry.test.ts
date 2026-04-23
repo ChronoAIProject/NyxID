@@ -11,6 +11,8 @@ const mockPosthog = vi.hoisted(() => ({
   identify: vi.fn(),
   reset: vi.fn(),
   opt_out_capturing: vi.fn(),
+  opt_in_capturing: vi.fn(),
+  has_opted_out_capturing: vi.fn(() => false),
 }));
 
 vi.mock("posthog-js", () => ({
@@ -146,6 +148,23 @@ describe("re-init after disable (consent withdrawal + re-opt-in flow)", () => {
     initTelemetry(validArgs);
     expect(mockPosthog.init).toHaveBeenCalledTimes(2);
     expect(isTelemetryActive()).toBe(true);
+  });
+
+  it("clears the persistent PostHog opt-out flag on re-enable so events flow again", () => {
+    // PostHog's `opt_out_capturing` writes a flag to localStorage that
+    // survives `init()`. Without this explicit `opt_in_capturing`, a
+    // user who toggles OFF in Settings and later toggles back ON would
+    // silently get no events — `telemetryActive` says yes but PostHog's
+    // own flag says no.
+    mockPosthog.has_opted_out_capturing.mockReturnValue(true);
+    initTelemetry(validArgs);
+    expect(mockPosthog.opt_in_capturing).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fire opt_in_capturing on a fresh init (avoids noisy $opt_in events)", () => {
+    mockPosthog.has_opted_out_capturing.mockReturnValue(false);
+    initTelemetry(validArgs);
+    expect(mockPosthog.opt_in_capturing).not.toHaveBeenCalled();
   });
 });
 

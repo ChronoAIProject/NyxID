@@ -12,7 +12,7 @@ pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
     //   (a) the operator has configured a telemetry DSN (or opted into
     //       the community share-back), AND
     //   (b) the user on this machine has actually consented (CLI
-    //       config / `NYXID_TELEMETRY=on` / etc — see
+    //       config / `NYXID_TELEMETRY=on` / `DO_NOT_TRACK` — see
     //       `crate::telemetry::consent::resolve_consent`).
     //
     // Historically this function checked only (a), which meant that a
@@ -22,11 +22,18 @@ pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
     // for their traffic anyway. Local opt-out was partial theater.
     // Tracked in `docs/TELEMETRY_CONSENT_FIX.md` §8.3.
     //
-    // Profile-scoped consent: when `profile` is `Some`, the per-profile
-    // config at `~/.nyxid/profiles/{name}/config.toml` is consulted.
-    // `None` means "use the default profile's consent," which is the
-    // right fallback for pre-auth flows (register, forgot-password,
-    // reset-password) where no profile has been selected yet.
+    // The `profile` argument is kept on the signature for future per-
+    // profile features, but consent is read against the DEFAULT profile
+    // regardless. Rationale: the only built-in consent editor today is
+    // `nyxid telemetry enable|disable`, which writes to
+    // `~/.nyxid/config.toml` (default profile). The main.rs first-run
+    // prompt also writes there. Reading profile-specific consent here
+    // would mean `nyxid --profile dev some-command` silently lost its
+    // headers until the user manually edited `~/.nyxid/profiles/dev/
+    // config.toml` — a footgun that treats consent as per-profile when
+    // no editor UI treats it that way. Consent is user-global in v1;
+    // making it per-profile is a separate feature that also needs a
+    // `nyxid telemetry --profile ...` editor path.
     let telemetry_configured = std::env::var("NYXID_TELEMETRY_DSN")
         .ok()
         .is_some_and(|s| !s.is_empty())
@@ -36,7 +43,10 @@ pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
                 matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
             });
 
-    let user_consented = crate::telemetry::consent::resolve_consent(profile).enabled;
+    // The `profile` parameter is intentionally unused below. See comment
+    // above. Acknowledged to clippy via binding prefix.
+    let _profile_for_future_use = profile;
+    let user_consented = crate::telemetry::consent::resolve_consent(None).enabled;
 
     let mut builder = Client::builder()
         .user_agent(CLI_USER_AGENT)

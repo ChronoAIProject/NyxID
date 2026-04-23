@@ -136,6 +136,17 @@ export function initTelemetry(args: InitTelemetryArgs): void {
   if (!dsn) return;
   if (!host) host = 'https://us.i.posthog.com';
 
+  // Clear any persistent PostHog opt-out flag. `opt_out_capturing()`
+  // (called from `disableTelemetry()`) writes a flag to localStorage
+  // that survives re-init — so a user who toggles OFF in Settings and
+  // later toggles back ON would otherwise re-enter with the SDK still
+  // refusing to capture events, even though our own `telemetryActive`
+  // flag says yes. Guarded so we only call it when actually coming out
+  // of a prior opt-out (avoids firing an `$opt_in` event every boot).
+  if (posthog.has_opted_out_capturing?.()) {
+    posthog.opt_in_capturing();
+  }
+
   posthog.init(dsn, {
     api_host: host,
 
