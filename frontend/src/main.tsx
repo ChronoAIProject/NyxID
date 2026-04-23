@@ -5,6 +5,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
 import { useAuthStore } from "./stores/auth-store";
 import { useConsentStore } from "./stores/consent-store";
+import { usePublicConfig } from "./hooks/use-public-config";
 import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
 import { ConsentBanner } from "./components/consent-banner";
 import "./app.css";
@@ -36,6 +37,12 @@ function Root() {
   const [ready, setReady] = useState(false);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const consentEnabled = useConsentStore((s) => s.enabled);
+  // Runtime telemetry config. TanStack Query caches this with
+  // `staleTime: Infinity` (see hooks/use-public-config.ts) — fetched
+  // once per app session, never refetched on effect re-runs or
+  // re-renders. Every other consumer of `usePublicConfig` reads from
+  // the same cache entry, so telemetry wiring adds zero extra network.
+  const { data: publicConfig } = usePublicConfig();
 
   useEffect(() => {
     useAuthStore
@@ -44,38 +51,29 @@ function Root() {
       .finally(() => setReady(true));
   }, []);
 
-  // Initialize telemetry once auth resolves AND consent is granted.
-  // Config (DSN + host + share-back flag) is fetched at runtime from
-  // the backend's `/api/v1/public/config` so rotation = restart backend,
-  // not rebuild+redeploy the frontend image. `initTelemetry` is
-  // internally idempotent (StrictMode-safe).
+  // Initialize telemetry once:
+  //   1. auth has resolved (we know who the user is, if any)
+  //   2. public config has landed (we know the DSN / host / share-back)
+  //   3. consent is granted
+  // If config is still in-flight, skip — we'll re-run when `publicConfig`
+  // updates. Running before config lands would initialize telemetry in
+  // default-off mode and require a second `initTelemetry` call to flip
+  // on, which the internal `inited` guard in lib/telemetry.ts blocks.
   useEffect(() => {
-    if (!ready) return;
-    let cancelled = false;
-    fetch("/api/v1/public/config")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((cfg) => {
-        if (cancelled || !cfg) return;
-        initTelemetry({
-          dsn: cfg.telemetry_dsn,
-          host: cfg.telemetry_host,
-          shareBack: cfg.telemetry_share_analytics === true,
-          consent: consentEnabled,
-        });
-        // If we restored an existing session, identify immediately so
-        // post-boot pageviews attribute to `user_id` rather than the anon id.
-        const user = useAuthStore.getState().user;
-        if (isAuthenticated && user?.id) {
-          telemetryIdentify(user.id);
-        }
-      })
-      .catch(() => {
-        // Backend unreachable — leave telemetry off. No user-visible impact.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [ready, consentEnabled, isAuthenticated]);
+    if (!ready || !publicConfig) return;
+    initTelemetry({
+      dsn: publicConfig.telemetry_dsn,
+      host: publicConfig.telemetry_host,
+      shareBack: publicConfig.telemetry_share_analytics === true,
+      consent: consentEnabled,
+    });
+    // If we restored an existing session, identify immediately so
+    // post-boot pageviews attribute to `user_id` rather than the anon id.
+    const user = useAuthStore.getState().user;
+    if (isAuthenticated && user?.id) {
+      telemetryIdentify(user.id);
+    }
+  }, [ready, publicConfig, consentEnabled, isAuthenticated]);
 
   // When auth resolves, redirect as needed:
   // - Authenticated user on landing → dashboard
