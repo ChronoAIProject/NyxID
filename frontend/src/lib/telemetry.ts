@@ -243,7 +243,8 @@ export function captureException(err: unknown): void {
 
 // --- For tests -------------------------------------------------------
 
-/** Reset the internal `inited` flag. Test-only; do not call from app code. */
+/** Reset internal module flags. Test-only; do not call from app code. */
 export function __resetForTests(): void {
   inited = false;
+  telemetryActive = false;
 }
