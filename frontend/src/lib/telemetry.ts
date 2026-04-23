@@ -85,11 +85,12 @@ function stripQueryString(url: string | undefined): string | undefined {
 export interface InitTelemetryArgs {
   /** Vendor DSN (e.g. PostHog project API key). Empty = no-op. */
   dsn: string | undefined;
-  /** Ingest host; defaults to PostHog Cloud EU when omitted. */
+  /** Ingest host; defaults to PostHog US when omitted. */
   host: string | undefined;
-  /** Community opt-in flag; currently unused at this layer because
-   * `VITE_NYXID_SHARE_ANALYTICS` is read by the caller before deciding
-   * which DSN to pass. Plumbed for future host/DSN swap logic. */
+  /** Community share-back opt-in flag. When `true` AND `dsn` is empty,
+   * falls back to the compiled-in `NYXID_PUBLIC_TELEMETRY_DSN` so
+   * self-hosters can contribute anonymized data without their own
+   * PostHog project. Matches the CLI + backend precedence ladder. */
   shareBack?: boolean;
   /** User's consent state. When `false`, init does nothing. */
   consent: boolean;

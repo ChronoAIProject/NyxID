@@ -54,7 +54,10 @@ pub struct PublicConfigResponse {
     pub telemetry_host: Option<String>,
     /// Whether community share-back is opted in on this deployment.
     /// Frontend uses this to decide whether to fall back to the
-    /// compiled-in public DSN when `telemetry_dsn` is empty.
+    /// compiled-in public DSN when `telemetry_dsn` is empty. Omitted
+    /// from the response when false so the default-off deploy's
+    /// `/public/config` shape remains byte-identical to pre-telemetry.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub telemetry_share_analytics: bool,
 }
 

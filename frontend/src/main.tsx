@@ -114,10 +114,10 @@ function Root() {
   }
 
   return (
-    <QueryClientProvider client={queryClient}>
+    <>
       <RouterProvider router={router} />
       <ConsentBanner />
-    </QueryClientProvider>
+    </>
   );
 }
 
@@ -126,8 +126,13 @@ if (!rootElement) {
   throw new Error("Root element not found");
 }
 
+// QueryClientProvider must wrap Root — `usePublicConfig()` (and every
+// other TanStack Query hook used inside Root) throws without a provider
+// above it in the tree.
 createRoot(rootElement).render(
   <StrictMode>
-    <Root />
+    <QueryClientProvider client={queryClient}>
+      <Root />
+    </QueryClientProvider>
   </StrictMode>,
 );

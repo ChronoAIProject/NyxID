@@ -1,5 +1,6 @@
 import type { ApiErrorResponse } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
+import { useConsentStore } from "@/stores/consent-store";
 
 const API_ORIGIN = "";
 
@@ -42,15 +43,18 @@ function buildFetchConfig(options: RequestOptions): RequestInit {
   const { method = "GET", body, headers = {}, signal } = options;
 
   // Surface identification for server-side telemetry (see
-  // docs/TELEMETRY_M1.md §3). Always attached — the header is tiny and
-  // harmless to backends that don't consume it. The backend reads
-  // telemetry config at runtime via /public/config, so there is no
-  // build-time signal to gate these headers against.
-  const telemetryHeaders: Record<string, string> = {
-    "X-NyxID-Client": "ui",
-    "X-NyxID-Client-Version":
-      (import.meta.env.VITE_BUILD_HASH as string | undefined) ?? "dev",
-  };
+  // docs/TELEMETRY_M1.md §3). Only attached when the user has opted
+  // in — honors the "byte-identical to pre-telemetry build" contract
+  // for users who declined consent (or where the deploy has no DSN).
+  // Zustand's `getState()` is a synchronous read; no re-render cost.
+  const telemetryOn = useConsentStore.getState().enabled;
+  const telemetryHeaders: Record<string, string> = telemetryOn
+    ? {
+        "X-NyxID-Client": "ui",
+        "X-NyxID-Client-Version":
+          (import.meta.env.VITE_BUILD_HASH as string | undefined) ?? "dev",
+      }
+    : {};
 
   const config: RequestInit = {
     method,
