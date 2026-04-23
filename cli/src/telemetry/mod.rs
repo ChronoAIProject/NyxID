@@ -132,19 +132,21 @@ impl TelemetryClient {
         })
     }
 
-    /// Fire-and-forget emission. Short-lived commands (most of them) may
-    /// exit before the HTTP POST completes; we accept ~10–30% loss on
-    /// `cli.command_invoked`. Use [`track_sync_blocking`] for panic
-    /// hooks or long-running commands where a flush is worth the wait.
+    /// Bounded-wait emission. Awaits the POST up to `TRACK_TIMEOUT_MS`;
+    /// if the vendor is slow or unreachable, the timeout fires and the
+    /// CLI proceeds with exit. Under normal network, a successful
+    /// capture takes ~50–200ms, so the user-visible cost is small.
     ///
-    /// [`track_sync_blocking`]: Self::track_sync_blocking
-    pub fn track(&self, event: CliEvent) {
+    /// Previously this was fire-and-forget via `tokio::spawn`, but
+    /// `#[tokio::main]` tears the runtime down when `main()` returns,
+    /// which cancelled the spawned task before the TCP handshake
+    /// completed — ~100% loss on short commands. Awaiting inline is
+    /// the simplest fix that makes events actually reach the vendor.
+    pub async fn track(&self, event: CliEvent) {
         let body = self.build_capture_body(event.name(), event.properties());
         let url = format!("{host}/capture/", host = self.host);
-        let http = self.http.clone();
-        tokio::spawn(async move {
-            let _ = http.post(&url).json(&body).send().await;
-        });
+        let fut = self.http.post(&url).json(&body).send();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(TRACK_TIMEOUT_MS), fut).await;
     }
 
     /// Blocking variant with a short timeout. Used from panic hooks and
@@ -179,33 +181,27 @@ impl TelemetryClient {
     /// invisible to the caller. On PostHog today this posts an
     /// `$identify` event with `$anon_distinct_id`. On a future vendor
     /// swap the method body changes; the caller does not.
-    pub fn identify(&mut self, user_id: &str) {
+    pub async fn identify(&mut self, user_id: &str) {
         let anon_id = self.distinct_id.clone();
         let user_id_owned = user_id.to_string();
-        // Snapshot fields needed by the spawned task; bump our own
-        // distinct_id immediately so any subsequent `track` goes out
-        // under the user_id even before the merge POST returns.
+        // Bump our own distinct_id immediately so subsequent `track`
+        // calls go out under the user_id.
         self.distinct_id = user_id_owned.clone();
 
-        let dsn = self.dsn.clone();
-        let host = self.host.clone();
-        let cli_version = self.cli_version;
-        let http = self.http.clone();
-        tokio::spawn(async move {
-            let url = format!("{host}/capture/");
-            let body = json!({
-                "api_key": dsn,
-                "event": "$identify",
-                "distinct_id": user_id_owned,
-                "properties": {
-                    "$anon_distinct_id": anon_id,
-                    "surface": "cli",
-                    "app_version": cli_version,
-                },
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-            });
-            let _ = http.post(&url).json(&body).send().await;
+        let url = format!("{host}/capture/", host = self.host);
+        let body = json!({
+            "api_key": self.dsn,
+            "event": "$identify",
+            "distinct_id": user_id_owned,
+            "properties": {
+                "$anon_distinct_id": anon_id,
+                "surface": "cli",
+                "app_version": self.cli_version,
+            },
+            "timestamp": chrono::Utc::now().to_rfc3339(),
         });
+        let fut = self.http.post(&url).json(&body).send();
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(TRACK_TIMEOUT_MS), fut).await;
     }
 
     /// Clear the local anon identity — called from `run_logout` and from

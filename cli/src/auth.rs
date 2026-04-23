@@ -319,7 +319,7 @@ async fn run_browser_login(base_url: &str, profile: Option<&str>) -> Result<()> 
     if let Some(user_id) = read_saved_user_id_for(profile)
         && let Some(mut client) = crate::telemetry::TelemetryClient::init(profile)
     {
-        client.identify(&user_id);
+        client.identify(&user_id).await;
     }
 
     eprintln!("Logged in successfully.");
@@ -533,7 +533,7 @@ async fn run_password_login(
     if let Some(user_id) = read_saved_user_id_for(profile)
         && let Some(mut client) = crate::telemetry::TelemetryClient::init(profile)
     {
-        client.identify(&user_id);
+        client.identify(&user_id).await;
     }
 
     eprintln!("Logged in as {email}");

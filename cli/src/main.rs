@@ -52,15 +52,17 @@ async fn main() {
     let result = run(cli).await;
 
     if let Some(client) = tele_client.as_mut() {
-        client.track(telemetry::CliEvent::CommandInvoked {
-            command_group: group,
-            subcommand: sub,
-            exit_code: if result.is_ok() { 0 } else { 1 },
-            duration_ms: start.elapsed().as_millis() as u64,
-            profile: profile.clone(),
-            os: std::env::consts::OS,
-            arch: std::env::consts::ARCH,
-        });
+        client
+            .track(telemetry::CliEvent::CommandInvoked {
+                command_group: group,
+                subcommand: sub,
+                exit_code: if result.is_ok() { 0 } else { 1 },
+                duration_ms: start.elapsed().as_millis() as u64,
+                profile: profile.clone(),
+                os: std::env::consts::OS,
+                arch: std::env::consts::ARCH,
+            })
+            .await;
     }
 
     if let Err(e) = result {
