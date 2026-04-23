@@ -42,21 +42,15 @@ function buildFetchConfig(options: RequestOptions): RequestInit {
   const { method = "GET", body, headers = {}, signal } = options;
 
   // Surface identification for server-side telemetry (see
-  // docs/TELEMETRY_M1.md §3). Only attached when a telemetry DSN is
-  // actually configured at build time OR when the share-back opt-in is
-  // set — keeps the default-off deploy byte-identical to a pre-
-  // telemetry build (no new headers on the wire). Mirrors the
-  // precedence ladder in backend/cli so all surfaces are symmetric.
-  const telemetryActive =
-    !!import.meta.env.VITE_TELEMETRY_DSN ||
-    import.meta.env.VITE_NYXID_SHARE_ANALYTICS === "true";
-  const telemetryHeaders: Record<string, string> = telemetryActive
-    ? {
-        "X-NyxID-Client": "ui",
-        "X-NyxID-Client-Version":
-          (import.meta.env.VITE_BUILD_HASH as string | undefined) ?? "dev",
-      }
-    : {};
+  // docs/TELEMETRY_M1.md §3). Always attached — the header is tiny and
+  // harmless to backends that don't consume it. The backend reads
+  // telemetry config at runtime via /public/config, so there is no
+  // build-time signal to gate these headers against.
+  const telemetryHeaders: Record<string, string> = {
+    "X-NyxID-Client": "ui",
+    "X-NyxID-Client-Version":
+      (import.meta.env.VITE_BUILD_HASH as string | undefined) ?? "dev",
+  };
 
   const config: RequestInit = {
     method,

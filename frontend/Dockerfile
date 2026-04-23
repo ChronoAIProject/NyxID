@@ -8,18 +8,12 @@ RUN npm ci
 
 COPY . .
 
-# Telemetry build args (see docs/TELEMETRY_M1.md §3). Empty by default,
-# which means telemetry initializes to hard-off mode — behavior is
-# byte-identical to a deploy without these vars. Supply them via
-# `docker build --build-arg VITE_TELEMETRY_DSN=phc_…` on deploys where
-# telemetry should be live.
-ARG VITE_TELEMETRY_DSN=""
-ARG VITE_TELEMETRY_HOST=""
-ARG VITE_NYXID_SHARE_ANALYTICS="false"
+# Build hash is baked in for surface-version traceability (shows up in
+# `X-NyxID-Client-Version` on requests). Non-secret, only used for
+# debugging/observability. Telemetry DSN + host are NOT baked here —
+# they are fetched at runtime from the backend's /api/v1/public/config
+# endpoint so rotation does not require an image rebuild.
 ARG VITE_BUILD_HASH="dev"
-ENV VITE_TELEMETRY_DSN=${VITE_TELEMETRY_DSN}
-ENV VITE_TELEMETRY_HOST=${VITE_TELEMETRY_HOST}
-ENV VITE_NYXID_SHARE_ANALYTICS=${VITE_NYXID_SHARE_ANALYTICS}
 ENV VITE_BUILD_HASH=${VITE_BUILD_HASH}
 
 RUN npm run build

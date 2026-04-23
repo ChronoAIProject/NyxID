@@ -45,23 +45,36 @@ function Root() {
   }, []);
 
   // Initialize telemetry once auth resolves AND consent is granted.
-  // `initTelemetry` is internally idempotent (StrictMode-safe).
-  // When consent is false the call is a no-op, so flipping the toggle
-  // off at runtime relies on `reset()` + page reload to fully unwind.
+  // Config (DSN + host + share-back flag) is fetched at runtime from
+  // the backend's `/api/v1/public/config` so rotation = restart backend,
+  // not rebuild+redeploy the frontend image. `initTelemetry` is
+  // internally idempotent (StrictMode-safe).
   useEffect(() => {
     if (!ready) return;
-    initTelemetry({
-      dsn: import.meta.env.VITE_TELEMETRY_DSN,
-      host: import.meta.env.VITE_TELEMETRY_HOST,
-      shareBack: import.meta.env.VITE_NYXID_SHARE_ANALYTICS === "true",
-      consent: consentEnabled,
-    });
-    // If we restored an existing session, identify immediately so
-    // post-boot pageviews attribute to `user_id` rather than the anon id.
-    const user = useAuthStore.getState().user;
-    if (isAuthenticated && user?.id) {
-      telemetryIdentify(user.id);
-    }
+    let cancelled = false;
+    fetch("/api/v1/public/config")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg) => {
+        if (cancelled || !cfg) return;
+        initTelemetry({
+          dsn: cfg.telemetry_dsn,
+          host: cfg.telemetry_host,
+          shareBack: cfg.telemetry_share_analytics === true,
+          consent: consentEnabled,
+        });
+        // If we restored an existing session, identify immediately so
+        // post-boot pageviews attribute to `user_id` rather than the anon id.
+        const user = useAuthStore.getState().user;
+        if (isAuthenticated && user?.id) {
+          telemetryIdentify(user.id);
+        }
+      })
+      .catch(() => {
+        // Backend unreachable — leave telemetry off. No user-visible impact.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [ready, consentEnabled, isAuthenticated]);
 
   // When auth resolves, redirect as needed:

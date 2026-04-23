@@ -43,6 +43,19 @@ pub struct PublicConfigResponse {
     pub social_providers: Vec<String>,
     pub invite_code_required: bool,
     pub email_auth_enabled: bool,
+    /// Public PostHog ingest key for the frontend. Non-secret by design
+    /// (PostHog ingest keys are write-only and project-scoped). Empty
+    /// when telemetry is off. See docs/TELEMETRY_M1.md §3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telemetry_dsn: Option<String>,
+    /// Host for the telemetry vendor, e.g. `https://us.i.posthog.com`.
+    /// Empty when the frontend should use its compiled-in default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telemetry_host: Option<String>,
+    /// Whether community share-back is opted in on this deployment.
+    /// Frontend uses this to decide whether to fall back to the
+    /// compiled-in public DSN when `telemetry_dsn` is empty.
+    pub telemetry_share_analytics: bool,
 }
 
 /// GET /api/v1/public/config
@@ -74,5 +87,18 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
         social_providers,
         invite_code_required: state.config.invite_code_required,
         email_auth_enabled: state.config.email_auth_enabled,
+        telemetry_dsn: state
+            .config
+            .telemetry_dsn
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .cloned(),
+        telemetry_host: state
+            .config
+            .telemetry_host
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .cloned(),
+        telemetry_share_analytics: state.config.share_analytics,
     })
 }

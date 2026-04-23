@@ -110,16 +110,13 @@ jobs:
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Frontend telemetry build-args — Vite bakes these into the
-          # JS bundle at build time, so they must be passed here (not
-          # at docker-compose runtime). Empty when the secret is unset,
-          # which keeps telemetry hard-off by default.
-          # Safe to pass to all matrix components: backend/node-agent
-          # Dockerfiles simply ignore ARGs they don't declare.
+          # Build-args: git hash for backend/node-agent surface tagging
+          # and a matching VITE_BUILD_HASH for the frontend's client-
+          # version header. Telemetry DSN + host are fetched at runtime
+          # from the backend's /api/v1/public/config endpoint, so no
+          # secret build-args are needed here.
           build-args: |
             NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
-            VITE_TELEMETRY_DSN=${{ secrets.VITE_TELEMETRY_DSN }}
-            VITE_TELEMETRY_HOST=${{ secrets.VITE_TELEMETRY_HOST }}
             VITE_BUILD_HASH=${{ steps.git.outputs.hash }}
           outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.component }}-${{ matrix.platform_pair }}

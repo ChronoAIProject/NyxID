@@ -11,20 +11,19 @@
 
 import { Button } from './ui/button';
 import { useConsentStore } from '../stores/consent-store';
+import { usePublicConfig } from '../hooks/use-public-config';
 
 export function ConsentBanner() {
   const asked = useConsentStore((s) => s.asked);
   const setConsent = useConsentStore((s) => s.setConsent);
+  const { data: cfg } = usePublicConfig();
 
-  // Default-off contract: when no telemetry DSN is configured AND
-  // share-back is not opted in at build time, the app has nothing to
-  // capture — rendering the consent banner would be user-visible
-  // drift from a pre-telemetry build. Short-circuit here. The banner
-  // still renders normally on any deploy where telemetry could
-  // actually fire.
-  const telemetryActive =
-    !!import.meta.env.VITE_TELEMETRY_DSN ||
-    import.meta.env.VITE_NYXID_SHARE_ANALYTICS === "true";
+  // Default-off contract: when the backend's /public/config reports
+  // no telemetry DSN AND share-back is not opted in, the app has
+  // nothing to capture — rendering the banner would be user-visible
+  // drift from a pre-telemetry deploy. Short-circuit here. The banner
+  // still renders normally on any deploy where telemetry could fire.
+  const telemetryActive = !!(cfg?.telemetry_dsn || cfg?.telemetry_share_analytics);
   if (!telemetryActive) return null;
 
   if (asked) return null;
