@@ -167,6 +167,7 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
         )),
         ws_passthrough_count: Arc::new(AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+        telemetry: None,
     }
 }
 
