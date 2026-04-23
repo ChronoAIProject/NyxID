@@ -49,8 +49,44 @@ let inited = false;
  */
 let telemetryActive = false;
 
-/** Synchronous read of the runtime telemetry state. */
+/**
+ * Best-effort Do-Not-Track detection. We honor the browser's DNT
+ * signal across the whole surface — not just inside PostHog — because
+ * `lib/api-client.ts` also attaches `X-NyxID-Client: ui` headers based
+ * on `isTelemetryActive()`, and the backend tags its own telemetry
+ * events off those headers. Without this check, a user with DNT set
+ * who clicked Allow on the banner would still generate backend-side
+ * telemetry even though our privacy policy claims we honor DNT.
+ *
+ * Values that count as "please do not track me": navigator.doNotTrack
+ * === "1", window.doNotTrack === "1", or legacy `navigator.msDoNotTrack
+ * === "1"` on older IE/Edge. All other values (including "0" and
+ * "unspecified") fall through to normal consent resolution.
+ */
+function isDntActive(): boolean {
+  if (typeof navigator === "undefined") return false;
+  // Modern browsers: navigator.doNotTrack
+  const nav = (navigator as Navigator & { msDoNotTrack?: string }).doNotTrack;
+  if (nav === "1" || nav === "yes") return true;
+  // Legacy IE/old Edge: navigator.msDoNotTrack
+  const ms = (navigator as Navigator & { msDoNotTrack?: string }).msDoNotTrack;
+  if (ms === "1") return true;
+  // Non-standard Firefox-era fallback
+  const win = (
+    typeof window !== "undefined" ? (window as Window & { doNotTrack?: string }) : null
+  )?.doNotTrack;
+  if (win === "1" || win === "yes") return true;
+  return false;
+}
+
+/**
+ * Synchronous read of the runtime telemetry state. Returns false if
+ * the browser has DNT set, regardless of the module-level
+ * `telemetryActive` flag, so callers like `api-client.ts` suppress
+ * surface-identification headers on DNT browsers.
+ */
 export function isTelemetryActive(): boolean {
+  if (isDntActive()) return false;
   return telemetryActive;
 }
 

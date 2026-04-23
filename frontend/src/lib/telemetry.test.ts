@@ -61,6 +61,36 @@ describe("isTelemetryActive", () => {
     disableTelemetry();
     expect(isTelemetryActive()).toBe(false);
   });
+
+  it("returns false when navigator.doNotTrack is '1', even after successful init", () => {
+    // The privacy policy promises we honor DNT. This must be true
+    // across the whole surface, not just inside the PostHog SDK —
+    // api-client.ts reads this flag to decide whether to send
+    // `X-NyxID-Client: ui` headers, which drive backend-side
+    // surface-tagged telemetry.
+    const original = Object.getOwnPropertyDescriptor(
+      Navigator.prototype,
+      "doNotTrack",
+    );
+    Object.defineProperty(navigator, "doNotTrack", {
+      value: "1",
+      configurable: true,
+    });
+    try {
+      initTelemetry(validArgs);
+      expect(isTelemetryActive()).toBe(false);
+    } finally {
+      if (original) {
+        Object.defineProperty(navigator, "doNotTrack", original);
+      } else {
+        // happy-dom may not have set a descriptor; best-effort reset.
+        Object.defineProperty(navigator, "doNotTrack", {
+          value: "unspecified",
+          configurable: true,
+        });
+      }
+    }
+  });
 });
 
 describe("initTelemetry", () => {
