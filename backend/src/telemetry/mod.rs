@@ -121,6 +121,7 @@ impl TelemetryClient {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let dsn_for_loop = dsn.clone();
         let host_for_loop = host.clone();
+        tracing::info!(host = %host, env = environment, "telemetry client initialized");
         tokio::spawn(drain_loop(rx, http, dsn_for_loop, host_for_loop));
 
         Some(Arc::new(Self {
@@ -234,15 +235,17 @@ async fn drain_loop(mut rx: mpsc::Receiver<CaptureJob>, http: Client, dsn: Strin
         match http.post(&url).json(&body).send().await {
             Ok(resp) => {
                 if !resp.status().is_success() {
-                    tracing::debug!(
+                    tracing::warn!(
                         status = %resp.status(),
                         event = %job.event_name,
                         "telemetry capture returned non-2xx"
                     );
+                } else {
+                    tracing::debug!(event = %job.event_name, "telemetry capture sent");
                 }
             }
             Err(e) => {
-                tracing::debug!(error = %e, event = %job.event_name, "telemetry capture failed");
+                tracing::warn!(error = %e, event = %job.event_name, "telemetry capture failed");
             }
         }
     }
