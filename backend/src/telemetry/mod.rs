@@ -35,8 +35,8 @@ use crate::config::AppConfig;
 ///
 /// Update both this constant and the CLI's constant together if the
 /// share-back project is ever migrated.
-const NYXID_PUBLIC_TELEMETRY_DSN: &str = ""; // set at release time
-const NYXID_PUBLIC_TELEMETRY_HOST: &str = "https://eu.i.posthog.com";
+const NYXID_PUBLIC_TELEMETRY_DSN: &str = "phc_pHHMZRXY8ymzBy9uwiGmAVDtGvGpDTiyXH2zs7bQWEgM";
+const NYXID_PUBLIC_TELEMETRY_HOST: &str = "https://us.i.posthog.com";
 
 const DEFAULT_HOST: &str = "https://eu.i.posthog.com";
 const CHANNEL_CAPACITY: usize = 1024;

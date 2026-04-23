@@ -66,8 +66,8 @@ export interface InitMobileTelemetryArgs {
  * Compiled-in share-back DSN. Empty until a release process bakes in
  * the real value. Matches backend/CLI/frontend wrapper pattern.
  */
-const NYXID_PUBLIC_TELEMETRY_DSN = '';
-const NYXID_PUBLIC_TELEMETRY_HOST = 'https://eu.i.posthog.com';
+const NYXID_PUBLIC_TELEMETRY_DSN = 'phc_pHHMZRXY8ymzBy9uwiGmAVDtGvGpDTiyXH2zs7bQWEgM';
+const NYXID_PUBLIC_TELEMETRY_HOST = 'https://us.i.posthog.com';
 
 export async function initTelemetry(args: InitMobileTelemetryArgs): Promise<void> {
   if (inited) return;

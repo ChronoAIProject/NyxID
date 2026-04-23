@@ -34,8 +34,8 @@ import type { UiEvent } from './telemetry-schema';
  * which is the safest possible default (parity with `cli/src/telemetry/mod.rs`
  * and `backend/src/telemetry/mod.rs`).
  */
-const NYXID_PUBLIC_TELEMETRY_DSN = "";
-const NYXID_PUBLIC_TELEMETRY_HOST = "https://eu.i.posthog.com";
+const NYXID_PUBLIC_TELEMETRY_DSN = "phc_pHHMZRXY8ymzBy9uwiGmAVDtGvGpDTiyXH2zs7bQWEgM";
+const NYXID_PUBLIC_TELEMETRY_HOST = "https://us.i.posthog.com";
 
 let inited = false;
 

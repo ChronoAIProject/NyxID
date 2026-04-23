@@ -33,8 +33,8 @@ use crate::auth::validate_profile_name;
 /// Left empty by default; the release process is expected to bake in
 /// the real value. A zero-length constant here means `share_analytics`
 /// silently degrades to "off", which is the safest possible default.
-const NYXID_PUBLIC_TELEMETRY_DSN: &str = "";
-const NYXID_PUBLIC_TELEMETRY_HOST: &str = "https://eu.i.posthog.com";
+const NYXID_PUBLIC_TELEMETRY_DSN: &str = "phc_pHHMZRXY8ymzBy9uwiGmAVDtGvGpDTiyXH2zs7bQWEgM";
+const NYXID_PUBLIC_TELEMETRY_HOST: &str = "https://us.i.posthog.com";
 
 const DEFAULT_HOST: &str = "https://eu.i.posthog.com";
 const ANON_ID_FILE_NAME: &str = "anon_id";
