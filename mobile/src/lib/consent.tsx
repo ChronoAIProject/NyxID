@@ -54,10 +54,19 @@ export function MobileConsentProvider({ children }: PropsWithChildren) {
       .then((raw) => {
         if (cancelled || !raw) return;
         try {
-          const parsed = JSON.parse(raw) as Partial<MobileConsentState>;
+          const parsed = JSON.parse(raw) as
+            | Partial<MobileConsentState>
+            | { state?: Partial<MobileConsentState> };
+          // Tolerate the zustand `persist` middleware's historical shape
+          // (`{ state: {...}, version: N }`) so preview installs from
+          // before the Context migration keep their opt-in decision.
+          const flags =
+            parsed && typeof parsed === "object" && "state" in parsed && parsed.state
+              ? parsed.state
+              : (parsed as Partial<MobileConsentState>);
           setState({
-            enabled: Boolean(parsed.enabled),
-            asked: Boolean(parsed.asked),
+            enabled: Boolean(flags?.enabled),
+            asked: Boolean(flags?.asked),
           });
         } catch {
           // Corrupt payload — treat as first run.
