@@ -199,7 +199,7 @@ async fn run(cli: Cli) -> Result<()> {
         // Admin-only operations
         Commands::Admin { command } => commands::admin::run(command).await,
 
-        // Telemetry (consent editor; also docs/TELEMETRY_M1.md §3)
+        // Telemetry (consent editor; also docs/TELEMETRY.md §3)
         Commands::Telemetry { command } => commands::telemetry::run(command, None).await,
 
         // Project links

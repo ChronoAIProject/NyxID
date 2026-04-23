@@ -5,7 +5,7 @@
  * `identify`, `reset`, `capture`, `captureException`. The
  * `posthog-react-native` SDK is imported only here; no caller
  * references it. Swapping vendors = rewriting this file (§5.0
- * hot-swap contract in `docs/TELEMETRY_M1.md`).
+ * hot-swap contract in `docs/TELEMETRY.md`).
  *
  * Mobile-specific hardening (§7.3):
  *   - `enableSessionReplay: false` (never on for an auth app)
@@ -73,7 +73,7 @@ export async function initTelemetry(args: InitMobileTelemetryArgs): Promise<void
   if (inited) return;
   if (!args.consent) return;
 
-  // Precedence (docs/TELEMETRY_M1.md §3): explicit DSN wins, then
+  // Precedence (docs/TELEMETRY.md §3): explicit DSN wins, then
   // share-back falls back to the compiled-in public DSN (currently
   // empty, so share-back silently degrades to "off" until release).
   let dsn = (args.dsn ?? '').trim();

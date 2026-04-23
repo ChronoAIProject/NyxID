@@ -9,7 +9,7 @@
  *   - `ui.mobile_*` — CTA events using the shared §5.2 taxonomy with
  *     `mobile_` prefix
  *
- * See `docs/TELEMETRY_M1.md` §5.3.
+ * See `docs/TELEMETRY.md` §5.3.
  */
 
 // --- Narrow unions ---------------------------------------------------

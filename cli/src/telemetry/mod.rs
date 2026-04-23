@@ -1,6 +1,6 @@
 //! CLI telemetry — vendor-neutral public API, fire-and-forget HTTPS POST.
 //!
-//! Public surface is the short verb list from `docs/TELEMETRY_M1.md`
+//! Public surface is the short verb list from `docs/TELEMETRY.md`
 //! §5.0 hot-swap contract: `init / track / identify / reset`. Vendor
 //! wire format lives inside — callers never see `$identify`,
 //! `/capture/`, or `phc_…`-shaped DSNs.

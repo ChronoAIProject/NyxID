@@ -5,7 +5,7 @@
  * behavior is identical: a single `{ enabled, asked }` policy flag
  * persisted across app restarts. Backed by AsyncStorage (consent is
  * policy, not secret; SecureStore would be overkill for one boolean —
- * see `docs/TELEMETRY_M1.md` §5.3).
+ * see `docs/TELEMETRY.md` §5.3).
  *
  * The store is consumed by `app/App.tsx` (gating telemetry init) and
  * by the Settings screen toggle.

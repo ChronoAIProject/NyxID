@@ -13,7 +13,7 @@ pub fn build_cli_http_client() -> Result<Client> {
     // pre-telemetry build — no new headers on the wire, no CORS-style
     // drift visible to the backend. The backend's telemetry middleware
     // reads these to tag events with `surface`; see
-    // docs/TELEMETRY_M1.md §3.
+    // docs/TELEMETRY.md §3.
     let telemetry_configured = std::env::var("NYXID_TELEMETRY_DSN")
         .ok()
         .is_some_and(|s| !s.is_empty())

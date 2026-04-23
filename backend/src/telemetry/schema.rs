@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use super::scrub;
 
 /// Strongly-typed canonical event. One variant per row in
-/// `docs/TELEMETRY_M1.md` §5.1.
+/// `docs/TELEMETRY.md` §5.1.
 #[derive(Debug, Clone)]
 pub enum TelemetryEvent {
     // --- handlers/auth.rs -----------------------------------------------
@@ -381,7 +381,7 @@ impl TelemetryEvent {
     ///
     /// Scrubbing is invoked on the final JSON here, NOT by callers, so
     /// there is no path by which an emitter can bypass egress redaction.
-    /// See `docs/TELEMETRY_M1.md` §6.
+    /// See `docs/TELEMETRY.md` §6.
     pub fn properties(&self) -> Value {
         let mut props = self.raw_properties();
         scrub::scrub_value(&mut props);

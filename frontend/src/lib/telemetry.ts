@@ -1,7 +1,7 @@
 /**
  * Frontend telemetry — vendor-neutral public API.
  *
- * Public surface is the short verb list from `docs/TELEMETRY_M1.md`
+ * Public surface is the short verb list from `docs/TELEMETRY.md`
  * §5.0 hot-swap contract: `initTelemetry / identify / reset / capture /
  * captureException`. The PostHog SDK (`posthog-js`) is imported only
  * here; no caller references it. Swapping vendors = rewriting this file.
@@ -123,7 +123,7 @@ export function initTelemetry(args: InitTelemetryArgs): void {
   if (inited) return;
   if (!args.consent) return;
 
-  // Precedence (docs/TELEMETRY_M1.md §3): explicit DSN wins, then
+  // Precedence (docs/TELEMETRY.md §3): explicit DSN wins, then
   // share-back falls back to the compiled-in public DSN (currently
   // empty so share-back silently degrades to "off" until a release
   // bakes in the real value). Matches CLI + backend precedence.

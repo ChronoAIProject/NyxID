@@ -4,7 +4,7 @@
 //! [`TelemetryEvent`], [`emit_event`]. Nothing under the vendor namespace
 //! (`posthog-rs` / `$identify` / `/capture/` endpoint shape) leaks across
 //! the module boundary — callers never see it. See
-//! `docs/TELEMETRY_M1.md` §5.0 (hot-swap contract).
+//! `docs/TELEMETRY.md` §5.0 (hot-swap contract).
 //!
 //! Today's implementation POSTs to PostHog's `/capture/` endpoint with
 //! `reqwest`. Swapping vendors means rewriting this file (and maybe
@@ -67,7 +67,7 @@ struct CaptureJob {
 impl TelemetryClient {
     /// Construct from `AppConfig`. Returns `None` when no DSN is
     /// configured — the default, and the contract for "hard off" per
-    /// `docs/TELEMETRY_M1.md` §3.
+    /// `docs/TELEMETRY.md` §3.
     ///
     /// Precedence (first match wins):
     /// 1. `NYXID_TELEMETRY_DSN` env var (self-hoster's own PostHog, or

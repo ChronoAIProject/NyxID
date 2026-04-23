@@ -4,7 +4,7 @@
  *
  * Adding a new event = adding a variant. Unknown event names become a
  * compile-time error, which is how we enforce the allowlist called for
- * in `docs/TELEMETRY_M1.md` §6 without any runtime validation.
+ * in `docs/TELEMETRY.md` §6 without any runtime validation.
  *
  * The shape of each event follows §5.2 taxonomy: 11 categories,
  * every CTA in the codebase fits into one of them (with a narrow

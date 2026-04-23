@@ -4,7 +4,7 @@
  * Persisted to localStorage so the user's choice survives reloads. The
  * value is policy (not secret), mirroring the mobile consent store
  * (`mobile/src/lib/consent.ts`) for cross-surface parity. See
- * `docs/TELEMETRY_M1.md` §8 gates.
+ * `docs/TELEMETRY.md` §8 gates.
  */
 
 import { create } from 'zustand';

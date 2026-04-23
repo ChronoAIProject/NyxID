@@ -142,7 +142,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: AdminCommands,
     },
-    /// Manage telemetry consent on this machine (see `docs/TELEMETRY_M1.md` §3)
+    /// Manage telemetry consent on this machine (see `docs/TELEMETRY.md` §3)
     Telemetry {
         #[command(subcommand)]
         command: TelemetryCommands,
@@ -428,7 +428,7 @@ pub enum SessionCommands {
 
 /// Subcommands under `nyxid telemetry`. Canonical editor for the
 /// persisted consent flag at `~/.nyxid/config.toml`. See
-/// `docs/TELEMETRY_M1.md` §3 for the full precedence ladder.
+/// `docs/TELEMETRY.md` §3 for the full precedence ladder.
 #[derive(Subcommand)]
 pub enum TelemetryCommands {
     /// Opt in: persist `{enabled=true, asked=true}` to config.

@@ -1,7 +1,7 @@
 //! Per-request telemetry context populated by `mw/telemetry.rs`.
 //!
 //! The middleware derives `surface` from the `X-NyxID-Client` header (see
-//! docs/TELEMETRY_M1.md §5.0 hot-swap contract). The `agent` override for
+//! docs/TELEMETRY.md §5.0 hot-swap contract). The `agent` override for
 //! API-key authenticated requests happens at emit time inside
 //! [`emit_event`] — not in the middleware — because `AuthUser` is an axum
 //! extractor, not a request-extension, so handlers own the check.

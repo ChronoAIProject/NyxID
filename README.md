@@ -218,7 +218,7 @@ nyxid catalog endpoints my-local-api
 | SSH Tunneling | [docs/SSH_TUNNELING.md](docs/SSH_TUNNELING.md) | Remote host access over WebSocket |
 | Security | [docs/SECURITY.md](docs/SECURITY.md) | Threat model and hardening |
 | Environment Variables | [docs/ENV.md](docs/ENV.md) | Full config reference |
-| Telemetry (M1) | [docs/TELEMETRY_M1.md](docs/TELEMETRY_M1.md) | Opt-in usage analytics — hot-swap contract, event taxonomy, consent + GDPR erasure |
+| Telemetry | [docs/TELEMETRY.md](docs/TELEMETRY.md) | Opt-in usage analytics — hot-swap contract, event taxonomy, consent + GDPR erasure |
 | Developer Guide | [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | Local development setup |
 
 ## Contributing

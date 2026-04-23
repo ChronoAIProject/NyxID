@@ -45,7 +45,7 @@ pub struct PublicConfigResponse {
     pub email_auth_enabled: bool,
     /// Public PostHog ingest key for the frontend. Non-secret by design
     /// (PostHog ingest keys are write-only and project-scoped). Empty
-    /// when telemetry is off. See docs/TELEMETRY_M1.md §3.
+    /// when telemetry is off. See docs/TELEMETRY.md §3.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub telemetry_dsn: Option<String>,
     /// Host for the telemetry vendor, e.g. `https://us.i.posthog.com`.

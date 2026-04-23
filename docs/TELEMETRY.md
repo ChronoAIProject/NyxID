@@ -1,11 +1,11 @@
-# M1 Telemetry — What goes where
+# Telemetry — What goes where
 
 | Field | Value |
 |---|---|
 | Status | Implementation ready |
 | Ticket | [ChronoAIProject/NyxID#442](https://github.com/ChronoAIProject/NyxID/issues/442) |
 | Branch | `feat/analytics-m1-discovery` |
-| Parent plan | `TELEMETRY_PLAN.md` (original draft — optionally copy into `docs/TELEMETRY.md`) |
+| Parent plan | `TELEMETRY_PLAN.md` (original draft — lives outside the repo) |
 | Reviews | Codex session `019db3de-1090-7130-b782-13b8b2be1a1a` (two passes — both findings folded) |
 
 ## 1. Purpose
@@ -667,8 +667,7 @@ These are non-code prerequisites for turning on production telemetry:
 - `mobile/app.json` — `expo.extra` + `EXPO_PUBLIC_*` vars (not `app.config.ts` — doesn't exist)
 
 ### Docs
-- `docs/TELEMETRY_M1.md` (this file)
-- `docs/TELEMETRY.md` (new — full event catalog + what share-back captures + opt-out per surface)
+- `docs/TELEMETRY.md` (this file — file-by-file implementation map + event catalog + opt-out per surface)
 - `.env.example` (new or extended)
 
 ## 10. Open questions / decisions
@@ -678,7 +677,7 @@ These are non-code prerequisites for turning on production telemetry:
 | OSS Docker / Expo release ships with `SHARE_ANALYTICS=true`? | No. Default off; documented opt-in only. |
 | PostHog Cloud vs self-hosted for NyxID's projects? | Start on PostHog Cloud (US default; EU available via HOST override). Self-host when volume justifies ops. |
 | Consent: opt-in banner vs legitimate-interest + opt-out? | Opt-in banner (safest default). Relax if Legal greenlights LIA + DPIA. |
-| Parent `TELEMETRY_PLAN.md` → `docs/TELEMETRY.md` inside repo? | TBD. |
+| Copy the parent `TELEMETRY_PLAN.md` into the repo? | Resolved — this file is the in-repo implementation reference; the original draft lives outside the tree. |
 | Mobile TestFlight / Android internal — same PostHog project as prod? | Separate project OR `environment=staging` prop on share-back. Pick before first TestFlight with telemetry. |
 | Emit `proxy.request` sampled? | No. Revisit after first data review if a specific question needs it. |
 | Emit backend pre-auth `anon:<ip_hash>` events? | No. Can't merge via `identify()`, creates undeletable orphans. |

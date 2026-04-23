@@ -11,7 +11,7 @@
 //! middleware-populated extension, so the decision naturally lives
 //! with the handler that holds the `AuthUser`.
 //!
-//! See `docs/TELEMETRY_M1.md` §5.1 + review-history notes on the
+//! See `docs/TELEMETRY.md` §5.1 + review-history notes on the
 //! middleware/extractor reconciliation.
 
 use axum::{extract::Request, middleware::Next, response::Response};

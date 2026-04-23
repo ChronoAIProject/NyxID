@@ -9,7 +9,7 @@
 //! Only the `user_id` is stored. PostHog's own `identify()` merges anon
 //! distinct_ids into the authenticated person, so deleting by `user_id`
 //! cascades to every aliased anon trail across FE, Mobile, and CLI
-//! (`docs/TELEMETRY_M1.md` §4.2). No server-side alias tracking needed.
+//! (`docs/TELEMETRY.md` §4.2). No server-side alias tracking needed.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

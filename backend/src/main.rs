@@ -79,7 +79,7 @@ pub struct AppState {
     /// bot adapter's outbound replies.
     pub token_exchange_cache: Arc<TokenExchangeCache>,
     /// Vendor-neutral telemetry client. `None` when no DSN is configured
-    /// (the default hard-off state — see `docs/TELEMETRY_M1.md` §3).
+    /// (the default hard-off state — see `docs/TELEMETRY.md` §3).
     pub telemetry: Option<Arc<telemetry::TelemetryClient>>,
 }
 
@@ -615,7 +615,7 @@ async fn main() {
         // every request and stash it in request extensions so handlers
         // can read it when they emit events. Header-only; the
         // `surface="agent"` override for api-key auth happens at emit
-        // time in `emit_event` (see `docs/TELEMETRY_M1.md` §5.1).
+        // time in `emit_event` (see `docs/TELEMETRY.md` §5.1).
         .layer(axum_mw::from_fn(mw::telemetry::telemetry_mw))
         .layer(Extension(per_ip_rate_limiter))
         .layer(Extension(global_rate_limiter))

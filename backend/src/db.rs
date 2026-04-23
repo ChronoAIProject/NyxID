@@ -1066,7 +1066,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
-    // ── telemetry erasure queue (docs/TELEMETRY_M1.md §8) ──
+    // ── telemetry erasure queue (docs/TELEMETRY.md §8) ──
     // The drain worker atomically claims the oldest pending job; the
     // `status + created_at` compound index matches that query. `user_id`
     // helps operator queries after dead-lettering.

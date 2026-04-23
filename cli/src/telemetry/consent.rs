@@ -1,6 +1,6 @@
 //! First-run consent resolver for the CLI.
 //!
-//! Implements the precedence ladder from `docs/TELEMETRY_M1.md` §3.
+//! Implements the precedence ladder from `docs/TELEMETRY.md` §3.
 //! `resolve_consent` is pure — it only reads env vars + the config
 //! file, never prompts. `prompt_if_needed_interactive` handles the
 //! one-time interactive prompt on a real TTY and persists the answer.
