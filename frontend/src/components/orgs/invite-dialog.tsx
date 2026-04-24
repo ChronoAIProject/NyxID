@@ -28,6 +28,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ApiError } from "@/lib/api-client";
+import { buildOrgInviteJoinUrl } from "@/lib/org-invite-links";
 import { copyToClipboard } from "@/lib/utils";
 import { useCreateInvite } from "@/hooks/use-org-invites";
 import {
@@ -100,20 +101,10 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
     }
   }
 
-  /**
-   * Build the redemption URL for the current page origin. The
-   * `/orgs/join/$nonce` route auto-submits the POST on page load, so the
-   * recipient just needs to click this link while signed in.
-   */
-  function buildJoinUrl(nonce: string): string {
-    if (typeof window === "undefined") return `/orgs/join/${nonce}`;
-    return `${window.location.origin}/orgs/join/${nonce}`;
-  }
-
   async function handleCopy() {
     if (!createdInvite) return;
     try {
-      await copyToClipboard(buildJoinUrl(createdInvite.nonce));
+      await copyToClipboard(buildOrgInviteJoinUrl(createdInvite.nonce));
       setCopied(true);
       toast.success("Invite link copied");
       setTimeout(() => setCopied(false), 2000);
@@ -144,7 +135,7 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
               </p>
               <div className="flex items-center justify-between gap-2">
                 <span className="break-all font-mono text-sm text-foreground">
-                  {buildJoinUrl(createdInvite.nonce)}
+                  {buildOrgInviteJoinUrl(createdInvite.nonce)}
                 </span>
                 <Button
                   variant="ghost"

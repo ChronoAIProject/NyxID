@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Building2, Plus, Trash2 } from "lucide-react";
+import { Building2, Check, Copy, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -36,7 +36,13 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { ApiError } from "@/lib/api-client";
-import { formatDate, formatRelativeTime, formatTimeDistance } from "@/lib/utils";
+import { buildOrgInviteJoinUrl } from "@/lib/org-invite-links";
+import {
+  copyToClipboard,
+  formatDate,
+  formatRelativeTime,
+  formatTimeDistance,
+} from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   useOrg,
@@ -86,6 +92,7 @@ export function OrgDetailPage() {
   const [revokeTarget, setRevokeTarget] = useState<MemberResponse | null>(null);
   const [scopeTarget, setScopeTarget] = useState<MemberResponse | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [copiedInviteId, setCopiedInviteId] = useState<string | null>(null);
 
   if (isLoading) {
     return (
@@ -155,6 +162,19 @@ export function OrgDetailPage() {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to cancel invite",
       );
+    }
+  }
+
+  async function handleCopyInviteLink(inviteId: string, nonce: string) {
+    try {
+      await copyToClipboard(buildOrgInviteJoinUrl(nonce));
+      setCopiedInviteId(inviteId);
+      toast.success("Invite link copied");
+      setTimeout(() => {
+        setCopiedInviteId((current) => (current === inviteId ? null : current));
+      }, 2000);
+    } catch {
+      toast.error("Failed to copy to clipboard");
     }
   }
 
@@ -291,7 +311,7 @@ export function OrgDetailPage() {
                         <TableHead>Status</TableHead>
                         <TableHead>Used by</TableHead>
                         <TableHead>Timeline</TableHead>
-                        <TableHead className="w-[80px]" />
+                        <TableHead className="w-[112px]" />
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -354,17 +374,38 @@ export function OrgDetailPage() {
                             </TableCell>
                             <TableCell>
                               {!isRedeemed && !isExpired && (
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                                  onClick={() =>
-                                    void handleCancelInvite(invite.id)
-                                  }
-                                  aria-label="Cancel invite"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </Button>
+                                <div className="flex items-center justify-end gap-1">
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                    onClick={() =>
+                                      void handleCopyInviteLink(
+                                        invite.id,
+                                        invite.nonce,
+                                      )
+                                    }
+                                    aria-label={`Copy invite link ${invite.nonce}`}
+                                    title="Copy invite link"
+                                  >
+                                    {copiedInviteId === invite.id ? (
+                                      <Check className="h-4 w-4 text-success" />
+                                    ) : (
+                                      <Copy className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                    onClick={() =>
+                                      void handleCancelInvite(invite.id)
+                                    }
+                                    aria-label="Cancel invite"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                </div>
                               )}
                             </TableCell>
                           </TableRow>
