@@ -11,10 +11,14 @@
 //! `schema.rs` event-name mapping). Callers don't move.
 
 pub mod context;
+pub mod sampling;
 pub mod schema;
 pub mod scrub;
 
 pub use context::{TelemetryContext, emit_event};
+// Re-exported for downstream emit-site chunks.
+#[allow(unused_imports)]
+pub use sampling::{hash_short_id, should_sample_event};
 pub use schema::TelemetryEvent;
 
 use std::sync::Arc;
@@ -147,15 +151,28 @@ impl TelemetryClient {
 
         // Merge common props (surface, app_version, environment, optional
         // client_version, optional api_key_id) into the scrubbed props.
+        //
+        // `event.properties()` runs the egress scrubber over every field
+        // the event itself carries. Common props are added AFTER that
+        // pass, so `client_version` (from `X-NyxID-Client-Version`,
+        // attacker-controllable) and `api_key_id` (raw UUID) would
+        // otherwise bypass the scrubber. Re-run scrubbing on each
+        // common prop we actually insert. Fixed values
+        // (`surface`, `app_version`, `environment`) are short enum
+        // strings and do not need scrubbing.
         if let Some(obj) = props.as_object_mut() {
             obj.insert("surface".into(), json!(ctx.surface));
             obj.insert("app_version".into(), json!(self.app_version));
             obj.insert("environment".into(), json!(self.environment));
             if let Some(v) = &ctx.client_version {
-                obj.insert("client_version".into(), json!(v));
+                let scrubbed = scrub::scrub_string(v).into_owned();
+                obj.insert("client_version".into(), json!(scrubbed));
             }
             if let Some(id) = api_key_id {
-                obj.insert("api_key_id".into(), json!(id));
+                // Raw api_key_id would be a UUID that the scrubber
+                // collapses to `[UUID_REDACTED]`; hash for stable
+                // per-agent attribution the same way emit sites do.
+                obj.insert("api_key_id".into(), json!(sampling::hash_short_id(id)));
             }
         }
 

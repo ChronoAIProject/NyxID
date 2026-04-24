@@ -592,6 +592,88 @@ async fn main() -> ExitCode {
 
 **Autocapture hardening (FE + Mobile):** `mask_all_text: true`, `mask_all_element_attributes: true`. CSS denylist: `input[type="password"]`, `input[name*="password"]`, `input[name*="secret"]`, `input[name="code"][autocomplete="one-time-code"]`, `input[name*="otp"]`, `[data-sensitive]`, `[data-api-key]`, `[data-credential]`. `before_send` drops entire events on paths: `/verify-email/*`, `/reset-password/*`, `/oauth/callback`, `/approve/*`.
 
+### 6.5 Part 2 Leftovers
+
+Events and sites defined in the §6 schema that Part 2 could not deliver
+cleanly without modifying production code paths beyond telemetry. Kept
+here as a punch list for follow-up work. Each follow-up lands in its own
+PR with its own review scope — telemetry-driven refactors should not hide
+inside an instrumentation sweep.
+
+**Variant-level leftovers** (variant has zero live emit sites after Part 2):
+
+| Event | Blocker | Chunk of origin | Follow-up |
+|---|---|---|---|
+| `auth.password_reset_requested` | `auth_service::initiate_password_reset` returns `Option<String>`; no `user_id` exposed to the handler. Emitting with a synthetic distinct_id would pollute cardinality. | BE-Auth | Change return to `Option<(token, user_id)>`; handler emits only on `Some`. HTTP response shape unchanged. |
+| `auth.password_reset_completed` | `auth_service::reset_password` returns `AppResult<()>`; the handler does not get the `user_id` of the account whose password was reset. Adding a telemetry-only DB read would be a redundant query. | BE-Auth | Change return to `AppResult<String>` (the `user_id`); handler emits on success. HTTP response shape unchanged. |
+| `api.rate_limited` | `mw/rate_limit.rs` is registered via `from_fn(...)`; middleware body cannot access `AppState.telemetry` without a `from_fn_with_state` conversion (which touches `main.rs`). | BE-Proxy-Infra | Convert middleware registration in `main.rs` to `from_fn_with_state(state, rate_limit_middleware)` and accept an `AppState` arg in the middleware body. |
+| `oauth.token_issued` | All four `/oauth/token` grant-type branches lack a `user_id` in handler scope: `exchange_authorization_code` returns only tokens; `refresh_tokens` returns `IssuedTokens` (no `user_id`); `client_credentials` has only `client_id` (`service_account_service::authenticate_client_credentials` returns `ClientCredentialsResponse` without `service_account_id`); the token-exchange branch is covered separately below. | BE-AdminOps | Either (a) expose `user_id` / `service_account_id` on the relevant service response structs; or (b) decode the issued JWT before returning and emit from there. |
+| `node.credential_configured` | Emitted from CLI (`nyxid node credentials` command), not backend. | (CLI follow-up) | Add emission at CLI command entry in a CLI-coverage PR. |
+
+**Call-site-level leftovers** (variant still emits from other sites, but one
+or more sites are blocked):
+
+| Variant / site | Blocker | Chunk of origin | Follow-up |
+|---|---|---|---|
+| `user.signed_up` — social auth path | `social_auth_service::find_or_create_user` returns bare `User` without outcome kind. Cannot distinguish first-time signup from returning login for social providers without a racy `created_at` check. `auth.logged_in` still fires for social; the signup variant still fires from the email path (Part-1 live). | BE-Auth | Change return to `(User, SocialOutcomeKind)` where `SocialOutcomeKind = NewUser \| ReturningUser \| LinkedToExisting`. Also updates caller in `social_token_exchange_service`. |
+| `auth.token_exchanged` — social token-exchange branch (`subject_token_type = id_token` with `provider`) | `SocialTokenExchangeResponse` strips `user_id_for_audit` before returning to the handler. `TokenExchangeResponse` (delegation branch) correctly includes `user_id`, so that site ships cleanly. | BE-AdminOps | Add `user_id` to `SocialTokenExchangeResponse`; handler reads it for distinct_id. |
+
+**Degraded / best-effort emissions** (variant emits, but with reduced fidelity
+that could not be improved without a refactor):
+
+| Variant | Degradation | Chunk of origin | Follow-up |
+|---|---|---|---|
+| `node.disconnected` | Reason granularity: reader teardown can observe `"client_close"` / `"error"` only. Admin-force and heartbeat-timeout reasons are not distinguishable, because `NodeWsManager::disconnect_connection()` removes the connection record before teardown inspects it. | BE-Nodes | Refactor `disconnect_connection()` to signal close only (not remove the entry); reader owns removal + reason pickup. |
+| `node.connected.profile` | Field is always emitted as `"unknown"` because the server never learns the node's profile name — profile is a CLI-side concept not sent through the WS handshake. | BE-Nodes | Thread `profile` through the node agent's WS handshake metadata; extend `NodeMetadata` and populate in `register_node`. |
+| `mcp.session_ended` / `ssh.tunnel_closed` (abrupt disconnect) | Events fire on normal close paths. Process panic / socket drop may miss the emit. No `Drop` trick — complexity outweighs marginal coverage. | BE-ProductOps | Accepted. Do not chase unless a product question specifically needs it. |
+
+**Do not widen this table during Part 2 implementation.** If a new blocker
+surfaces at emit time, stop and ask — do not invent a workaround inline.
+
+#### Mobile consent UI not wired (known gap)
+
+`useMobileConsent().enabled` persists via AsyncStorage and gates
+`initTelemetry()` in `AuthSessionContext`, but no in-app UI currently
+flips it from the default `false` to `true`. That means on a fresh
+install the client-side `capture()` calls added in Part 2 short-circuit
+to no-ops, and mobile telemetry never turns on for real users.
+
+Closing this requires either (a) a first-launch consent prompt, (b) an
+in-Settings toggle that calls `setConsent(true)`, or (c) both. The
+privacy-policy copy in `mobile/src/features/legal/PrivacyPolicyScreen.tsx`
+already references "Settings" as the on/off control, so a Settings
+toggle is the minimum shippable UI.
+
+The backend-side mobile emissions are unaffected: they fire based on
+server-side telemetry config, not the mobile client flag.
+
+Follow-up: ship the consent toggle (Settings > Privacy > "Help improve
+NyxID") in the next mobile release before treating client-side mobile
+telemetry coverage as live.
+
+#### Mobile-to-backend consent propagation (known gap)
+
+The mobile client's local opt-out (the `useMobileConsent()` toggle) suppresses
+client-side captures and tears down the PostHog client on that device. It does
+NOT reach the backend: mobile HTTP requests identify themselves as
+`X-NyxID-Client: mobile` regardless of consent, and backend handlers emit their
+usual telemetry events on those requests. That means backend events
+(`notification.device_registered`, `approval.decided`, `auth.logged_in`, etc.)
+still fire for a mobile user who opted out locally.
+
+This is a structural gap, not a specific emit-site fix. Closing it requires the
+mobile HTTP client to send an explicit `X-NyxID-Telemetry-Consent: on|off`
+header and the backend's `emit_event` helper to short-circuit when surface is
+`mobile`/`agent` (originating from a mobile device) and consent is `off`. Both
+ends need to ship in the same change; partial plumbing would be worse than the
+current state.
+
+Follow-up: design an end-to-end consent signal that works for hosted NyxID
+(user chose opt-in/out) AND self-hosters (operator-level default). Until then,
+the mobile app's in-app copy should make clear that opting out only stops
+client-side captures and that server-side events tied to the user's account
+still occur.
+
 ## 7. Infrastructure + legal requirements (operator owns)
 
 These are non-code prerequisites for turning on production telemetry:
