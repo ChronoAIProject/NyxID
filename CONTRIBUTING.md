@@ -180,21 +180,16 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 
 ### CLI Wizard Bundle
 
-The CLI embeds a React-based wizard UI (`cli/src/wizard/assets/index.html`) into its binary via `rust_embed`, so `cargo build -p nyxid-cli` does not need a Node toolchain. The bundle is a **committed prebuilt artifact** — if you edit any of the source files feeding it, you must rebuild the bundle and commit the result in the same PR:
-
-- `frontend/src/components/cli-wizard/**`
-- `frontend/src/wizard-entry.tsx`
-- `frontend/src/pages/cli-pair/**`
-- `frontend/wizard.html`
-- `frontend/vite.wizard.config.ts`
+The CLI embeds a React-based wizard UI (`cli/src/wizard/assets/index.html`) into its binary via `rust_embed`, so `cargo build -p nyxid-cli` does not need a Node toolchain. The bundle is a **committed prebuilt artifact** — if you edit any file the wizard pulls in (`frontend/src/components/cli-wizard/**`, any `components/ui/` primitive or `hooks/`, `lib/`, `schemas/`, `stores/`, `pages/cli-pair/` file the wizard imports, `frontend/wizard.html`, `frontend/vite.wizard.config.ts`, or `frontend/package-lock.json`), rebuild the bundle and commit the result in the same PR:
 
 ```bash
 npm --prefix frontend run build:wizard
-cp frontend/dist-wizard/wizard.html cli/src/wizard/assets/index.html
-git add cli/src/wizard/assets/index.html
+git add cli/src/wizard/
 ```
 
-Two CI jobs guard freshness. **CLI Wizard Bundle Touch Check** (~10s) fails fast if wizard sources changed but the bundle didn't. **CLI Wizard Bundle Freshness** (~1-2min) rebuilds in a clean environment and byte-diffs against your committed file — catches non-deterministic rebuilds and version drift.
+`build:wizard` now copies the built bundle into `cli/src/wizard/assets/index.html`, writes the module-graph manifest to `cli/src/wizard/bundle-meta/index.manifest`, and a source-closure hash to `cli/src/wizard/bundle-meta/index.hash`. All three files must be committed.
+
+Freshness is enforced by the `wizard_bundle_is_fresh` integration test in `cli/tests/wizard_bundle_freshness.rs`, which runs as the dedicated **CLI Wizard Bundle Freshness** CI job and on `cargo test -p nyxid-cli --test wizard_bundle_freshness` locally. The test re-hashes the current source closure from the committed manifest and compares against the committed hash — no npm install or vite rebuild is needed. The hash covers every file Vite traversed at build time (so transitive imports like `components/ui/button.tsx` are caught automatically) plus `frontend/package-lock.json`, `frontend/vite.wizard.config.ts`, `frontend/wizard.html`, `frontend/vite-plugins/wizard-manifest.ts`, and `.node-version`.
 
 ---
 
@@ -298,8 +293,7 @@ Every pull request runs the following checks automatically via GitHub Actions:
 | **Rust Test** | `cargo test --workspace` with a real MongoDB service -- unit and integration tests |
 | **Rust Features** | Builds with `--features aws-kms`, `gcp-kms`, and both -- ensures KMS providers compile |
 | **Frontend** | `npm run lint`, `npm run test`, `npm run build` -- lint, test, and type-check |
-| **CLI Wizard Bundle Touch Check** | Fast <10s sentinel -- fails if wizard sources changed but `cli/src/wizard/assets/index.html` wasn't updated. See [CLI Wizard Bundle](#cli-wizard-bundle). |
-| **CLI Wizard Bundle Freshness** | Rebuilds the wizard bundle in a clean environment and byte-diffs against the committed `cli/src/wizard/assets/index.html`. |
+| **CLI Wizard Bundle Freshness** | Dedicated job that runs `cargo test -p nyxid-cli --test wizard_bundle_freshness`. Re-hashes the wizard's source closure from the committed manifest and fails if it no longer matches the committed hash. No npm install or vite rebuild in CI. See [CLI Wizard Bundle](#cli-wizard-bundle). |
 | **SDK Build** | `npm run build` across all SDK packages -- ensures TypeScript compiles |
 
 All checks must pass before a PR can be merged. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
