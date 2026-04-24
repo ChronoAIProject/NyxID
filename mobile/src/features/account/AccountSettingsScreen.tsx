@@ -10,6 +10,7 @@ import { OfflineBanner } from "../../components/OfflineBanner";
 import { TelegramLinkModal } from "../../components/TelegramLinkModal";
 import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverlay";
 import { useAuthSession } from "../auth/AuthSessionContext";
+import { capture } from "../../lib/telemetry";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { isApiError } from "../../lib/api/ApiError";
@@ -199,9 +200,31 @@ export function AccountSettingsScreen({ navigation }: Props) {
     showToast("Telegram connected!", "success");
   };
 
+  // Helper: emit `ui.mobile_preference_toggled` only after a settings
+  // mutation actually succeeds on the server. Attached as a per-call
+  // `onSuccess` so the shared `notifMutation` can fire different events
+  // based on which setting was toggled. Failed / offline / rejected
+  // updates never count as completed toggles.
+  const emitPreferenceToggledOnSuccess = (
+    prefName: "push_enabled" | "telegram_enabled",
+    value: boolean,
+  ) => ({
+    onSuccess: () => {
+      capture({
+        name: "ui.mobile_preference_toggled",
+        props: { name: prefName, value },
+      });
+    },
+  });
+
   const handleTogglePush = (newValue: boolean) => {
     if (newValue) {
-      notifMutation.mutate({ push_enabled: true });
+      // Enable path has no confirmation -- user tap IS the commit. Emit
+      // only after the server accepts the setting change.
+      notifMutation.mutate(
+        { push_enabled: true },
+        emitPreferenceToggledOnSuccess("push_enabled", true),
+      );
       return;
     }
     const willDisableApproval = isLastChannel("push") && notifSettings?.approval_required;
@@ -215,10 +238,16 @@ export function AccountSettingsScreen({ navigation }: Props) {
         text: "Disable",
         style: "destructive",
         onPress: () => {
-          notifMutation.mutate({
-            push_enabled: false,
-            ...(willDisableApproval && { approval_required: false }),
-          });
+          // Emit only on mutation success so a failed update (offline /
+          // rejected / network error) doesn't count as a completed
+          // disable in analytics. Cancel naturally skips this arm.
+          notifMutation.mutate(
+            {
+              push_enabled: false,
+              ...(willDisableApproval && { approval_required: false }),
+            },
+            emitPreferenceToggledOnSuccess("push_enabled", false),
+          );
         },
       },
     ]);
@@ -226,7 +255,10 @@ export function AccountSettingsScreen({ navigation }: Props) {
 
   const handleToggleTelegram = (newValue: boolean) => {
     if (newValue) {
-      notifMutation.mutate({ telegram_enabled: true });
+      notifMutation.mutate(
+        { telegram_enabled: true },
+        emitPreferenceToggledOnSuccess("telegram_enabled", true),
+      );
       return;
     }
     const willDisableApproval = isLastChannel("telegram") && notifSettings?.approval_required;
@@ -241,16 +273,47 @@ export function AccountSettingsScreen({ navigation }: Props) {
         text: "Disable",
         style: "destructive",
         onPress: async () => {
-          // Disable notifications + approval in one call, then disconnect
+          // Disable notifications + approval in one call, then
+          // disconnect. Only emit after BOTH land -- the earlier design
+          // emitted before the settings update, which overcounted
+          // completed toggles on offline/error.
+          //
+          // Partial-success guard: if settings update succeeded but
+          // disconnect fails, the backend has already flipped
+          // `telegram_enabled=false`. The UI MUST invalidate the
+          // cached settings query so the toggle reflects the new
+          // state; otherwise the screen would keep showing "enabled"
+          // until the user manually refreshes.
+          let settingsOk = false;
           try {
             await mobileApi.updateNotificationSettings({
               telegram_enabled: false,
               ...(willDisableApproval && { approval_required: false }),
             });
+            settingsOk = true;
           } catch {
-            // disconnect will cascade anyway
+            // disconnect will cascade anyway; telemetry won't fire.
           }
-          telegramDisconnectMutation.mutate();
+          telegramDisconnectMutation.mutate(undefined, {
+            onSuccess: () => {
+              if (settingsOk) {
+                capture({
+                  name: "ui.mobile_preference_toggled",
+                  props: { name: "telegram_enabled", value: false },
+                });
+              }
+            },
+            onSettled: () => {
+              // Always invalidate, even on partial success: if settings
+              // succeeded but disconnect failed, the UI would otherwise
+              // keep showing the old (enabled) state.
+              if (settingsOk) {
+                void queryClient.invalidateQueries({
+                  queryKey: ["account", "notificationSettings"],
+                });
+              }
+            },
+          });
         },
       },
     ]);
@@ -287,6 +350,14 @@ export function AccountSettingsScreen({ navigation }: Props) {
   };
 
   const handleDeleteAccount = () => {
+    // Opening a native confirm counts as opening the
+    // delete_account_confirm dialog. If the user cancels, the dialog
+    // ends on step 1 without an abandonment event (native Alert hides
+    // its lifecycle from us); the confirm path emits destructive_confirmed.
+    capture({
+      name: "ui.mobile_dialog_opened",
+      props: { dialog_id: "delete_account_confirm", entry_point: "account_settings" },
+    });
     Alert.alert(
       "Delete Account",
       "This action is permanent and will permanently delete your account and server-side data.",
@@ -296,6 +367,10 @@ export function AccountSettingsScreen({ navigation }: Props) {
           text: "Delete",
           style: "destructive",
           onPress: () => {
+            capture({
+              name: "ui.mobile_destructive_confirmed",
+              props: { domain: "account", action: "delete_account" },
+            });
             setToast(null);
             deleteAccountMutation.mutate();
           },
@@ -401,7 +476,19 @@ export function AccountSettingsScreen({ navigation }: Props) {
                     </View>
                   </View>
                 ) : (
-                  <Pressable onPress={() => setIsTelegramLinkVisible(true)} style={styles.channelRowLeft}>
+                  <Pressable
+                    onPress={() => {
+                      capture({
+                        name: "ui.mobile_dialog_opened",
+                        props: {
+                          dialog_id: "other",
+                          entry_point: "account_settings.telegram_link",
+                        },
+                      });
+                      setIsTelegramLinkVisible(true);
+                    }}
+                    style={styles.channelRowLeft}
+                  >
                     <Text style={styles.accountRowLabel}>Telegram</Text>
                     <View style={styles.linkPill}>
                       <Text style={styles.linkPillText}>Link account</Text>
@@ -439,7 +526,13 @@ export function AccountSettingsScreen({ navigation }: Props) {
                 <>
                   <Pressable
                     style={[styles.themeToggleHalf, isLight && styles.themeToggleHalfActive]}
-                    onPress={() => setPreference("light")}
+                    onPress={() => {
+                      capture({
+                        name: "ui.mobile_preference_toggled",
+                        props: { name: "theme", value: "light" },
+                      });
+                      setPreference("light");
+                    }}
                   >
                     <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={lightColor} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                       <Circle cx={12} cy={12} r={5} />
@@ -450,7 +543,13 @@ export function AccountSettingsScreen({ navigation }: Props) {
                   <View style={styles.themeToggleDivider} />
                   <Pressable
                     style={[styles.themeToggleHalf, isDark && styles.themeToggleHalfActive]}
-                    onPress={() => setPreference("dark")}
+                    onPress={() => {
+                      capture({
+                        name: "ui.mobile_preference_toggled",
+                        props: { name: "theme", value: "dark" },
+                      });
+                      setPreference("dark");
+                    }}
                   >
                     <Svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke={darkColor} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                       <Path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
@@ -465,7 +564,13 @@ export function AccountSettingsScreen({ navigation }: Props) {
             <Text style={styles.accountRowLabel}>Use system setting</Text>
             <Switch
               value={preference === "system"}
-              onValueChange={(on) => setPreference(on ? "system" : mode)}
+              onValueChange={(on) => {
+                capture({
+                  name: "ui.mobile_preference_toggled",
+                  props: { name: "theme_system", value: on },
+                });
+                setPreference(on ? "system" : mode);
+              }}
               trackColor={{ false: colors.borderSoft, true: colors.success }}
             />
           </View>
@@ -489,11 +594,27 @@ export function AccountSettingsScreen({ navigation }: Props) {
 
         {/* Legal links */}
         <View style={styles.legalRow}>
-          <Pressable onPress={() => navigation.navigate("TermsOfService")}>
+          <Pressable
+            onPress={() => {
+              capture({
+                name: "ui.mobile_legal_page_opened",
+                props: { page: "terms" },
+              });
+              navigation.navigate("TermsOfService");
+            }}
+          >
             <Text style={styles.legalLink}>Terms of Service</Text>
           </Pressable>
           <Text style={styles.legalDot}>·</Text>
-          <Pressable onPress={() => navigation.navigate("PrivacyPolicy")}>
+          <Pressable
+            onPress={() => {
+              capture({
+                name: "ui.mobile_legal_page_opened",
+                props: { page: "privacy" },
+              });
+              navigation.navigate("PrivacyPolicy");
+            }}
+          >
             <Text style={styles.legalLink}>Privacy Policy</Text>
           </Pressable>
         </View>

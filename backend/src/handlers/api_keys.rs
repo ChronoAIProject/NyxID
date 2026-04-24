@@ -24,6 +24,7 @@ use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoi
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
 use crate::services::{key_service, org_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
 
@@ -1050,6 +1051,7 @@ fn parse_expires_at(s: &str) -> AppResult<DateTime<Utc>> {
 pub async fn create_key(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<CreateApiKeyRequest>,
 ) -> AppResult<Json<CreateApiKeyResponse>> {
     auth_user.ensure_write_scope()?;
@@ -1114,6 +1116,26 @@ pub async fn create_key(
         body.callback_url.as_deref(),
     )
     .await?;
+
+    // Telemetry: api_key.created. `scope_mode` collapses the two
+    // allow-all flags into a single enum: "all" when both are unrestricted,
+    // "scoped" otherwise (either services or nodes are pinned).
+    let scope_mode = if created.allow_all_services && created.allow_all_nodes {
+        "all"
+    } else {
+        "scoped"
+    };
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ApiKeyCreated {
+            platform: created.platform.clone(),
+            scope_mode: scope_mode.to_string(),
+            rate_limit_per_second: created.rate_limit_per_second,
+        },
+    );
 
     Ok(Json(CreateApiKeyResponse {
         id: created.id,
@@ -1198,13 +1220,34 @@ pub async fn update_key(
 pub async fn delete_key(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(key_id): Path<String>,
 ) -> AppResult<Json<DeleteApiKeyResponse>> {
     auth_user.ensure_write_scope()?;
 
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
+
+    // Look up platform before delete so we can attribute the event. The
+    // delete path only carries `key_id`, so the record must be fetched while
+    // it still exists.
+    let pre_delete_platform = key_service::get_api_key(&state.db, &user_id_str, &key_id)
+        .await
+        .ok()
+        .and_then(|k| k.platform);
+
     key_service::delete_api_key(&state.db, &user_id_str, &key_id).await?;
+
+    // Telemetry: api_key.deleted.
+    emit_event(
+        state.telemetry.as_deref(),
+        &actor,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ApiKeyDeleted {
+            platform: pre_delete_platform,
+        },
+    );
 
     Ok(Json(DeleteApiKeyResponse {
         message: "API key deleted".to_string(),
@@ -1228,6 +1271,7 @@ pub async fn delete_key(
 pub async fn rotate_key(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(key_id): Path<String>,
 ) -> AppResult<Json<CreateApiKeyResponse>> {
     auth_user.ensure_write_scope()?;
@@ -1235,6 +1279,17 @@ pub async fn rotate_key(
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
     let created = key_service::rotate_api_key(&state.db, &user_id_str, &key_id).await?;
+
+    // Telemetry: api_key.rotated.
+    emit_event(
+        state.telemetry.as_deref(),
+        &actor,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ApiKeyRotated {
+            platform: created.platform.clone(),
+        },
+    );
 
     Ok(Json(CreateApiKeyResponse {
         id: created.id,

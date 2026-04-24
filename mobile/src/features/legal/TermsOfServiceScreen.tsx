@@ -5,6 +5,7 @@ import { RootStackParamList } from "../../app/AppNavigator";
 
 import { BlurBackButton } from "../../components/BlurBackButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
+import { capture } from "../../lib/telemetry";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { createFlowStyles } from "../../theme/flowStyles";
@@ -132,7 +133,15 @@ export function TermsOfServiceScreen({ navigation }: Props) {
   return (
     <ScreenContainer>
       <View style={styles.stickyBack}>
-        <BlurBackButton onPress={() => navigation.goBack()} />
+        <BlurBackButton
+          onPress={() => {
+            capture({
+              name: "ui.mobile_nav_target_opened",
+              props: { target: "terms_back", source: "back" },
+            });
+            navigation.goBack();
+          }}
+        />
       </View>
       <ScrollView
         style={flowStyles.content}

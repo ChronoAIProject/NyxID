@@ -12,6 +12,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::notification_channel::{COLLECTION_NAME, DeviceToken, NotificationChannel};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, notification_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 /// Maximum number of push devices per user.
 const MAX_DEVICES_PER_USER: usize = 10;
@@ -72,6 +73,7 @@ pub struct MessageResponse {
 pub async fn register_device(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<RegisterDeviceRequest>,
 ) -> AppResult<Json<DeviceResponse>> {
     // Input validation
@@ -137,6 +139,12 @@ pub async fn register_device(
         )
         .await?;
 
+        // NO registration emit here. This is the same-device token-rotation
+        // path (APNs/FCM replaces the push token on the existing
+        // `device_id`); it is not a new-device acquisition. Matches the
+        // existing-token refresh path below, which also suppresses the
+        // event. The emit survives only on the true new-device insert path.
+
         return Ok(Json(DeviceResponse {
             device_id,
             platform: body.platform.clone(),
@@ -183,6 +191,12 @@ pub async fn register_device(
             bson::DateTime::from_chrono(Utc::now()),
         )
         .await?;
+
+        // Not a new registration — the mobile app hits this path on every
+        // sign-in / session restore via `activatePushAfterLogin({ forceRegister: true })`.
+        // Emitting here would count every re-auth as a fresh device and inflate
+        // the registration funnel. Telemetry fires only on the new-device insert
+        // path below.
 
         return Ok(Json(DeviceResponse {
             device_id,
@@ -270,6 +284,9 @@ pub async fn register_device(
             )
             .await?;
 
+            // Another request already persisted this token. The "primary" emit
+            // has already fired there, so skip here to avoid double-counting.
+
             return Ok(Json(DeviceResponse {
                 device_id: existing.device_id.clone(),
                 platform: existing.platform.clone(),
@@ -294,7 +311,7 @@ pub async fn register_device(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(user_id.clone()),
         "push_device_registered".to_string(),
         Some(serde_json::json!({
             "device_id": device_id,
@@ -304,6 +321,17 @@ pub async fn register_device(
         None,
         None,
         None,
+    );
+
+    // Telemetry: notification.device_registered (new-device path).
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::NotificationDeviceRegistered {
+            platform: body.platform.clone(),
+        },
     );
 
     Ok(Json(DeviceResponse {
@@ -350,17 +378,22 @@ pub async fn list_devices(
 pub async fn remove_device(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(device_id): Path<String>,
 ) -> AppResult<Json<MessageResponse>> {
     let user_id = auth_user.user_id.to_string();
     let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
 
-    // Verify the device exists for this user
-    let device_exists = channel
+    // Verify the device exists for this user, and capture its platform
+    // pre-delete for telemetry. The DELETE path param is only a `device_id`,
+    // so platform must be resolved from the existing record before the
+    // `$pull` makes it unreachable.
+    let removed_platform = channel
         .push_devices
         .iter()
-        .any(|d| d.device_id == device_id);
-    if !device_exists {
+        .find(|d| d.device_id == device_id)
+        .map(|d| d.platform.clone());
+    if removed_platform.is_none() {
         return Err(AppError::NotFound("Device not found".to_string()));
     }
 
@@ -402,7 +435,7 @@ pub async fn remove_device(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(user_id.clone()),
         "push_device_removed".to_string(),
         Some(serde_json::json!({
             "device_id": device_id,
@@ -413,6 +446,19 @@ pub async fn remove_device(
         None,
         None,
     );
+
+    // Telemetry: notification.device_removed. Platform is captured pre-delete
+    // above; if the device record ever slipped past the existence check we
+    // would have already errored out, so unwrap is safe here.
+    if let Some(platform) = removed_platform {
+        emit_event(
+            state.telemetry.as_deref(),
+            &user_id,
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::NotificationDeviceRemoved { platform },
+        );
+    }
 
     let message = if approval_auto_disabled && channel.approval_required {
         "Device removed. Approval protection has been disabled because no notification channels remain.".to_string()
@@ -430,6 +476,7 @@ pub async fn remove_device(
 pub async fn remove_current_device(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<UnregisterCurrentDeviceRequest>,
 ) -> AppResult<Json<MessageResponse>> {
     validate_token_for_platform(&body.platform, &body.token, "token")?;
@@ -438,6 +485,11 @@ pub async fn remove_current_device(
     let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
     let collection = state.db.collection::<NotificationChannel>(COLLECTION_NAME);
     let now = bson::DateTime::from_chrono(Utc::now());
+
+    // Gate telemetry on whether the pull actually removed a matching device.
+    // Logout fires this endpoint even when the local token is stale / already
+    // rotated / never registered; we don't want to count those as real removals.
+    let token_was_present = channel.push_devices.iter().any(|d| d.token == body.token);
 
     collection
         .update_one(
@@ -473,7 +525,7 @@ pub async fn remove_current_device(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(user_id.clone()),
         "push_device_removed_on_logout".to_string(),
         Some(serde_json::json!({
             "platform": body.platform,
@@ -485,6 +537,20 @@ pub async fn remove_current_device(
         None,
         None,
     );
+
+    // Telemetry: notification.device_removed (sign-out path). Only fires when
+    // the pull actually removed a token from this user's channel.
+    if token_was_present {
+        emit_event(
+            state.telemetry.as_deref(),
+            &user_id,
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::NotificationDeviceRemoved {
+                platform: body.platform.clone(),
+            },
+        );
+    }
 
     let message = if approval_auto_disabled {
         "Current device removed. Approval protection has been disabled because no notification channels remain.".to_string()

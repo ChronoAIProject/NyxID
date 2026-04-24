@@ -23,6 +23,7 @@ use crate::services::{
     approval_service, audit_service, node_routing_service, node_service, notification_service,
     ssh_service, user_service_service,
 };
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 use super::services_helpers::fetch_service;
 
@@ -69,11 +70,24 @@ const MAX_SSH_BANNER_BYTES: usize = 4 * 1024;
 pub async fn issue_ssh_certificate(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(service_id): Path<String>,
     Json(body): Json<IssueSshCertificateRequest>,
 ) -> AppResult<Json<IssueSshCertificateResponse>> {
     authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
+    // Resolve the catalog slug for telemetry -- the path param is the
+    // service UUID, not the slug. Best-effort: cert issuance already
+    // passed auth + SSH config validation, so a transient read failure
+    // here (or the service getting deleted between auth and this
+    // lookup) must never fail the issuance. Fall back to the UUID and
+    // accept that the event will be scrubbed to `[UUID_REDACTED]` in
+    // that rare case.
+    let service_slug = fetch_service(&state, &service_id)
+        .await
+        .ok()
+        .map(|s| s.slug)
+        .unwrap_or_else(|| service_id.clone());
     let user_id = auth_user.user_id.to_string();
     let user = state
         .db
@@ -95,7 +109,7 @@ pub async fn issue_ssh_certificate(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(user_id.clone()),
         "ssh_certificate_issued".to_string(),
         Some(serde_json::json!({
             "service_id": service_id,
@@ -109,6 +123,22 @@ pub async fn issue_ssh_certificate(
         None,
         None,
         None,
+    );
+
+    // Telemetry: ssh.certificate_issued. `ttl_secs` derived from the
+    // certificate validity window (not the configured TTL minutes, so it
+    // reflects the actual issuance). `service_slug` comes from the
+    // resolved downstream service, not the path param.
+    let ttl_secs = (issued.valid_before - issued.valid_after).num_seconds();
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::SshCertificateIssued {
+            service_slug,
+            ttl_secs,
+        },
     );
 
     Ok(Json(IssueSshCertificateResponse {
@@ -146,6 +176,15 @@ pub async fn ssh_tunnel_ws(
     authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
     validate_runtime_ssh_target(&service_id, &ssh_service).await?;
+    // Resolve the downstream service so telemetry
+    // (`ssh.tunnel_opened` / `_closed`) emits the slug, not the UUID.
+    // Best-effort: SSH tunnel establishment is user-facing; a transient
+    // telemetry-only lookup failure must never block the tunnel.
+    let service_slug = fetch_service(&state, &service_id)
+        .await
+        .ok()
+        .map(|s| s.slug)
+        .unwrap_or_else(|| service_id.clone());
     let session_guard = state
         .ssh_session_manager
         .try_acquire(&auth_user.user_id.to_string())?;
@@ -157,30 +196,47 @@ pub async fn ssh_tunnel_ws(
             .map(str::to_string),
     };
 
+    // Snapshot the request-scoped telemetry context BEFORE the WS upgrade
+    // so SshTunnelOpened / SshTunnelClosed (fired from the spawned socket
+    // task) can carry the original `X-NyxID-Client` surface. Without this
+    // the websocket task falls back to `TelemetryContext::default()` and
+    // every SSH session gets recorded as `surface="backend"`.
+    let tele = TelemetryContext::from_headers(
+        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-nyxid-client-version")
+            .and_then(|v| v.to_str().ok()),
+    );
+
     Ok(ws
         .on_upgrade(move |socket| async move {
             handle_ssh_socket(
                 state,
                 auth_user,
                 service_id,
+                service_slug,
                 ssh_service,
                 socket,
                 session_guard,
                 client_meta,
+                tele,
             )
             .await;
         })
         .into_response())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_ssh_socket(
     state: AppState,
     auth_user: AuthUser,
     service_id: String,
+    service_slug: String,
     ssh_service: crate::models::downstream_service::SshServiceConfig,
     mut socket: WebSocket,
     session_guard: ssh_service::SshSessionGuard,
     client_meta: TunnelClientMeta,
+    tele: TelemetryContext,
 ) {
     // Held for Drop-based session count cleanup for the tunnel lifetime.
     let _ = &session_guard;
@@ -212,13 +268,16 @@ async fn handle_ssh_socket(
         handle_node_ssh_socket(
             state,
             service_id,
+            service_slug,
             ssh_service,
             socket,
             user_id,
+            auth_user.api_key_id.clone(),
             session_id,
             started_at,
             client_meta,
             node_route,
+            tele,
         )
         .await;
         return;
@@ -376,6 +435,18 @@ async fn handle_ssh_socket(
         None,
     );
 
+    // Telemetry: ssh.tunnel_opened (direct path).
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::SshTunnelOpened {
+            service_slug: service_slug.clone(),
+            mode: "tunnel".to_string(),
+        },
+    );
+
     let mut read_buf = vec![0_u8; 16 * 1024];
     let tunnel_timeout = tokio::time::sleep(Duration::from_secs(
         state.config.ssh_max_tunnel_duration_secs,
@@ -437,15 +508,16 @@ async fn handle_ssh_socket(
 
     let _ = socket.close().await;
 
+    let duration_ms = started_at.elapsed().as_millis() as u64;
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(user_id.clone()),
         "ssh_tunnel_disconnected".to_string(),
         Some(serde_json::json!({
             "service_id": service_id,
             "session_id": session_id,
             "routed_via": "ssh",
-            "duration_ms": started_at.elapsed().as_millis() as u64,
+            "duration_ms": duration_ms,
             "bytes_from_client": from_client_bytes,
             "bytes_to_client": to_client_bytes,
             "disconnect_reason": disconnect_reason,
@@ -455,19 +527,36 @@ async fn handle_ssh_socket(
         None,
         None,
     );
+
+    // Telemetry: ssh.tunnel_closed (direct path).
+    // Best-effort: normal close only, abrupt close may miss -- see
+    // TELEMETRY.md §6.5.
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::SshTunnelClosed {
+            service_slug,
+            duration_ms,
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_node_ssh_socket(
     state: AppState,
     service_id: String,
+    service_slug: String,
     ssh_service: crate::models::downstream_service::SshServiceConfig,
     mut socket: WebSocket,
     user_id: String,
+    api_key_id: Option<String>,
     session_id: String,
     started_at: Instant,
     client_meta: TunnelClientMeta,
     node_route: crate::services::node_routing_service::NodeRoute,
+    tele: TelemetryContext,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -679,6 +768,18 @@ async fn handle_node_ssh_socket(
         None,
     );
 
+    // Telemetry: ssh.tunnel_opened (node path).
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::SshTunnelOpened {
+            service_slug: service_slug.clone(),
+            mode: "tunnel".to_string(),
+        },
+    );
+
     let tunnel_timeout = tokio::time::sleep(Duration::from_secs(
         state.config.ssh_max_tunnel_duration_secs,
     ));
@@ -752,16 +853,17 @@ async fn handle_node_ssh_socket(
     );
     let _ = socket.close().await;
 
+    let duration_ms = started_at.elapsed().as_millis() as u64;
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(user_id.clone()),
         "ssh_tunnel_disconnected".to_string(),
         Some(serde_json::json!({
             "service_id": service_id,
             "session_id": session_id,
             "routed_via": "node",
             "node_id": node_id,
-            "duration_ms": started_at.elapsed().as_millis() as u64,
+            "duration_ms": duration_ms,
             "bytes_from_client": from_client_bytes,
             "bytes_to_client": to_client_bytes,
             "disconnect_reason": disconnect_reason,
@@ -770,6 +872,20 @@ async fn handle_node_ssh_socket(
         client_meta.user_agent,
         None,
         None,
+    );
+
+    // Telemetry: ssh.tunnel_closed (node path).
+    // Best-effort: normal close only, abrupt close may miss -- see
+    // TELEMETRY.md §6.5.
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::SshTunnelClosed {
+            service_slug,
+            duration_ms,
+        },
     );
 }
 

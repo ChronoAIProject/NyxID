@@ -16,6 +16,7 @@ use crate::services::channel_adapters::slack::SlackAdapter;
 use crate::services::channel_adapters::telegram::TelegramAdapter;
 use crate::services::channel_platform::PlatformAdapter;
 use crate::services::{audit_service, channel_bot_service, lark_permission, org_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -127,6 +128,18 @@ impl std::fmt::Display for UpdateChannelBotRequest {
 
 fn normalize_optional_field(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Truncated SHA-256 of a platform conversation ID, for use in telemetry
+/// properties where raw conversation IDs must not be emitted. Returns the
+/// first 16 hex chars (8 bytes) of the digest — enough entropy for
+/// per-conversation cardinality analysis, short enough to stay ergonomic.
+pub(crate) fn hash_conversation_id(id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(id.as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(&digest[..8])
 }
 
 fn ensure_lark_verify_material_present(
@@ -382,6 +395,7 @@ fn bot_to_item(bot: &crate::models::channel_bot::ChannelBot) -> ChannelBotItem {
 pub async fn create_bot(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<CreateChannelBotRequest>,
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
     let actor = auth_user.user_id.to_string();
@@ -497,6 +511,16 @@ pub async fn create_bot(
             "Webhook registration failed: {e}"
         )));
     }
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ChannelBotRegistered {
+            platform: body.platform.clone(),
+        },
+    );
 
     audit_service::log_async(
         state.db.clone(),
@@ -753,6 +777,7 @@ pub async fn get_bot(
 pub async fn delete_bot(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(bot_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let actor = auth_user.user_id.to_string();
@@ -770,6 +795,16 @@ pub async fn delete_bot(
         &owner_id,
     )
     .await?;
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ChannelBotDeleted {
+            platform: bot.platform.clone(),
+        },
+    );
 
     audit_service::log_async(
         state.db.clone(),

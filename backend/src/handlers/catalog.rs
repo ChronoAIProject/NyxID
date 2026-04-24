@@ -17,6 +17,7 @@ use crate::mw::auth::AuthUser;
 use crate::services::{
     api_docs_service, catalog_service, openapi_parser, org_service, user_service_service,
 };
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CatalogEntryResponse {
@@ -169,6 +170,7 @@ pub struct CatalogListQuery {
 pub async fn list_catalog(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Query(query): Query<CatalogListQuery>,
 ) -> AppResult<Json<CatalogListResponse>> {
     let user_id = auth_user.user_id.to_string();
@@ -177,7 +179,24 @@ pub async fn list_catalog(
     } else {
         catalog_service::list_catalog(&state.db, &state.encryption_keys, &user_id).await?
     };
-    let items = entries.into_iter().map(catalog_entry_response).collect();
+    let items: Vec<CatalogEntryResponse> =
+        entries.into_iter().map(catalog_entry_response).collect();
+
+    // Telemetry: catalog.browsed. `filter` is None today because the list
+    // endpoint does not yet accept a search/filter query (only
+    // `include_all`); plumb a filter string through here when a search
+    // parameter lands.
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::CatalogBrowsed {
+            filter: None,
+            result_count: items.len() as i64,
+        },
+    );
+
     Ok(Json(CatalogListResponse { entries: items }))
 }
 
@@ -198,6 +217,7 @@ pub async fn list_catalog(
 pub async fn get_catalog_entry(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(slug): Path<String>,
 ) -> AppResult<Json<CatalogEntryResponse>> {
     // Pass the caller's user_id so the service layer can enforce
@@ -209,6 +229,21 @@ pub async fn get_catalog_entry(
     let entry =
         catalog_service::get_catalog_entry(&state.db, &state.encryption_keys, &user_id, &slug)
             .await?;
+
+    // Telemetry: catalog.entry_viewed.
+    let has_openapi_spec = entry.openapi_spec_url.is_some();
+    let catalog_slug = entry.slug.clone();
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::CatalogEntryViewed {
+            catalog_slug,
+            has_openapi_spec,
+        },
+    );
+
     Ok(Json(catalog_entry_response(entry)))
 }
 
@@ -331,6 +366,7 @@ async fn find_readable_user_service_by_slug(
 pub async fn list_catalog_endpoints(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(slug): Path<String>,
 ) -> AppResult<Json<CatalogEndpointsListResponse>> {
     let user_id = auth_user.user_id.to_string();
@@ -343,6 +379,17 @@ pub async fn list_catalog_endpoints(
 
     if let Some(svc) = svc {
         let Some(ref spec_url) = svc.openapi_spec_url else {
+            // Telemetry: catalog.endpoints_fetched (no spec configured).
+            emit_event(
+                state.telemetry.as_deref(),
+                &user_id,
+                auth_user.api_key_id.as_deref(),
+                &tele,
+                TelemetryEvent::CatalogEndpointsFetched {
+                    catalog_slug: slug.clone(),
+                    endpoint_count: 0,
+                },
+            );
             return Ok(Json(CatalogEndpointsListResponse {
                 slug,
                 openapi_spec_url: None,
@@ -354,10 +401,22 @@ pub async fn list_catalog_endpoints(
         // instead of raw reqwest to prevent SSRF and resource exhaustion.
         let spec = api_docs_service::fetch_spec_json(spec_url).await?;
         let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
-        let endpoints = parsed
+        let endpoints: Vec<CatalogEndpointResponse> = parsed
             .into_iter()
             .map(parsed_endpoint_to_response)
             .collect();
+
+        // Telemetry: catalog.endpoints_fetched (catalog service path).
+        emit_event(
+            state.telemetry.as_deref(),
+            &user_id,
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::CatalogEndpointsFetched {
+                catalog_slug: slug.clone(),
+                endpoint_count: endpoints.len() as i64,
+            },
+        );
 
         return Ok(Json(CatalogEndpointsListResponse {
             slug,
@@ -382,6 +441,17 @@ pub async fn list_catalog_endpoints(
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
 
     let Some(ref spec_url) = user_endpoint.openapi_spec_url else {
+        // Telemetry: catalog.endpoints_fetched (user-service path, no spec).
+        emit_event(
+            state.telemetry.as_deref(),
+            &user_id,
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::CatalogEndpointsFetched {
+                catalog_slug: slug.clone(),
+                endpoint_count: 0,
+            },
+        );
         return Ok(Json(CatalogEndpointsListResponse {
             slug,
             openapi_spec_url: None,
@@ -391,10 +461,22 @@ pub async fn list_catalog_endpoints(
 
     let spec = api_docs_service::fetch_spec_json_scoped(spec_url, &user_endpoint.user_id).await?;
     let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
-    let endpoints = parsed
+    let endpoints: Vec<CatalogEndpointResponse> = parsed
         .into_iter()
         .map(parsed_endpoint_to_response)
         .collect();
+
+    // Telemetry: catalog.endpoints_fetched (user-service path).
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::CatalogEndpointsFetched {
+            catalog_slug: slug.clone(),
+            endpoint_count: endpoints.len() as i64,
+        },
+    );
 
     Ok(Json(CatalogEndpointsListResponse {
         slug,
@@ -503,6 +585,7 @@ mod tests {
         let Json(response) = list_catalog_endpoints(
             State(state),
             test_auth_user(&caller_id),
+            crate::telemetry::TelemetryContext::default(),
             Path("custom-api".to_string()),
         )
         .await
@@ -557,6 +640,7 @@ mod tests {
         let Json(response) = list_catalog_endpoints(
             State(state),
             test_auth_user(&caller_id),
+            crate::telemetry::TelemetryContext::default(),
             Path("custom-api".to_string()),
         )
         .await
@@ -613,6 +697,7 @@ mod tests {
         let err = list_catalog_endpoints(
             State(state),
             test_auth_user(&caller_id),
+            crate::telemetry::TelemetryContext::default(),
             Path("other-api".to_string()),
         )
         .await
@@ -646,6 +731,7 @@ mod tests {
         let Json(response) = list_catalog_endpoints(
             State(state),
             test_auth_user(&caller_id),
+            crate::telemetry::TelemetryContext::default(),
             Path("catalog-api".to_string()),
         )
         .await
@@ -709,6 +795,7 @@ mod tests {
         let Json(response) = list_catalog_endpoints(
             State(state),
             test_auth_user(&member_id),
+            crate::telemetry::TelemetryContext::default(),
             Path("org-api".to_string()),
         )
         .await

@@ -10,7 +10,9 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, node_routing_service, node_service, ssh_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
+use super::services_helpers::fetch_service;
 use super::ssh_tunnel::authorize_ssh_access;
 
 // ---------------------------------------------------------------------------
@@ -85,6 +87,7 @@ pub struct SshExecResponse {
 pub async fn ssh_exec(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(service_id): Path<String>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
@@ -94,6 +97,13 @@ pub async fn ssh_exec(
     authorize_ssh_access(&state, &auth_user, &service_id).await?;
 
     let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
+    // Resolve the catalog slug for telemetry -- best-effort so exec
+    // never fails on a telemetry-only DB read.
+    let service_slug = fetch_service(&state, &service_id)
+        .await
+        .ok()
+        .map(|s| s.slug)
+        .unwrap_or_else(|| service_id.clone());
     let user_id = auth_user.user_id.to_string();
 
     // -- Validate: certificate auth must be enabled --
@@ -235,7 +245,7 @@ pub async fn ssh_exec(
                 // -- Audit log --
                 audit_service::log_async(
                     state.db.clone(),
-                    Some(user_id),
+                    Some(user_id.clone()),
                     "ssh_exec_command".to_string(),
                     Some(serde_json::json!({
                         "service_id": service_id,
@@ -251,6 +261,20 @@ pub async fn ssh_exec(
                     user_agent,
                     None,
                     None,
+                );
+
+                // Telemetry: ssh.tunnel_opened with mode="exec". Exec is a
+                // one-shot command invocation -- no corresponding
+                // `ssh.tunnel_closed` event fires for this path.
+                emit_event(
+                    state.telemetry.as_deref(),
+                    &user_id,
+                    auth_user.api_key_id.as_deref(),
+                    &tele,
+                    TelemetryEvent::SshTunnelOpened {
+                        service_slug,
+                        mode: "exec".to_string(),
+                    },
                 );
 
                 return Ok(Json(response));

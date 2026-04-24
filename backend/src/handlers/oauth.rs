@@ -17,6 +17,7 @@ use crate::services::{
     audit_service, consent_service, oauth_client_service, oauth_service, service_account_service,
     social_token_exchange_service, token_exchange_service,
 };
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
 // --- Request / Response types ---
 
@@ -265,6 +266,7 @@ pub async fn authorize(
 pub async fn authorize_decision(
     State(state): State<AppState>,
     opt_auth: OptionalAuthUser,
+    tele: TelemetryContext,
     Form(form): Form<ConsentDecisionForm>,
 ) -> Result<Response, AppError> {
     let params = AuthorizeQuery {
@@ -313,6 +315,46 @@ pub async fn authorize_decision(
 
     let code = issue_authorization_code(&state, &auth_user, &params, &validated_scope).await?;
     let redirect_url = build_callback_url(&params, &code);
+
+    // OAuth consent submits from multiple client types (web consent form,
+    // native desktop / mobile via custom scheme, CLI via loopback). The
+    // browser form POST does not carry `X-NyxID-Client`, so the
+    // request-derived `tele.surface` defaults to `"backend"` which would
+    // misattribute every grant. Derive surface from the redirect URI
+    // instead: loopback -> CLI, non-http(s) custom scheme -> SDK/native,
+    // everything else -> web UI.
+    let consent_surface: &'static str = match url::Url::parse(&params.redirect_uri).ok().map(|u| {
+        let scheme = u.scheme().to_string();
+        let host = u.host_str().map(str::to_string);
+        (scheme, host)
+    }) {
+        Some((scheme, _)) if scheme != "http" && scheme != "https" => "sdk",
+        Some((scheme, host))
+            if scheme == "http"
+                && matches!(host.as_deref(), Some("127.0.0.1" | "localhost" | "[::1]")) =>
+        {
+            "cli"
+        }
+        _ => "ui",
+    };
+    let tele_consent = TelemetryContext {
+        surface: consent_surface,
+        client_version: None,
+    };
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id_str,
+        auth_user.api_key_id.as_deref(),
+        &tele_consent,
+        TelemetryEvent::OauthAuthorizationGranted {
+            // Raw UUID would be scrubbed to `[UUID_REDACTED]`, collapsing
+            // every OAuth client onto a single bucket. Hash keeps
+            // per-client analysis possible without leaking the UUID.
+            client_id: hash_short_id(&params.client_id),
+            grant_type: "authorization_code".to_string(),
+        },
+    );
+    let _ = &tele;
 
     if needs_success_page(&params.redirect_uri) {
         Ok(oauth_success_page(&redirect_url))
@@ -750,17 +792,24 @@ async fn issue_authorization_code(
 /// standard OAuth/OIDC client libraries depend on the standard error shape.
 pub async fn token(
     State(state): State<AppState>,
+    tele: TelemetryContext,
     headers: HeaderMap,
     Form(body): Form<TokenRequest>,
 ) -> Response {
-    match token_inner(&state, &headers, body).await {
+    match token_inner(&state, &tele, &headers, body).await {
         Ok(json) => json.into_response(),
         Err(err) => oauth_error_response(err),
     }
 }
 
+// TODO(telemetry): all grant branches blocked — see TELEMETRY.md §6.5
+// (oauth.token_issued). The four `/oauth/token` grant-type branches
+// (`authorization_code`, `refresh_token`, `client_credentials`, social
+// `urn:ietf:params:oauth:grant-type:token-exchange`) do not emit
+// `OauthTokenIssued` in Part 2. Lift this once §6.5 is resolved.
 async fn token_inner(
     state: &AppState,
+    tele: &TelemetryContext,
     headers: &HeaderMap,
     body: TokenRequest,
 ) -> AppResult<Json<TokenResponse>> {
@@ -846,6 +895,10 @@ async fn token_inner(
             // - provider present: social token exchange (provider-specific token type validation)
             // - provider absent + access_token type: delegated token exchange
             if let Some(provider) = body.provider.as_deref() {
+                // TODO(telemetry): social branch blocked — see TELEMETRY.md §6.5
+                // (auth.token_exchanged). `SocialTokenExchangeResponse` does not
+                // carry `user_id`, so no distinct_id is available at this site.
+                // Lift once §6.5 is resolved and the service response is extended.
                 let result = social_token_exchange_service::exchange_social_token(
                     &state.db,
                     &state.config,
@@ -902,6 +955,17 @@ async fn token_inner(
                     None,
                     None,
                     None,
+                );
+
+                emit_event(
+                    state.telemetry.as_deref(),
+                    &result.user_id,
+                    None,
+                    tele,
+                    TelemetryEvent::AuthTokenExchanged {
+                        subject_token_type: subject_token_type.to_string(),
+                        exchange_provider: None,
+                    },
                 );
 
                 Ok(Json(TokenResponse {
@@ -1257,6 +1321,10 @@ pub struct RegisterClientResponse {
 /// RFC 7591 Dynamic Client Registration. MCP clients (Cursor, Claude Code, etc.)
 /// call this endpoint to register themselves before starting the OAuth flow.
 /// Only public clients (PKCE-based, no secret) are created via this endpoint.
+// TODO(telemetry): dynamic registration has no user_id. RFC 7591 DCR is an
+// unauthenticated endpoint, so there is no `AuthUser` from which to derive a
+// distinct_id. `OauthClientRegistered` is emitted from the authenticated
+// developer_apps path only.
 pub async fn register_client(
     State(state): State<AppState>,
     Json(body): Json<RegisterClientRequest>,

@@ -15,6 +15,7 @@ use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoi
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
 use crate::services::{approval_service, audit_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Response types ---
 
@@ -637,6 +638,7 @@ pub async fn get_request_status(
 pub async fn create_request(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<CreateToolApprovalRequest>,
 ) -> AppResult<(axum::http::StatusCode, Json<CreateApprovalResponse>)> {
     // Validate tool_name
@@ -700,6 +702,25 @@ pub async fn create_request(
         auth_user.api_key_name.clone(),
     );
 
+    // Telemetry: approval.requested. `channel` defaults to "in_app" when the
+    // request has no denormalized notification channel (the field is set by
+    // the service during channel fan-out, and may be absent for requests
+    // that routed in-app only).
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ApprovalRequested {
+            service_slug: request.service_slug.clone(),
+            mode: request.approval_mode.as_str().to_string(),
+            channel: request
+                .notification_channel
+                .clone()
+                .unwrap_or_else(|| "in_app".to_string()),
+        },
+    );
+
     Ok((
         axum::http::StatusCode::CREATED,
         Json(CreateApprovalResponse {
@@ -717,6 +738,7 @@ pub async fn decide_request(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(request_id): Path<String>,
+    tele: TelemetryContext,
     headers: HeaderMap,
     Json(body): Json<DecideRequest>,
 ) -> AppResult<Json<DecideResponse>> {
@@ -768,6 +790,57 @@ pub async fn decide_request(
         None,
         None,
         None,
+    );
+
+    // Telemetry: approval.decided. Only the web decision path is in scope
+    // for this handler, so `decided_via = "web"`. `decision_ms` measures
+    // wall-clock latency from request creation to now, clamped non-negative
+    // in case of clock skew.
+    let decision_ms = (chrono::Utc::now() - updated.created_at)
+        .num_milliseconds()
+        .max(0) as u64;
+    let decision = if body.approved {
+        "approved"
+    } else {
+        "rejected"
+    };
+    // `decided_via` names the surface that decided the approval. API-key
+    // auth always means agent, regardless of header. Otherwise fall back
+    // to the `X-NyxID-Client` header via `tele.surface`. Match
+    // `emit_event`'s surface-resolution order so the property stays
+    // consistent with PostHog's `surface` computed property.
+    // `TelemetryContext.surface` never carries "agent" -- that override
+    // only happens inside `emit_event()` when `api_key_id` is Some --
+    // so checking `auth_user.api_key_id` directly is required here.
+    let decided_via = if auth_user.api_key_id.is_some() {
+        "agent".to_string()
+    } else {
+        match tele.surface {
+            "mobile" => "mobile".to_string(),
+            "cli" => "cli".to_string(),
+            "sdk" => "sdk".to_string(),
+            // Default branch covers `ui` (explicit) and `backend`
+            // (unknown header); both are web-UI-class callers for
+            // the purposes of the decision-surface funnel.
+            _ => "web".to_string(),
+        }
+    };
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ApprovalDecided {
+            service_slug: updated.service_slug.clone(),
+            mode: updated.approval_mode.as_str().to_string(),
+            decision: decision.to_string(),
+            decision_ms,
+            channel: updated
+                .notification_channel
+                .clone()
+                .unwrap_or_else(|| "in_app".to_string()),
+            decided_via,
+        },
     );
 
     Ok(Json(DecideResponse {
@@ -852,6 +925,7 @@ pub async fn list_grants(
 pub async fn revoke_grant(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(grant_id): Path<String>,
     Query(query): Query<RevokeGrantQuery>,
 ) -> AppResult<Json<MessageResponse>> {
@@ -876,6 +950,22 @@ pub async fn revoke_grant(
         actor.clone()
     };
 
+    // Pre-fetch the grant so we can resolve a real `service_slug` for the
+    // telemetry emission below. Emitting the raw `grant_id` would be scrubbed
+    // to `[UUID_REDACTED]` by `telemetry::scrub`, leaving the event unusable
+    // for per-service analysis. Best-effort: a transient read error must
+    // never block the revoke itself -- telemetry failure is never a
+    // product failure.
+    let grant_before_revoke = state
+        .db
+        .collection::<crate::models::approval_grant::ApprovalGrant>(
+            crate::models::approval_grant::COLLECTION_NAME,
+        )
+        .find_one(mongodb::bson::doc! { "_id": &grant_id, "user_id": &owner_user_id })
+        .await
+        .ok()
+        .flatten();
+
     approval_service::revoke_grant(&state.db, &owner_user_id, &grant_id).await?;
 
     audit_service::log_async(
@@ -890,6 +980,50 @@ pub async fn revoke_grant(
         None,
         None,
         None,
+    );
+
+    // Resolve a meaningful service_slug. Approval grants store `service_id`
+    // as either a `UserService` UUID (custom per-user service) or a
+    // catalog `DownstreamService` UUID (catalog-backed service). Try
+    // UserService first, then DownstreamService. Fall back to the raw
+    // `service_id` on any error or miss. ALL lookups are best-effort:
+    // the grant has already been revoked by the service call above,
+    // and a telemetry-only slug failure must never turn a successful
+    // revoke into a 500 to the client.
+    let service_slug = match grant_before_revoke {
+        Some(grant) => {
+            let user_lookup = crate::services::user_service_service::find_user_service_by_id(
+                &state.db,
+                &grant.service_id,
+            )
+            .await
+            .ok()
+            .flatten();
+            if let Some(svc) = user_lookup {
+                svc.slug
+            } else {
+                let downstream_lookup = state
+                    .db
+                    .collection::<crate::models::downstream_service::DownstreamService>(
+                        crate::models::downstream_service::COLLECTION_NAME,
+                    )
+                    .find_one(mongodb::bson::doc! { "_id": &grant.service_id })
+                    .await
+                    .ok()
+                    .flatten();
+                downstream_lookup
+                    .map(|svc| svc.slug)
+                    .unwrap_or(grant.service_id)
+            }
+        }
+        None => grant_id.clone(),
+    };
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ApprovalGrantRevoked { service_slug },
     );
 
     Ok(Json(MessageResponse {
@@ -1375,6 +1509,7 @@ pub async fn list_service_configs(
 pub async fn set_service_config(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(service_id): Path<String>,
     Query(query): Query<ServiceApprovalConfigQuery>,
     Json(body): Json<SetServiceApprovalConfigRequest>,
@@ -1435,6 +1570,25 @@ pub async fn set_service_config(
         None,
         None,
         None,
+    );
+
+    // Telemetry: approval.config_updated. Prefer the UserService slug for
+    // display; fall back to the stored effective_service_id (catalog id or
+    // UserService id) when there is no UserService-space slug available.
+    let telemetry_service_slug = target
+        .user_service_slug
+        .clone()
+        .unwrap_or_else(|| target.effective_service_id.clone());
+    let telemetry_mode = config.approval_mode.as_str().to_string();
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ApprovalConfigUpdated {
+            service_slug: telemetry_service_slug,
+            mode: telemetry_mode,
+        },
     );
 
     Ok(Json(ServiceApprovalConfigItem {

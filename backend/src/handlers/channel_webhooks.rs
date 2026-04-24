@@ -18,10 +18,13 @@ use axum::{
 use mongodb::bson::doc;
 
 use crate::AppState;
-use crate::handlers::channel_bots::resolve_adapter;
+use crate::handlers::channel_bots::{hash_conversation_id, resolve_adapter};
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::services::channel_platform::PlatformVerifySecrets;
 use crate::services::{channel_bot_service, channel_relay_service, channel_routing_service};
+use crate::telemetry::{
+    TelemetryClient, TelemetryContext, TelemetryEvent, emit_event, should_sample_event,
+};
 
 struct WebhookHandlerDeps<'a> {
     db: &'a crate::db::DbHandle,
@@ -31,6 +34,7 @@ struct WebhookHandlerDeps<'a> {
     encryption_keys: &'a crate::crypto::aes::EncryptionKeys,
     token_exchange_cache:
         &'a std::sync::Arc<crate::services::provider_token_exchange_service::TokenExchangeCache>,
+    telemetry: Option<&'a TelemetryClient>,
 }
 
 impl<'a> From<&'a AppState> for WebhookHandlerDeps<'a> {
@@ -42,6 +46,7 @@ impl<'a> From<&'a AppState> for WebhookHandlerDeps<'a> {
             http_client: &value.http_client,
             encryption_keys: value.encryption_keys.as_ref(),
             token_exchange_cache: &value.token_exchange_cache,
+            telemetry: value.telemetry.as_deref(),
         }
     }
 }
@@ -410,6 +415,29 @@ async fn handle_webhook_inner_with_deps(
                 continue;
             }
         };
+
+        // Telemetry: channel.message_received is sampled at 10% per
+        // docs/TELEMETRY.md §6.5. Sampling key is the conversation hash,
+        // NOT the user id: hashing on user_id would make each owner either
+        // 100% in or 100% out of the sample and skew the funnel toward
+        // whichever high-volume owner happens to hash in. Conversation-
+        // keyed sampling gives ~10% of messages per conversation, which
+        // averages to ~10% across owners. Webhook ingress has no AuthUser /
+        // TelemetryContext — use default context and None for api_key_id.
+        let distinct_id = bot.user_id.clone();
+        let conversation_hash = hash_conversation_id(&route.conversation.platform_conversation_id);
+        if should_sample_event("channel.message_received", &conversation_hash, 10) {
+            emit_event(
+                state.telemetry,
+                &distinct_id,
+                None,
+                &TelemetryContext::default(),
+                TelemetryEvent::ChannelMessageReceived {
+                    platform: bot.platform.clone(),
+                    conversation_id_hash: conversation_hash,
+                },
+            );
+        }
 
         // Look up the API key for signing and name attribution
         let api_key = match state
@@ -909,6 +937,7 @@ mod tests {
             http_client: &http_client,
             encryption_keys: &encryption_keys,
             token_exchange_cache: &token_exchange_cache,
+            telemetry: None,
         };
 
         let result = handle_webhook_inner_with_deps(

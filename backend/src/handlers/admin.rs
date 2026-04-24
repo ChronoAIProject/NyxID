@@ -13,6 +13,7 @@ use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 use crate::services::{admin_user_service, audit_service, consent_service, oauth_client_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
 
@@ -440,6 +441,7 @@ pub async fn set_user_role(
 pub async fn set_user_status(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     headers: HeaderMap,
     Path(user_id): Path<String>,
     Json(body): Json<SetStatusRequest>,
@@ -462,6 +464,22 @@ pub async fn set_user_status(
         extract_user_agent(&headers),
         None,
         None,
+    );
+
+    // `is_active=false` is the suspend path; `is_active=true` is unsuspend.
+    // There is no dedicated suspend/unsuspend route — this single endpoint
+    // serves both, so the emitted variant mirrors the applied bool.
+    let event = if body.is_active {
+        TelemetryEvent::AdminUserUnsuspended
+    } else {
+        TelemetryEvent::AdminUserSuspended
+    };
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        event,
     );
 
     Ok(Json(StatusUpdateResponse {
@@ -658,6 +676,7 @@ pub async fn revoke_user_sessions(
 pub async fn list_audit_log(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Query(query): Query<AuditLogQuery>,
 ) -> AppResult<Json<AuditLogListResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -673,6 +692,23 @@ pub async fn list_audit_log(
     if let Some(ref api_key_id) = query.api_key_id {
         filter.insert("api_key_id", api_key_id);
     }
+
+    // Summarize filters as an opaque marker list rather than the raw IDs
+    // (which are PII-adjacent). `None` when no filter was applied.
+    let filter_marker: Option<String> = {
+        let mut parts: Vec<&str> = Vec::new();
+        if query.user_id.is_some() {
+            parts.push("user_id");
+        }
+        if query.api_key_id.is_some() {
+            parts.push("api_key_id");
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(","))
+        }
+    };
 
     let total = state
         .db
@@ -705,6 +741,16 @@ pub async fn list_audit_log(
             created_at: e.created_at.to_rfc3339(),
         })
         .collect();
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminAuditLogViewed {
+            filter: filter_marker,
+        },
+    );
 
     Ok(Json(AuditLogListResponse {
         entries: items,
@@ -753,6 +799,7 @@ pub struct OAuthClientListResponse {
 pub async fn create_oauth_client(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<CreateOAuthClientRequest>,
 ) -> AppResult<Json<OAuthClientResponse>> {
     require_admin(&state, &auth_user).await?;
@@ -816,6 +863,14 @@ pub async fn create_oauth_client(
         client_name = %client.client_name,
         created_by = %user_id,
         "OAuth client created"
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminOauthClientRegistered,
     );
 
     Ok(Json(OAuthClientResponse {

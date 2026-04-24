@@ -12,6 +12,7 @@ use crate::handlers::admin_helpers::{extract_ip, extract_user_agent, require_adm
 use crate::models::service_account::ServiceAccount;
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, org_service, service_account_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 /// Gate access to a service account by either global admin OR admin of
 /// the SA's owning org. Org-owned SAs (`owner_user_id` points at a
@@ -164,6 +165,7 @@ fn sa_to_item(sa: ServiceAccount) -> ServiceAccountItem {
 pub async fn create_service_account(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     headers: HeaderMap,
     Json(body): Json<CreateServiceAccountRequest>,
 ) -> AppResult<Json<CreateServiceAccountResponse>> {
@@ -218,6 +220,14 @@ pub async fn create_service_account(
         extract_user_agent(&headers),
         None,
         None,
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminServiceAccountCreated,
     );
 
     Ok(Json(CreateServiceAccountResponse {
@@ -338,6 +348,7 @@ pub async fn update_service_account(
 pub async fn delete_service_account(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     headers: HeaderMap,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<AdminActionResponse>> {
@@ -359,6 +370,14 @@ pub async fn delete_service_account(
         None,
     );
 
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminServiceAccountDeleted,
+    );
+
     Ok(Json(AdminActionResponse {
         message: "Service account deactivated".to_string(),
     }))
@@ -368,6 +387,7 @@ pub async fn delete_service_account(
 pub async fn rotate_secret(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     headers: HeaderMap,
     Path(sa_id): Path<String>,
 ) -> AppResult<Json<RotateSecretResponse>> {
@@ -388,6 +408,14 @@ pub async fn rotate_secret(
         extract_user_agent(&headers),
         None,
         None,
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminServiceAccountRotated,
     );
 
     Ok(Json(RotateSecretResponse {

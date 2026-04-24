@@ -15,6 +15,7 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 use crate::mw::auth::AuthUser;
 use crate::services::user_service_service::{CredentialSource, UserServiceWithSource};
 use crate::services::{node_service, org_service, unified_key_service, user_service_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 /// Resolve which user_id owns this user service and whether the actor may
 /// modify it (directly or as an org admin). Returns the effective owner_id
@@ -223,6 +224,7 @@ pub async fn list_user_services(
 pub async fn update_user_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(service_id): Path<String>,
     Json(body): Json<UpdateUserServiceRequest>,
 ) -> AppResult<Json<UserServiceResponse>> {
@@ -235,6 +237,12 @@ pub async fn update_user_service(
     // Load current state before update (needed for node binding sync).
     let current =
         user_service_service::get_user_service(&state.db, &user_id_str, &service_id).await?;
+    // Capture the pre-update User-Agent override so we can emit
+    // `service.user_agent_customized` only when the value actually changes
+    // post-update (body.custom_user_agent.is_some() alone isn't enough --
+    // the caller may re-send the same value).
+    let previous_custom_user_agent = current.custom_user_agent.clone();
+    let custom_user_agent_field_present = body.custom_user_agent.is_some();
 
     let identity = if body.identity_propagation_mode.is_some()
         || body.identity_include_user_id.is_some()
@@ -318,6 +326,23 @@ pub async fn update_user_service(
     }
 
     let svc = user_service_service::get_user_service(&state.db, &user_id_str, &service_id).await?;
+
+    // Telemetry: service.user_agent_customized -- emit only when the
+    // User-Agent override actually changed (set, cleared, or swapped value).
+    // A PUT with no `custom_user_agent` field or with the same string as
+    // before is not a "customization" event.
+    if custom_user_agent_field_present && svc.custom_user_agent != previous_custom_user_agent {
+        emit_event(
+            state.telemetry.as_deref(),
+            &actor,
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::ServiceUserAgentCustomized {
+                provider_slug: svc.slug.clone(),
+            },
+        );
+    }
+
     Ok(Json(user_service_response(svc)))
 }
 
@@ -338,6 +363,7 @@ pub async fn update_user_service(
 pub async fn delete_user_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(service_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let actor = auth_user.user_id.to_string();
@@ -346,6 +372,8 @@ pub async fn delete_user_service(
     // Load current state to clean up node binding.
     let current =
         user_service_service::get_user_service(&state.db, &user_id_str, &service_id).await?;
+
+    let service_slug = current.slug.clone();
 
     user_service_service::deactivate_user_service(&state.db, &user_id_str, &actor, &service_id)
         .await?;
@@ -360,6 +388,18 @@ pub async fn delete_user_service(
         current.node_id.as_deref(),
     )
     .await?;
+
+    // Telemetry: service.disconnected. `provider_slug` is the UserService
+    // slug, captured pre-deactivation above.
+    emit_event(
+        state.telemetry.as_deref(),
+        &actor,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ServiceDisconnected {
+            provider_slug: service_slug,
+        },
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }

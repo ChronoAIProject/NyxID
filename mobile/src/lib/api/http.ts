@@ -344,6 +344,7 @@ function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): Challen
     from_org_policy: fromOrgPolicy,
     org_id: orgId,
     org_name: orgName,
+    service_slug: item.service_slug,
   };
 }
 
@@ -497,29 +498,19 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
   const requiresAuth = options.requiresAuth ?? true;
   const retryOnAuthFailure = options.retryOnAuthFailure ?? true;
 
-  // Surface identification for server-side telemetry. Only attached
-  // when a telemetry DSN is present OR share-back is opted in via
-  // expo-config extras — keeps the default-off build byte-identical
-  // to a pre-telemetry build. Mirrors the precedence ladder on backend
-  // and CLI so all surfaces are symmetric.
-  const telemetryExtra = (Constants.expoConfig?.extra ?? {}) as Record<
-    string,
-    unknown
-  >;
-  const dsnConfigured =
-    typeof telemetryExtra.TELEMETRY_DSN === "string" &&
-    telemetryExtra.TELEMETRY_DSN.length > 0;
-  const shareBackOn =
-    telemetryExtra.NYXID_SHARE_ANALYTICS === "true" ||
-    telemetryExtra.NYXID_SHARE_ANALYTICS === true;
-  const telemetryHeaders: Record<string, string> =
-    dsnConfigured || shareBackOn
-      ? {
-          "X-NyxID-Client": "mobile",
-          "X-NyxID-Client-Version":
-            (Constants.expoConfig?.version as string | undefined) ?? "dev",
-        }
-      : {};
+  // Surface identification for server-side telemetry. Sent on every
+  // request regardless of the mobile client's own telemetry config:
+  // the header identifies the calling app, not the telemetry state.
+  // Backend may be opted in for analytics even when the mobile client
+  // is opted out locally, and the surface attribution still needs to
+  // read "mobile" for those backend-emitted events -- otherwise
+  // mobile-driven auth / approval / device funnels collapse into
+  // `surface="backend"` in the hosted deploy.
+  const telemetryHeaders: Record<string, string> = {
+    "X-NyxID-Client": "mobile",
+    "X-NyxID-Client-Version":
+      (Constants.expoConfig?.version as string | undefined) ?? "dev",
+  };
 
   const headers: Record<string, string> = {
     Accept: "application/json",

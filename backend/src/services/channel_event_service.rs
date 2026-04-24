@@ -43,6 +43,7 @@ use crate::services::channel_relay_service::{
 };
 use crate::services::channel_routing_service;
 use crate::services::event_dedup_cache::EventDedupCache;
+use crate::telemetry::{TelemetryClient, TelemetryContext, TelemetryEvent, emit_event};
 
 /// Device event envelope as accepted from the HTTP client.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -72,6 +73,8 @@ pub async fn forward_event(
     config: &AppConfig,
     rate_limiter: &PerChannelEventLimiter,
     dedup_cache: &Arc<EventDedupCache>,
+    telemetry: Option<&TelemetryClient>,
+    tele: &TelemetryContext,
     auth_user: &AuthUser,
     conversation_id: &str,
     envelope: &EventEnvelope,
@@ -190,6 +193,22 @@ pub async fn forward_event(
             OUTCOME_DEDUPED,
         )
         .await;
+        // Telemetry: device channel event received (deduplicated path).
+        // Distinct id is the conversation owner's user_id. This endpoint
+        // is API-key-authenticated, so thread `api_key_id` through: that
+        // triggers the `surface="agent"` override in `emit_event` and
+        // preserves per-agent attribution for `channel.event_received`.
+        emit_event(
+            telemetry,
+            &conversation.user_id.to_string(),
+            Some(api_key_id),
+            tele,
+            TelemetryEvent::ChannelEventReceived {
+                source: envelope.source.clone(),
+                event_type: envelope.event_type.clone(),
+                deduplicated: true,
+            },
+        );
         audit(
             db,
             auth_user,
@@ -313,6 +332,21 @@ pub async fn forward_event(
                 OUTCOME_DELIVERED,
             )
             .await;
+            // Telemetry: device channel event received (delivered path).
+            // Distinct id is the conversation owner's user_id. Thread the
+            // authenticated api_key_id to preserve the `surface="agent"`
+            // attribution -- this endpoint is API-key-authenticated.
+            emit_event(
+                telemetry,
+                &conversation.user_id.to_string(),
+                Some(api_key_id),
+                tele,
+                TelemetryEvent::ChannelEventReceived {
+                    source: envelope.source.clone(),
+                    event_type: envelope.event_type.clone(),
+                    deduplicated: false,
+                },
+            );
             audit(
                 db,
                 auth_user,

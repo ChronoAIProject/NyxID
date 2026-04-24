@@ -516,6 +516,7 @@ async fn main() {
     let http_for_expiry = state.http_client.clone();
     let fcm_for_expiry = state.fcm_auth.clone();
     let apns_for_expiry = state.apns_auth.clone();
+    let telemetry_for_expiry = state.telemetry.clone();
     let expiry_interval_secs = config.approval_expiry_interval_secs;
     tokio::spawn(async move {
         let mut interval =
@@ -533,6 +534,7 @@ async fn main() {
                 &http_for_expiry,
                 fcm_for_expiry.as_deref(),
                 apns_for_expiry.as_deref(),
+                telemetry_for_expiry.as_ref(),
             )
             .await
             {

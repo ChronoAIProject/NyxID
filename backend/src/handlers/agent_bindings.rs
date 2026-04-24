@@ -17,10 +17,15 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 use crate::mw::auth::AuthUser;
 use crate::services::org_service::OwnerAccess;
 use crate::services::{agent_binding_service, audit_service, org_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 struct BindingOwnerAccess {
     user_id: String,
     access: OwnerAccess,
+    /// The API key's platform label (e.g. "claude-code", "codex"). Cached
+    /// here so telemetry emits can avoid a second `ApiKey` fetch; the
+    /// key was already loaded in `resolve_binding_owner`.
+    platform: Option<String>,
 }
 
 /// Resolve the effective owner *and* the caller's `OwnerAccess` for a
@@ -58,6 +63,7 @@ async fn resolve_binding_owner(
     Ok(BindingOwnerAccess {
         user_id: key.user_id,
         access,
+        platform: key.platform,
     })
 }
 
@@ -233,6 +239,7 @@ pub struct DeleteBindingResponse {
 pub async fn create_binding(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(key_id): Path<String>,
     Json(body): Json<CreateBindingRequest>,
 ) -> AppResult<Json<BindingResponse>> {
@@ -244,8 +251,11 @@ pub async fn create_binding(
     // `user_service_id` and `user_api_key_id` also belong to the same
     // owner, which is the intended invariant: an org-owned agent can
     // only bind to org-owned services and credentials, not personal ones.
-    let BindingOwnerAccess { user_id, access } =
-        resolve_binding_owner(&state, &actor, &key_id, true).await?;
+    let BindingOwnerAccess {
+        user_id,
+        access,
+        platform,
+    } = resolve_binding_owner(&state, &actor, &key_id, true).await?;
     // Per-binding scope check: a scoped admin can only bind services in
     // their `allowed_service_ids` set. The body's `user_service_id` is
     // already in `UserService.id` space, so it can be checked directly.
@@ -278,7 +288,24 @@ pub async fn create_binding(
     );
 
     let mut responses = enrich_bindings(&state, vec![binding]).await?;
-    Ok(Json(responses.remove(0)))
+    let response = responses.remove(0);
+
+    // Telemetry: agent_binding.created. The enriched response already
+    // carries the resolved `service_slug` (falling back to the raw id when
+    // the service row is missing), so reuse it instead of issuing another
+    // lookup.
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AgentBindingCreated {
+            platform,
+            service_slug: response.service_slug.clone(),
+        },
+    );
+
+    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -304,8 +331,11 @@ pub async fn list_bindings(
     // list bindings on an org-owned key. Scope filtering still applies:
     // a scoped admin only sees bindings whose `user_service_id` is in
     // their `allowed_service_ids` set.
-    let BindingOwnerAccess { user_id, access } =
-        resolve_binding_owner(&state, &actor, &key_id, false).await?;
+    let BindingOwnerAccess {
+        user_id,
+        access,
+        platform: _,
+    } = resolve_binding_owner(&state, &actor, &key_id, false).await?;
     let bindings: Vec<_> = agent_binding_service::list_bindings(&state.db, &user_id, &key_id)
         .await?
         .into_iter()
@@ -332,13 +362,17 @@ pub async fn list_bindings(
 pub async fn delete_binding(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path((key_id, binding_id)): Path<(String, String)>,
 ) -> AppResult<Json<DeleteBindingResponse>> {
     auth_user.ensure_write_scope()?;
 
     let actor = auth_user.user_id.to_string();
-    let BindingOwnerAccess { user_id, access } =
-        resolve_binding_owner(&state, &actor, &key_id, true).await?;
+    let BindingOwnerAccess {
+        user_id,
+        access,
+        platform,
+    } = resolve_binding_owner(&state, &actor, &key_id, true).await?;
     // Look up the binding to enforce per-binding scope: a scoped admin
     // can only delete bindings whose `user_service_id` is in their
     // `allowed_service_ids` set.
@@ -347,6 +381,21 @@ pub async fn delete_binding(
     if !access.allows_resource(&binding.user_service_id) {
         return Err(AppError::NotFound("Binding not found".to_string()));
     }
+    // Resolve the UserService slug BEFORE the delete so the telemetry emit
+    // below has a stable slug. Once the cascade cleanup runs we'd have to
+    // fall back to the raw id; doing the lookup up-front avoids that.
+    // Best-effort: a transient read error here must never turn a
+    // successful binding load into a failed DELETE. Fall back to the
+    // raw id instead.
+    let service_slug_for_telemetry: String = state
+        .db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! { "_id": &binding.user_service_id })
+        .await
+        .ok()
+        .flatten()
+        .map(|svc| svc.slug)
+        .unwrap_or_else(|| binding.user_service_id.clone());
     agent_binding_service::delete_binding(&state.db, &user_id, &key_id, &binding_id).await?;
 
     audit_service::log_async(
@@ -361,6 +410,20 @@ pub async fn delete_binding(
         None,
         auth_user.api_key_id.clone(),
         auth_user.api_key_name.clone(),
+    );
+
+    // Telemetry: agent_binding.deleted. Slug + platform resolved before
+    // the cascade so the emit carries meaningful values even if the
+    // `UserService` row is gone by the time the event fires.
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AgentBindingDeleted {
+            platform,
+            service_slug: service_slug_for_telemetry,
+        },
     );
 
     Ok(Json(DeleteBindingResponse {

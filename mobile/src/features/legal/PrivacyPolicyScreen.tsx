@@ -5,6 +5,7 @@ import { RootStackParamList } from "../../app/AppNavigator";
 
 import { BlurBackButton } from "../../components/BlurBackButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
+import { capture } from "../../lib/telemetry";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { createFlowStyles } from "../../theme/flowStyles";
@@ -104,23 +105,31 @@ const PRIVACY_SECTIONS: LegalSection[] = [
   {
     title: "10. Local Storage",
     paragraphs: [
-      "The App stores authentication tokens and push token references using Expo Secure Store and platform-protected local storage. No tracking cookies, advertising identifiers, or analytics SDKs are used. The App does not perform cross-app tracking.",
+      "The App stores authentication tokens and push token references using Expo Secure Store and platform-protected local storage. The App does not use tracking cookies, advertising identifiers, or cross-app tracking.",
     ],
   },
   {
-    title: "11. Children's Privacy",
+    title: "11. Product Analytics",
+    paragraphs: [
+      "When you opt in (and only when you opt in), the App uses a product-analytics service (PostHog) to record anonymized usage events such as which screens you visit, which buttons you tap, and whether push notifications are received. Events carry your NyxID user identifier so we can measure funnels like sign-up to first approval. We strip persistent hardware identifiers (device id, device name) before any event leaves the device. Raw deep-link URLs, notification bodies, and any tokens are never captured.",
+      "You can toggle analytics on or off at any time from Settings. Turning it off clears your local identifier and stops new events from this device immediately. NyxID's backend may still emit events attributable to your account while you use the service (for example, when your app completes an approval or registers a push token); account-level opt-out for backend events is tracked as a follow-up. Requesting account deletion also fires a deletion signal to the analytics provider so historical events tied to your identifier are removed.",
+      "Self-hosters of NyxID can run the App with analytics disabled by default, or point it at their own analytics project. The App never transmits events to any third party when consent is off.",
+    ],
+  },
+  {
+    title: "12. Children's Privacy",
     paragraphs: [
       "The App is not intended for use by children under 16 (or the applicable minimum age in your jurisdiction). We do not knowingly collect data from children. If you believe a child has provided data to us, please contact us for removal.",
     ],
   },
   {
-    title: "12. Policy Updates",
+    title: "13. Policy Updates",
     paragraphs: [
       "We may update this policy to reflect changes in our practices or legal requirements. Material changes will be indicated by a new effective date. Continued use of the App after changes constitutes acceptance.",
     ],
   },
   {
-    title: "13. Contact",
+    title: "14. Contact",
     paragraphs: ["Privacy inquiries: privacy@chrono-ai.fun"],
   },
 ];
@@ -133,7 +142,15 @@ export function PrivacyPolicyScreen({ navigation }: Props) {
   return (
     <ScreenContainer>
       <View style={styles.stickyBack}>
-        <BlurBackButton onPress={() => navigation.goBack()} />
+        <BlurBackButton
+          onPress={() => {
+            capture({
+              name: "ui.mobile_nav_target_opened",
+              props: { target: "privacy_back", source: "back" },
+            });
+            navigation.goBack();
+          }}
+        />
       </View>
       <ScrollView
         style={flowStyles.content}

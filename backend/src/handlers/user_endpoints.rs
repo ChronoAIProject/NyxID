@@ -15,6 +15,7 @@ use crate::mw::auth::AuthUser;
 use crate::services::{
     api_docs_service, openapi_parser, org_service, user_endpoint_service, user_service_service,
 };
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 /// Resolve which user_id owns this endpoint and whether the actor may
 /// modify it. Returns the effective owner_id (may be an org user id) for
@@ -154,6 +155,7 @@ pub async fn list_endpoints(
 pub async fn update_endpoint(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(endpoint_id): Path<String>,
     Json(body): Json<UpdateEndpointRequest>,
 ) -> AppResult<Json<EndpointResponse>> {
@@ -176,6 +178,25 @@ pub async fn update_endpoint(
     .await?;
 
     let ep = user_endpoint_service::get_endpoint(&state.db, &owner_id, &endpoint_id).await?;
+
+    // Telemetry: endpoint.updated. `endpoint_type` is "catalog" when this
+    // endpoint was auto-provisioned from a catalog template (i.e. has a
+    // `catalog_service_id`), else "custom" for user-defined URLs.
+    let endpoint_type = if ep.catalog_service_id.is_some() {
+        "catalog"
+    } else {
+        "custom"
+    };
+    emit_event(
+        state.telemetry.as_deref(),
+        &actor,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::EndpointUpdated {
+            endpoint_type: endpoint_type.to_string(),
+        },
+    );
+
     Ok(Json(endpoint_response(ep)))
 }
 
@@ -196,11 +217,40 @@ pub async fn update_endpoint(
 pub async fn delete_endpoint(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(endpoint_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_endpoint_write_owner(&state, &actor, &endpoint_id).await?;
+
+    // Capture endpoint_type pre-delete so telemetry can classify custom vs
+    // catalog-derived endpoints even though the record will be gone after
+    // the delete call.
+    let endpoint_type = user_endpoint_service::get_endpoint(&state.db, &owner_id, &endpoint_id)
+        .await
+        .ok()
+        .map(|ep| {
+            if ep.catalog_service_id.is_some() {
+                "catalog"
+            } else {
+                "custom"
+            }
+        })
+        .unwrap_or("custom");
+
     user_endpoint_service::delete_endpoint(&state.db, &owner_id, &endpoint_id).await?;
+
+    // Telemetry: endpoint.deleted.
+    emit_event(
+        state.telemetry.as_deref(),
+        &actor,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::EndpointDeleted {
+            endpoint_type: endpoint_type.to_string(),
+        },
+    );
+
     Ok(StatusCode::NO_CONTENT)
 }
 

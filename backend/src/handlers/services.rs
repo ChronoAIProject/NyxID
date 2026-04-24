@@ -21,6 +21,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
 use crate::services::{api_docs_service, audit_service, oauth_client_service, ssh_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 use super::services_helpers::{
     DeleteServiceResponse, fetch_service, require_admin_or_creator, service_to_response,
@@ -573,6 +574,7 @@ pub async fn list_services(
 pub async fn create_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<CreateServiceRequest>,
 ) -> AppResult<Json<ServiceResponse>> {
     if body.name.is_empty() {
@@ -979,6 +981,16 @@ pub async fn create_service(
         None,
     );
 
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminServiceCreated {
+            slug: new_service.slug.clone(),
+        },
+    );
+
     Ok(Json(service_to_response(new_service)))
 }
 
@@ -1133,6 +1145,7 @@ pub async fn get_service(
 pub async fn update_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(service_id): Path<String>,
     Json(body): Json<UpdateServiceRequest>,
 ) -> AppResult<Json<ServiceResponse>> {
@@ -1775,6 +1788,17 @@ pub async fn update_service(
 
     // Re-fetch the updated service to return fresh data
     let updated = fetch_service(&state, &service_id).await?;
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminServiceUpdated {
+            slug: updated.slug.clone(),
+        },
+    );
+
     Ok(Json(service_to_response(updated)))
 }
 

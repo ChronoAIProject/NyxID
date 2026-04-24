@@ -29,6 +29,66 @@ use crate::services::{
     identity_service, llm_usage_service, node_metrics_service, node_routing_service, node_service,
     notification_service, proxy_service, sse_parser, user_service_service,
 };
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+
+/// Map an `AppError` surfaced by the proxy handler to the `(status, error_code)`
+/// pair used by `TelemetryEvent::ProxyError`.
+///
+/// Scoped to the variants the proxy handler actually emits. Unknown variants
+/// fall back to `(500, 0)` per the §5.1 "use 0 if no direct mapping" rule —
+/// the real `AppError::error_code()` is crate-private, and we intentionally
+/// don't widen its visibility just for telemetry. Keep this list in sync with
+/// the `return Err(...)` sites in this file.
+fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
+    match err {
+        AppError::BadRequest(_) => (400, 1000),
+        AppError::Unauthorized(_) => (401, 1001),
+        AppError::Forbidden(_) => (403, 1002),
+        AppError::NotFound(_) => (404, 1003),
+        AppError::RateLimited => (429, 1005),
+        AppError::Internal(_) => (500, 1006),
+        AppError::DatabaseError(_) => (500, 1007),
+        AppError::ValidationError(_) => (400, 1008),
+        AppError::NodeNotFound(_) => (404, 8000),
+        AppError::NodeOffline(_) => (503, 8001),
+        AppError::NodeProxyTimeout => (504, 8002),
+        AppError::NodeCredentialMissing(_) => (502, 8004),
+        AppError::ApiKeyScopeForbidden(_) => (403, 9000),
+        AppError::ApiKeyScopeInactive => (403, 9001),
+        AppError::ApiKeyScopeNotFound(_) => (404, 9002),
+        AppError::OrgApprovalNoAdmin(_) => (503, 8106),
+        AppError::ApprovalRequired { .. } => (403, 7000),
+        AppError::ApprovalFailed { .. } => (403, 7001),
+        // Catch-all: unknown / less-common variants emit a 500 + error_code=0
+        // placeholder. This is acceptable per the telemetry spec.
+        _ => (500, 0),
+    }
+}
+
+/// Fire-and-forget emission of `TelemetryEvent::ProxyError` from any proxy
+/// error branch. `resolved_slug` should be the slug of the resolved
+/// `UserService` / `DownstreamService`, or empty if resolution never
+/// succeeded — NEVER a UUID from the route path.
+fn emit_proxy_error_telemetry(
+    state: &AppState,
+    auth_user: &AuthUser,
+    tele: &TelemetryContext,
+    resolved_slug: &str,
+    err: &AppError,
+) {
+    let (status, error_code) = proxy_error_telemetry_fields(err);
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        tele,
+        TelemetryEvent::ProxyError {
+            service_slug: resolved_slug.to_string(),
+            error_code,
+            status,
+        },
+    );
+}
 
 /// Response headers that are safe to forward back to the client.
 /// Uses an allowlist to prevent leaking internal headers from downstream services.
@@ -266,8 +326,37 @@ fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String 
 pub async fn proxy_request(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path((service_id, path)): Path<(String, String)>,
     request: Request<Body>,
+) -> AppResult<Response> {
+    // Emit `proxy.error` on any error branch reached via this handler. The
+    // inner function threads `resolved_slug` through so we can attach a
+    // real slug (never a UUID from the route path) even when the error
+    // happens after service resolution. See docs/TELEMETRY.md §5.1.
+    let mut resolved_slug = String::new();
+    let result = proxy_request_inner(
+        &state,
+        &auth_user,
+        &service_id,
+        &path,
+        request,
+        &mut resolved_slug,
+    )
+    .await;
+    if let Err(ref err) = result {
+        emit_proxy_error_telemetry(&state, &auth_user, &tele, &resolved_slug, err);
+    }
+    result
+}
+
+async fn proxy_request_inner(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    path: &str,
+    request: Request<Body>,
+    resolved_slug: &mut String,
 ) -> AppResult<Response> {
     auth_user.ensure_rest_proxy_access()?;
 
@@ -284,32 +373,32 @@ pub async fn proxy_request(
             &user_id_str,
             us_id,
             None,
-            Some(&service_id),
+            Some(service_id),
         )
         .await?
         {
             let effective_service_id = resolved.target.service.id.clone();
             if let Some(routing) = &resolved.org_routing {
                 audit_org_routing(
-                    &state,
-                    &auth_user,
+                    state,
+                    auth_user,
                     routing,
                     &resolved.user_service_id,
                     &effective_service_id,
                 );
             } else {
                 audit_personal_routing(
-                    &state,
-                    &auth_user,
+                    state,
+                    auth_user,
                     Some(&resolved.user_service_id),
                     &effective_service_id,
                 );
             }
             return execute_proxy_inner(
-                &state,
-                &auth_user,
+                state,
+                auth_user,
                 &effective_service_id,
-                &path,
+                path,
                 request,
                 Some(PreResolved {
                     target: resolved.target,
@@ -322,6 +411,7 @@ pub async fn proxy_request(
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
                 }),
+                resolved_slug,
             )
             .await;
         }
@@ -337,32 +427,32 @@ pub async fn proxy_request(
         &state.node_ws_manager,
         &user_id_str,
         None,
-        Some(&service_id),
+        Some(service_id),
     )
     .await?
     {
         let effective_service_id = resolved.target.service.id.clone();
         if let Some(routing) = &resolved.org_routing {
             audit_org_routing(
-                &state,
-                &auth_user,
+                state,
+                auth_user,
                 routing,
                 &resolved.user_service_id,
                 &effective_service_id,
             );
         } else {
             audit_personal_routing(
-                &state,
-                &auth_user,
+                state,
+                auth_user,
                 Some(&resolved.user_service_id),
                 &effective_service_id,
             );
         }
         return execute_proxy_inner(
-            &state,
-            &auth_user,
+            state,
+            auth_user,
             &effective_service_id,
-            &path,
+            path,
             request,
             Some(PreResolved {
                 target: resolved.target,
@@ -375,6 +465,7 @@ pub async fn proxy_request(
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
             }),
+            resolved_slug,
         )
         .await;
     }
@@ -382,9 +473,9 @@ pub async fn proxy_request(
     // Fall back to old path. Before we do, block org viewers whose org
     // has any presence for this catalog service from slipping into the
     // legacy approval flow (see ChronoAIProject/NyxID#375).
-    proxy_service::guard_slug_against_viewer_orgs(&state.db, &user_id_str, None, Some(&service_id))
+    proxy_service::guard_slug_against_viewer_orgs(&state.db, &user_id_str, None, Some(service_id))
         .await?;
-    execute_proxy(&state, &auth_user, &service_id, &path, request).await
+    execute_proxy(state, auth_user, service_id, path, request, resolved_slug).await
 }
 
 #[utoipa::path(
@@ -412,8 +503,38 @@ pub async fn proxy_request(
 pub async fn proxy_request_by_slug(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path((slug, path)): Path<(String, String)>,
     request: Request<Body>,
+) -> AppResult<Response> {
+    // Start empty; `proxy_request_by_slug_inner` populates this once the
+    // resolved `UserService`/`DownstreamService` is available. We
+    // intentionally do NOT seed with the path-param slug: telemetry §5.1
+    // requires a resolved slug or empty, and the path param is unvalidated
+    // user input until resolution succeeds.
+    let mut resolved_slug = String::new();
+    let result = proxy_request_by_slug_inner(
+        &state,
+        &auth_user,
+        &slug,
+        &path,
+        request,
+        &mut resolved_slug,
+    )
+    .await;
+    if let Err(ref err) = result {
+        emit_proxy_error_telemetry(&state, &auth_user, &tele, &resolved_slug, err);
+    }
+    result
+}
+
+async fn proxy_request_by_slug_inner(
+    state: &AppState,
+    auth_user: &AuthUser,
+    slug: &str,
+    path: &str,
+    request: Request<Body>,
+    resolved_slug: &mut String,
 ) -> AppResult<Response> {
     auth_user.ensure_rest_proxy_access()?;
 
@@ -429,7 +550,7 @@ pub async fn proxy_request_by_slug(
             &state.encryption_keys,
             &user_id_str,
             us_id,
-            Some(&slug),
+            Some(slug),
             None,
         )
         .await?
@@ -437,25 +558,25 @@ pub async fn proxy_request_by_slug(
             let effective_service_id = resolved.target.service.id.clone();
             if let Some(routing) = &resolved.org_routing {
                 audit_org_routing(
-                    &state,
-                    &auth_user,
+                    state,
+                    auth_user,
                     routing,
                     &resolved.user_service_id,
                     &effective_service_id,
                 );
             } else {
                 audit_personal_routing(
-                    &state,
-                    &auth_user,
+                    state,
+                    auth_user,
                     Some(&resolved.user_service_id),
                     &effective_service_id,
                 );
             }
             return execute_proxy_inner(
-                &state,
-                &auth_user,
+                state,
+                auth_user,
                 &effective_service_id,
-                &path,
+                path,
                 request,
                 Some(PreResolved {
                     target: resolved.target,
@@ -468,6 +589,7 @@ pub async fn proxy_request_by_slug(
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
                 }),
+                resolved_slug,
             )
             .await;
         }
@@ -482,7 +604,7 @@ pub async fn proxy_request_by_slug(
         &state.encryption_keys,
         &state.node_ws_manager,
         &user_id_str,
-        Some(&slug),
+        Some(slug),
         None,
     )
     .await?
@@ -490,25 +612,25 @@ pub async fn proxy_request_by_slug(
         let effective_service_id = resolved.target.service.id.clone();
         if let Some(routing) = &resolved.org_routing {
             audit_org_routing(
-                &state,
-                &auth_user,
+                state,
+                auth_user,
                 routing,
                 &resolved.user_service_id,
                 &effective_service_id,
             );
         } else {
             audit_personal_routing(
-                &state,
-                &auth_user,
+                state,
+                auth_user,
                 Some(&resolved.user_service_id),
                 &effective_service_id,
             );
         }
         return execute_proxy_inner(
-            &state,
-            &auth_user,
+            state,
+            auth_user,
             &effective_service_id,
-            &path,
+            path,
             request,
             Some(PreResolved {
                 target: resolved.target,
@@ -521,6 +643,7 @@ pub async fn proxy_request_by_slug(
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
             }),
+            resolved_slug,
         )
         .await;
     }
@@ -528,30 +651,39 @@ pub async fn proxy_request_by_slug(
     // Fall back to old path. Before we do, block org viewers whose org
     // has any presence for this slug from slipping into the legacy
     // approval flow (see ChronoAIProject/NyxID#375).
-    proxy_service::guard_slug_against_viewer_orgs(&state.db, &user_id_str, Some(&slug), None)
+    proxy_service::guard_slug_against_viewer_orgs(&state.db, &user_id_str, Some(slug), None)
         .await?;
-    let service = proxy_service::resolve_service_by_slug(&state.db, &slug).await?;
-    execute_proxy(&state, &auth_user, &service.id, &path, request).await
+    let service = proxy_service::resolve_service_by_slug(&state.db, slug).await?;
+    execute_proxy(state, auth_user, &service.id, path, request, resolved_slug).await
 }
 
 /// ANY /api/v1/proxy/:service_id (no trailing path)
 pub async fn proxy_request_root(
     state: State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(service_id): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    proxy_request(state, auth_user, Path((service_id, String::new())), request).await
+    proxy_request(
+        state,
+        auth_user,
+        tele,
+        Path((service_id, String::new())),
+        request,
+    )
+    .await
 }
 
 /// ANY /api/v1/proxy/s/:slug (no trailing path)
 pub async fn proxy_request_by_slug_root(
     state: State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(slug): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    proxy_request_by_slug(state, auth_user, Path((slug, String::new())), request).await
+    proxy_request_by_slug(state, auth_user, tele, Path((slug, String::new())), request).await
 }
 
 /// Core proxy execution logic shared by UUID and slug handlers (old path).
@@ -569,8 +701,18 @@ async fn execute_proxy(
     service_id: &str,
     path: &str,
     request: Request<Body>,
+    resolved_slug: &mut String,
 ) -> AppResult<Response> {
-    execute_proxy_inner(state, auth_user, service_id, path, request, None).await
+    execute_proxy_inner(
+        state,
+        auth_user,
+        service_id,
+        path,
+        request,
+        None,
+        resolved_slug,
+    )
+    .await
 }
 
 /// Resolve proxy target and node routing via the old DownstreamService path.
@@ -781,6 +923,7 @@ async fn execute_proxy_inner(
     path: &str,
     request: Request<Body>,
     pre_resolved: Option<PreResolved>,
+    resolved_slug: &mut String,
 ) -> AppResult<Response> {
     let user_id_str = auth_user.user_id.to_string();
 
@@ -1008,6 +1151,11 @@ async fn execute_proxy_inner(
         audit_personal_routing(state, auth_user, None, service_id);
         resolved
     };
+
+    // Record the resolved service slug so the outer wrapper can attach it
+    // to `TelemetryEvent::ProxyError` if any downstream error branch fires
+    // before the handler returns `Ok`.
+    *resolved_slug = target.service.slug.clone();
 
     // === Request Decomposition ===
     // Extract method, query, headers BEFORE body consumption.

@@ -91,11 +91,16 @@ export async function initTelemetry(args: InitMobileTelemetryArgs): Promise<void
     enableSessionReplay: false,
     // Strip identifying device props before any event is built.
     // `$device_name` often carries the user's first name on iOS;
-    // `$device_model` plus OS + app_version is plenty for debugging.
+    // `$device_id` is a persistent hardware identifier the privacy
+    // contract in this file (and docs/TELEMETRY.md §6) requires us to
+    // drop. `$device_model` + OS + app_version is plenty for debugging.
+    // Cast to an index-signature shape since PostHog's typed prop bag
+    // doesn't expose `$device_id` in the `customAppProperties` argument.
     customAppProperties: (props) => {
-      const out = { ...props };
+      const out: Record<string, unknown> = { ...props };
       out.$device_name = null;
-      return out;
+      out.$device_id = null;
+      return out as typeof props;
     },
     // Drop deep-link events that embed a token in the URL. We still
     // emit `mobile.deep_link_opened` with a narrow `link_type` enum
@@ -123,6 +128,20 @@ export async function initTelemetry(args: InitMobileTelemetryArgs): Promise<void
       return event;
     },
   });
+
+  // Ensure opt-in: if the user previously opted out via
+  // `shutdownTelemetry()`, the SDK persisted that flag to storage.
+  // Calling `optIn()` on the freshly-constructed client clears it so
+  // events flow again after re-consent.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const asAny = ph as any;
+    if (typeof asAny.optIn === "function") {
+      asAny.optIn();
+    }
+  } catch {
+    // Best-effort.
+  }
 
   client = ph;
   inited = true;
@@ -166,6 +185,49 @@ export function capture(event: MobileEvent): void {
 export function captureException(err: unknown): void {
   if (!inited || !client) return;
   client.captureException(err);
+}
+
+/**
+ * Fully tear down the telemetry client. Unlike `reset()` (which only
+ * clears the current identity), this clears the local identity, releases
+ * the vendor client, and flips `inited` back to `false` so subsequent
+ * `capture()` / `identify()` / `captureException()` calls short-circuit
+ * until `initTelemetry()` is called again.
+ *
+ * Call from the consent-revoke path: when a user turns analytics off in
+ * Settings, this ensures no further events reach the vendor -- satisfies
+ * the privacy-policy promise that turning analytics off "stops new
+ * events immediately."
+ */
+export function shutdownTelemetry(): void {
+  if (!inited) return;
+  const snapshot = client;
+  // Flip our gate first so new calls into `capture()` short-circuit
+  // even if the vendor teardown below takes a moment.
+  client = null;
+  inited = false;
+  if (!snapshot) return;
+  try {
+    // `optOut()` is the SDK-level opt-out. It persists the flag to
+    // storage AND suppresses any lifecycle / captureAppLifecycleEvents
+    // listeners the SDK has already wired up. Just `reset()` on its own
+    // only clears the current identity -- the vendor keeps emitting
+    // $app_background / $app_foreground / etc. until process exit,
+    // which would violate the "stops new events immediately" promise
+    // in Settings.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const asAny = snapshot as any;
+    if (typeof asAny.optOut === "function") {
+      asAny.optOut();
+    }
+  } catch {
+    // Best-effort; never throw out of a consent path.
+  }
+  try {
+    snapshot.reset();
+  } catch {
+    // Best-effort; never throw out of a consent path.
+  }
 }
 
 // Helper for app shell to read the expo-config DSN/host.

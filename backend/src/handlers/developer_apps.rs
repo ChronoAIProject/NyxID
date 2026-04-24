@@ -11,6 +11,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::mw::auth::AuthUser;
 use crate::services::{oauth_client_service, org_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 use mongodb::bson::doc;
 
 /// Resolve which user_id owns this developer OAuth client and whether the
@@ -198,6 +199,7 @@ fn validate_redirect_uris(redirect_uris: &[String]) -> AppResult<Vec<String>> {
 pub async fn create_my_oauth_client(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<CreateDeveloperOAuthClientRequest>,
 ) -> AppResult<Json<DeveloperOAuthClientResponse>> {
     if body.name.trim().is_empty() {
@@ -247,6 +249,14 @@ pub async fn create_my_oauth_client(
         &allowed_scopes,
     )
     .await?;
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::OauthClientRegistered,
+    );
 
     Ok(Json(to_response(client, raw_secret)))
 }
@@ -343,6 +353,7 @@ pub async fn update_my_oauth_client(
 pub async fn rotate_my_oauth_client_secret(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(client_id): Path<String>,
 ) -> AppResult<Json<RotateDeveloperClientSecretResponse>> {
     let actor = auth_user.user_id.to_string();
@@ -350,6 +361,17 @@ pub async fn rotate_my_oauth_client_secret(
     let (updated, new_secret) =
         oauth_client_service::rotate_client_secret_for_creator(&state.db, &client_id, &user_id)
             .await?;
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::OauthClientSecretRotated {
+            // Hash: raw UUID would be scrubbed to `[UUID_REDACTED]`.
+            client_id: hash_short_id(&updated.id),
+        },
+    );
 
     Ok(Json(RotateDeveloperClientSecretResponse {
         id: updated.id,

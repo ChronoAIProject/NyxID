@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::crypto::jwt;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::channel_bots::resolve_adapter;
+use crate::handlers::channel_bots::{hash_conversation_id, resolve_adapter};
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::channel_bot::ChannelBot;
 use crate::models::channel_conversation::{COLLECTION_NAME as CONVERSATIONS, ChannelConversation};
@@ -37,6 +37,9 @@ use crate::services::{
     audit_service, channel_bot_service,
     channel_platform::{OutboundEdit, OutboundReply},
     channel_relay_service,
+};
+use crate::telemetry::{
+    TelemetryContext, TelemetryEvent, emit_event, hash_short_id, should_sample_event,
 };
 
 // ---------------------------------------------------------------------------
@@ -795,6 +798,46 @@ pub async fn async_reply(
         platform_msg_id.as_deref(),
     )
     .await?;
+
+    // Telemetry: channel.reply_sent is sampled at 10% per
+    // docs/TELEMETRY.md §6.5. Sampling key is the conversation hash (not
+    // user id): hashing on user_id would make each bot owner either 100%
+    // in or 100% out of the sample and skew the funnel toward whichever
+    // agent is chattiest. Conversation-keyed sampling gives ~10% of
+    // replies per conversation and averages to ~10% across users. Reply
+    // mode is always "async" per ADR-013 (sync 200+body replies were
+    // removed). Distinct_id on the emit is still the bot owner's user_id.
+    //
+    // `async_reply` uses `OptionalAuthUser` (reply tokens can authenticate
+    // without a user session), so we get the API-key identity from the
+    // resolved `attributed_api_key_id` rather than `auth_user.api_key_id`.
+    // TelemetryContext is derived from request headers -- the middleware
+    // extractor isn't in the signature.
+    let distinct_id = bot.user_id.clone();
+    let conversation_hash = hash_conversation_id(&conversation.platform_conversation_id);
+    if should_sample_event("channel.reply_sent", &conversation_hash, 10) {
+        let tele = TelemetryContext::from_headers(
+            headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+            headers
+                .get("x-nyxid-client-version")
+                .and_then(|v| v.to_str().ok()),
+        );
+        emit_event(
+            state.telemetry.as_deref(),
+            &distinct_id,
+            Some(attributed_api_key_id.as_str()),
+            &tele,
+            TelemetryEvent::ChannelReplySent {
+                platform: bot.platform.clone(),
+                reply_mode: "async".to_string(),
+                // Hash: raw API-key UUID would be scrubbed to
+                // `[UUID_REDACTED]`, losing the per-agent dimension this
+                // field exists for. `hash_short_id` keeps per-agent
+                // analytics possible without leaking the id.
+                agent_api_key_id: Some(hash_short_id(&attributed_api_key_id)),
+            },
+        );
+    }
 
     Ok(Json(AsyncReplyResponse {
         message_id: stored.id,

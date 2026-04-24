@@ -9,6 +9,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::notification_channel::{COLLECTION_NAME, NotificationChannel};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, notification_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Response types ---
 
@@ -161,6 +162,13 @@ pub async fn update_settings(
     Ok(Json(to_settings_response(&updated)))
 }
 
+// TODO(telemetry): emit `notification.channel_linked { channel: "telegram" }`
+// from the Telegram webhook handler (`handlers/telegram_webhook.rs`), where
+// the link is actually completed when the user sends the /start code to the
+// bot. This handler only generates the link code; emitting here would misfire
+// whenever a user starts but never finishes the flow. Webhook file is out of
+// scope for this chunk.
+//
 /// POST /api/v1/notifications/telegram/link
 ///
 /// Generate a one-time link code for connecting Telegram account.
@@ -225,6 +233,7 @@ pub async fn telegram_link(
 pub async fn telegram_disconnect(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
 ) -> AppResult<Json<MessageResponse>> {
     let user_id = auth_user.user_id.to_string();
     let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
@@ -255,7 +264,7 @@ pub async fn telegram_disconnect(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(user_id.clone()),
         "telegram_disconnected".to_string(),
         if approval_disabled {
             Some(serde_json::json!({ "approval_auto_disabled": true }))
@@ -267,6 +276,24 @@ pub async fn telegram_disconnect(
         None,
         None,
     );
+
+    // Telemetry: notification.channel_unlinked (Telegram). Only emit
+    // when the pre-update state actually had Telegram linked --
+    // otherwise a repeated tap / retry / no-op disconnect would
+    // fabricate unlink activity. The endpoint is idempotent, so this
+    // handler must be too.
+    let telegram_was_linked = channel.telegram_chat_id.is_some() || channel.telegram_enabled;
+    if telegram_was_linked {
+        emit_event(
+            state.telemetry.as_deref(),
+            &user_id,
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::NotificationChannelUnlinked {
+                channel: "telegram".to_string(),
+            },
+        );
+    }
 
     let message = if approval_disabled {
         "Telegram disconnected. Approval protection has been disabled because no notification channels remain.".to_string()

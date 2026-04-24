@@ -17,7 +17,9 @@ use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, node_routing_service, node_service, ssh_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
+use super::services_helpers::fetch_service;
 use super::ssh_tunnel::authorize_ssh_access;
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +66,14 @@ pub async fn ssh_web_terminal(
 ) -> AppResult<Response> {
     authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_svc = ssh_service::get_ssh_service(&state.db, &service_id).await?;
+    // Resolve the catalog slug once up front so telemetry reports the
+    // service by slug rather than by UUID path param. Best-effort: web
+    // terminal availability must not fail on a telemetry-only lookup.
+    let service_slug = fetch_service(&state, &service_id)
+        .await
+        .ok()
+        .map(|s| s.slug)
+        .unwrap_or_else(|| service_id.clone());
 
     if !ssh_svc.certificate_auth_enabled {
         return Err(AppError::BadRequest(
@@ -99,12 +109,24 @@ pub async fn ssh_web_terminal(
     let cols = query.cols.clamp(10, 500);
     let rows = query.rows.clamp(2, 200);
 
+    // Snapshot telemetry context BEFORE the WS upgrade so the spawned
+    // socket task keeps the original `X-NyxID-Client` surface on
+    // SshTunnelOpened / SshTunnelClosed. Without this every web-terminal
+    // session is recorded as `surface="backend"`.
+    let tele = TelemetryContext::from_headers(
+        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-nyxid-client-version")
+            .and_then(|v| v.to_str().ok()),
+    );
+
     Ok(ws
         .on_upgrade(move |socket| async move {
             handle_web_terminal(
                 state,
                 auth_user,
                 service_id,
+                service_slug,
                 ssh_svc,
                 principal,
                 cols,
@@ -112,6 +134,7 @@ pub async fn ssh_web_terminal(
                 socket,
                 session_guard,
                 client_meta,
+                tele,
             )
             .await;
         })
@@ -123,6 +146,7 @@ async fn handle_web_terminal(
     state: AppState,
     auth_user: AuthUser,
     service_id: String,
+    service_slug: String,
     ssh_svc: crate::models::downstream_service::SshServiceConfig,
     principal: String,
     cols: u32,
@@ -130,6 +154,7 @@ async fn handle_web_terminal(
     mut socket: WebSocket,
     session_guard: ssh_service::SshSessionGuard,
     client_meta: (Option<String>, Option<String>),
+    tele: TelemetryContext,
 ) {
     let _ = &session_guard;
     let user_id = auth_user.user_id.to_string();
@@ -176,8 +201,23 @@ async fn handle_web_terminal(
 
     if let Some(node_route) = node_route {
         handle_node_web_terminal(
-            state, service_id, ssh_svc, principal, cols, rows, socket, user_id, session_id,
-            started_at, ip_address, user_agent, node_route, ephemeral,
+            state,
+            service_id,
+            service_slug,
+            ssh_svc,
+            principal,
+            cols,
+            rows,
+            socket,
+            user_id,
+            auth_user.api_key_id.clone(),
+            session_id,
+            started_at,
+            ip_address,
+            user_agent,
+            node_route,
+            ephemeral,
+            tele,
         )
         .await;
     } else {
@@ -207,18 +247,21 @@ pub(crate) struct EphemeralSshCredentials {
 async fn handle_node_web_terminal(
     state: AppState,
     service_id: String,
+    service_slug: String,
     ssh_svc: crate::models::downstream_service::SshServiceConfig,
     principal: String,
     cols: u32,
     rows: u32,
     mut socket: WebSocket,
     user_id: String,
+    api_key_id: Option<String>,
     session_id: String,
     started_at: Instant,
     ip_address: Option<String>,
     user_agent: Option<String>,
     node_route: node_routing_service::NodeRoute,
     ephemeral: EphemeralSshCredentials,
+    tele: TelemetryContext,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -337,6 +380,19 @@ async fn handle_node_web_terminal(
         None,
     );
 
+    // Telemetry: ssh.tunnel_opened with mode="terminal" for the web
+    // terminal path (`/ssh/{id}/terminal`).
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::SshTunnelOpened {
+            service_slug: service_slug.clone(),
+            mode: "terminal".to_string(),
+        },
+    );
+
     // ----- Bridge loop: browser WebSocket <-> node agent -----
     let idle_timeout = Duration::from_secs(DEFAULT_WEB_TERMINAL_IDLE_TIMEOUT_SECS);
     let max_duration = Duration::from_secs(state.config.ssh_max_tunnel_duration_secs);
@@ -414,9 +470,10 @@ async fn handle_node_web_terminal(
     close_node_web_terminal(&state, &node_id, &session_id, "session_cleanup");
     let _ = socket.close().await;
 
+    let duration_ms = started_at.elapsed().as_millis() as u64;
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id),
+        Some(user_id.clone()),
         "ssh_web_terminal_disconnected".to_string(),
         Some(serde_json::json!({
             "service_id": service_id,
@@ -424,7 +481,7 @@ async fn handle_node_web_terminal(
             "principal": principal,
             "routed_via": "node",
             "node_id": node_id,
-            "duration_ms": started_at.elapsed().as_millis() as u64,
+            "duration_ms": duration_ms,
             "bytes_from_client": from_client_bytes,
             "bytes_to_client": to_client_bytes,
             "disconnect_reason": disconnect_reason,
@@ -433,6 +490,20 @@ async fn handle_node_web_terminal(
         user_agent,
         None,
         None,
+    );
+
+    // Telemetry: ssh.tunnel_closed for the web terminal path.
+    // Best-effort: normal close only, abrupt close may miss -- see
+    // TELEMETRY.md §6.5.
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::SshTunnelClosed {
+            service_slug,
+            duration_ms,
+        },
     );
 }
 

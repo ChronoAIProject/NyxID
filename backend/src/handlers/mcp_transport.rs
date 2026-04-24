@@ -11,10 +11,12 @@ use tokio_stream::StreamExt;
 
 use crate::AppState;
 use crate::crypto::jwt;
+use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionRecord};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth;
 use crate::services::{audit_service, mcp_service, ssh_service, user_service_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -537,7 +539,22 @@ pub async fn mcp_post(State(state): State<AppState>, headers: HeaderMap, body: S
     let user_id = auth.user_id.clone();
 
     match request.method.as_str() {
-        "initialize" => handle_initialize(&state, &user_id, &request, auth.is_api_key),
+        "initialize" => {
+            let tele = TelemetryContext::from_headers(
+                headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+                headers
+                    .get("x-nyxid-client-version")
+                    .and_then(|v| v.to_str().ok()),
+            );
+            handle_initialize(
+                &state,
+                &user_id,
+                &request,
+                auth.is_api_key,
+                auth.api_key_id.as_deref(),
+                &tele,
+            )
+        }
 
         "notifications/initialized" => {
             if let Ok(sid) = require_session(&headers) {
@@ -715,6 +732,20 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
         return r;
     }
 
+    // Look up the persisted session's `created_at` before removing it so we
+    // can emit `mcp.session_ended` with a duration. Best-effort: the write
+    // that persists the record is fire-and-forget at create time, so the
+    // record may not exist yet for very-short-lived sessions -- duration
+    // falls back to 0 in that case. See `docs/TELEMETRY.md` §6.5.
+    let persisted_created_at = state
+        .db
+        .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+        .find_one(doc! { "_id": &sid })
+        .await
+        .ok()
+        .flatten()
+        .map(|rec| rec.created_at);
+
     state.mcp_sessions.remove(&sid);
 
     // Audit log for session deletion -- attribute API key when present.
@@ -729,6 +760,35 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
         auth.api_key_name.clone(),
     );
 
+    // Telemetry: mcp.session_ended. Best-effort: normal close only, abrupt
+    // close may miss -- see TELEMETRY.md §6.5. `reason = "client_close"`
+    // since this handler only runs on explicit DELETE. Build context from
+    // request headers so CLI/UI/SDK sessions keep the correct `surface`
+    // instead of collapsing to `backend` via `TelemetryContext::default()`.
+    let tele = TelemetryContext::from_headers(
+        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-nyxid-client-version")
+            .and_then(|v| v.to_str().ok()),
+    );
+    let duration_ms = persisted_created_at
+        .map(|start| {
+            let elapsed = chrono::Utc::now().signed_duration_since(start);
+            let ms = elapsed.num_milliseconds();
+            if ms < 0 { 0 } else { ms as u64 }
+        })
+        .unwrap_or(0);
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth.user_id,
+        auth.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::McpSessionEnded {
+            duration_ms,
+            reason: "client_close".to_string(),
+        },
+    );
+
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -741,6 +801,8 @@ fn handle_initialize(
     user_id: &str,
     request: &JsonRpcRequest,
     is_api_key: bool,
+    api_key_id: Option<&str>,
+    tele: &TelemetryContext,
 ) -> Response {
     // API-key auth is stateless: each request authenticates independently,
     // so no MCP session is created on initialize.
@@ -764,6 +826,25 @@ fn handle_initialize(
             None => return rpc_error(request.id.clone(), -32000, "Too many active MCP sessions"),
         }
     };
+
+    // Telemetry: mcp.session_started. `client` is taken from the MCP
+    // `clientInfo.name` field when provided by the initialize params, else
+    // None. Fire for both session-backed and stateless API-key callers so
+    // per-client usage is visible in either mode.
+    let client = request
+        .params
+        .as_ref()
+        .and_then(|p| p.get("clientInfo"))
+        .and_then(|ci| ci.get("name"))
+        .and_then(|n| n.as_str())
+        .map(str::to_owned);
+    emit_event(
+        state.telemetry.as_deref(),
+        user_id,
+        api_key_id,
+        tele,
+        TelemetryEvent::McpSessionStarted { client },
+    );
 
     let result = serde_json::json!({
         "protocolVersion": MCP_PROTOCOL_VERSION,

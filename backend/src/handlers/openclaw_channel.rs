@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::handlers::channel_bots::hash_conversation_id;
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, openclaw_channel_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, should_sample_event};
 
 // --- Request / Response types ---
 
@@ -121,6 +123,28 @@ pub async fn handle_channel_message(
 
     let nyxid_user_id = Some(mapping.nyxid_user_id.clone());
 
+    // Telemetry: channel.message_received is sampled at 10% per
+    // docs/TELEMETRY.md §6.5. Sampling key is the conversation hash (not
+    // user id): hashing on user_id would make each mapped NyxID user
+    // either 100% in or 100% out of the sample. Conversation-keyed
+    // sampling gives ~10% of messages per conversation and averages to
+    // ~10% across users. Webhook ingress — no AuthUser / TelemetryContext,
+    // so use default context and None for api_key_id.
+    let distinct_id = mapping.nyxid_user_id.clone();
+    let conversation_hash = hash_conversation_id(&message.channel_user_id);
+    if should_sample_event("channel.message_received", &conversation_hash, 10) {
+        emit_event(
+            state.telemetry.as_deref(),
+            &distinct_id,
+            None,
+            &TelemetryContext::default(),
+            TelemetryEvent::ChannelMessageReceived {
+                platform: format!("openclaw:{}", message.channel),
+                conversation_id_hash: conversation_hash,
+            },
+        );
+    }
+
     // Get available providers and check OpenClaw connection status
     let slugs =
         openclaw_channel_service::get_user_provider_slugs(&state.db, &mapping.nyxid_user_id)
@@ -162,6 +186,7 @@ pub async fn handle_channel_message(
 pub async fn create_mapping(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<CreateMappingRequest>,
 ) -> AppResult<Json<MappingResponse>> {
     if body.channel.is_empty() {
@@ -194,6 +219,17 @@ pub async fn create_mapping(
         &user_id_str,
     )
     .await?;
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ChannelMappingCreated {
+            platform: format!("openclaw:{}", body.channel),
+            conversation_id_hash: hash_conversation_id(&body.channel_user_id),
+        },
+    );
 
     audit_service::log_async(
         state.db.clone(),

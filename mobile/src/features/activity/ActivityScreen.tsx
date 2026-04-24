@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { capture } from "../../lib/telemetry";
 import {
   ActivityIndicator,
   Alert,
@@ -290,6 +291,79 @@ export function ActivityScreen() {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [mutatingIds, setMutatingIds] = useState<Set<string>>(new Set());
   const [detailChallenge, setDetailChallenge] = useState<ChallengeDetail | null>(null);
+  // Track when the approval-detail sheet was opened so we can report
+  // both the view duration on abandonment and the view->tap latency on
+  // decision emission.
+  const detailOpenedAtRef = useRef<number | null>(null);
+  const detailDecidedRef = useRef<boolean>(false);
+  // Track when the pending-list tab first surfaced approvals in this
+  // view session. Used as the decision-latency fallback for INLINE
+  // approve/deny taps on a list card (no detail sheet opened). Without
+  // this, inline decisions reported `decision_ms = 0` and polluted the
+  // latency metric with synthetic zeros.
+  const listPendingShownAtRef = useRef<number | null>(null);
+  // Tracks whether the currently-open detail sheet was opened from a
+  // path where a decision is actually possible (i.e. PENDING status).
+  // History-list taps open the same sheet in read-only mode, so
+  // closing THAT sheet isn't an "abandonment" -- the user was just
+  // reviewing, never had a decision to make. This ref lets
+  // closeApprovalDetail gate `ui.mobile_dialog_abandoned` accordingly.
+  const detailDecidableRef = useRef<boolean>(false);
+
+  // Open the approval-detail sheet and emit the pair of events the
+  // telemetry spec wants: `mobile.approval_viewed` (device-side) and
+  // `ui.mobile_dialog_opened` (CTA taxonomy). Centralizing the opener
+  // guarantees both sites (card tap + deep-link) record consistently.
+  const openApprovalDetail = useCallback(
+    (challenge: ChallengeDetail, entryPoint: string) => {
+      detailOpenedAtRef.current = Date.now();
+      detailDecidedRef.current = false;
+      detailDecidableRef.current = challenge.status === "PENDING";
+      capture({
+        name: "mobile.approval_viewed",
+        props: {
+          // Use the backend's stable slug (catalog slug or
+          // `UserService.slug`), NOT the display title, so the funnel
+          // groups by the underlying service rather than user-editable
+          // text and custom services don't fragment by renamed titles.
+          service_slug: challenge.service_slug || "unknown",
+          mode: challenge.approval_mode,
+        },
+      });
+      capture({
+        name: "ui.mobile_dialog_opened",
+        props: { dialog_id: "approval_detail", entry_point: entryPoint },
+      });
+      setDetailChallenge(challenge);
+    },
+    []
+  );
+
+  const closeApprovalDetail = useCallback(() => {
+    const openedAt = detailOpenedAtRef.current;
+    // Only count closing the sheet as "abandonment" when the user was
+    // looking at a PENDING approval (decision was possible). History
+    // or already-decided items open the same sheet in read-only mode;
+    // closing them is normal review behavior, not abandonment.
+    if (
+      openedAt != null
+      && !detailDecidedRef.current
+      && detailDecidableRef.current
+    ) {
+      capture({
+        name: "ui.mobile_dialog_abandoned",
+        props: {
+          dialog_id: "approval_detail",
+          final_step: 1,
+          duration_ms: Math.max(0, Date.now() - openedAt),
+        },
+      });
+    }
+    detailOpenedAtRef.current = null;
+    detailDecidedRef.current = false;
+    detailDecidableRef.current = false;
+    setDetailChallenge(null);
+  }, []);
 
   useEffect(() => {
     if (!toast) return;
@@ -342,6 +416,21 @@ export function ActivityScreen() {
   const pendingCount = pendingItems.length;
   const activeCount = activeItems.length;
 
+  // Stamp the moment the pending list first has items under an active
+  // "pending" segment. Used as the decision-latency baseline for
+  // inline approve/deny taps (no detail sheet). Cleared when the user
+  // leaves the pending segment or the list empties, so the next visit
+  // measures its own view duration.
+  useEffect(() => {
+    if (activeSegment === "pending" && pendingCount > 0) {
+      if (listPendingShownAtRef.current == null) {
+        listPendingShownAtRef.current = Date.now();
+      }
+    } else {
+      listPendingShownAtRef.current = null;
+    }
+  }, [activeSegment, pendingCount]);
+
   // --- Deep-link / push-notification: auto-open sheet for a specific challenge ---
   const deepLinkChallengeId = route.params?.challengeId;
   const deepLinkConsumedRef = useRef<string | null>(null);
@@ -353,17 +442,17 @@ export function ActivityScreen() {
 
     const found = pendingItems.find((c) => c.id === deepLinkChallengeId);
     if (found) {
-      setDetailChallenge(found);
+      openApprovalDetail(found, "deep_link");
       return;
     }
 
     // Not in local cache yet — fetch directly
     mobileApi.getChallengeById(deepLinkChallengeId).then((challenge) => {
-      setDetailChallenge(challenge);
+      openApprovalDetail(challenge, "deep_link");
     }).catch(() => {
       setToast({ message: "Challenge not found", kind: "error" });
     });
-  }, [deepLinkChallengeId, pendingItems, navigation]);
+  }, [deepLinkChallengeId, pendingItems, navigation, openApprovalDetail]);
 
   // --- Mutations ---
   const decideMutation = useMutation({
@@ -373,11 +462,38 @@ export function ActivityScreen() {
       return mobileApi.submitDecision(id, decision, durationSec);
     },
     onMutate: ({ id }) => {
+      // Snapshot view->tap latency HERE (so offline/expired failures
+      // don't see a delayed clock), but DEFER the actual
+      // `ui.mobile_decision_made` emit until onSuccess. Emitting in
+      // onMutate would overcount on failures (offline, session
+      // expired, challenge already decided elsewhere). Mark the detail
+      // flow as "decided" so closeApprovalDetail doesn't emit a
+      // dialog_abandoned for the in-flight attempt.
+      //
+      // Latency reference precedence:
+      //   1. detail sheet open time (user reviewed the full approval)
+      //   2. pending-list shown time (inline decision from card tap)
+      //   3. tap-time (fallback: decision_ms = 0 only when neither ref
+      //      is set -- rare: e.g. deep-link that bypasses both)
+      const openedAt = detailOpenedAtRef.current ?? listPendingShownAtRef.current;
+      const decisionMs = openedAt != null ? Math.max(0, Date.now() - openedAt) : 0;
+      detailDecidedRef.current = true;
       setMutatingIds((prev) => new Set(prev).add(id));
+      return { decisionMs };
     },
-    onSuccess: (_, { decision, approvalMode }) => {
+    onSuccess: (_, { decision, approvalMode }, context) => {
+      capture({
+        name: "ui.mobile_decision_made",
+        props: {
+          domain: "approvals",
+          decision: decision === "APPROVE" ? "approve" : "deny",
+          decision_ms: context?.decisionMs ?? 0,
+        },
+      });
       void queryClient.invalidateQueries({ queryKey: ["challenges"] });
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
+      detailOpenedAtRef.current = null;
+      detailDecidedRef.current = false;
       setDetailChallenge(null);
 
       const isGrant = decision === "APPROVE" && approvalMode === "grant";
@@ -391,6 +507,14 @@ export function ActivityScreen() {
       });
     },
     onError: (error, { id }) => {
+      // Decision didn't stick -- clear the "decided" flag so a subsequent
+      // sheet close is counted as an abandonment. Intentionally KEEP
+      // `detailOpenedAtRef` so a retry from the same sheet still measures
+      // `decision_ms` from the original open, and `closeApprovalDetail()`
+      // can still emit `ui.mobile_dialog_abandoned` with the real
+      // duration. The ref clears naturally on successful decide or sheet
+      // close.
+      detailDecidedRef.current = false;
       setToast({ message: getDecisionErrorMessage(error), kind: "error" });
     },
     onSettled: (_, __, { id }) => {
@@ -433,8 +557,13 @@ export function ActivityScreen() {
         // Forward org_id when the grant is org-scoped so the backend
         // pivots ownership to the owning org (otherwise DELETE 404s
         // because the default path searches by user_id = actor).
-        onPress: () =>
-          revokeMutation.mutate({ id: grant.id, orgId: grant.org_id ?? null }),
+        onPress: () => {
+          capture({
+            name: "ui.mobile_destructive_confirmed",
+            props: { domain: "approvals", action: "revoke_session" },
+          });
+          revokeMutation.mutate({ id: grant.id, orgId: grant.org_id ?? null });
+        },
       },
     ]);
   }, [revokeMutation]);
@@ -500,7 +629,24 @@ export function ActivityScreen() {
           activeIndex={segmentIndex}
           onPress={(i) => {
             const seg: ActivitySegment[] = ["pending", "active", "history"];
-            setActiveSegment(seg[i] ?? "pending");
+            const next = seg[i] ?? "pending";
+            if (next !== activeSegment) {
+              const resultCount =
+                next === "pending"
+                  ? pendingCount
+                  : next === "active"
+                    ? activeCount
+                    : historyItems.length;
+              capture({
+                name: "ui.mobile_list_filtered",
+                props: {
+                  list: "activity",
+                  filter: next,
+                  result_count: resultCount,
+                },
+              });
+            }
+            setActiveSegment(next);
           }}
         />
       </View>
@@ -519,7 +665,7 @@ export function ActivityScreen() {
                 challenge={item}
                 grantDurationLabel={grantDurationLabel}
                 isMutating={mutatingIds.has(item.id)}
-                onPress={() => setDetailChallenge(item)}
+                onPress={() => openApprovalDetail(item, "pending_list")}
                 onApprove={() => decideMutation.mutate({ id: item.id, decision: "APPROVE", approvalMode: item.approval_mode })}
                 onDeny={() => decideMutation.mutate({ id: item.id, decision: "DENY", approvalMode: item.approval_mode })}
               />
@@ -580,7 +726,7 @@ export function ActivityScreen() {
             renderItem={({ item }) => (
               <HistoryCard
                 item={item}
-                onPress={() => setDetailChallenge(item)}
+                onPress={() => openApprovalDetail(item, "history_list")}
               />
             )}
             renderSectionHeader={({ section }) => <HistorySectionHeader title={section.title} />}
@@ -603,7 +749,7 @@ export function ActivityScreen() {
       <ChallengeDetailSheet
         challenge={detailChallenge}
         grantDurationLabel={grantDurationLabel}
-        onClose={() => setDetailChallenge(null)}
+        onClose={closeApprovalDetail}
         onApprove={(id) => decideMutation.mutate({ id, decision: "APPROVE", approvalMode: detailChallenge!.approval_mode })}
         onDeny={(id) => decideMutation.mutate({ id, decision: "DENY", approvalMode: detailChallenge!.approval_mode })}
         isMutating={mutatingIds.has(detailChallenge?.id ?? "")}

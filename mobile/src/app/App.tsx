@@ -34,6 +34,8 @@ import {
 import { startPushPolling } from "../lib/notifications/pushPollingSignal";
 import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
 import { MobileConsentProvider } from "../lib/consent";
+import { capture } from "../lib/telemetry";
+import type { PushType } from "../lib/telemetry-schema";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import type { BottomNavV2Tab } from "../components/BottomNavV2";
 // import { NyxSheet } from "../features/nyx/NyxSheet"; // TODO: re-enable when chat is ready
@@ -127,6 +129,65 @@ export default function App() {
     return () => {
       disposed = true;
       cleanup?.();
+    };
+  }, []);
+
+  // Emit `mobile.push_received` — narrow categorization only. We never
+  // read the notification body; only infer the `type` from the structured
+  // data field (set by the backend push payload) and snapshot the
+  // current AppState to classify foreground vs background delivery.
+  useEffect(() => {
+    const classifyPushType = (data: unknown): PushType => {
+      if (!data || typeof data !== "object") return "other";
+      const typeRaw = (data as { type?: unknown }).type;
+      if (typeof typeRaw === "string" && typeRaw === "approval_request") {
+        return "approval_request";
+      }
+      // Backend payloads may omit `type` on the approval path but still
+      // ship a `challenge_id`/`request_id`, which uniquely identifies
+      // an approval request. Anything else (decision ack, expiry)
+      // is lumped into "other".
+      if (!typeRaw) {
+        const challengeId =
+          (data as { challenge_id?: unknown }).challenge_id ??
+          (data as { challengeId?: unknown }).challengeId ??
+          (data as { request_id?: unknown }).request_id;
+        if (typeof challengeId === "string" && challengeId.length > 0) {
+          return "approval_request";
+        }
+      }
+      return "other";
+    };
+
+    // NOTE: `addNotificationReceivedListener` only fires while the JS
+    // runtime is active -- i.e., the app is foregrounded or briefly
+    // active in the background. Pushes delivered while the app is
+    // terminated, or shown by the OS without waking JS, are NOT observed
+    // here. This listener therefore reliably measures ONLY
+    // `app_state: "foreground"` receipts. Background/quit delivery
+    // observability would require a native notification-service
+    // extension on iOS and a foreground service on Android, which is
+    // out of scope for this sweep. See docs/TELEMETRY.md §5.3. The
+    // `app_state` prop is still populated from `AppState.currentState`
+    // for honest emission when the listener does happen to catch a
+    // backgrounded-but-live runtime; under normal conditions it reads
+    // "foreground".
+    const subscription = Notifications.addNotificationReceivedListener((notification) => {
+      try {
+        const pushType = classifyPushType(notification.request.content.data);
+        const appState =
+          AppState.currentState === "active" ? "foreground" : "background";
+        capture({
+          name: "mobile.push_received",
+          props: { type: pushType, app_state: appState },
+        });
+      } catch {
+        // never break push pipeline on telemetry failure
+      }
+    });
+
+    return () => {
+      subscription.remove();
     };
   }, []);
 
@@ -269,6 +330,10 @@ function ThemedAppShell({
           currentRouteName={currentRouteName}
           onMainTabPress={(tab: BottomNavV2Tab) => {
             if (!navigationRef.isReady()) return;
+            capture({
+              name: "ui.mobile_nav_target_opened",
+              props: { target: tab, source: "tab" },
+            });
             if (tab === "activity") navigationRef.navigate("Activity");
             if (tab === "account") navigationRef.navigate("AccountSettings");
           }}

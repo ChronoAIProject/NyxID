@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { capture } from "../../lib/telemetry";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -60,6 +61,25 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
     queryFn: () => mobileApi.getChallengeById(challengeId),
   });
 
+  // view->tap latency for `ui.mobile_decision_made`; starts when the
+  // approval data first resolves on this screen.
+  const viewedAtRef = useRef<number | null>(null);
+  const viewedEmittedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!data) return;
+    if (viewedEmittedRef.current === data.id) return;
+    viewedEmittedRef.current = data.id;
+    viewedAtRef.current = Date.now();
+    capture({
+      name: "mobile.approval_viewed",
+      props: {
+        // Stable backend slug, not the user-editable display title.
+        service_slug: data.service_slug || "unknown",
+        mode: data.approval_mode,
+      },
+    });
+  }, [data]);
+
   const settingsQuery = useQuery({
     queryKey: ["notifications", "settings"],
     queryFn: mobileApi.getNotificationSettings,
@@ -73,7 +93,23 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
       const idempotencyKey = createIdempotencyKey("decision", challengeId);
       return mobileApi.submitDecision(challengeId, decision, durationSec);
     },
-    onSuccess: (_, decision) => {
+    onMutate: () => {
+      // Snapshot view->tap latency at tap-time (not at server-response
+      // time) but DEFER the emit to onSuccess so failures don't
+      // overcount decisions.
+      const openedAt = viewedAtRef.current;
+      const decisionMs = openedAt != null ? Math.max(0, Date.now() - openedAt) : 0;
+      return { decisionMs };
+    },
+    onSuccess: (_, decision, context) => {
+      capture({
+        name: "ui.mobile_decision_made",
+        props: {
+          domain: "approvals",
+          decision: decision === "APPROVE" ? "approve" : "deny",
+          decision_ms: context?.decisionMs ?? 0,
+        },
+      });
       void queryClient.invalidateQueries({ queryKey: ["challenges"] });
       void queryClient.invalidateQueries({ queryKey: ["approvals"] });
       void queryClient.invalidateQueries({ queryKey: ["challenge", challengeId] });
@@ -115,7 +151,16 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   return (
     <ScreenContainer>
       <ScrollView style={flowStyles.content} contentContainerStyle={[flowStyles.scrollContent, { paddingHorizontal: spacing.xxl }]}>
-        <Pressable onPress={() => navigation.goBack()} style={styles.backBtn}>
+        <Pressable
+          onPress={() => {
+            capture({
+              name: "ui.mobile_nav_target_opened",
+              props: { target: "Activity", source: "back" },
+            });
+            navigation.goBack();
+          }}
+          style={styles.backBtn}
+        >
           <Text style={styles.backText}>{"\u2190"} Back to Activity</Text>
         </Pressable>
 

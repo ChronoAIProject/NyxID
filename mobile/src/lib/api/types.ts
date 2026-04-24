@@ -26,6 +26,13 @@ export type ChallengeDetail = ChallengeItem & {
     client: string;
     location: string;
   };
+  /**
+   * Stable service identifier (e.g. catalog slug or `UserService.slug`).
+   * Populated from `BackendApprovalRequestItem.service_slug`. Used for
+   * telemetry (`mobile.approval_viewed`) so funnels group by the
+   * underlying service rather than the user-editable display title.
+   */
+  service_slug: string;
 };
 
 export type ApprovalItem = {

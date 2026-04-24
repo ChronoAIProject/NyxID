@@ -21,6 +21,11 @@ use crate::services::{
         WsWebTerminalStartedMsg,
     },
 };
+use crate::telemetry::{
+    context::{TelemetryContext, emit_event},
+    sampling::hash_short_id,
+    schema::TelemetryEvent,
+};
 
 /// RAII guard that decrements the pending auth counter on drop.
 /// Prevents counter leaks if the WS handler future is cancelled (H3).
@@ -270,7 +275,28 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                                 "signing_secret": raw_signing_secret,
                             });
                             let _ = ws_sink.send(Message::Text(ok_msg.to_string().into())).await;
-                            return Some(node.id);
+
+                            // Telemetry: node.registered. `profile` is unknown server-side
+                            // (the CLI-side profile name is never sent over the wire).
+                            // TODO(telemetry): see TELEMETRY.md §6.5 degraded emissions -- profile unknown server-side
+                            let node_platform = node
+                                .metadata
+                                .as_ref()
+                                .and_then(|m| m.os.clone())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let ctx = TelemetryContext::default();
+                            emit_event(
+                                state.telemetry.as_deref(),
+                                &node.user_id,
+                                None,
+                                &ctx,
+                                TelemetryEvent::NodeRegistered {
+                                    node_platform,
+                                    profile: "unknown".to_string(),
+                                },
+                            );
+
+                            return Some((node.id, node.user_id));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Node registration failed");
@@ -308,7 +334,7 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                                 }
                             });
                             let _ = ws_sink.send(Message::Text(ok_msg.to_string().into())).await;
-                            return Some(node.id);
+                            return Some((node.id, node.user_id));
                         }
                         Ok(_) => {
                             let err_msg = serde_json::json!({
@@ -389,8 +415,8 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
     // Drop it explicitly here since auth phase is complete.
     drop(_guard);
 
-    let node_id = match auth_result {
-        Ok(Some(id)) => id,
+    let (node_id, owner_user_id) = match auth_result {
+        Ok(Some(pair)) => pair,
         _ => {
             // Timeout or auth failure -- close connection
             let _ = ws_sink
@@ -408,6 +434,28 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
     // H4: Use bounded channel to prevent memory exhaustion from slow/malicious nodes
     let (tx, mut rx) = mpsc::channel::<NodeOutboundMessage>(WS_WRITER_CHANNEL_SIZE);
     state.node_ws_manager.register_connection(&node_id, tx);
+
+    // Telemetry: node.connected. Emitted once after WS auth + registration
+    // in the manager. `profile` is unknown server-side -- only the CLI knows
+    // the profile name.
+    // TODO(telemetry): see TELEMETRY.md §6.5 degraded emissions -- profile unknown server-side
+    {
+        let ctx = TelemetryContext::default();
+        emit_event(
+            state.telemetry.as_deref(),
+            &owner_user_id,
+            None,
+            &ctx,
+            TelemetryEvent::NodeConnected {
+                // Raw node_id is a UUID and would be redacted by
+                // `telemetry::scrub` to `[UUID_REDACTED]`, collapsing
+                // every node onto the same property value. Hash keeps
+                // per-node granularity without leaking the UUID.
+                node_id: hash_short_id(&node_id),
+                profile: "unknown".to_string(),
+            },
+        );
+    }
 
     // Mark node online
     if let Err(e) = node_service::set_node_status(&state.db, &node_id, NodeStatus::Online).await {
@@ -443,6 +491,10 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
     let db = state.db.clone();
     let ws_manager = state.node_ws_manager.clone();
 
+    // Track teardown reason for telemetry. Default assumes a clean client
+    // close; any read error flips it to "error" before the loop breaks.
+    let mut reason: &'static str = "client_close";
+
     while let Some(msg) = ws_stream.next().await {
         // Binary frames carry streaming proxy data chunks:
         //   [36 bytes: request_id as ASCII UUID][remaining: raw data]
@@ -460,11 +512,15 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
 
         let text = match msg {
             Ok(Message::Text(t)) => t,
-            Ok(Message::Close(_)) => break,
+            Ok(Message::Close(_)) => {
+                reason = "client_close";
+                break;
+            }
             Ok(Message::Ping(_)) => continue,
             Ok(_) => continue,
             Err(e) => {
                 tracing::debug!(node_id = %node_id_reader, error = %e, "WebSocket read error");
+                reason = "error";
                 break;
             }
         };
@@ -771,6 +827,27 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
 
     if let Err(e) = node_service::set_node_status(&state.db, &node_id, NodeStatus::Offline).await {
         tracing::warn!(node_id = %node_id, error = %e, "Failed to set node status to offline");
+    }
+
+    // Telemetry: node.disconnected. Single-owner rule -- only the reader
+    // teardown emits this event. Admin-initiated disconnects + heartbeat
+    // sweep disconnects are tracked via their own events (or are §6.5
+    // leftovers today); they will route back here when the WS reader
+    // observes the close frame.
+    {
+        let ctx = TelemetryContext::default();
+        emit_event(
+            state.telemetry.as_deref(),
+            &owner_user_id,
+            None,
+            &ctx,
+            TelemetryEvent::NodeDisconnected {
+                // See note on NodeConnected: raw UUIDs are redacted by the
+                // scrubber, so hash for telemetry.
+                node_id: hash_short_id(&node_id),
+                reason: reason.to_string(),
+            },
+        );
     }
 }
 

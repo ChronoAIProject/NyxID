@@ -20,6 +20,7 @@ use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, mfa_service, token_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
 
@@ -66,6 +67,7 @@ pub struct MfaDisableResponse {
 pub async fn setup(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
 ) -> AppResult<Json<MfaSetupResponse>> {
     let user_id_str = auth_user.user_id.to_string();
 
@@ -79,6 +81,16 @@ pub async fn setup(
     let result =
         mfa_service::setup_totp(&state.db, &state.encryption_keys, &user_id_str, &user.email)
             .await?;
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id_str,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::MfaEnrollmentStarted {
+            factor_type: "totp".to_string(),
+        },
+    );
 
     Ok(Json(MfaSetupResponse {
         factor_id: result.factor_id,
@@ -94,6 +106,7 @@ pub async fn setup(
 pub async fn confirm(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<MfaConfirmRequest>,
 ) -> AppResult<Json<MfaConfirmResponse>> {
     let user_id_str = auth_user.user_id.to_string();
@@ -136,6 +149,16 @@ pub async fn confirm(
         )
         .await?;
 
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id_str,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::MfaEnrollmentCompleted {
+            factor_type: "totp".to_string(),
+        },
+    );
+
     Ok(Json(MfaConfirmResponse {
         message: "MFA enabled successfully. Save your recovery codes.".to_string(),
         recovery_codes,
@@ -172,15 +195,51 @@ pub async fn verify(
 
     let user_id = &pending_session.user_id;
 
+    // Pre-auth path: build telemetry context from headers so both the
+    // success and failure branches can attribute the event to the user
+    // held by the MFA pending session.
+    let tele_mfa = TelemetryContext::from_headers(
+        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-nyxid-client-version")
+            .and_then(|v| v.to_str().ok()),
+    );
+
     // Verify TOTP code
     let valid =
         mfa_service::verify_totp(&state.db, &state.encryption_keys, user_id, &body.code).await?;
 
     if !valid {
+        emit_event(
+            state.telemetry.as_deref(),
+            user_id,
+            None,
+            &tele_mfa,
+            TelemetryEvent::MfaChallengeFailed {
+                factor_type: "totp".to_string(),
+                reason: "wrong_code".to_string(),
+            },
+        );
         return Err(AppError::AuthenticationFailed(
             "Invalid MFA code".to_string(),
         ));
     }
+
+    emit_event(
+        state.telemetry.as_deref(),
+        user_id,
+        None,
+        &tele_mfa,
+        TelemetryEvent::MfaChallengeSucceeded {
+            factor_type: "totp".to_string(),
+        },
+    );
+
+    // AuthLoggedIn is emitted AFTER session/token creation succeeds
+    // (see both arms of `match client_mode` below). Emitting here would
+    // record a false-positive login if the DB/JWT/cookie step that
+    // follows fails, matching the bug Part 1 already fixed on the
+    // non-MFA password path.
 
     // Revoke the pending MFA session
     state
@@ -224,6 +283,20 @@ pub async fn verify(
                 domain,
             )?;
 
+            // Session is now materialized; record the login. `method`
+            // matches Part 1's non-MFA password-login path so a single
+            // password-login funnel covers MFA and non-MFA users.
+            emit_event(
+                state.telemetry.as_deref(),
+                user_id,
+                None,
+                &tele_mfa,
+                TelemetryEvent::AuthLoggedIn {
+                    method: "password".to_string(),
+                    mfa_required: true,
+                },
+            );
+
             Ok((
                 response_headers,
                 Json(LoginResponse {
@@ -254,6 +327,21 @@ pub async fn verify(
                 ua,
                 None,
                 None,
+            );
+
+            // Tokens are materialized; record the login under the same
+            // `method="password"` label as non-MFA logins so the
+            // password-login funnel is consistent for both MFA and
+            // non-MFA users.
+            emit_event(
+                state.telemetry.as_deref(),
+                user_id,
+                None,
+                &tele_mfa,
+                TelemetryEvent::AuthLoggedIn {
+                    method: "password".to_string(),
+                    mfa_required: true,
+                },
             );
 
             Ok((

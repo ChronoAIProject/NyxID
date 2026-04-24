@@ -18,6 +18,7 @@ use crate::models::service_approval_config::{
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::services::notification_service;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
+use crate::telemetry::{TelemetryClient, TelemetryContext, TelemetryEvent, emit_event};
 
 /// Resolve the approval mode for a (user, service) pair.
 pub async fn resolve_approval_mode(
@@ -781,6 +782,7 @@ pub async fn expire_pending_requests(
     http_client: &reqwest::Client,
     fcm_auth: Option<&FcmAuth>,
     apns_auth: Option<&ApnsAuth>,
+    telemetry: Option<&Arc<TelemetryClient>>,
 ) -> AppResult<u64> {
     let sweep_time = bson::DateTime::from_chrono(Utc::now());
     let sweep_marker = format!("expiry:{}", uuid::Uuid::new_v4());
@@ -891,6 +893,22 @@ pub async fn expire_pending_requests(
             )
             .await;
         }
+    }
+
+    // Telemetry: emit `approval.expired` per actually-expired row. Background
+    // sweep has no request headers, so use the default `backend` context; no
+    // auth context either (sweep runs unauthenticated), so api_key_id = None.
+    for req in &actually_expired {
+        emit_event(
+            telemetry.map(Arc::as_ref),
+            &req.user_id.to_string(),
+            None,
+            &TelemetryContext::default(),
+            TelemetryEvent::ApprovalExpired {
+                service_slug: req.service_slug.clone(),
+                mode: req.approval_mode.as_str().to_string(),
+            },
+        );
     }
 
     Ok(count)

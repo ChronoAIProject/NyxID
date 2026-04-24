@@ -14,6 +14,7 @@ use crate::handlers::auth::{
     clear_cookie_with_same_site, extract_ip, extract_user_agent,
 };
 use crate::services::{audit_service, invite_code_service, social_auth_service, token_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 use social_auth_service::SocialProfile;
 
 const SOCIAL_STATE_COOKIE: &str = "nyx_social_state";
@@ -435,6 +436,31 @@ pub async fn callback(
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
 
+    // Pre-auth path — derive telemetry surface from `redirect_target`
+    // instead of the `X-NyxID-Client` headers. The social provider
+    // redirects the user's browser to this callback directly, so the
+    // request never carries the app's client header and a header-derived
+    // context always resolves to `surface="backend"`. Using the redirect
+    // target keeps web vs. mobile attribution correct for
+    // `AuthLoggedIn { method }` funnel analysis.
+    let surface: &'static str = match &redirect_target {
+        SocialRedirectTarget::Web { .. } => "ui",
+        SocialRedirectTarget::Mobile { .. } => "mobile",
+    };
+    let tele_social = TelemetryContext {
+        surface,
+        client_version: None,
+    };
+
+    // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (user.signed_up social path).
+    // `social_auth_service::find_or_create_user` returns the `User` but does
+    // not signal whether the record was just created or already existed,
+    // so we cannot cleanly emit `user.signed_up` only on the new-user
+    // branch without a service refactor. Emitting on every successful
+    // social callback would double-count returning users against
+    // sign-up metrics, which violates the "clean over broad" telemetry
+    // rule.
+
     match &redirect_target {
         SocialRedirectTarget::Web { .. } => {
             let session =
@@ -469,6 +495,17 @@ pub async fn callback(
                 ua,
                 None,
                 None,
+            );
+
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::AuthLoggedIn {
+                    method: provider.as_str().to_string(),
+                    mfa_required: false,
+                },
             );
 
             build_web_auth_redirect(
@@ -514,6 +551,17 @@ pub async fn callback(
                 ua,
                 None,
                 None,
+            );
+
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::AuthLoggedIn {
+                    method: provider.as_str().to_string(),
+                    mfa_required: false,
+                },
             );
 
             build_mobile_auth_redirect(
@@ -756,6 +804,27 @@ pub async fn apple_callback(
     let ip = extract_ip(&headers, Some(peer));
     let ua = extract_user_agent(&headers);
 
+    // Pre-auth path — derive surface from `redirect_target` rather than
+    // the `X-NyxID-Client` headers. Apple's `form_post` response mode
+    // POSTs directly from apple.com to this callback, so the request
+    // never carries the app's client header. Using the redirect target
+    // keeps web vs. mobile attribution correct for successful Apple
+    // sign-ins in the AuthLoggedIn funnel.
+    let surface: &'static str = match &redirect_target {
+        SocialRedirectTarget::Web { .. } => "ui",
+        SocialRedirectTarget::Mobile { .. } => "mobile",
+    };
+    let tele_social = TelemetryContext {
+        surface,
+        client_version: None,
+    };
+
+    // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (user.signed_up social path).
+    // `social_auth_service::find_or_create_user` does not signal whether
+    // the returned `User` was just created, so we cannot emit
+    // `user.signed_up` only on the new-user branch without a service
+    // refactor. See callback() above for the same rationale.
+
     match &redirect_target {
         SocialRedirectTarget::Web { .. } => {
             let session =
@@ -790,6 +859,17 @@ pub async fn apple_callback(
                 ua,
                 None,
                 None,
+            );
+
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::AuthLoggedIn {
+                    method: "apple".to_string(),
+                    mfa_required: false,
+                },
             );
 
             build_web_auth_redirect(
@@ -835,6 +915,17 @@ pub async fn apple_callback(
                 ua,
                 None,
                 None,
+            );
+
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::AuthLoggedIn {
+                    method: "apple".to_string(),
+                    mfa_required: false,
+                },
             );
 
             build_mobile_auth_redirect(&tokens, &redirect_target, "apple", &user.id, secure, domain)

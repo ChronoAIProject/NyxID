@@ -15,6 +15,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::channel_event_service::{self, EventEnvelope, ForwardOutcome};
+use crate::telemetry::TelemetryContext;
 
 const MAX_ID_LEN: usize = 64;
 const MAX_LABEL_LEN: usize = 128;
@@ -34,6 +35,7 @@ pub async fn post_event(
     State(state): State<AppState>,
     Path(conversation_id): Path<String>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(envelope): Json<EventEnvelope>,
 ) -> AppResult<Json<EventAcceptedResponse>> {
     // Auth: this endpoint only accepts a genuine `nyxid_ag_...` API key.
@@ -61,6 +63,8 @@ pub async fn post_event(
         &state.config,
         &state.per_channel_event_limiter,
         &state.event_dedup_cache,
+        state.telemetry.as_deref(),
+        &tele,
         &auth_user,
         &conversation_id,
         &envelope,

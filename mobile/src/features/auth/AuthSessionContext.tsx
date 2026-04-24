@@ -19,7 +19,13 @@ import {
   initTelemetry,
   readExpoTelemetryConfig,
   reset as telemetryReset,
+  shutdownTelemetry,
 } from "../../lib/telemetry";
+import {
+  armDeepLinkBuffer,
+  discardPendingDeepLinks,
+  flushPendingDeepLinks,
+} from "../../app/linking";
 import { decodeJwtSub } from "../../lib/auth/jwt";
 import { useMobileConsent } from "../../lib/consent";
 
@@ -97,20 +103,73 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
   }, [isAuthenticated]);
 
   // Initialize telemetry once the session has finished restoring AND
-  // the user has opted in. Idempotent: `initTelemetry` guards against
-  // double-invoke internally so effect re-runs are safe.
-  const { enabled: consentEnabled } = useMobileConsent();
+  // consent hydration from AsyncStorage has completed AND the user has
+  // opted in. Gating on `isHydrated` prevents a cold-start race where
+  // `enabled` reads as the `false` default before persisted consent
+  // loads -- without this, users who had previously opted in would hit
+  // `discardPendingDeepLinks()` and lose the launch's buffered event.
+  // Idempotent: `initTelemetry` guards against double-invoke internally
+  // so effect re-runs are safe.
+  const { enabled: consentEnabled, isHydrated: consentHydrated } = useMobileConsent();
   useEffect(() => {
     if (isRestoring) return;
-    if (!consentEnabled) return;
+    if (!consentHydrated) return;
+    if (!consentEnabled) {
+      // Consent is hydrated and explicitly off. Tear down the vendor
+      // client (if previously initialized) + drop the cold-start
+      // deep-link buffer. Synchronous so neither step races any deep
+      // link that arrives between consent flip and effect re-run.
+      shutdownTelemetry();
+      discardPendingDeepLinks();
+      return;
+    }
+    // Re-arm the deep-link buffer BEFORE init runs so the brief window
+    // between consent flipping on and init resolving captures deep
+    // links instead of dropping them. Synchronous call so a deep link
+    // arriving in that window is guaranteed to see state="pending"
+    // rather than the stale "discarded" left by the previous consent-off
+    // branch.
+    armDeepLinkBuffer();
     const cfg = readExpoTelemetryConfig();
+    // Effect-scoped cancellation flag. If consent flips off (or the
+    // component unmounts) while `initTelemetry()` is still resolving,
+    // the `.then()` callback below must NOT flush -- otherwise it would
+    // move the buffer back to state="active" after the opt-out path
+    // already set it to "discarded", and a subsequent opt-in would fail
+    // to re-arm buffering for the second init window.
+    let cancelled = false;
     void initTelemetry({
       dsn: cfg.dsn,
       host: cfg.host,
       shareBack: cfg.shareBack,
       consent: true,
+    }).then(async () => {
+      if (cancelled) return;
+      // Cold-start `mobile.deep_link_opened` events captured during
+      // `NavigationContainer.getInitialURL()` run before this init
+      // completes; flush them now. This path only runs with consent=true.
+      // Re-apply `identify()` first if a session was already restored:
+      // the earlier identify in the session-restore effect was a no-op
+      // because telemetry wasn't initialized yet, so without this the
+      // flushed events would attribute to the anonymous distinct id
+      // instead of the restored user.
+      try {
+        const session = await loadStoredAuthSession();
+        if (cancelled) return;
+        if (session?.userId) {
+          telemetryIdentify(session.userId);
+        }
+      } catch {
+        // identify is best-effort; never break telemetry init on
+        // persisted-session read failure.
+      }
+      if (cancelled) return;
+      flushPendingDeepLinks();
     });
-  }, [isRestoring, consentEnabled]);
+    return () => {
+      cancelled = true;
+    };
+  }, [isRestoring, consentHydrated, consentEnabled]);
 
   useEffect(() => {
     let active = true;

@@ -11,6 +11,7 @@ import { ToastKind, ToastOverlay, ToastState } from "../../components/ToastOverl
 import { mobileApi } from "../../lib/api/mobileApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { useAuthSession } from "./AuthSessionContext";
+import { capture } from "../../lib/telemetry";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { createFlowStyles } from "../../theme/flowStyles";
@@ -275,6 +276,11 @@ export function AuthHomeScreen({ navigation }: Props) {
       return;
     }
 
+    capture({
+      name: "ui.mobile_provider_connect_initiated",
+      props: { provider, method: "oauth" },
+    });
+
     // Reset the dedup ref so a fresh attempt can re-process a callback URL
     // that matches a previous attempt's URL. The backend's mobile error
     // redirect is deterministic (status=error&error=<code>) so two retries
@@ -428,11 +434,29 @@ export function AuthHomeScreen({ navigation }: Props) {
           {/* Legal */}
           <Text style={styles.legal}>
             By continuing, you agree to{" "}
-            <Text style={styles.legalLink} onPress={() => navigation.navigate("TermsOfService")}>
+            <Text
+              style={styles.legalLink}
+              onPress={() => {
+                capture({
+                  name: "ui.mobile_legal_page_opened",
+                  props: { page: "terms" },
+                });
+                navigation.navigate("TermsOfService");
+              }}
+            >
               Terms
             </Text>{" "}
             and{" "}
-            <Text style={styles.legalLink} onPress={() => navigation.navigate("PrivacyPolicy")}>
+            <Text
+              style={styles.legalLink}
+              onPress={() => {
+                capture({
+                  name: "ui.mobile_legal_page_opened",
+                  props: { page: "privacy" },
+                });
+                navigation.navigate("PrivacyPolicy");
+              }}
+            >
               Privacy
             </Text>
             .

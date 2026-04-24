@@ -18,6 +18,13 @@ use crate::models::downstream_service::{
 use crate::models::node::NodeMetadata;
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, node_routing_service, node_service};
+use crate::telemetry::{
+    context::{TelemetryContext, emit_event},
+    sampling::hash_short_id,
+    schema::TelemetryEvent,
+};
+
+// NodeCredentialConfigured is emitted from the nyxid CLI, not backend -- see TELEMETRY.md §6.5
 
 // --- Request types ---
 
@@ -274,6 +281,7 @@ pub async fn get_node(
 pub async fn delete_node(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(node_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let user_id_str = auth_user.user_id.to_string();
@@ -290,13 +298,25 @@ pub async fn delete_node(
 
     audit_service::log_async(
         state.db.clone(),
-        Some(user_id_str),
+        Some(user_id_str.clone()),
         "node_deleted".to_string(),
         Some(serde_json::json!({ "node_id": &node_id })),
         None,
         None,
         None,
         None,
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id_str,
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::NodeDeleted {
+            // Raw UUID would be scrubbed to `[UUID_REDACTED]`; hash keeps
+            // per-node granularity without leaking the UUID.
+            node_id: hash_short_id(&node_id),
+        },
     );
 
     Ok(StatusCode::NO_CONTENT)

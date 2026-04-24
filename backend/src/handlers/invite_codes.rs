@@ -17,6 +17,7 @@ use crate::models::invite_code::{InviteCode, InviteCodeUsage};
 use crate::mw::auth::AuthUser;
 use crate::services::invite_code_service::InviteCodeUsageUser;
 use crate::services::{audit_service, invite_code_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
 //
@@ -149,6 +150,7 @@ pub async fn create_invite_code(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     headers: HeaderMap,
     Json(body): Json<CreateInviteCodeRequest>,
 ) -> AppResult<Json<InviteCodeResponse>> {
@@ -181,6 +183,16 @@ pub async fn create_invite_code(
         extract_user_agent(&headers),
         None,
         None,
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::InviteCodeGenerated {
+            generated_by_role: "admin".to_string(),
+        },
     );
 
     // A freshly-created code has no usages, so the empty user map is fine.

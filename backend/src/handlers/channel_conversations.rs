@@ -9,11 +9,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::handlers::channel_bots::hash_conversation_id;
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::mw::auth::AuthUser;
 use crate::services::{
     audit_service, channel_bot_service, channel_relay_service, channel_routing_service, org_service,
 };
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // ---------------------------------------------------------------------------
 // Request types
@@ -234,6 +236,7 @@ fn conversation_to_item(
 pub async fn create_conversation(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Json(body): Json<CreateConversationRequest>,
 ) -> AppResult<(StatusCode, Json<ConversationItem>)> {
     let actor = auth_user.user_id.to_string();
@@ -263,6 +266,17 @@ pub async fn create_conversation(
     } else {
         create_bot_conversation(&state, &owner_id, &body).await?
     };
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ChannelMappingCreated {
+            platform: conversation.platform.clone(),
+            conversation_id_hash: hash_conversation_id(&conversation.platform_conversation_id),
+        },
+    );
 
     audit_service::log_async(
         state.db.clone(),
@@ -510,13 +524,25 @@ pub async fn update_conversation(
 pub async fn delete_conversation(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(conversation_id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
     let actor = auth_user.user_id.to_string();
-    let (owner_id, _conv) =
+    let (owner_id, conv) =
         resolve_conversation_owner(&state, &actor, &conversation_id, true).await?;
 
     channel_routing_service::delete_conversation(&state.db, &conversation_id, &owner_id).await?;
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::ChannelMappingDeleted {
+            platform: conv.platform.clone(),
+            conversation_id_hash: hash_conversation_id(&conv.platform_conversation_id),
+        },
+    );
 
     audit_service::log_async(
         state.db.clone(),

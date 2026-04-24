@@ -441,8 +441,28 @@ pub async fn login(
     if user.mfa_enabled {
         match &body.mfa_code {
             Some(code) => {
+                // Build the telemetry context eagerly so both failure
+                // branches (length abuse + wrong code) can emit the same
+                // `mfa.challenge_failed` event before returning the error.
+                let tele_mfa = TelemetryContext::from_headers(
+                    headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+                    headers
+                        .get("x-nyxid-client-version")
+                        .and_then(|v| v.to_str().ok()),
+                );
+
                 // Validate MFA code length to prevent abuse
                 if code.len() > 10 {
+                    emit_event(
+                        state.telemetry.as_deref(),
+                        &user.id.to_string(),
+                        None,
+                        &tele_mfa,
+                        TelemetryEvent::MfaChallengeFailed {
+                            factor_type: "totp".to_string(),
+                            reason: "wrong_code".to_string(),
+                        },
+                    );
                     return Err(AppError::AuthenticationFailed(
                         "Invalid MFA code".to_string(),
                     ));
@@ -457,10 +477,34 @@ pub async fn login(
                 .await?;
 
                 if !valid {
+                    emit_event(
+                        state.telemetry.as_deref(),
+                        &user.id.to_string(),
+                        None,
+                        &tele_mfa,
+                        TelemetryEvent::MfaChallengeFailed {
+                            factor_type: "totp".to_string(),
+                            reason: "wrong_code".to_string(),
+                        },
+                    );
                     return Err(AppError::AuthenticationFailed(
                         "Invalid MFA code".to_string(),
                     ));
                 }
+
+                // Inline-MFA success: pair with the failure emit above so
+                // the MFA funnel sees both outcomes from the
+                // single-request `/auth/login` path. The standalone
+                // `/auth/mfa/verify` path emits its own success event.
+                emit_event(
+                    state.telemetry.as_deref(),
+                    &user.id.to_string(),
+                    None,
+                    &tele_mfa,
+                    TelemetryEvent::MfaChallengeSucceeded {
+                        factor_type: "totp".to_string(),
+                    },
+                );
             }
             None => {
                 // Store a temporary MFA session bound to the user.
@@ -677,6 +721,7 @@ pub struct RefreshRequest {
 /// Browser sessions do not use this endpoint.
 pub async fn refresh(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Option<Json<RefreshRequest>>,
 ) -> AppResult<(HeaderMap, Json<RefreshResponse>)> {
     let refresh_token = body
@@ -692,6 +737,26 @@ pub async fn refresh(
         Some(&state.mcp_sessions),
     )
     .await?;
+
+    // Telemetry: auth.token_refreshed. Pre-auth path (no AuthUser),
+    // so we decode the newly-issued access token to get the user id.
+    if let Ok(claims) =
+        crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &tokens.access_token)
+    {
+        let tele = TelemetryContext::from_headers(
+            headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+            headers
+                .get("x-nyxid-client-version")
+                .and_then(|v| v.to_str().ok()),
+        );
+        emit_event(
+            state.telemetry.as_deref(),
+            &claims.sub,
+            None,
+            &tele,
+            TelemetryEvent::AuthTokenRefreshed,
+        );
+    }
 
     Ok((
         HeaderMap::new(),
@@ -720,9 +785,26 @@ pub struct VerifyEmailResponse {
 /// Verify a user's email address using the token sent during registration.
 pub async fn verify_email(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<VerifyEmailRequest>,
 ) -> AppResult<Json<VerifyEmailResponse>> {
-    auth_service::verify_email(&state.db, &body.token).await?;
+    let user_id = auth_service::verify_email(&state.db, &body.token).await?;
+
+    // Telemetry: user.email_verified. Pre-auth path (token-gated), so
+    // surface comes from the `X-NyxID-Client` header.
+    let tele = TelemetryContext::from_headers(
+        headers.get("x-nyxid-client").and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-nyxid-client-version")
+            .and_then(|v| v.to_str().ok()),
+    );
+    emit_event(
+        state.telemetry.as_deref(),
+        &user_id,
+        None,
+        &tele,
+        TelemetryEvent::UserEmailVerified,
+    );
 
     Ok(Json(VerifyEmailResponse {
         message: "Email verified successfully".to_string(),
@@ -763,6 +845,14 @@ pub async fn forgot_password(
         tracing::debug!(token = %token, "Password reset token generated (dev only)");
     }
 
+    // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (auth.password_reset_requested).
+    // `initiate_password_reset` returns `Option<String>` (the bare reset token)
+    // and intentionally does not reveal whether the email matched a user,
+    // so we have no `user_id` to use as distinct_id without a service
+    // refactor. Emitting here would require changing the service to return
+    // the user_id alongside the token, which is explicitly out of scope for
+    // this sweep per the Part-2 hard scope rule.
+
     Ok(Json(ForgotPasswordResponse {
         message: "If that email exists, a password reset link has been sent.".to_string(),
     }))
@@ -797,6 +887,12 @@ pub async fn reset_password(
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
     auth_service::reset_password(&state.db, &body.token, &body.new_password).await?;
+
+    // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (auth.password_reset_completed).
+    // `auth_service::reset_password` returns `AppResult<()>` and the handler
+    // has no `AuthUser` (pre-auth path), so we have no `user_id` to use as
+    // distinct_id. Emitting here would require changing the service to
+    // return the user_id, which is explicitly out of scope for this sweep.
 
     Ok(Json(ResetPasswordResponse {
         message: "Password has been reset successfully".to_string(),
