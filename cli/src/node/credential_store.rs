@@ -92,6 +92,16 @@ impl ServiceCredential {
         }
     }
 
+    /// Raw credential value for WebSocket auth-frame injection.
+    pub fn raw_credential(&self) -> Option<&str> {
+        match &self.injection {
+            CredentialInjection::Header { value, .. } => Some(value),
+            CredentialInjection::QueryParam { value, .. } => Some(value),
+            CredentialInjection::PathPrefix { credential, .. } => Some(credential),
+            CredentialInjection::NoAuth => None,
+        }
+    }
+
     /// Local target URL for this service.
     pub fn target_url(&self) -> Option<&str> {
         self.target_url.as_deref()

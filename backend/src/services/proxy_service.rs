@@ -20,6 +20,7 @@ use crate::models::user_provider_token::{
 use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
+use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
@@ -49,6 +50,11 @@ pub struct ProxyTarget {
     /// Applied after the catalog layer; non-overridable entries win against
     /// lower layers including the catalog defaults and caller-supplied headers.
     pub user_service_default_headers: Vec<DefaultRequestHeader>,
+    /// WebSocket frame-auth injection rules. For new-path services this is
+    /// sourced from `UserService` first, falling back to the catalog
+    /// `DownstreamService` so existing provisioned rows inherit newly-added
+    /// catalog rules.
+    pub ws_frame_injections: Vec<WsFrameInjection>,
 }
 
 pub(crate) struct PreparedDelegatedRequest {
@@ -425,6 +431,7 @@ pub async fn resolve_proxy_target(
             .await?
             .unwrap_or_else(|| service.base_url.clone());
         let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
+        let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
             base_url,
             auth_method: service.auth_method.clone(),
@@ -433,6 +440,7 @@ pub async fn resolve_proxy_target(
             service,
             catalog_default_headers,
             user_service_default_headers: Vec::new(),
+            ws_frame_injections,
         });
     }
 
@@ -464,6 +472,7 @@ pub async fn resolve_proxy_target(
         .unwrap_or_else(|| service.base_url.clone());
 
     let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
+    let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
         base_url,
         auth_method: service.auth_method.clone(),
@@ -472,6 +481,7 @@ pub async fn resolve_proxy_target(
         service,
         catalog_default_headers,
         user_service_default_headers: Vec::new(),
+        ws_frame_injections,
     })
 }
 
@@ -540,6 +550,7 @@ pub async fn resolve_proxy_target_lenient(
                 Err(_) => (String::new(), false),
             };
         let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
+        let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
                 base_url,
@@ -549,6 +560,7 @@ pub async fn resolve_proxy_target_lenient(
                 service,
                 catalog_default_headers,
                 user_service_default_headers: Vec::new(),
+                ws_frame_injections,
             },
             has_server_credential,
         ));
@@ -595,6 +607,7 @@ pub async fn resolve_proxy_target_lenient(
         .unwrap_or_else(|| service.base_url.clone());
 
     let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
+    let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
             base_url,
@@ -604,6 +617,7 @@ pub async fn resolve_proxy_target_lenient(
             service,
             catalog_default_headers,
             user_service_default_headers: Vec::new(),
+            ws_frame_injections,
         },
         has_credential,
     ))
@@ -1319,6 +1333,13 @@ async fn finish_resolution(
     // entry has no defaults set.
     let catalog_default_headers =
         load_catalog_default_headers_for_user_service(db, &user_service).await;
+    let catalog_ws_frame_injections =
+        load_catalog_ws_frame_injections_for_user_service(db, &user_service).await;
+    let effective_ws_frame_injections = if user_service.ws_frame_injections.is_empty() {
+        catalog_ws_frame_injections
+    } else {
+        user_service.ws_frame_injections.clone()
+    };
     let user_service_default_headers = user_service
         .default_request_headers
         .clone()
@@ -1341,6 +1362,7 @@ async fn finish_resolution(
                 service: minimal_service,
                 catalog_default_headers: catalog_default_headers.clone(),
                 user_service_default_headers: user_service_default_headers.clone(),
+                ws_frame_injections: effective_ws_frame_injections.clone(),
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
@@ -1405,6 +1427,7 @@ async fn finish_resolution(
                 service: minimal_service,
                 catalog_default_headers: catalog_default_headers.clone(),
                 user_service_default_headers: user_service_default_headers.clone(),
+                ws_frame_injections: effective_ws_frame_injections.clone(),
             },
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
@@ -1447,6 +1470,7 @@ async fn finish_resolution(
             service: minimal_service,
             catalog_default_headers,
             user_service_default_headers,
+            ws_frame_injections: effective_ws_frame_injections,
         },
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
@@ -1482,6 +1506,36 @@ async fn load_catalog_default_headers_for_user_service(
                 catalog_id,
                 error = %e,
                 "Failed to load catalog default_request_headers; proceeding without"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Load catalog `DownstreamService.ws_frame_injections` for a catalog-backed
+/// `UserService`. Existing user-service rows usually do not have a snapshot of
+/// newly-added catalog WS auth rules, so target resolution falls back to these
+/// rules when the user-owned list is empty.
+async fn load_catalog_ws_frame_injections_for_user_service(
+    db: &mongodb::Database,
+    user_service: &crate::models::user_service::UserService,
+) -> Vec<WsFrameInjection> {
+    let catalog_id = match user_service.catalog_service_id.as_deref() {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+    match db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": catalog_id })
+        .await
+    {
+        Ok(Some(svc)) => svc.ws_frame_injections,
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                catalog_id,
+                error = %e,
+                "Failed to load catalog ws_frame_injections; proceeding without"
             );
             Vec::new()
         }
@@ -1731,6 +1785,7 @@ fn build_minimal_downstream_service(
         recommended_skills: None,
         custom_user_agent: user_service.custom_user_agent.clone(),
         default_request_headers: None,
+        ws_frame_injections: user_service.ws_frame_injections.clone(),
         developer_app_ids: None,
         token_exchange_config,
         created_at: now,
@@ -2364,6 +2419,7 @@ mod tests {
                 recommended_skills: None,
                 custom_user_agent: None,
                 default_request_headers: None,
+                ws_frame_injections: Vec::new(),
                 developer_app_ids: None,
                 token_exchange_config: None,
                 created_at: now,
@@ -2371,6 +2427,7 @@ mod tests {
             },
             catalog_default_headers: Vec::new(),
             user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
         }
     }
 
@@ -3118,6 +3175,7 @@ mod tests {
                 examples_url: None,
                 custom_user_agent: None,
                 default_request_headers: None,
+                ws_frame_injections: Vec::new(),
                 developer_app_ids: None,
                 token_exchange_config: Some(make_lark_token_exchange_config()),
                 created_at: now,
@@ -3125,6 +3183,7 @@ mod tests {
             },
             catalog_default_headers: Vec::new(),
             user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
         }
     }
 
@@ -3284,6 +3343,7 @@ mod tests {
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             is_active: true,
             source: None,
             source_id: None,
@@ -3407,6 +3467,7 @@ mod tests {
                 examples_url: None,
                 custom_user_agent: None,
                 default_request_headers: None,
+                ws_frame_injections: Vec::new(),
                 developer_app_ids: None,
                 token_exchange_config: None,
                 created_at: now,
@@ -3414,6 +3475,7 @@ mod tests {
             },
             catalog_default_headers: Vec::new(),
             user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
         }
     }
 

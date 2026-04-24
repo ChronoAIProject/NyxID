@@ -651,6 +651,7 @@ mod tests {
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             is_active: true,
             source: None,
             source_id: None,

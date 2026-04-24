@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::models::default_request_header::DefaultRequestHeader;
+use crate::models::ws_frame_injection::WsFrameInjection;
 
 pub const COLLECTION_NAME: &str = "downstream_services";
 
@@ -291,6 +292,11 @@ pub struct DownstreamService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_request_headers: Option<Vec<DefaultRequestHeader>>,
 
+    /// WebSocket frame-auth injection rules. Orthogonal to HTTP
+    /// `auth_method`; existing documents default to no frame injection.
+    #[serde(default)]
+    pub ws_frame_injections: Vec<WsFrameInjection>,
+
     /// Developer app (OAuth client) IDs that grant access to this service.
     /// When set on a private service, users who have consented to any of
     /// these apps will have the service auto-provisioned in their AI Services.
@@ -396,6 +402,7 @@ pub mod test_helpers {
             recommended_skills: None,
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),
@@ -501,6 +508,7 @@ mod tests {
                     sensitive: false,
                 },
             ]),
+            ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),
@@ -567,6 +575,7 @@ mod tests {
             recommended_skills: None,
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),

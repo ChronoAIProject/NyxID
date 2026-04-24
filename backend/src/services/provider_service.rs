@@ -2520,6 +2520,7 @@ pub async fn seed_default_services(
             recommended_skills: None,
             custom_user_agent: None,
             default_request_headers,
+            ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config,
             created_at: now,

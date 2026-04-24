@@ -12,6 +12,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::org_membership::OrgRole;
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
 use crate::services::user_service_service::{CredentialSource, UserServiceWithSource};
 use crate::services::{node_service, org_service, unified_key_service, user_service_service};
@@ -78,6 +79,12 @@ pub struct UpdateUserServiceRequest {
     )]
     pub default_request_headers:
         Option<Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>>,
+    /// Replace user-owned WebSocket frame-auth injection rules. Omitted
+    /// leaves the existing value unchanged; an empty array clears the
+    /// user override and lets catalog-backed services fall back to their
+    /// catalog rules at proxy time.
+    #[serde(default)]
+    pub ws_frame_injections: Option<Vec<WsFrameInjection>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -113,6 +120,7 @@ pub struct UserServiceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_request_headers:
         Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    pub ws_frame_injections: Vec<crate::models::ws_frame_injection::WsFrameInjection>,
     pub created_at: String,
     pub updated_at: String,
     /// Provenance: personal credentials, or inherited from an org membership.
@@ -244,6 +252,10 @@ pub async fn update_user_service(
     let previous_custom_user_agent = current.custom_user_agent.clone();
     let custom_user_agent_field_present = body.custom_user_agent.is_some();
 
+    if let Some(ref rules) = body.ws_frame_injections {
+        crate::services::ws_frame_injector::validate_rules(rules)?;
+    }
+
     let identity = if body.identity_propagation_mode.is_some()
         || body.identity_include_user_id.is_some()
         || body.identity_include_email.is_some()
@@ -298,6 +310,7 @@ pub async fn update_user_service(
         identity.as_ref(),
         body.custom_user_agent.as_deref(),
         body.default_request_headers.as_ref(),
+        body.ws_frame_injections.as_deref(),
     )
     .await?;
 
@@ -439,6 +452,7 @@ fn user_service_with_source_response(item: UserServiceWithSource) -> UserService
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
             svc.default_request_headers,
         ),
+        ws_frame_injections: svc.ws_frame_injections,
         created_at: svc.created_at.to_rfc3339(),
         updated_at: svc.updated_at.to_rfc3339(),
         credential_source: source.into(),

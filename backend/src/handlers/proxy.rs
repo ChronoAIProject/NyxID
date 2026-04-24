@@ -27,7 +27,7 @@ use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, Stre
 use crate::services::{
     action_description, approval_service, audit_service, chatgpt_translator, delegation_service,
     identity_service, llm_usage_service, node_metrics_service, node_routing_service, node_service,
-    notification_service, proxy_service, sse_parser, user_service_service,
+    notification_service, proxy_service, sse_parser, user_service_service, ws_frame_injector,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -1722,10 +1722,8 @@ async fn execute_proxy_inner(
                                 })?
                         }
                         ProxyResponseType::Streaming(mut rx) => {
-                            let idle_timeout = std::time::Duration::from_secs(
-                                state.config.proxy_stream_idle_timeout_secs,
-                            );
                             let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+                            let idle_timeout = std::time::Duration::from_secs(idle_timeout_secs);
 
                             // Wait for the Start chunk
                             let first = tokio::time::timeout(idle_timeout, rx.recv())
@@ -1778,6 +1776,10 @@ async fn execute_proxy_inner(
 
                             let service_id_owned = service_id.to_string();
                             let node_id_owned = node_id.to_string();
+                            let stream_db = state.db.clone();
+                            let stream_user_id = user_id_str.clone();
+                            let stream_api_key_id = auth_user.api_key_id.clone();
+                            let stream_api_key_name = auth_user.api_key_name.clone();
 
                             // Convert the mpsc receiver into a streaming body.
                             let stream = async_stream::stream! {
@@ -1801,6 +1803,24 @@ async fn execute_proxy_inner(
                                         }
                                         Ok(Some(StreamChunk::Start { .. })) => {
                                             // Duplicate start, ignore
+                                        }
+                                        Ok(Some(StreamChunk::Injected { trigger_kind, frame_index })) => {
+                                            audit_service::log_async(
+                                                stream_db.clone(),
+                                                Some(stream_user_id.clone()),
+                                                "ws_frame_auth_injected".to_string(),
+                                                Some(serde_json::json!({
+                                                    "service_id": service_id_owned,
+                                                    "trigger_kind": trigger_kind,
+                                                    "frame_index_in": frame_index,
+                                                    "routed_via": "node",
+                                                    "node_id": node_id_owned,
+                                                })),
+                                                None,
+                                                None,
+                                                stream_api_key_id.clone(),
+                                                stream_api_key_name.clone(),
+                                            );
                                         }
                                         Ok(None) => break,
                                         Err(_) => {
@@ -2711,6 +2731,97 @@ fn tungstenite_msg_to_axum(
     }
 }
 
+fn axum_msg_payload_for_injection(
+    msg: &axum::extract::ws::Message,
+) -> Option<(crate::models::ws_frame_injection::WsFrameKind, Vec<u8>)> {
+    match msg {
+        axum::extract::ws::Message::Text(t) => Some((
+            crate::models::ws_frame_injection::WsFrameKind::Text,
+            t.to_string().into_bytes(),
+        )),
+        axum::extract::ws::Message::Binary(b) => Some((
+            crate::models::ws_frame_injection::WsFrameKind::Binary,
+            b.to_vec(),
+        )),
+        _ => None,
+    }
+}
+
+fn tungstenite_msg_payload_for_injection(
+    msg: &tokio_tungstenite::tungstenite::Message,
+) -> Option<(crate::models::ws_frame_injection::WsFrameKind, Vec<u8>)> {
+    match msg {
+        tokio_tungstenite::tungstenite::Message::Text(t) => Some((
+            crate::models::ws_frame_injection::WsFrameKind::Text,
+            t.to_string().into_bytes(),
+        )),
+        tokio_tungstenite::tungstenite::Message::Binary(b) => Some((
+            crate::models::ws_frame_injection::WsFrameKind::Binary,
+            b.to_vec(),
+        )),
+        _ => None,
+    }
+}
+
+fn injection_frame_to_tungstenite(
+    frame: ws_frame_injector::WsFrame,
+) -> tokio_tungstenite::tungstenite::Message {
+    match frame.kind {
+        crate::models::ws_frame_injection::WsFrameKind::Text => {
+            let text = String::from_utf8(frame.payload).unwrap_or_default();
+            tokio_tungstenite::tungstenite::Message::Text(text.into())
+        }
+        crate::models::ws_frame_injection::WsFrameKind::Binary => {
+            tokio_tungstenite::tungstenite::Message::Binary(frame.payload.into())
+        }
+    }
+}
+
+fn injection_frame_to_axum(frame: ws_frame_injector::WsFrame) -> axum::extract::ws::Message {
+    match frame.kind {
+        crate::models::ws_frame_injection::WsFrameKind::Text => {
+            let text = String::from_utf8(frame.payload).unwrap_or_default();
+            axum::extract::ws::Message::Text(text.into())
+        }
+        crate::models::ws_frame_injection::WsFrameKind::Binary => {
+            axum::extract::ws::Message::Binary(frame.payload.into())
+        }
+    }
+}
+
+fn audit_ws_frame_auth_injected(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+    action: &ws_frame_injector::InjectionAction,
+    routed_node_id: Option<&str>,
+    api_key_id: Option<String>,
+    api_key_name: Option<String>,
+) {
+    let mut data = serde_json::json!({
+        "service_id": service_id,
+        "trigger_kind": action.trigger_kind,
+        "frame_index_in": action.frame_index_in,
+    });
+    if let Some(node_id) = routed_node_id
+        && let Some(obj) = data.as_object_mut()
+    {
+        obj.insert("routed_via".to_string(), serde_json::json!("node"));
+        obj.insert("node_id".to_string(), serde_json::json!(node_id));
+    }
+
+    audit_service::log_async(
+        db.clone(),
+        Some(user_id.to_string()),
+        "ws_frame_auth_injected".to_string(),
+        Some(data),
+        None,
+        None,
+        api_key_id,
+        api_key_name,
+    );
+}
+
 /// Maximum duration for a single WS passthrough session (seconds).
 const WS_PASSTHROUGH_MAX_DURATION_SECS: u64 = 3600;
 /// Idle timeout: close the bridge if no frames pass in either direction (seconds).
@@ -2724,16 +2835,24 @@ const WS_PASSTHROUGH_IDLE_TIMEOUT_SECS: u64 = 300;
 /// first. Enforces idle timeout and max session duration.
 ///
 /// Returns the session duration for audit logging.
+#[allow(clippy::too_many_arguments)]
 async fn bridge_websockets(
     client_ws: axum::extract::ws::WebSocket,
     downstream_ws: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     service_id: String,
+    ws_frame_injections: Vec<crate::models::ws_frame_injection::WsFrameInjection>,
+    credential: String,
+    db: mongodb::Database,
+    user_id: String,
+    api_key_id: Option<String>,
+    api_key_name: Option<String>,
 ) -> std::time::Duration {
     let start = std::time::Instant::now();
     let (mut client_sink, mut client_stream) = client_ws.split();
     let (mut downstream_sink, mut downstream_stream) = downstream_ws.split();
+    let mut injector_state = ws_frame_injector::InjectorState::default();
 
     let max_duration = tokio::time::sleep(std::time::Duration::from_secs(
         WS_PASSTHROUGH_MAX_DURATION_SECS,
@@ -2767,6 +2886,49 @@ async fn bridge_websockets(
                         idle_timeout
                             .as_mut()
                             .reset(tokio::time::Instant::now() + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS));
+                        if let Some((kind, payload)) = axum_msg_payload_for_injection(&axum_msg) {
+                            let frame = ws_frame_injector::IncomingFrame {
+                                direction: crate::models::ws_frame_injection::WsFrameDirection::Upstream,
+                                kind,
+                                payload,
+                            };
+                            if let Some(action) = ws_frame_injector::evaluate(
+                                &ws_frame_injections,
+                                &mut injector_state,
+                                &frame,
+                                &credential,
+                            ) {
+                                tracing::info!(
+                                    service_id = %service_id,
+                                    trigger_kind = action.trigger_kind,
+                                    frame_index_in = action.frame_index_in,
+                                    credential_sha256_prefix = %action.credential_sha256_prefix,
+                                    "Injected WebSocket auth frame"
+                                );
+                                audit_ws_frame_auth_injected(
+                                    &db,
+                                    &user_id,
+                                    &service_id,
+                                    &action,
+                                    None,
+                                    api_key_id.clone(),
+                                    api_key_name.clone(),
+                                );
+                                // NOTE: `direction` is the trigger direction. The injected
+                                // frame is sent to the opposite side so a downstream
+                                // auth challenge can produce an upstream auth response.
+                                if client_sink
+                                    .send(injection_frame_to_axum(action.send_frame))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                if !action.forward_original {
+                                    continue;
+                                }
+                            }
+                        }
                         let is_close = matches!(axum_msg, axum::extract::ws::Message::Close(_));
                         let _ = downstream_sink.send(axum_msg_to_tungstenite(axum_msg)).await;
                         if is_close {
@@ -2786,6 +2948,49 @@ async fn bridge_websockets(
                         idle_timeout
                             .as_mut()
                             .reset(tokio::time::Instant::now() + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS));
+                        if let Some((kind, payload)) = tungstenite_msg_payload_for_injection(&tung_msg) {
+                            let frame = ws_frame_injector::IncomingFrame {
+                                direction: crate::models::ws_frame_injection::WsFrameDirection::Downstream,
+                                kind,
+                                payload,
+                            };
+                            if let Some(action) = ws_frame_injector::evaluate(
+                                &ws_frame_injections,
+                                &mut injector_state,
+                                &frame,
+                                &credential,
+                            ) {
+                                tracing::info!(
+                                    service_id = %service_id,
+                                    trigger_kind = action.trigger_kind,
+                                    frame_index_in = action.frame_index_in,
+                                    credential_sha256_prefix = %action.credential_sha256_prefix,
+                                    "Injected WebSocket auth frame"
+                                );
+                                audit_ws_frame_auth_injected(
+                                    &db,
+                                    &user_id,
+                                    &service_id,
+                                    &action,
+                                    None,
+                                    api_key_id.clone(),
+                                    api_key_name.clone(),
+                                );
+                                // NOTE: `direction` is the trigger direction. For the HA
+                                // preset this sends the auth frame back upstream to the
+                                // downstream socket and consumes the auth_required frame.
+                                if downstream_sink
+                                    .send(injection_frame_to_tungstenite(action.send_frame))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                if !action.forward_original {
+                                    continue;
+                                }
+                            }
+                        }
                         let is_close = matches!(tung_msg, tokio_tungstenite::tungstenite::Message::Close(_));
                         let _ = client_sink.send(tungstenite_msg_to_axum(tung_msg)).await;
                         if is_close {
@@ -2901,6 +3106,8 @@ async fn handle_ws_passthrough(
 
     let db = state.db.clone();
     let sid = service_id_owned.clone();
+    let ws_frame_injections = target.ws_frame_injections.clone();
+    let credential = target.credential.clone();
     let ws_upgrade = ws_upgrade.max_message_size(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
     let ws_upgrade = if let Some(protocol) = downstream.selected_protocol.clone() {
         ws_upgrade.protocols([protocol])
@@ -2910,7 +3117,18 @@ async fn handle_ws_passthrough(
 
     Ok(ws_upgrade
         .on_upgrade(move |client_ws| async move {
-            let duration = bridge_websockets(client_ws, downstream.stream, sid.clone()).await;
+            let duration = bridge_websockets(
+                client_ws,
+                downstream.stream,
+                sid.clone(),
+                ws_frame_injections,
+                credential,
+                db.clone(),
+                user_id_str.clone(),
+                ak_id.clone(),
+                ak_name.clone(),
+            )
+            .await;
             drop(guard); // decrement counter (guard moved into closure)
 
             audit_service::log_async(
@@ -3052,6 +3270,7 @@ async fn handle_ws_passthrough_via_node(
             path: node_path.clone(),
             query: prepared.query.clone(),
             headers: enriched_headers.clone(),
+            ws_frame_injections: target.ws_frame_injections.clone(),
         };
 
         match state
@@ -3146,6 +3365,10 @@ async fn handle_ws_passthrough_via_node(
                 &node_id_owned,
                 &sess_id,
                 sid.clone(),
+                db.clone(),
+                user_id_str.clone(),
+                ak_id.clone(),
+                ak_name.clone(),
             )
             .await;
 
@@ -3174,6 +3397,7 @@ async fn handle_ws_passthrough_via_node(
 }
 
 /// Bridge client WS frames to/from a node-relayed WS proxy session.
+#[allow(clippy::too_many_arguments)]
 async fn bridge_websockets_via_node(
     client_ws: axum::extract::ws::WebSocket,
     mut ws_proxy_rx: tokio::sync::mpsc::Receiver<crate::services::node_ws_manager::WsProxyFrame>,
@@ -3181,6 +3405,10 @@ async fn bridge_websockets_via_node(
     node_id: &str,
     session_id: &str,
     service_id: String,
+    db: mongodb::Database,
+    user_id: String,
+    api_key_id: Option<String>,
+    api_key_name: Option<String>,
 ) -> std::time::Duration {
     use crate::services::node_ws_manager::WsProxyFrame;
 
@@ -3275,6 +3503,24 @@ async fn bridge_websockets_via_node(
                             break;
                         }
                     }
+                    Some(WsProxyFrame::Injected { trigger_kind, frame_index }) => {
+                        audit_service::log_async(
+                            db.clone(),
+                            Some(user_id.clone()),
+                            "ws_frame_auth_injected".to_string(),
+                            Some(serde_json::json!({
+                                "service_id": service_id,
+                                "trigger_kind": trigger_kind,
+                                "frame_index_in": frame_index,
+                                "routed_via": "node",
+                                "node_id": node_id,
+                            })),
+                            None,
+                            None,
+                            api_key_id.clone(),
+                            api_key_name.clone(),
+                        );
+                    }
                     Some(WsProxyFrame::Closed { code, reason }) => {
                         let close_frame = code.map(|c| axum::extract::ws::CloseFrame {
                             code: c,
@@ -3330,10 +3576,12 @@ mod tests {
     use axum::{
         Router,
         body::{Body, to_bytes},
-        extract::Path,
+        extract::{Path, State, ws::WebSocketUpgrade},
         http::{Request, StatusCode},
+        response::IntoResponse,
         routing::get,
     };
+    use futures::{SinkExt, StreamExt};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -3835,6 +4083,142 @@ mod tests {
         assert!(!is_ws_upgrade_request(&request));
     }
 
+    #[derive(Clone)]
+    struct WsBridgeTestState {
+        downstream: Arc<
+            tokio::sync::Mutex<
+                Option<
+                    tokio_tungstenite::WebSocketStream<
+                        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                    >,
+                >,
+            >,
+        >,
+        db: mongodb::Database,
+    }
+
+    async fn ws_bridge_test_handler(
+        State(state): State<WsBridgeTestState>,
+        ws: WebSocketUpgrade,
+    ) -> impl IntoResponse {
+        ws.on_upgrade(move |client_ws| async move {
+            let downstream_ws = state
+                .downstream
+                .lock()
+                .await
+                .take()
+                .expect("downstream socket available");
+            super::bridge_websockets(
+                client_ws,
+                downstream_ws,
+                "svc-ha".to_string(),
+                vec![crate::models::ws_frame_injection::WsFrameInjection {
+                    trigger: crate::models::ws_frame_injection::WsFrameTrigger::JsonFieldEquals {
+                        path: "$.type".to_string(),
+                        value: serde_json::json!("auth_required"),
+                    },
+                    template: r#"{"type":"auth","access_token":"${credential}"}"#.to_string(),
+                    frame_kind: crate::models::ws_frame_injection::WsFrameKind::Text,
+                    consume_trigger: true,
+                    direction: crate::models::ws_frame_injection::WsFrameDirection::Downstream,
+                }],
+                "TEST_CRED".to_string(),
+                state.db,
+                "user-1".to_string(),
+                None,
+                None,
+            )
+            .await;
+        })
+    }
+
+    #[tokio::test]
+    async fn bridge_websockets_injects_ha_auth_frame_and_consumes_challenge() {
+        let downstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind downstream");
+        let downstream_addr = downstream_listener.local_addr().expect("downstream addr");
+        let (auth_tx, auth_rx) = tokio::sync::oneshot::channel::<String>();
+
+        let downstream_task = tokio::spawn(async move {
+            let (stream, _) = downstream_listener
+                .accept()
+                .await
+                .expect("accept downstream");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept downstream ws");
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"auth_required"}"#.into(),
+            ))
+            .await
+            .expect("send auth_required");
+            let auth = ws
+                .next()
+                .await
+                .expect("auth response")
+                .expect("auth response ok");
+            let auth_text = auth.into_text().expect("auth response text").to_string();
+            auth_tx.send(auth_text).expect("send auth text");
+            ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                r#"{"type":"auth_ok"}"#.into(),
+            ))
+            .await
+            .expect("send auth_ok");
+        });
+
+        let (downstream_ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://{downstream_addr}"))
+                .await
+                .expect("connect bridge downstream");
+
+        let mut client_options =
+            mongodb::options::ClientOptions::parse("mongodb://127.0.0.1:27099")
+                .await
+                .expect("parse mongodb options");
+        client_options.server_selection_timeout = Some(std::time::Duration::from_millis(10));
+        let db = mongodb::Client::with_options(client_options)
+            .expect("mongodb client")
+            .database("nyxid_ws_frame_injection_test");
+
+        let state = WsBridgeTestState {
+            downstream: Arc::new(tokio::sync::Mutex::new(Some(downstream_ws))),
+            db,
+        };
+        let app = Router::new()
+            .route("/ws", get(ws_bridge_test_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind bridge");
+        let bridge_addr = listener.local_addr().expect("bridge addr");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve bridge");
+        });
+
+        let (mut client_ws, _) = tokio_tungstenite::connect_async(format!("ws://{bridge_addr}/ws"))
+            .await
+            .expect("connect client");
+        let client_msg = client_ws
+            .next()
+            .await
+            .expect("client receives auth_ok")
+            .expect("client frame ok")
+            .into_text()
+            .expect("client text")
+            .to_string();
+
+        assert_eq!(client_msg, r#"{"type":"auth_ok"}"#);
+        assert_eq!(
+            auth_rx.await.expect("auth frame captured"),
+            r#"{"type":"auth","access_token":"TEST_CRED"}"#
+        );
+
+        let _ = client_ws.close(None).await;
+        downstream_task.await.expect("downstream task");
+        server_task.abort();
+    }
+
     // ---- build_downstream_ws_url tests ----
 
     use super::build_downstream_ws_url;
@@ -3849,6 +4233,7 @@ mod tests {
             service: crate::models::downstream_service::test_helpers::dummy_service(),
             catalog_default_headers: Vec::new(),
             user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
         }
     }
 

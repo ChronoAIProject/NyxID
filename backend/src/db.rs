@@ -1726,6 +1726,10 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             delegation_token_scope: inherited_identity.delegation_token_scope,
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: service
+                .as_ref()
+                .map(|svc| svc.ws_frame_injections.clone())
+                .unwrap_or_default(),
             is_active: true,
             source: Some("migration_provider_token".to_string()),
             source_id: Some(token.id.clone()),
@@ -1925,6 +1929,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             delegation_token_scope: inherited_identity.delegation_token_scope,
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: service.ws_frame_injections.clone(),
             is_active: true,
             source: Some("migration_connection".to_string()),
             source_id: Some(conn.id.clone()),
@@ -2159,6 +2164,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             delegation_token_scope: inherited_identity.delegation_token_scope,
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: service.ws_frame_injections.clone(),
             is_active: true,
             source: Some("migration_node_binding".to_string()),
             source_id: Some(binding.id.clone()),
@@ -2241,6 +2247,7 @@ mod tests {
             recommended_skills: None,
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),

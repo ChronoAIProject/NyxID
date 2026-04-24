@@ -10,6 +10,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user_api_key::UserApiKey;
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
 use crate::services::{
     catalog_service, credential_push_service, lark_permission, node_service, org_service,
@@ -188,6 +189,11 @@ pub struct CreateKeyRequest {
     /// call specific operations instead of only the generic proxy tool.
     /// SSH services ignore this field entirely.
     pub openapi_spec_url: Option<String>,
+    /// User-owned WebSocket frame-auth injection rules to attach to the
+    /// created UserService. Useful for custom WebSocket services such as
+    /// Home Assistant that authenticate after upgrade.
+    #[serde(default)]
+    pub ws_frame_injections: Option<Vec<WsFrameInjection>>,
 }
 
 impl std::fmt::Debug for CreateKeyRequest {
@@ -258,6 +264,10 @@ pub struct KeyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_request_headers:
         Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    /// User-owned WebSocket frame-auth injection rules. Empty means no
+    /// user override; catalog-backed services may still inherit catalog
+    /// rules at proxy resolution time.
+    pub ws_frame_injections: Vec<WsFrameInjection>,
     pub auto_connected: bool,
     /// Developer app (OAuth client) ID that triggered this auto-provision.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -521,6 +531,9 @@ pub async fn create_key(
     };
 
     let credential = body.credential.as_deref().unwrap_or("");
+    if let Some(ref rules) = body.ws_frame_injections {
+        crate::services::ws_frame_injector::validate_rules(rules)?;
+    }
 
     // Build SSH params if SSH-specific fields are present
     let ssh_params = body.ssh_host.as_deref().map(|host| {
@@ -591,6 +604,7 @@ pub async fn create_key(
         ssh_params,
         identity,
         openapi_input,
+        body.ws_frame_injections.as_deref(),
     )
     .await?;
 
@@ -1401,6 +1415,7 @@ pub async fn update_key(
             identity.as_ref(),
             body.custom_user_agent.as_deref(),
             body.default_request_headers.as_ref(),
+            None,
         )
         .await?;
     }
@@ -1667,6 +1682,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
             result.service.default_request_headers.clone(),
         ),
+        ws_frame_injections: result.service.ws_frame_injections.clone(),
         auto_connected: false,
         source_app_id: None,
         source_app_name: None,
@@ -1725,6 +1741,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         default_request_headers: crate::models::default_request_header::redact_list_for_response(
             view.default_request_headers,
         ),
+        ws_frame_injections: view.ws_frame_injections,
         auto_connected: view.auto_connected,
         source_app_id: view.source_app_id,
         source_app_name: view.source_app_name,

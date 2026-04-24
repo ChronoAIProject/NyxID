@@ -546,6 +546,17 @@ pub enum ServiceCommands {
         /// the catalog entry's default spec URL.
         #[arg(long, value_name = "URL")]
         openapi_spec_url: Option<String>,
+        /// Apply a WebSocket auth-frame preset to the created user service.
+        /// Supported value: home-assistant.
+        #[arg(
+            long = "ws-frame-preset",
+            value_name = "NAME",
+            conflicts_with = "ws_frame_clear"
+        )]
+        ws_frame_preset: Option<String>,
+        /// Clear WebSocket auth-frame rules on the created user service.
+        #[arg(long = "ws-frame-clear")]
+        ws_frame_clear: bool,
         /// Force the terminal (rpassword) flow and skip the browser wizard
         /// even when a local display is available. Equivalent to setting
         /// `NYXID_NO_WIZARD=1` for a single invocation.
@@ -650,6 +661,17 @@ pub enum ServiceCommands {
         /// Clear all default request headers for this service.
         #[arg(long)]
         clear_default_headers: bool,
+        /// Apply a WebSocket auth-frame preset. Supported value:
+        /// home-assistant.
+        #[arg(
+            long = "ws-frame-preset",
+            value_name = "NAME",
+            conflicts_with = "ws_frame_clear"
+        )]
+        ws_frame_preset: Option<String>,
+        /// Clear WebSocket auth-frame rules on this user service.
+        #[arg(long = "ws-frame-clear")]
+        ws_frame_clear: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -1414,6 +1436,77 @@ mod tests {
             }
             _ => panic!("unexpected parse result"),
         }
+    }
+
+    #[test]
+    fn service_add_accepts_ws_frame_preset() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "service",
+            "add",
+            "--custom",
+            "--ws-frame-preset",
+            "home-assistant",
+        ])
+        .expect("service add should parse websocket frame preset");
+
+        match cli.command {
+            Commands::Service {
+                command:
+                    ServiceCommands::Add {
+                        ws_frame_preset,
+                        ws_frame_clear,
+                        ..
+                    },
+            } => {
+                assert_eq!(ws_frame_preset.as_deref(), Some("home-assistant"));
+                assert!(!ws_frame_clear);
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn service_update_accepts_ws_frame_clear() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "service",
+            "update",
+            "service-1",
+            "--ws-frame-clear",
+        ])
+        .expect("service update should parse websocket frame clear");
+
+        match cli.command {
+            Commands::Service {
+                command:
+                    ServiceCommands::Update {
+                        id, ws_frame_clear, ..
+                    },
+            } => {
+                assert_eq!(id, "service-1");
+                assert!(ws_frame_clear);
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn service_ws_frame_preset_and_clear_conflict() {
+        let err = match Cli::try_parse_from([
+            "nyxid",
+            "service",
+            "update",
+            "service-1",
+            "--ws-frame-preset",
+            "home-assistant",
+            "--ws-frame-clear",
+        ]) {
+            Ok(_) => panic!("preset and clear should be mutually exclusive"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }
 

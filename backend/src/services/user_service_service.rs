@@ -9,7 +9,8 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
 use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
 use crate::models::user_service::{COLLECTION_NAME, UserService};
-use crate::services::{agent_binding_service, node_service, org_service};
+use crate::models::ws_frame_injection::WsFrameInjection;
+use crate::services::{agent_binding_service, node_service, org_service, ws_frame_injector};
 
 /// Valid auth methods for user services.
 ///
@@ -419,11 +420,15 @@ pub async fn create_user_service(
     source_id: Option<&str>,
     source_app_id: Option<&str>,
     identity: &IdentityConfig,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
 ) -> AppResult<UserService> {
     validate_slug(slug)?;
     validate_auth_method(auth_method)?;
     let identity = normalize_identity_config(identity)?;
     let node_id = node_id.filter(|nid| !nid.is_empty());
+    if let Some(rules) = ws_frame_injections {
+        ws_frame_injector::validate_rules(rules)?;
+    }
 
     if source.is_some() != source_id.is_some() {
         return Err(AppError::ValidationError(
@@ -539,6 +544,7 @@ pub async fn create_user_service(
         delegation_token_scope: identity.delegation_token_scope,
         custom_user_agent: None,
         default_request_headers: None,
+        ws_frame_injections: ws_frame_injections.unwrap_or_default().to_vec(),
         is_active: true,
         source: source.map(str::to_string),
         source_id: source_id.map(str::to_string),
@@ -576,6 +582,7 @@ pub async fn update_user_service(
     default_request_headers: Option<
         &Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
     >,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
     let mut set_doc = doc! {
@@ -747,6 +754,15 @@ pub async fn update_user_service(
                 set_doc.insert("default_request_headers", bson::Bson::Null);
             }
         }
+    }
+
+    if let Some(rules) = ws_frame_injections {
+        ws_frame_injector::validate_rules(rules)?;
+        set_doc.insert(
+            "ws_frame_injections",
+            bson::to_bson(rules)
+                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?,
+        );
     }
 
     let result = db
@@ -1298,6 +1314,7 @@ pub async fn deactivate_user_service(
         None,
         None,
         None,
+        None,
     )
     .await?;
 
@@ -1410,6 +1427,10 @@ pub async fn backfill_stale_catalog_auth_snapshots(db: &mongodb::Database) -> Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ws_frame_injection::{
+        WsFrameDirection, WsFrameInjection, WsFrameKind, WsFrameTrigger,
+    };
+    use crate::test_utils::{connect_test_database, test_user_service};
 
     fn sample_identity_config() -> IdentityConfig {
         IdentityConfig {
@@ -1510,6 +1531,152 @@ mod tests {
             validate_slug("bad--slug"),
             Err(AppError::ValidationError(message))
                 if message == "Slug must not contain consecutive hyphens"
+        ));
+    }
+
+    fn home_assistant_ws_rule() -> WsFrameInjection {
+        WsFrameInjection {
+            trigger: WsFrameTrigger::JsonFieldEquals {
+                path: "$.type".to_string(),
+                value: serde_json::json!("auth_required"),
+            },
+            template: r#"{"type":"auth","access_token":"${credential}"}"#.to_string(),
+            frame_kind: WsFrameKind::Text,
+            consume_trigger: true,
+            direction: WsFrameDirection::Downstream,
+        }
+    }
+
+    #[tokio::test]
+    async fn update_user_service_round_trips_ws_frame_injections() {
+        let Some(db) = connect_test_database("user_service_ws_frames").await else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let service = test_user_service(
+            &service_id,
+            &user_id,
+            "home-assistant",
+            "endpoint-1",
+            None,
+            None,
+        );
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&service)
+            .await
+            .unwrap();
+
+        let rules = vec![home_assistant_ws_rule()];
+        update_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&rules),
+        )
+        .await
+        .unwrap();
+
+        let updated = get_user_service(&db, &user_id, &service_id).await.unwrap();
+        assert_eq!(updated.ws_frame_injections.len(), 1);
+        let rule = &updated.ws_frame_injections[0];
+        assert_eq!(
+            rule.template,
+            r#"{"type":"auth","access_token":"${credential}"}"#
+        );
+        assert_eq!(rule.frame_kind, WsFrameKind::Text);
+        assert_eq!(rule.direction, WsFrameDirection::Downstream);
+        assert!(rule.consume_trigger);
+        match &rule.trigger {
+            WsFrameTrigger::JsonFieldEquals { path, value } => {
+                assert_eq!(path, "$.type");
+                assert_eq!(value, &serde_json::json!("auth_required"));
+            }
+            other => panic!("unexpected trigger: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_user_service_rejects_invalid_ws_frame_injections() {
+        let Some(db) = connect_test_database("user_service_ws_frames_invalid").await else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let service = test_user_service(
+            &service_id,
+            &user_id,
+            "home-assistant",
+            "endpoint-1",
+            None,
+            None,
+        );
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&service)
+            .await
+            .unwrap();
+
+        let too_many = vec![home_assistant_ws_rule(); 5];
+        let err = update_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&too_many),
+        )
+        .await
+        .expect_err("more than four rules should be rejected");
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message.contains("ws_frame_injections must not exceed 4 entries")
+        ));
+
+        let mut overlong = home_assistant_ws_rule();
+        overlong.template = "a".repeat(4097);
+        let overlong_rules = vec![overlong];
+        let err = update_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&overlong_rules),
+        )
+        .await
+        .expect_err("overlong templates should be rejected");
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message.contains("template must not exceed 4096 bytes")
         ));
     }
 }

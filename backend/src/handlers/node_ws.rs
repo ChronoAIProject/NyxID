@@ -14,8 +14,8 @@ use crate::services::{
     audit_service, node_service,
     node_ws_manager::{
         NodeCapabilitiesMsg, NodeOutboundMessage, NodeProxyResponse, NodeSshExecResult,
-        NodeWsManager, WsProxyBinaryInbound, WsProxyClosedInbound, WsProxyErrorInbound,
-        WsProxyOpenedInbound, WsProxyResponseChunkMsg, WsProxyResponseEndMsg,
+        NodeWsManager, WsFrameInjectedInbound, WsProxyBinaryInbound, WsProxyClosedInbound,
+        WsProxyErrorInbound, WsProxyOpenedInbound, WsProxyResponseChunkMsg, WsProxyResponseEndMsg,
         WsProxyResponseStartMsg, WsProxyTextInbound, WsSshExecResultMsg, WsSshTunnelClosedMsg,
         WsSshTunnelDataMsg, WsSshTunnelOpenedMsg, WsWebTerminalClosedMsg, WsWebTerminalDataMsg,
         WsWebTerminalStartedMsg,
@@ -122,6 +122,8 @@ enum NodeMessage {
     WsProxyClosed(WsProxyClosedInbound),
     #[serde(rename = "ws_proxy_error")]
     WsProxyError(WsProxyErrorInbound),
+    #[serde(rename = "ws_frame_injected")]
+    WsFrameInjected(WsFrameInjectedInbound),
 }
 
 fn decode_base64_payload(
@@ -809,6 +811,14 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
             }
             NodeMessage::WsProxyError(msg) => {
                 ws_manager.deliver_ws_proxy_error(&node_id_reader, &msg.session_id, &msg.error);
+            }
+            NodeMessage::WsFrameInjected(msg) => {
+                ws_manager.deliver_ws_frame_injected(
+                    &node_id_reader,
+                    &msg.session_id,
+                    msg.trigger_kind,
+                    msg.frame_index,
+                );
             }
             NodeMessage::Register { .. } | NodeMessage::Auth { .. } => {
                 // Already authenticated, ignore duplicate auth messages

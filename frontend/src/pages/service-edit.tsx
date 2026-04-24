@@ -8,9 +8,11 @@ import {
   updateServiceSchema,
   type UpdateServiceFormData,
   VISIBILITY_OPTIONS,
+  type WsFrameInjection,
 } from "@/schemas/services";
 import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
+import { WsFrameInjectionsEditor } from "@/components/shared/ws-frame-injections-editor";
 import {
   getAuthTypeLabel,
   SERVICE_CATEGORY_LABELS,
@@ -96,6 +98,7 @@ export function ServiceEditPage() {
       certificate_ttl_minutes: "30",
       allowed_principals: "",
       default_request_headers: [],
+      ws_frame_injections: [],
     },
   });
 
@@ -147,6 +150,9 @@ export function ServiceEditPage() {
           service.ssh_config?.allowed_principals.join(", ") ?? "",
         default_request_headers: service.default_request_headers
           ? service.default_request_headers.map((h) => ({ ...h }))
+          : [],
+        ws_frame_injections: service.ws_frame_injections
+          ? service.ws_frame_injections.map((rule) => ({ ...rule }))
           : [],
       });
     }
@@ -240,6 +246,7 @@ export function ServiceEditPage() {
                   supports_websocket: data.supports_websocket ?? false,
                   supports_streaming: data.supports_streaming ?? false,
                 },
+                ws_frame_injections: data.ws_frame_injections ?? [],
                 ...(defaultRequestHeadersPayload !== undefined
                   ? { default_request_headers: defaultRequestHeadersPayload }
                   : {}),
@@ -290,6 +297,12 @@ export function ServiceEditPage() {
   }
 
   const isSshService = service.service_type === "ssh";
+  const wsFrameRules = form.watch("ws_frame_injections") ?? [];
+  const setWsFrameRules = (next: WsFrameInjection[]) =>
+    form.setValue("ws_frame_injections", next, {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
 
   return (
     <div className="space-y-8">
@@ -583,6 +596,17 @@ export function ServiceEditPage() {
                       <FormMessage />
                     </FormItem>
                   )}
+                />
+
+                <WsFrameInjectionsEditor
+                  value={wsFrameRules}
+                  onChange={setWsFrameRules}
+                  errorMessage={
+                    typeof form.formState.errors.ws_frame_injections
+                      ?.message === "string"
+                      ? form.formState.errors.ws_frame_injections.message
+                      : undefined
+                  }
                 />
 
                 <div>

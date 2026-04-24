@@ -4,6 +4,7 @@ import {
   defaultRequestHeaderSchema,
   defaultRequestHeaderUpdateSchema,
 } from "./default-request-headers";
+import { wsFrameInjectionSchema, wsFrameInjectionsSchema } from "./services";
 
 export { credentialSourceSchema } from "./orgs";
 export type {
@@ -58,6 +59,7 @@ export const userServiceResponseSchema = z.object({
   /// NyxID#356: per-user default request headers owned by this user
   /// service. Catalog-level admin defaults are surfaced separately.
   default_request_headers: z.array(defaultRequestHeaderSchema).optional(),
+  ws_frame_injections: z.array(wsFrameInjectionSchema),
   created_at: z.string(),
   updated_at: z.string(),
   credential_source: credentialSourceSchema,
@@ -79,6 +81,7 @@ export const updateUserServiceRequestSchema = z.object({
   is_active: z.boolean().optional(),
   custom_user_agent: z.string().optional(),
   default_request_headers: defaultRequestHeaderUpdateSchema,
+  ws_frame_injections: wsFrameInjectionsSchema.optional(),
 });
 
 export type UpdateUserServiceRequest = z.infer<

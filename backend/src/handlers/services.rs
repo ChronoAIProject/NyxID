@@ -18,6 +18,7 @@ use crate::models::downstream_service::{
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
 use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
 use crate::services::{api_docs_service, audit_service, oauth_client_service, ssh_service};
@@ -75,6 +76,9 @@ pub struct CreateServiceRequest {
     #[serde(default)]
     pub default_request_headers:
         Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    /// WebSocket frame-auth injection rules. Orthogonal to HTTP auth_method.
+    #[serde(default)]
+    pub ws_frame_injections: Vec<WsFrameInjection>,
 }
 
 impl std::fmt::Debug for CreateServiceRequest {
@@ -175,6 +179,9 @@ pub struct ServiceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_request_headers:
         Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    /// WebSocket frame-auth injection rules. Values never contain resolved
+    /// credentials; templates may include the literal `${credential}` marker.
+    pub ws_frame_injections: Vec<WsFrameInjection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_app_ids: Option<Vec<String>>,
     pub created_by: String,
@@ -239,6 +246,10 @@ pub struct UpdateServiceRequest {
     /// update time rather than at first proxy request.
     #[serde(default)]
     pub token_exchange_config: Option<TokenExchangeConfig>,
+    /// Replace WebSocket frame-auth injection rules. Omitted leaves the
+    /// existing value unchanged; an empty array clears the rules.
+    #[serde(default)]
+    pub ws_frame_injections: Option<Vec<WsFrameInjection>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -913,6 +924,7 @@ pub async fn create_service(
         Some(list) => crate::models::default_request_header::validate_headers(list)?,
         None => None,
     };
+    crate::services::ws_frame_injector::validate_rules(&body.ws_frame_injections)?;
 
     let new_service = DownstreamService {
         id: id.clone(),
@@ -955,6 +967,7 @@ pub async fn create_service(
         recommended_skills: body.recommended_skills.clone(),
         custom_user_agent: None,
         default_request_headers,
+        ws_frame_injections: body.ws_frame_injections.clone(),
         developer_app_ids: body.developer_app_ids.clone(),
         token_exchange_config,
         created_at: now,
@@ -1608,6 +1621,15 @@ pub async fn update_service(
                 set_doc.insert("default_request_headers", bson::Bson::Null);
             }
         }
+    }
+
+    if let Some(ref rules) = body.ws_frame_injections {
+        crate::services::ws_frame_injector::validate_rules(rules)?;
+        set_doc.insert(
+            "ws_frame_injections",
+            bson::to_bson(rules)
+                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?,
+        );
     }
 
     if set_doc.is_empty() {

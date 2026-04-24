@@ -12,8 +12,8 @@
     "build:wizard": "tsc -b && vite build --config vite.wizard.config.ts",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "NODE_ENV=test vitest run",
+    "test:watch": "NODE_ENV=test vitest"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

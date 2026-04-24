@@ -18,6 +18,9 @@ use super::metrics::NodeMetrics;
 use super::proxy_executor;
 use super::secret_backend::SecretBackend;
 use super::signing::{self, ReplayGuard};
+use super::ws_frame_injector::{
+    self, IncomingFrame, InjectorState, WsFrameDirection, WsFrameInjection, WsFrameKind,
+};
 
 // ---------------------------------------------------------------------------
 // Web terminal types
@@ -2475,6 +2478,24 @@ async fn handle_ws_proxy_open(
     let base_url = parsed["base_url"].as_str().unwrap_or("");
     let path = parsed["path"].as_str().unwrap_or("");
     let query = parsed["query"].as_str();
+    let ws_frame_injections = match parsed.get("ws_frame_injections") {
+        Some(value) if !value.is_null() => {
+            match serde_json::from_value::<Vec<WsFrameInjection>>(value.clone()) {
+                Ok(rules) => rules,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %error,
+                        "Invalid ws_frame_injections in ws_proxy_open"
+                    );
+                    let _ =
+                        send_ws_proxy_error(&tx, &session_id, "invalid_ws_frame_injections").await;
+                    return;
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
 
     // Resolve credentials.
     let cred = match credentials.get(&service_slug) {
@@ -2489,6 +2510,7 @@ async fn handle_ws_proxy_open(
             return;
         }
     };
+    let raw_credential = cred.raw_credential().map(str::to_string);
 
     // Resolve effective base URL.
     let effective_base_url = if base_url.is_empty() {
@@ -2641,6 +2663,8 @@ async fn handle_ws_proxy_open(
                     control_rx,
                     task_tx,
                     task_proxies,
+                    ws_frame_injections,
+                    raw_credential,
                 )
                 .await;
             });
@@ -2681,6 +2705,8 @@ async fn run_ws_proxy_session(
     control_rx: mpsc::Receiver<WsProxyControl>,
     tx: mpsc::Sender<NodeWsMessage>,
     active_ws_proxies: ActiveWsProxyMap,
+    ws_frame_injections: Vec<WsFrameInjection>,
+    raw_credential: Option<String>,
 ) {
     run_ws_proxy_session_with_limits(
         session_id,
@@ -2688,26 +2714,86 @@ async fn run_ws_proxy_session(
         control_rx,
         tx,
         active_ws_proxies,
+        ws_frame_injections,
+        raw_credential,
         Duration::from_secs(WS_PROXY_MAX_DURATION_SECS),
         Duration::from_secs(WS_PROXY_IDLE_TIMEOUT_SECS),
     )
     .await;
 }
 
+async fn send_ws_proxy_control_to_downstream<S>(
+    downstream_sink: &mut futures::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<S>,
+        Message,
+    >,
+    control: WsProxyControl,
+) -> bool
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    match control {
+        WsProxyControl::Text(data) => downstream_sink
+            .send(Message::Text(data.into()))
+            .await
+            .is_ok(),
+        WsProxyControl::Binary(data) => downstream_sink
+            .send(Message::Binary(data.into()))
+            .await
+            .is_ok(),
+        WsProxyControl::Close { code, reason } => {
+            let close_frame = code.map(|c| tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(c),
+                reason: reason.unwrap_or_default().into(),
+            });
+            downstream_sink
+                .send(Message::Close(close_frame))
+                .await
+                .is_ok()
+        }
+    }
+}
+
+fn injection_frame_to_control(frame: ws_frame_injector::WsFrame) -> WsProxyControl {
+    match frame.kind {
+        WsFrameKind::Text => {
+            let text = String::from_utf8(frame.payload).unwrap_or_default();
+            WsProxyControl::Text(text)
+        }
+        WsFrameKind::Binary => WsProxyControl::Binary(frame.payload),
+    }
+}
+
+async fn send_ws_frame_injected(
+    tx: &mpsc::Sender<NodeWsMessage>,
+    session_id: &str,
+    action: &ws_frame_injector::InjectionAction,
+) -> bool {
+    let json = serde_json::json!({
+        "type": "ws_frame_injected",
+        "request_id": session_id,
+        "trigger_kind": action.trigger_kind,
+        "frame_index": action.frame_index_in,
+    });
+    send_ws_message(tx, json.to_string()).await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_ws_proxy_session_with_limits<S>(
     session_id: String,
     downstream_ws: tokio_tungstenite::WebSocketStream<S>,
     mut control_rx: mpsc::Receiver<WsProxyControl>,
     tx: mpsc::Sender<NodeWsMessage>,
     active_ws_proxies: ActiveWsProxyMap,
+    ws_frame_injections: Vec<WsFrameInjection>,
+    raw_credential: Option<String>,
     max_duration_limit: Duration,
     idle_timeout_limit: Duration,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-
     let (mut downstream_sink, mut downstream_stream) = downstream_ws.split();
+    let mut injector_state = InjectorState::default();
 
     let max_duration = tokio::time::sleep(max_duration_limit);
     tokio::pin!(max_duration);
@@ -2742,28 +2828,14 @@ async fn run_ws_proxy_session_with_limits<S>(
             // Server -> downstream (via control channel)
             ctrl = control_rx.recv() => {
                 match ctrl {
-                    Some(WsProxyControl::Text(data)) => {
+                    Some(control @ WsProxyControl::Text(_)) | Some(control @ WsProxyControl::Binary(_)) => {
                         idle_timeout.as_mut().reset(reset_idle());
-                        let msg = Message::Text(data.into());
-                        if downstream_sink.send(msg).await.is_err() {
+                        if !send_ws_proxy_control_to_downstream(&mut downstream_sink, control).await {
                             break;
                         }
                     }
-                    Some(WsProxyControl::Binary(data)) => {
-                        idle_timeout.as_mut().reset(reset_idle());
-                        let msg = Message::Binary(data.into());
-                        if downstream_sink.send(msg).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(WsProxyControl::Close { code, reason }) => {
-                        let close_frame = code.map(|c| {
-                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                                code: CloseCode::from(c),
-                                reason: reason.unwrap_or_default().into(),
-                            }
-                        });
-                        let _ = downstream_sink.send(Message::Close(close_frame)).await;
+                    Some(control @ WsProxyControl::Close { .. }) => {
+                        let _ = send_ws_proxy_control_to_downstream(&mut downstream_sink, control).await;
                         break;
                     }
                     None => break, // Server disconnected
@@ -2774,6 +2846,30 @@ async fn run_ws_proxy_session_with_limits<S>(
                 match msg {
                     Some(Ok(Message::Text(t))) => {
                         idle_timeout.as_mut().reset(reset_idle());
+                        if let Some(credential) = raw_credential.as_deref() {
+                            let frame = IncomingFrame {
+                                direction: WsFrameDirection::Downstream,
+                                kind: WsFrameKind::Text,
+                                payload: t.to_string().into_bytes(),
+                            };
+                            if let Some(action) = ws_frame_injector::evaluate(
+                                &ws_frame_injections,
+                                &mut injector_state,
+                                &frame,
+                                credential,
+                            ) {
+                                let control = injection_frame_to_control(action.send_frame.clone());
+                                if !send_ws_proxy_control_to_downstream(&mut downstream_sink, control).await {
+                                    break;
+                                }
+                                if !send_ws_frame_injected(&tx, &session_id, &action).await {
+                                    break;
+                                }
+                                if !action.forward_original {
+                                    continue;
+                                }
+                            }
+                        }
                         let json = serde_json::json!({
                             "type": "ws_proxy_text",
                             "session_id": session_id,
@@ -2785,6 +2881,30 @@ async fn run_ws_proxy_session_with_limits<S>(
                     }
                     Some(Ok(Message::Binary(b))) => {
                         idle_timeout.as_mut().reset(reset_idle());
+                        if let Some(credential) = raw_credential.as_deref() {
+                            let frame = IncomingFrame {
+                                direction: WsFrameDirection::Downstream,
+                                kind: WsFrameKind::Binary,
+                                payload: b.to_vec(),
+                            };
+                            if let Some(action) = ws_frame_injector::evaluate(
+                                &ws_frame_injections,
+                                &mut injector_state,
+                                &frame,
+                                credential,
+                            ) {
+                                let control = injection_frame_to_control(action.send_frame.clone());
+                                if !send_ws_proxy_control_to_downstream(&mut downstream_sink, control).await {
+                                    break;
+                                }
+                                if !send_ws_frame_injected(&tx, &session_id, &action).await {
+                                    break;
+                                }
+                                if !action.forward_original {
+                                    continue;
+                                }
+                            }
+                        }
                         let json = serde_json::json!({
                             "type": "ws_proxy_binary",
                             "session_id": session_id,
@@ -3147,6 +3267,8 @@ mod tests {
             control_rx,
             tx,
             active_ws_proxies,
+            Vec::new(),
+            None,
             Duration::from_millis(200),
             Duration::from_millis(25),
         ));
@@ -3179,6 +3301,8 @@ mod tests {
             control_rx,
             tx,
             active_ws_proxies,
+            Vec::new(),
+            None,
             Duration::from_millis(25),
             Duration::from_millis(200),
         ));

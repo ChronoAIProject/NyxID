@@ -45,3 +45,4 @@ pub mod user_provider_credentials;
 pub mod user_provider_token;
 pub mod user_service;
 pub mod user_service_connection;
+pub mod ws_frame_injection;

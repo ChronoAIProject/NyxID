@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::models::default_request_header::DefaultRequestHeader;
+use crate::models::ws_frame_injection::WsFrameInjection;
 
 pub const COLLECTION_NAME: &str = "user_services";
 
@@ -72,6 +73,11 @@ pub struct UserService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_request_headers: Option<Vec<DefaultRequestHeader>>,
 
+    /// WebSocket frame-auth injection rules. Orthogonal to HTTP
+    /// `auth_method`; existing documents default to no frame injection.
+    #[serde(default)]
+    pub ws_frame_injections: Vec<WsFrameInjection>,
+
     pub is_active: bool,
 
     /// Source tracking for migration idempotency
@@ -135,6 +141,7 @@ mod tests {
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             is_active: true,
             source: None,
             source_id: None,
@@ -179,6 +186,7 @@ mod tests {
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             is_active: true,
             source: None,
             source_id: None,
@@ -218,6 +226,7 @@ mod tests {
             delegation_token_scope: "custom:scope".to_string(),
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             is_active: true,
             source: None,
             source_id: None,
@@ -270,6 +279,7 @@ mod tests {
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             is_active: true,
             source: None,
             source_id: None,

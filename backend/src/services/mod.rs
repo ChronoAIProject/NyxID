@@ -65,3 +65,4 @@ pub mod user_credentials_service;
 pub mod user_endpoint_service;
 pub mod user_service_service;
 pub mod user_token_service;
+pub mod ws_frame_injector;

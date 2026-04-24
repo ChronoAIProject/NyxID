@@ -2455,6 +2455,10 @@ pub async fn execute_tool(
                             StreamChunk::Error(e) => {
                                 return Ok((502, format!("Node streaming error: {e}")));
                             }
+                            StreamChunk::Injected { .. } => {
+                                // Metadata-only WS auth injection signal; MCP streaming
+                                // responses must not include it in the response body.
+                            }
                         }
                     }
                     return Ok((status, String::from_utf8_lossy(&body_buf).to_string()));

@@ -9,6 +9,7 @@ import type {
   ExternalApiKeyListResponse,
 } from "@/types/keys";
 import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
+import type { WsFrameInjection } from "@/schemas/services";
 
 // -- Queries --
 
@@ -96,6 +97,7 @@ interface CreateKeyParams {
   readonly ssh_principals?: string;
   readonly ssh_certificate_ttl_minutes?: number;
   readonly openapi_spec_url?: string;
+  readonly ws_frame_injections?: readonly WsFrameInjection[];
   /**
    * Create the service under the given org so every admin of that org can
    * manage the resulting UserService / UserEndpoint / UserApiKey rows.
@@ -213,6 +215,7 @@ interface UpdateUserServiceParams {
   readonly default_request_headers?:
     | null
     | readonly DefaultRequestHeader[];
+  readonly ws_frame_injections?: readonly WsFrameInjection[];
 }
 
 export function useUpdateUserService() {

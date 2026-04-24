@@ -562,6 +562,7 @@ pub async fn gateway_request(
             service: target.service,
             catalog_default_headers: target.catalog_default_headers,
             user_service_default_headers: target.user_service_default_headers,
+            ws_frame_injections: target.ws_frame_injections,
         },
         None => target,
     };

@@ -11,3 +11,4 @@ pub mod proxy_executor;
 pub mod secret_backend;
 pub mod signing;
 pub mod ws_client;
+pub mod ws_frame_injector;

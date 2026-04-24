@@ -213,6 +213,38 @@ export const IDENTITY_PROPAGATION_MODES = [
 export type IdentityPropagationMode =
   (typeof IDENTITY_PROPAGATION_MODES)[number];
 
+export const wsFrameTriggerSchema = z.union([
+  z.literal("first_frame_from_downstream"),
+  z.object({
+    json_field_equals: z.object({
+      path: z.string().min(1, "JSON path is required"),
+      value: z.unknown(),
+    }),
+  }),
+  z.object({
+    frame_index_from_downstream: z.object({
+      index: z.number().int().min(0),
+    }),
+  }),
+]);
+
+export const wsFrameInjectionSchema = z.object({
+  trigger: wsFrameTriggerSchema,
+  template: z
+    .string()
+    .max(4096, "Template must be at most 4096 characters"),
+  frame_kind: z.enum(["text", "binary"]),
+  consume_trigger: z.boolean(),
+  direction: z.enum(["downstream", "upstream"]),
+});
+
+export const wsFrameInjectionsSchema = z
+  .array(wsFrameInjectionSchema)
+  .max(4, "At most 4 WebSocket auth-frame rules are allowed");
+
+export type WsFrameTrigger = z.infer<typeof wsFrameTriggerSchema>;
+export type WsFrameInjection = z.infer<typeof wsFrameInjectionSchema>;
+
 export const updateServiceSchema = z
   .object({
     service_type: z.enum(SERVICE_TYPES),
@@ -276,6 +308,7 @@ export const updateServiceSchema = z
     /// `undefined` leaves the value unchanged, `null` clears, an array
     /// replaces. Matches the backend `Option<Option<Vec<...>>>` semantics.
     default_request_headers: defaultRequestHeaderUpdateSchema,
+    ws_frame_injections: wsFrameInjectionsSchema.optional(),
   })
   .superRefine((value, ctx) => {
     if (value.service_type === "http") {

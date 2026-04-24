@@ -75,6 +75,7 @@ Error variants map to HTTP status codes and numeric error codes (1000-3002, 7000
 - Error codes 8000-8003 are reserved for node errors (`NodeNotFound`, `NodeOffline`, `NodeProxyTimeout`, `NodeRegistrationFailed`)
 - `NodeStatus` is an enum (`Online`/`Offline`/`Draining`) -- not a bare string
 - WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
+- WebSocket auth-frame injection rules live on `DownstreamService.ws_frame_injections` and `UserService.ws_frame_injections`; they are additive and separate from HTTP `auth_method` injection. `WsFrameDirection` is the trigger direction, so a `downstream` rule matches frames from the service and injects the configured response back toward that service. Direct and node-routed WS paths emit metadata-only `ws_frame_auth_injected` audit events; never log injected payloads or credentials.
 - Admin node endpoints (`handlers/admin_nodes.rs`) require admin role and have no ownership check
 - `nyxid node daemon` subcommands manage background service lifecycle (`cli/src/node/daemon.rs`): `install` creates a launchd LaunchAgent on macOS or systemd user unit on Linux; `start`/`stop`/`restart`/`status`/`logs`/`uninstall` wrap platform service managers
 - All node commands support `--profile` for multi-instance operation. Profile-aware service labels: `dev.nyxid.node.{profile}` (macOS) / `nyxid-node-{profile}.service` (Linux). Config stored at `~/.nyxid-node/profiles/{name}/`

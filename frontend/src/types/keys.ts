@@ -1,5 +1,6 @@
 import type { CredentialSource } from "@/schemas/orgs";
 import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
+import type { WsFrameInjection } from "@/schemas/services";
 
 export type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
@@ -34,6 +35,7 @@ export interface KeyInfo {
    * the catalog response.
    */
   readonly default_request_headers?: readonly DefaultRequestHeader[] | null;
+  readonly ws_frame_injections: readonly WsFrameInjection[];
   readonly auto_connected: boolean;
   readonly source_app_id?: string | null;
   readonly source_app_name?: string | null;
@@ -175,6 +177,7 @@ export interface UserServiceInfo {
   readonly node_id: string | null;
   readonly node_priority: number;
   readonly is_active: boolean;
+  readonly ws_frame_injections: readonly WsFrameInjection[];
   readonly created_at: string;
   readonly updated_at: string;
 }

@@ -18,8 +18,10 @@ use crate::models::user_provider_token::{
     COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
 };
 use crate::models::user_service::UserService;
+use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::services::{
     node_service, ssh_service, user_api_key_service, user_endpoint_service, user_service_service,
+    ws_frame_injector,
 };
 
 const AUTO_PROVISION_SOURCE: &str = "auto_provision";
@@ -286,6 +288,10 @@ pub struct KeyView {
     /// separately on the catalog payload.
     pub default_request_headers:
         Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    /// User-configured WebSocket frame-auth injection rules. Empty means
+    /// no user override; proxy resolution may still fall back to catalog
+    /// rules for catalog-backed services.
+    pub ws_frame_injections: Vec<WsFrameInjection>,
     pub auto_connected: bool,
     /// Developer app (OAuth client) ID that triggered this auto-provision.
     pub source_app_id: Option<String>,
@@ -471,8 +477,12 @@ pub async fn create_key(
     ssh_params: Option<SshCreateParams<'_>>,
     identity: Option<user_service_service::IdentityConfig>,
     openapi_spec_url: OpenApiSpecUrlInput<'_>,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
 ) -> AppResult<CreateKeyResult> {
     let node_id = node_id.filter(|nid| !nid.is_empty());
+    if let Some(rules) = ws_frame_injections {
+        ws_frame_injector::validate_rules(rules)?;
+    }
 
     if let Some(node_id) = node_id {
         node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
@@ -721,6 +731,7 @@ pub async fn create_key(
                 None,
                 None,
                 &catalog_identity,
+                ws_frame_injections,
             )
             .await
             {
@@ -866,6 +877,7 @@ pub async fn create_key(
             recommended_skills: None,
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
             created_at: now,
@@ -929,6 +941,7 @@ pub async fn create_key(
                 None,
                 None,
                 &user_service_service::IdentityConfig::none(),
+                ws_frame_injections,
             )
             .await
             {
@@ -1067,6 +1080,7 @@ pub async fn create_key(
                 None,
                 None,
                 &custom_identity,
+                ws_frame_injections,
             )
             .await
             {
@@ -1322,6 +1336,7 @@ pub async fn auto_provision_no_auth_services(
             Some(&source_id),
             *source_app_id,
             &catalog_identity,
+            None,
         )
         .await
         {
@@ -2510,6 +2525,7 @@ fn build_key_view(
         delegation_token_scope: svc.delegation_token_scope.clone(),
         custom_user_agent: svc.custom_user_agent.clone(),
         default_request_headers: svc.default_request_headers.clone(),
+        ws_frame_injections: svc.ws_frame_injections.clone(),
         auto_connected,
         source_app_id: svc.source_app_id.clone(),
         source_app_name,
@@ -2605,6 +2621,7 @@ mod tests {
             delegation_token_scope: "llm:proxy".to_string(),
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             is_active: true,
             source_app_id: None,
             source: None,
@@ -2669,6 +2686,7 @@ mod tests {
             recommended_skills: None,
             custom_user_agent: None,
             default_request_headers: None,
+            ws_frame_injections: Vec::new(),
             developer_app_ids: None,
             token_exchange_config: None,
             created_at: Utc::now(),
@@ -2989,6 +3007,7 @@ mod tests {
                 None,
                 None,
                 OpenApiSpecUrlInput::Inherit,
+                None,
             ),
             create_key(
                 &db,
@@ -3006,6 +3025,7 @@ mod tests {
                 None,
                 None,
                 OpenApiSpecUrlInput::Inherit,
+                None,
             )
         );
 
@@ -3054,6 +3074,7 @@ mod tests {
             }),
             None,
             OpenApiSpecUrlInput::Inherit,
+            None,
         )
         .await
         .expect("user A SSH create should succeed");
@@ -3080,6 +3101,7 @@ mod tests {
             }),
             None,
             OpenApiSpecUrlInput::Inherit,
+            None,
         )
         .await
         .expect("user B SSH create should succeed");
@@ -3166,6 +3188,7 @@ mod tests {
             None,
             None,
             OpenApiSpecUrlInput::Inherit,
+            None,
         )
         .await
         .unwrap();
@@ -3198,6 +3221,7 @@ mod tests {
             None,
             None,
             OpenApiSpecUrlInput::Inherit,
+            None,
         )
         .await
         .unwrap();
@@ -3254,6 +3278,7 @@ mod tests {
             None,
             None,
             OpenApiSpecUrlInput::Inherit,
+            None,
         )
         .await
         .err()

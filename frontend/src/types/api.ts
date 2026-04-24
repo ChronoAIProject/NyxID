@@ -159,6 +159,7 @@ export interface DownstreamService {
    * proxied request. `null` / `undefined` means no defaults are set.
    */
   readonly default_request_headers?: readonly DefaultRequestHeader[] | null;
+  readonly ws_frame_injections?: readonly WsFrameInjection[] | null;
 }
 
 export interface DefaultRequestHeader {
@@ -166,6 +167,28 @@ export interface DefaultRequestHeader {
   readonly value: string;
   readonly overridable: boolean;
   readonly sensitive: boolean;
+}
+
+export type WsFrameTrigger =
+  | "first_frame_from_downstream"
+  | {
+      readonly json_field_equals: {
+        readonly path: string;
+        readonly value: unknown;
+      };
+    }
+  | {
+      readonly frame_index_from_downstream: {
+        readonly index: number;
+      };
+    };
+
+export interface WsFrameInjection {
+  readonly trigger: WsFrameTrigger;
+  readonly template: string;
+  readonly frame_kind: "text" | "binary";
+  readonly consume_trigger: boolean;
+  readonly direction: "downstream" | "upstream";
 }
 
 export interface ServiceCapabilities {
@@ -253,6 +276,7 @@ export type UpdateServicePayload =
       readonly default_request_headers?:
         | null
         | readonly DefaultRequestHeader[];
+      readonly ws_frame_injections?: readonly WsFrameInjection[];
     }
   | {
       readonly name?: string;

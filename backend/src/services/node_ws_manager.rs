@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::errors::{AppError, AppResult};
+use crate::models::ws_frame_injection::WsFrameInjection;
 
 const STREAM_BUFFER_CAPACITY: usize = 1024;
 const SSH_TUNNEL_BUFFER_CAPACITY: usize = 256;
@@ -59,6 +60,11 @@ pub enum StreamChunk {
     End,
     /// Stream error
     Error(String),
+    /// Node reports that it injected a WS auth frame locally.
+    Injected {
+        trigger_kind: String,
+        frame_index: usize,
+    },
 }
 
 /// Result of sending a proxy request: either a complete response or a streaming channel.
@@ -118,6 +124,11 @@ pub enum WsProxyFrame {
     Text(String),
     /// Binary WS frame from downstream.
     Binary(Vec<u8>),
+    /// Node reports that it injected a WS auth frame locally.
+    Injected {
+        trigger_kind: String,
+        frame_index: usize,
+    },
     /// Downstream closed the WS connection.
     Closed {
         code: Option<u16>,
@@ -146,6 +157,7 @@ pub struct NodeWsProxyRequest {
     pub path: String,
     pub query: Option<String>,
     pub headers: Vec<(String, String)>,
+    pub ws_frame_injections: Vec<WsFrameInjection>,
 }
 
 pub(crate) enum PendingWebTerminal {
@@ -344,6 +356,8 @@ struct WsProxyOpen {
     #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<String>,
     headers: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ws_frame_injections: Vec<WsFrameInjection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -556,6 +570,15 @@ pub struct WsProxyClosedInbound {
 pub struct WsProxyErrorInbound {
     pub session_id: String,
     pub error: String,
+}
+
+/// JSON ws_frame_injected from node.
+#[derive(Debug, Deserialize)]
+pub struct WsFrameInjectedInbound {
+    #[serde(rename = "request_id", alias = "session_id")]
+    pub session_id: String,
+    pub trigger_kind: String,
+    pub frame_index: usize,
 }
 
 /// JSON ssh_exec_result from node.
@@ -2245,6 +2268,7 @@ impl NodeWsManager {
             path: request.path,
             query: request.query,
             headers: headers_json,
+            ws_frame_injections: request.ws_frame_injections,
             timestamp,
             nonce,
             signature,
@@ -2457,6 +2481,49 @@ impl NodeWsManager {
                     return;
                 };
                 tx.try_send(WsProxyFrame::Binary(data))
+            };
+            match send_result {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        session_id = %session_id,
+                        "Dropping WS proxy due to full receive buffer"
+                    );
+                    conn.ws_proxies.remove(session_id);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    conn.ws_proxies.remove(session_id);
+                }
+            }
+        }
+    }
+
+    /// Deliver a metadata-only WS frame injection signal from the node.
+    pub fn deliver_ws_frame_injected(
+        &self,
+        node_id: &str,
+        session_id: &str,
+        trigger_kind: String,
+        frame_index: usize,
+    ) {
+        if let Some(conn) = self.connections.get(node_id) {
+            let send_result = {
+                let Some(pending) = conn.ws_proxies.get(session_id) else {
+                    tracing::trace!(
+                        node_id = %node_id,
+                        session_id = %session_id,
+                        "WS frame injection signal for unknown session"
+                    );
+                    return;
+                };
+                let PendingWsProxy::Active(tx) = pending.value() else {
+                    return;
+                };
+                tx.try_send(WsProxyFrame::Injected {
+                    trigger_kind,
+                    frame_index,
+                })
             };
             match send_result {
                 Ok(()) => {}

@@ -486,6 +486,113 @@ nyxid proxy discover --output json
 
 NyxID injects the user's credentials automatically. Do not ask for or log raw downstream credentials.
 
+### WebSocket-authenticated services
+
+Some protocols (Home Assistant, Discord gateway, MQTT-over-WS, Slack RTM) do not accept the credential on the HTTP upgrade. They complete the upgrade unauthenticated, send a challenge frame, then expect a response frame carrying the credential. NyxID can inject a held credential into that response frame on the client's behalf -- the client never sees the challenge.
+
+From an agent's point of view, this is a normal WS proxy call with only the NyxID bearer:
+
+```python
+import asyncio, json, os, websockets
+
+async def main():
+    async with websockets.connect(
+        "wss://nyx-api.chrono-ai.fun/api/v1/proxy/s/home-assistant/websocket",
+        additional_headers={"Authorization": f"Bearer {os.environ['NYXID_ACCESS_TOKEN']}"},
+    ) as ws:
+        # First visible frame is auth_ok -- the auth_required challenge was
+        # consumed by NyxID and never reached this client.
+        print(await ws.recv())
+        await ws.send(json.dumps({"id": 1, "type": "get_states"}))
+        print(await ws.recv())
+
+asyncio.run(main())
+```
+
+Or with `websocat`:
+
+```bash
+websocat -H="Authorization: Bearer $NYXID_ACCESS_TOKEN" \
+  "wss://nyx-api.chrono-ai.fun/api/v1/proxy/s/home-assistant/websocket"
+```
+
+**Home Assistant preset.** The admin service-edit dashboard has a one-click Home Assistant preset in the "WebSocket auth frames" section. It installs this rule on the catalog entry so every user whose `UserService` is catalog-backed inherits it automatically:
+
+```json
+{
+  "trigger": {"json_field_equals": {"path": "$.type", "value": "auth_required"}},
+  "template": "{\"type\":\"auth\",\"access_token\":\"${credential}\"}",
+  "frame_kind": "text",
+  "consume_trigger": true,
+  "direction": "downstream"
+}
+```
+
+Expected on-wire behavior:
+
+```text
+Downstream -> NyxID:    {"type":"auth_required","ha_version":"..."}
+NyxID -> Downstream:    {"type":"auth","access_token":"<held credential>"}
+Downstream -> Client:   {"type":"auth_ok"}
+```
+
+With `consume_trigger: true` the client's first visible frame is `auth_ok`, not `auth_required`. The credential substitution for `${credential}` uses the service's held LLAT (or bearer); the client only ever sends its NyxID bearer.
+
+**User-owned custom services: configure via CLI.** Home Assistant is normally
+added as a custom endpoint today, so configure the WebSocket auth-frame preset
+when creating the user-owned service:
+
+```bash
+nyxid service add --custom \
+  --slug my-ha \
+  --label "Home Assistant" \
+  --endpoint-url "https://ha.local:8123/api" \
+  --auth-method bearer \
+  --auth-key-name Authorization \
+  --credential-env HA_TOKEN \
+  --ws-frame-preset home-assistant
+```
+
+To add or clear the preset on an existing user service:
+
+```bash
+nyxid service update "$USER_SERVICE_ID" --ws-frame-preset home-assistant
+nyxid service update "$USER_SERVICE_ID" --ws-frame-clear
+```
+
+Raw REST uses the user-service update endpoint (the route is `PUT`, not
+`PATCH`):
+
+```bash
+curl -X PUT "https://nyx-api.chrono-ai.fun/api/v1/user-services/$USER_SERVICE_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ws_frame_injections":[{
+    "trigger":{"json_field_equals":{"path":"$.type","value":"auth_required"}},
+    "template":"{\"type\":\"auth\",\"access_token\":\"${credential}\"}",
+    "frame_kind":"text",
+    "consume_trigger":true,
+    "direction":"downstream"
+  }]}'
+```
+
+**Platform operators:** configure catalog defaults via the admin dashboard or
+`PUT /api/v1/services/{service_id}`. A non-empty user-owned
+`UserService.ws_frame_injections` list overrides catalog rules; an empty user
+list falls back to catalog rules for catalog-backed services.
+
+**Other WS protocols.** The same pattern covers any challenge/response post-upgrade auth. Only Home Assistant has a built-in preset today; others need the rule hand-written.
+
+| Protocol | Challenge shape | Response template |
+|----------|-----------------|-------------------|
+| Home Assistant | `{"type":"auth_required"}` text frame | `{"type":"auth","access_token":"${credential}"}` |
+| Discord gateway | op:10 Hello text frame | op:2 IDENTIFY with the bot token |
+| MQTT-over-WS CONNECT | binary CONNECT packet | binary CONNECT with username/password |
+
+Binary frame triggers are supported via `"frame_kind": "binary"`, but `json_field_equals` only evaluates text frames -- use `first_frame_from_downstream` or `frame_index_from_downstream` for binary protocols.
+
+**Limits.** Max 4 rules per service, 4 KB per template, 8 injections per WS connection. `${credential}` is the only supported template interpolation. Credentials never appear in logs, errors, or audit payloads -- the proxy only records a 12-hex-char SHA-256 prefix for correlation. Successful injection emits the metadata-only audit event `ws_frame_auth_injected`. See `docs/WS_FRAME_INJECTION.md` for the full schema.
+
 ## Managing Services
 
 ```bash

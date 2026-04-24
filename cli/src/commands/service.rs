@@ -95,6 +95,36 @@ fn build_route_body(direct: bool, node: Option<&str>) -> Result<Value> {
     Ok(serde_json::json!({ "node_id": node_value }))
 }
 
+fn home_assistant_ws_frame_rules() -> Value {
+    serde_json::json!([{
+        "trigger": {
+            "json_field_equals": {
+                "path": "$.type",
+                "value": "auth_required"
+            }
+        },
+        "template": "{\"type\":\"auth\",\"access_token\":\"${credential}\"}",
+        "frame_kind": "text",
+        "consume_trigger": true,
+        "direction": "downstream"
+    }])
+}
+
+fn build_ws_frame_injections_body(preset: Option<&str>, clear: bool) -> Result<Option<Value>> {
+    if clear {
+        return Ok(Some(Value::Array(Vec::new())));
+    }
+
+    let Some(name) = preset else {
+        return Ok(None);
+    };
+
+    match name {
+        "home-assistant" => Ok(Some(home_assistant_ws_frame_rules())),
+        other => bail!("Unsupported --ws-frame-preset '{other}'. Supported value: home-assistant"),
+    }
+}
+
 pub async fn run(command: ServiceCommands) -> Result<()> {
     match command {
         ServiceCommands::Add {
@@ -113,6 +143,8 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             scopes,
             org,
             openapi_spec_url,
+            ws_frame_preset,
+            ws_frame_clear,
             terminal,
             no_wait,
             auth,
@@ -145,7 +177,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 || auth_key_name.is_some()
                 || !scopes.is_empty()
                 || org.is_some()
-                || openapi_spec_url.is_some();
+                || openapi_spec_url.is_some()
+                || ws_frame_preset.is_some()
+                || ws_frame_clear;
             // `--no-wait` forces the pairing variant even when a local
             // browser is available and wins over `--output json`
             // (agent wrappers use JSON specifically to automate the
@@ -214,6 +248,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 validate_service_slug(custom_slug)?;
             }
 
+            let ws_frame_injections =
+                build_ws_frame_injections_body(ws_frame_preset.as_deref(), ws_frame_clear)?;
+
             // OAuth flow
             if oauth {
                 return run_oauth_add(
@@ -225,6 +262,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         additional_scopes: &additional_scopes,
                         target_org_id: org.as_deref(),
                         openapi_spec_url: openapi_spec_url.as_deref(),
+                        ws_frame_injections: ws_frame_injections.as_ref(),
                     },
                     &auth,
                 )
@@ -242,6 +280,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         additional_scopes: &additional_scopes,
                         target_org_id: org.as_deref(),
                         openapi_spec_url: openapi_spec_url.as_deref(),
+                        ws_frame_injections: ws_frame_injections.as_ref(),
                     },
                     &auth,
                 )
@@ -425,6 +464,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // and a non-empty URL as an explicit override.
             if let Some(ref url) = openapi_spec_url {
                 body.insert("openapi_spec_url".into(), Value::String(url.clone()));
+            }
+            if let Some(ref rules) = ws_frame_injections {
+                body.insert("ws_frame_injections".into(), rules.clone());
             }
 
             let result: Value = api.post("/keys", &body).await?;
@@ -672,11 +714,16 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             inactive,
             default_header,
             clear_default_headers,
+            ws_frame_preset,
+            ws_frame_clear,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
 
             let mut body = serde_json::Map::new();
+            let ws_frame_injections =
+                build_ws_frame_injections_body(ws_frame_preset.as_deref(), ws_frame_clear)?;
+            let has_ws_frame_update = ws_frame_injections.is_some();
 
             if let Some(l) = label {
                 body.insert("label".into(), Value::String(l));
@@ -717,9 +764,26 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 );
             }
 
-            let result: Value = api
-                .put(&format!("/keys/{id}"), &Value::Object(body))
-                .await?;
+            let mut result: Value = if body.is_empty() && has_ws_frame_update {
+                api.get(&format!("/keys/{id}")).await?
+            } else {
+                api.put(&format!("/keys/{id}"), &Value::Object(body))
+                    .await?
+            };
+
+            if let Some(rules) = ws_frame_injections {
+                let service_id = result["user_service_id"]
+                    .as_str()
+                    .or(result["id"].as_str())
+                    .or(result["_id"].as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Could not resolve user_service_id"))?
+                    .to_string();
+                let body = serde_json::json!({ "ws_frame_injections": rules });
+                let _: Value = api
+                    .put(&format!("/user-services/{service_id}"), &body)
+                    .await?;
+                result = api.get(&format!("/keys/{id}")).await?;
+            }
 
             match auth.output {
                 OutputFormat::Json => {
@@ -910,6 +974,9 @@ async fn run_oauth_add(
     if let Some(url) = options.openapi_spec_url {
         key_body.insert("openapi_spec_url".into(), Value::String(url.to_string()));
     }
+    if let Some(rules) = options.ws_frame_injections {
+        key_body.insert("ws_frame_injections".into(), rules.clone());
+    }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
     let key_id = key_result["id"]
         .as_str()
@@ -1000,6 +1067,9 @@ async fn run_device_code_add(
     }
     if let Some(url) = options.openapi_spec_url {
         key_body.insert("openapi_spec_url".into(), Value::String(url.to_string()));
+    }
+    if let Some(rules) = options.ws_frame_injections {
+        key_body.insert("ws_frame_injections".into(), rules.clone());
     }
     let key_result: Value = api.post("/keys", &Value::Object(key_body)).await?;
     let key_id = key_result["id"]
@@ -1316,6 +1386,7 @@ struct CatalogAddFlowOptions<'a> {
     additional_scopes: &'a [String],
     target_org_id: Option<&'a str>,
     openapi_spec_url: Option<&'a str>,
+    ws_frame_injections: Option<&'a Value>,
 }
 
 /// Parse the `token_exchange_credential_fields` array out of a raw catalog
@@ -1702,5 +1773,39 @@ mod tests {
         // empty header.
         let parsed = parse_default_headers(&["x-empty=".to_string()]).unwrap();
         assert_eq!(parsed[0]["value"], "");
+    }
+
+    #[test]
+    fn ws_frame_home_assistant_preset_matches_backend_shape() {
+        let payload = build_ws_frame_injections_body(Some("home-assistant"), false)
+            .unwrap()
+            .expect("preset should produce rules");
+
+        assert_eq!(payload[0]["trigger"]["json_field_equals"]["path"], "$.type");
+        assert_eq!(
+            payload[0]["trigger"]["json_field_equals"]["value"],
+            "auth_required"
+        );
+        assert_eq!(
+            payload[0]["template"],
+            "{\"type\":\"auth\",\"access_token\":\"${credential}\"}"
+        );
+        assert_eq!(payload[0]["frame_kind"], "text");
+        assert_eq!(payload[0]["consume_trigger"], true);
+        assert_eq!(payload[0]["direction"], "downstream");
+    }
+
+    #[test]
+    fn ws_frame_clear_builds_empty_rule_list() {
+        let payload = build_ws_frame_injections_body(None, true)
+            .unwrap()
+            .expect("clear should produce an explicit payload");
+
+        assert_eq!(payload.as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn ws_frame_unknown_preset_is_rejected() {
+        assert!(build_ws_frame_injections_body(Some("other"), false).is_err());
     }
 }

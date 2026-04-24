@@ -11,8 +11,13 @@ import {
 } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
+import { WsFrameInjectionsEditor } from "@/components/shared/ws-frame-injections-editor";
 import { defaultRequestHeaderListSchema } from "@/schemas/default-request-headers";
 import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
+import {
+  wsFrameInjectionsSchema,
+  type WsFrameInjection,
+} from "@/schemas/services";
 import { ApiError } from "@/lib/api-client";
 import { deriveServiceBadge } from "@/lib/service-status";
 import { copyToClipboard } from "@/lib/utils";
@@ -1421,6 +1426,117 @@ function DefaultHeadersSection({
   );
 }
 
+function WsFrameInjectionsSection({
+  serviceId,
+  rules,
+}: {
+  readonly serviceId: string;
+  readonly rules: readonly WsFrameInjection[];
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<WsFrameInjection[]>([]);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const updateService = useUpdateUserService();
+
+  function handleEdit() {
+    setDraft(rules.map((rule) => ({ ...rule })));
+    setSaveError(null);
+    setEditing(true);
+  }
+
+  function handleCancel() {
+    setDraft([]);
+    setSaveError(null);
+    setEditing(false);
+  }
+
+  function handleSave() {
+    const parsed = wsFrameInjectionsSchema.safeParse(draft);
+    if (!parsed.success) {
+      const first = parsed.error.issues[0];
+      setSaveError(first?.message ?? "Invalid WebSocket auth-frame rules");
+      return;
+    }
+
+    updateService.mutate(
+      {
+        serviceId,
+        ws_frame_injections: parsed.data,
+      },
+      {
+        onSuccess: () => {
+          toast.success("WebSocket auth frames updated");
+          setEditing(false);
+          setSaveError(null);
+        },
+        onError: (err) => {
+          const message =
+            err instanceof ApiError
+              ? err.message
+              : "Failed to update WebSocket auth frames";
+          setSaveError(message);
+          toast.error(message);
+        },
+      },
+    );
+  }
+
+  return (
+    <div className="space-y-3 md:col-span-2">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">WebSocket auth frames</h3>
+          <p className="text-xs text-muted-foreground">
+            User-owned frame injection rules for post-upgrade auth.
+          </p>
+        </div>
+        {!editing && (
+          <Button size="sm" variant="outline" onClick={handleEdit}>
+            <Pencil className="mr-1 h-3 w-3" />
+            Edit
+          </Button>
+        )}
+      </div>
+
+      {editing ? (
+        <div className="space-y-3">
+          <WsFrameInjectionsEditor
+            value={draft}
+            onChange={setDraft}
+            errorMessage={saveError ?? undefined}
+          />
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              onClick={handleSave}
+              disabled={updateService.isPending}
+            >
+              Save
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleCancel}
+              disabled={updateService.isPending}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-[10px] border border-border p-3">
+          <Badge variant="outline">{rules.length}/4 rules</Badge>
+          {rules.length === 0 && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              No user-owned WebSocket auth-frame rules.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function KeyDetailPage() {
   const { keyId } = useParams({ strict: false }) as { keyId: string };
   const navigate = useNavigate();
@@ -1733,6 +1849,17 @@ export function KeyDetailPage() {
               }
               catalogHeaders={catalogHeaders}
               readOnly={readOnly}
+            />
+          )}
+
+          {!isSsh && !readOnly && (
+            <WsFrameInjectionsSection
+              serviceId={keyInfo.id}
+              rules={
+                keyInfo.ws_frame_injections
+                  ? [...keyInfo.ws_frame_injections]
+                  : []
+              }
             />
           )}
 
