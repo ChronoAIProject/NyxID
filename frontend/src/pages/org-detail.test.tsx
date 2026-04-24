@@ -169,6 +169,10 @@ vi.mock("@/lib/utils", async () => {
 import { OrgDetailPage } from "./org-detail";
 
 describe("OrgDetailPage invites tab", () => {
+  const pendingInvite = fixtures.invites[0]!;
+  const redeemedInvite = fixtures.invites[1]!;
+  const expiredInvite = fixtures.invites[2]!;
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockCopyToClipboard.mockResolvedValue(undefined);
@@ -184,7 +188,7 @@ describe("OrgDetailPage invites tab", () => {
 
     await waitFor(() => {
       expect(mockCopyToClipboard).toHaveBeenCalledWith(
-        `${window.location.origin}/orgs/join/${fixtures.invites[0].nonce}`,
+        `${window.location.origin}/orgs/join/${pendingInvite.nonce}`,
       );
     });
     expect(mockToastSuccess).toHaveBeenCalledWith("Invite link copied");
@@ -202,12 +206,12 @@ describe("OrgDetailPage invites tab", () => {
     ).toHaveLength(1);
     expect(
       screen.queryByRole("button", {
-        name: new RegExp(fixtures.invites[1].nonce, "i"),
+        name: new RegExp(redeemedInvite.nonce, "i"),
       }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", {
-        name: new RegExp(fixtures.invites[2].nonce, "i"),
+        name: new RegExp(expiredInvite.nonce, "i"),
       }),
     ).not.toBeInTheDocument();
   });
