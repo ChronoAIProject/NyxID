@@ -7,7 +7,7 @@ export function LandingFooter() {
         </p>
         <div className="flex items-center gap-4">
           <a
-            href="https://discord.gg/MB5bRa4arr"
+            href="https://discord.gg/QMvcs8UQBW"
             target="_blank"
             rel="noopener noreferrer"
             className="text-gray-500 transition-colors hover:text-white"
