@@ -934,6 +934,11 @@ pub enum OrgCommands {
         #[command(subcommand)]
         command: OrgInviteCommands,
     },
+    /// Manage role-level default service scopes for an organization
+    RoleScope {
+        #[command(subcommand)]
+        command: OrgRoleScopeCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -955,8 +960,13 @@ pub enum OrgMemberCommands {
         /// Role: admin, member, viewer (default: member)
         #[arg(long, default_value = "member")]
         role: String,
+        /// Scope mode: `inherit` (follow role default, new default) or
+        /// `override` (use --allowed-service-ids explicitly). Omit to let the
+        /// server pick: inherit when no list is given, override otherwise.
+        #[arg(long)]
+        scope_source: Option<String>,
         /// Comma-separated list of UserService IDs to scope this member to.
-        /// Omit for full access to all org services.
+        /// Implies override when provided without an explicit --scope-source.
         #[arg(long)]
         allowed_service_ids: Option<String>,
         #[command(flatten)]
@@ -971,6 +981,11 @@ pub enum OrgMemberCommands {
         /// New role: admin, member, viewer
         #[arg(long)]
         role: Option<String>,
+        /// Scope mode: `inherit` (reset to role default) or `override`
+        /// (keep / set a per-member list). When set to `inherit`, any
+        /// explicit --allowed-service-ids is ignored server-side.
+        #[arg(long)]
+        scope_source: Option<String>,
         /// Comma-separated UserService IDs to scope this member. Pass empty to clear.
         #[arg(long)]
         allowed_service_ids: Option<String>,
@@ -999,7 +1014,13 @@ pub enum OrgInviteCommands {
         /// Role to grant on redemption: admin, member, viewer (default: member)
         #[arg(long, default_value = "member")]
         role: String,
+        /// Scope mode applied to the redeemed membership: `inherit` or
+        /// `override`. Defaults to `inherit` unless --allowed-service-ids
+        /// is also provided.
+        #[arg(long)]
+        scope_source: Option<String>,
         /// Comma-separated UserService IDs to scope the new member to.
+        /// Implies override when provided without an explicit --scope-source.
         #[arg(long)]
         allowed_service_ids: Option<String>,
         /// Time-to-live in hours (default: 24)
@@ -1023,6 +1044,50 @@ pub enum OrgInviteCommands {
         invite_id: String,
         #[arg(long)]
         yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OrgRoleScopeCommands {
+    /// Show the default service scope for every org role (admin only)
+    List {
+        /// Org ID
+        org_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set the default service scope for one role (admin only).
+    ///
+    /// Provide either --allowed-service-ids (restrict to the listed IDs)
+    /// or --full-access (clear to "no restriction"). Members in `inherit`
+    /// mode pick up the new scope immediately.
+    Set {
+        /// Org ID
+        org_id: String,
+        /// Role to update: admin, member, viewer
+        #[arg(long)]
+        role: String,
+        /// Comma-separated UserService IDs this role can access.
+        /// Mutually exclusive with --full-access.
+        #[arg(long, conflicts_with = "full_access")]
+        allowed_service_ids: Option<String>,
+        /// Grant full access (no restriction) for this role.
+        #[arg(long)]
+        full_access: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Remove the role scope row, reverting the role to the default
+    /// (full access). Equivalent to `set --full-access`, but the row is
+    /// deleted rather than stored with null.
+    Clear {
+        /// Org ID
+        org_id: String,
+        /// Role: admin, member, viewer
+        #[arg(long)]
+        role: String,
         #[command(flatten)]
         auth: AuthArgs,
     },

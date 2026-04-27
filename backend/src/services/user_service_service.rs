@@ -237,6 +237,8 @@ pub async fn list_user_services_with_sources(
     let mut org_name_cache: std::collections::HashMap<String, String> = Default::default();
 
     for m in memberships {
+        let effective_scope =
+            crate::services::org_role_scope_service::effective_scope_for_membership(db, &m).await?;
         let org_name = if let Some(name) = org_name_cache.get(&m.org_user_id) {
             name.clone()
         } else {
@@ -253,8 +255,8 @@ pub async fn list_user_services_with_sources(
 
         let org_services = list_user_services(db, &m.org_user_id).await?;
         for svc in org_services {
-            // Scope filter: drop services outside the membership's
-            // `allowed_service_ids` entirely. We do NOT return them with
+            // Scope filter: drop services outside the effective member scope
+            // entirely. We do NOT return them with
             // `allowed: false` because the response payload still contains
             // endpoint_id, api_key_id, auth metadata, etc. -- a member
             // scoped to service A must not see metadata for service B.
@@ -262,7 +264,7 @@ pub async fn list_user_services_with_sources(
             // Role-based "can see but not proxy" (viewer) remains visible
             // with `allowed: false` because viewers are explicitly entitled
             // to see the listing of services their org has.
-            if !m.allows_service(&svc.id) {
+            if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &svc.id) {
                 continue;
             }
             // Viewer can see but not proxy. Member/Admin can use.
@@ -1322,6 +1324,10 @@ pub async fn deactivate_user_service(
     // service. Without this, the Agent Key detail page keeps showing
     // bindings pointing at a now-inactive service (issue #324).
     agent_binding_service::cleanup_bindings_for_user_service(db, user_id, service_id).await?;
+    crate::services::org_role_scope_service::remove_service_from_all_scopes(
+        db, user_id, service_id,
+    )
+    .await?;
 
     Ok(())
 }

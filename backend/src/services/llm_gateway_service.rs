@@ -68,8 +68,8 @@ pub async fn resolve_llm_service_by_slug(
 ///
 /// - Personal `UserService` + `UserApiKey` (the new path)
 /// - Org-shared `UserService` + `UserApiKey` for any org the actor is a
-///   non-viewer member of, subject to the membership's `allowed_service_ids`
-///   scope (mirrors the proxy resolver's role + scope filters)
+///   non-viewer member of, subject to the effective member scope
+///   (mirrors the proxy resolver's role + scope filters)
 /// - Personal legacy `UserProviderToken` (pre-migration users)
 ///
 /// The reported status is the *best* across all reachable credentials --
@@ -92,7 +92,7 @@ pub async fn get_llm_status(
     // Build the list of (user_id, optional membership) tuples whose
     // credentials this actor can use. The actor's own user_id has no
     // membership (unrestricted personal access). Org user_ids carry the
-    // membership so we can apply role + `allowed_service_ids` filters.
+    // effective scope so we can apply role + service filters.
     let mut credential_owners: Vec<CredentialOwner> =
         vec![CredentialOwner::Personal(user_id.to_string())];
     match org_service::find_active_memberships_with_timeout(db, user_id).await {
@@ -101,9 +101,12 @@ pub async fn get_llm_status(
                 if !m.role.can_proxy() {
                     continue; // viewers cannot use org credentials
                 }
+                let effective_scope =
+                    crate::services::org_role_scope_service::effective_scope_for_membership(db, &m)
+                        .await?;
                 credential_owners.push(CredentialOwner::Org {
                     org_user_id: m.org_user_id,
-                    allowed_service_ids: m.allowed_service_ids,
+                    effective_scope,
                 });
             }
         }
@@ -229,11 +232,11 @@ pub async fn get_llm_status(
 enum CredentialOwner {
     /// The caller's own user_id. No scope filter.
     Personal(String),
-    /// An org the caller belongs to as a non-viewer. The optional
-    /// `allowed_service_ids` is the membership scope (None = unrestricted).
+    /// An org the caller belongs to as a non-viewer. `effective_scope = None`
+    /// means unrestricted.
     Org {
         org_user_id: String,
-        allowed_service_ids: Option<Vec<String>>,
+        effective_scope: Option<Vec<String>>,
     },
 }
 
@@ -249,13 +252,11 @@ impl CredentialOwner {
         match self {
             CredentialOwner::Personal(_) => true,
             CredentialOwner::Org {
-                allowed_service_ids: None,
-                ..
-            } => true,
-            CredentialOwner::Org {
-                allowed_service_ids: Some(ids),
-                ..
-            } => ids.iter().any(|id| id == user_service_id),
+                effective_scope, ..
+            } => crate::services::org_role_scope_service::scope_allows(
+                effective_scope,
+                user_service_id,
+            ),
         }
     }
 }

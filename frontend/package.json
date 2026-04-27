@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "build:wizard": "tsc -b && vite build --config vite.wizard.config.ts",
+    "build:wizard": "tsc -b && vite build --config vite.wizard.config.ts && node scripts/install-wizard-bundle.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "NODE_ENV=test vitest run",

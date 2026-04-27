@@ -331,7 +331,7 @@ async fn load_user_tools_inner(
     // user's "route via node" choice (twelfth-round Codex review P1).
     //
     // Scope: personal services always, org services only when the
-    // caller's membership actually allows them (`m.allows_service`).
+    // caller's effective membership scope actually allows them.
     // Previously this bulk-loaded the org owner's entire service table,
     // which could suppress a platform tool for a scoped member just
     // because some *other* service in the same org was pinned to a
@@ -377,6 +377,9 @@ async fn load_user_tools_inner(
             if !m.role.can_proxy() {
                 continue;
             }
+            let effective_scope =
+                crate::services::org_role_scope_service::effective_scope_for_membership(db, m)
+                    .await?;
             let org_pinned: Vec<UserService> = db
                 .collection::<UserService>(USER_SERVICES)
                 .find(doc! {
@@ -389,7 +392,8 @@ async fn load_user_tools_inner(
                 .try_collect()
                 .await?;
             for svc in org_pinned {
-                if !m.allows_service(&svc.id) {
+                if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &svc.id)
+                {
                     continue;
                 }
                 // Mirror the personal-pinned loop: always block the
@@ -653,6 +657,8 @@ async fn load_callable_user_services(
         if !m.role.can_proxy() {
             continue; // Viewers cannot call MCP tools
         }
+        let effective_scope =
+            crate::services::org_role_scope_service::effective_scope_for_membership(db, m).await?;
 
         let org_svcs: Vec<UserService> = db
             .collection::<UserService>(USER_SERVICES)
@@ -666,7 +672,7 @@ async fn load_callable_user_services(
             .await?;
 
         for svc in org_svcs {
-            if !m.allows_service(&svc.id) {
+            if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &svc.id) {
                 continue;
             }
             if let Some(ak_id) = &svc.api_key_id {

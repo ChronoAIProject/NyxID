@@ -22,7 +22,9 @@ use mongodb::options::FindOptions;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole};
+use crate::models::org_membership::{
+    COLLECTION_NAME as ORG_MEMBERSHIPS, MemberScopeSource, OrgMembership, OrgRole,
+};
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 
 /// Wall-clock timeout for the proxy fallback membership query.
@@ -689,6 +691,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
         .delete_many(doc! { "user_id": org_user_id })
         .await?;
     // Cascade memberships
+    crate::services::org_role_scope_service::delete_all_for_org(db, org_user_id).await?;
     db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
         .delete_many(doc! { "org_user_id": org_user_id })
         .await?;
@@ -723,8 +726,15 @@ pub async fn create_membership(
     org_user_id: &str,
     member_user_id: &str,
     role: OrgRole,
+    scope_source: MemberScopeSource,
     allowed_service_ids: Option<Vec<String>>,
 ) -> AppResult<OrgMembership> {
+    let allowed_service_ids = if scope_source == MemberScopeSource::Inherit {
+        None
+    } else {
+        allowed_service_ids
+    };
+
     // Validate the org actually exists and is an org.
     let _ = get_org_user(db, org_user_id).await?;
     // Validate the member exists and is a person.
@@ -759,11 +769,6 @@ pub async fn create_membership(
         // Reactivate revoked row in-place.
         let now = Utc::now();
         let now_bson = bson::DateTime::from_chrono(now);
-        let role_str = match role {
-            OrgRole::Admin => "admin",
-            OrgRole::Member => "member",
-            OrgRole::Viewer => "viewer",
-        };
         let allowed = match &allowed_service_ids {
             None => bson::Bson::Null,
             Some(ids) => bson::to_bson(ids).map_err(|e| AppError::Internal(e.to_string()))?,
@@ -772,7 +777,8 @@ pub async fn create_membership(
             .update_one(
                 doc! { "_id": &row.id },
                 doc! { "$set": {
-                    "role": role_str,
+                    "role": role.as_str(),
+                    "scope_source": scope_source.as_str(),
                     "allowed_service_ids": allowed,
                     "revoked_at": bson::Bson::Null,
                     "created_at": now_bson,
@@ -784,6 +790,7 @@ pub async fn create_membership(
             org_user_id: org_user_id.to_string(),
             member_user_id: member_user_id.to_string(),
             role,
+            scope_source,
             allowed_service_ids,
             created_at: now,
             revoked_at: None,
@@ -796,6 +803,7 @@ pub async fn create_membership(
         org_user_id: org_user_id.to_string(),
         member_user_id: member_user_id.to_string(),
         role,
+        scope_source,
         allowed_service_ids,
         created_at: now,
         revoked_at: None,
@@ -874,22 +882,41 @@ pub async fn update_membership(
     db: &mongodb::Database,
     membership_id: &str,
     role: Option<OrgRole>,
+    scope_source: Option<MemberScopeSource>,
     allowed_service_ids: Option<Option<Vec<String>>>,
 ) -> AppResult<OrgMembership> {
     let mut update = doc! {};
     if let Some(role) = role {
-        let role_str = match role {
-            OrgRole::Admin => "admin",
-            OrgRole::Member => "member",
-            OrgRole::Viewer => "viewer",
-        };
-        update.insert("role", role_str);
+        update.insert("role", role.as_str());
     }
-    if let Some(scope) = allowed_service_ids {
-        match scope {
-            None => update.insert("allowed_service_ids", bson::Bson::Null),
-            Some(ids) => update.insert("allowed_service_ids", ids),
-        };
+    match scope_source {
+        Some(MemberScopeSource::Inherit) => {
+            update.insert("scope_source", MemberScopeSource::Inherit.as_str());
+            update.insert("allowed_service_ids", bson::Bson::Null);
+        }
+        Some(MemberScopeSource::Override) => {
+            update.insert("scope_source", MemberScopeSource::Override.as_str());
+            match allowed_service_ids {
+                None => {
+                    update.insert("allowed_service_ids", bson::Bson::Null);
+                }
+                Some(None) => {
+                    update.insert("allowed_service_ids", bson::Bson::Null);
+                }
+                Some(Some(ids)) => {
+                    update.insert("allowed_service_ids", ids);
+                }
+            };
+        }
+        None => {
+            if let Some(scope) = allowed_service_ids {
+                update.insert("scope_source", MemberScopeSource::Override.as_str());
+                match scope {
+                    None => update.insert("allowed_service_ids", bson::Bson::Null),
+                    Some(ids) => update.insert("allowed_service_ids", ids),
+                };
+            }
+        }
     }
     if update.is_empty() {
         return Err(AppError::BadRequest("No fields to update".to_string()));
@@ -1051,7 +1078,7 @@ pub async fn find_active_memberships_with_timeout(
 /// Outcome of [`resolve_owner_access`]. Distinguishes direct ownership from
 /// org-mediated access so callers can make role-aware decisions.
 ///
-/// The org variants carry the membership's `allowed_service_ids` scope so
+/// The org variants carry the membership's effective service scope so
 /// callers can gate per-resource reads/writes via [`Self::allows_resource`].
 /// Resources outside the scope must be treated as not-found for both read
 /// and write; never leak metadata a member is not entitled to see.
@@ -1080,8 +1107,8 @@ pub enum OwnerAccess {
     /// The actor IS the resource owner. Full access.
     Direct,
     /// The actor is an Admin of the org that owns this resource. Full access,
-    /// subject to the admin's own `allowed_service_ids` scope (admins rarely
-    /// have one, but the field is honored for correctness).
+    /// subject to the admin's own effective service scope (admins rarely
+    /// restrict this, but the scope is honored for correctness).
     AsOrgAdmin {
         org_user_id: String,
         membership_id: String,
@@ -1116,8 +1143,8 @@ impl OwnerAccess {
     /// Whether the actor is allowed to touch the given `user_service` /
     /// resource id under this access grant. `Direct` ownership and
     /// `Forbidden` always return true / false respectively. Org-mediated
-    /// access honors the membership's `allowed_service_ids` scope: `None`
-    /// means unrestricted access; `Some(list)` means only those ids are
+    /// access honors the membership's effective service scope: `None` means
+    /// unrestricted access; `Some(list)` means only those ids are
     /// reachable through the membership.
     ///
     /// Call this **in addition to** `can_read`/`can_write` in every handler
@@ -1200,18 +1227,21 @@ pub async fn resolve_owner_access(
     let Some(m) = membership else {
         return Ok(OwnerAccess::Forbidden);
     };
+    let effective_scope =
+        crate::services::org_role_scope_service::effective_scope_for_membership(db, &m).await?;
+    let membership_id = m.id.clone();
 
     Ok(match m.role {
         OrgRole::Admin => OwnerAccess::AsOrgAdmin {
             org_user_id: owner.id,
-            membership_id: m.id,
-            allowed_service_ids: m.allowed_service_ids,
+            membership_id,
+            allowed_service_ids: effective_scope,
         },
         OrgRole::Member | OrgRole::Viewer => OwnerAccess::AsOrgMember {
             org_user_id: owner.id,
-            membership_id: m.id,
+            membership_id,
             role: m.role,
-            allowed_service_ids: m.allowed_service_ids,
+            allowed_service_ids: effective_scope,
         },
     })
 }

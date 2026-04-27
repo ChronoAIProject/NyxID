@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::org_invite::{COLLECTION_NAME, OrgInvite};
-use crate::models::org_membership::OrgRole;
+use crate::models::org_membership::{MemberScopeSource, OrgRole};
 use crate::services::org_service;
 
 /// Default TTL for new invites (24 hours). Configurable per-call via
@@ -50,6 +50,7 @@ pub async fn create_invite(
     org_user_id: &str,
     created_by: &str,
     role: OrgRole,
+    scope_source: MemberScopeSource,
     allowed_service_ids: Option<Vec<String>>,
     ttl: Option<Duration>,
 ) -> AppResult<OrgInvite> {
@@ -66,6 +67,7 @@ pub async fn create_invite(
             org_user_id: org_user_id.to_string(),
             nonce: generate_nonce(),
             role,
+            scope_source,
             allowed_service_ids: allowed_service_ids.clone(),
             created_by: created_by.to_string(),
             expires_at,
@@ -187,6 +189,7 @@ pub async fn redeem_invite(
         &invite.org_user_id,
         member_user_id,
         invite.role,
+        invite.scope_source,
         invite.allowed_service_ids.clone(),
     )
     .await

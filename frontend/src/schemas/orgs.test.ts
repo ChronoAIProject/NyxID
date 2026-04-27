@@ -9,6 +9,7 @@ import {
   orgResponseSchema,
   orgRoleSchema,
   ORG_ROLES,
+  scopeSourceSchema,
   updateMemberRequestSchema,
   updateOrgRequestSchema,
 } from "./orgs";
@@ -23,6 +24,14 @@ describe("orgRoleSchema", () => {
   it("rejects unknown roles", () => {
     expect(orgRoleSchema.safeParse("owner").success).toBe(false);
     expect(orgRoleSchema.safeParse("Admin").success).toBe(false);
+  });
+});
+
+describe("scopeSourceSchema", () => {
+  it("accepts inherit and override", () => {
+    expect(scopeSourceSchema.safeParse("inherit").success).toBe(true);
+    expect(scopeSourceSchema.safeParse("override").success).toBe(true);
+    expect(scopeSourceSchema.safeParse("custom").success).toBe(false);
   });
 });
 
@@ -92,7 +101,9 @@ describe("memberResponseSchema", () => {
       display_name: "Alice",
       email: "alice@example.com",
       role: "admin",
+      scope_source: "override",
       allowed_service_ids: ["svc-1"],
+      effective_allowed_service_ids: ["svc-1"],
       created_at: "2026-01-01T00:00:00Z",
       revoked_at: null,
     });
@@ -106,7 +117,9 @@ describe("memberResponseSchema", () => {
       display_name: null,
       email: null,
       role: "member",
+      scope_source: "inherit",
       allowed_service_ids: null,
+      effective_allowed_service_ids: null,
       created_at: "2026-01-01T00:00:00Z",
       revoked_at: null,
     });
@@ -120,6 +133,7 @@ describe("inviteResponseSchema", () => {
       id: "inv-1",
       nonce: "abcd1234",
       role: "member",
+      scope_source: "inherit",
       allowed_service_ids: null,
       created_by: "u-1",
       expires_at: "2026-01-02T00:00:00Z",
@@ -135,6 +149,7 @@ describe("inviteResponseSchema", () => {
       id: "inv-2",
       nonce: "redeemed1234",
       role: "viewer",
+      scope_source: "override",
       allowed_service_ids: null,
       created_by: "u-1",
       expires_at: "2026-02-02T00:00:00Z",
@@ -253,6 +268,20 @@ describe("updateMemberRequestSchema", () => {
     expect(
       updateMemberRequestSchema.safeParse({
         allowed_service_ids: ["svc-1", "svc-2"],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("accepts scope_source changes", () => {
+    expect(
+      updateMemberRequestSchema.safeParse({
+        scope_source: "inherit",
+      }).success,
+    ).toBe(true);
+    expect(
+      updateMemberRequestSchema.safeParse({
+        scope_source: "override",
+        allowed_service_ids: [],
       }).success,
     ).toBe(true);
   });

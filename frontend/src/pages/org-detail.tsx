@@ -2,7 +2,15 @@ import { useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Building2, Check, Copy, Plus, Trash2 } from "lucide-react";
+import {
+  Building2,
+  Check,
+  Copy,
+  Globe,
+  KeyRound,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -34,6 +42,9 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { PageHeader } from "@/components/shared/page-header";
 import { ApiError } from "@/lib/api-client";
 import { buildOrgInviteJoinUrl } from "@/lib/org-invite-links";
@@ -58,12 +69,21 @@ import {
   useOrgInvites,
   useCancelInvite,
 } from "@/hooks/use-org-invites";
+import { useKeys } from "@/hooks/use-keys";
+import {
+  useClearOrgRoleScope,
+  useOrgRoleScopes,
+  useSetOrgRoleScope,
+} from "@/hooks/use-org-role-scopes";
 import {
   updateOrgRequestSchema,
+  ORG_ROLES,
   type MemberResponse,
   type OrgRole,
   type UpdateOrgRequest,
 } from "@/schemas/orgs";
+import type { OrgRoleScope } from "@/schemas/org-role-scopes";
+import type { KeyInfo } from "@/types/keys";
 import { MemberRow } from "@/components/orgs/member-row";
 import { MemberScopeDialog } from "@/components/orgs/member-scope-dialog";
 import { RoleBadge } from "@/components/orgs/role-badge";
@@ -71,7 +91,12 @@ import { InviteDialog } from "@/components/orgs/invite-dialog";
 import { OrgApprovalConfigs } from "@/components/orgs/org-approval-configs";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
 
-type TabValue = "members" | "invites" | "approvals" | "settings";
+type TabValue =
+  | "members"
+  | "role-permissions"
+  | "invites"
+  | "approvals"
+  | "settings";
 
 export function OrgDetailPage() {
   const { orgId } = useParams({ strict: false }) as { orgId: string };
@@ -178,6 +203,23 @@ export function OrgDetailPage() {
     }
   }
 
+  async function handleResetMemberScope(member: MemberResponse) {
+    try {
+      await updateMemberMutation.mutateAsync({
+        orgId,
+        memberId: member.user_id,
+        body: { scope_source: "inherit" },
+      });
+      toast.success("Member reset to role defaults");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to reset member scope",
+      );
+    }
+  }
+
   async function handleDeleteOrg() {
     try {
       await deleteOrgMutation.mutateAsync(orgId);
@@ -216,6 +258,7 @@ export function OrgDetailPage() {
       <Tabs value={tab} onValueChange={(value) => setTab(value as TabValue)}>
         <TabsList>
           <TabsTrigger value="members">Members</TabsTrigger>
+          <TabsTrigger value="role-permissions">Role permissions</TabsTrigger>
           <TabsTrigger value="invites">Invites</TabsTrigger>
           <TabsTrigger value="approvals">Approvals</TabsTrigger>
           <TabsTrigger value="settings">Settings</TabsTrigger>
@@ -267,11 +310,26 @@ export function OrgDetailPage() {
                       onChangeRole={(id, role) => void handleChangeRole(id, role)}
                       onRevoke={(target) => setRevokeTarget(target)}
                       onEditScope={(target) => setScopeTarget(target)}
+                      onResetScope={(target) =>
+                        void handleResetMemberScope(target)
+                      }
                     />
                   ))}
                 </TableBody>
               </Table>
             </div>
+          )}
+        </TabsContent>
+
+        <TabsContent value="role-permissions" className="mt-6">
+          {isAdmin ? (
+            <RolePermissionsPanel orgId={orgId} />
+          ) : (
+            <Card>
+              <CardContent className="py-6 text-center text-sm text-muted-foreground">
+                Only admins can manage role permissions.
+              </CardContent>
+            </Card>
           )}
         </TabsContent>
 
@@ -530,6 +588,257 @@ export function OrgDetailPage() {
       </Dialog>
     </div>
   );
+}
+
+function RolePermissionsPanel({ orgId }: { readonly orgId: string }) {
+  const { data: keys, isLoading: keysLoading } = useKeys();
+  const { data: roleScopes, isLoading: scopesLoading } =
+    useOrgRoleScopes(orgId);
+  const setScopeMutation = useSetOrgRoleScope(orgId);
+  const clearScopeMutation = useClearOrgRoleScope(orgId);
+
+  const orgServices = (keys ?? []).filter(
+    (key) =>
+      key.credential_source?.type === "org" &&
+      key.credential_source.org_id === orgId,
+  );
+  const roleScopeMap = new Map(roleScopes?.map((scope) => [scope.role, scope]));
+  const isLoading = keysLoading || scopesLoading;
+
+  async function saveRoleScope(
+    role: OrgRole,
+    allowedServiceIds: readonly string[] | null,
+  ) {
+    try {
+      if (allowedServiceIds === null) {
+        await clearScopeMutation.mutateAsync({ role });
+      } else {
+        await setScopeMutation.mutateAsync({
+          role,
+          body: { allowed_service_ids: [...allowedServiceIds] },
+        });
+      }
+      toast.success("Role permissions updated");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError
+          ? err.message
+          : "Failed to update role permissions",
+      );
+    }
+  }
+
+  if (isLoading) {
+    return <Skeleton className="h-64 w-full" />;
+  }
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-3">
+      {ORG_ROLES.map((role) => {
+        const scope = roleScopeMap.get(role) ?? defaultRoleScope(role);
+        const pending =
+          (setScopeMutation.isPending &&
+            setScopeMutation.variables?.role === role) ||
+          (clearScopeMutation.isPending &&
+            clearScopeMutation.variables?.role === role);
+        return (
+          <RolePermissionCard
+            // Key on the persisted scope so an external invalidation
+            // (e.g. another admin saved) resets local draft state.
+            key={`${role}-${scope.updated_at ?? "default"}`}
+            role={role}
+            scope={scope}
+            services={orgServices}
+            pending={pending}
+            onSave={(next) => void saveRoleScope(role, next)}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+interface RolePermissionCardProps {
+  readonly role: OrgRole;
+  readonly scope: OrgRoleScope;
+  readonly services: readonly KeyInfo[];
+  readonly pending: boolean;
+  readonly onSave: (allowedServiceIds: readonly string[] | null) => void;
+}
+
+function RolePermissionCard({
+  role,
+  scope,
+  services,
+  pending,
+  onSave,
+}: RolePermissionCardProps) {
+  const [draftFullAccess, setDraftFullAccess] = useState(
+    scope.allowed_service_ids === null,
+  );
+  const [draftSelectedIds, setDraftSelectedIds] = useState<readonly string[]>(
+    scope.allowed_service_ids ?? [],
+  );
+
+  const savedFullAccess = scope.allowed_service_ids === null;
+  const savedSelectedIds = scope.allowed_service_ids ?? [];
+  const dirty =
+    draftFullAccess !== savedFullAccess ||
+    (!draftFullAccess && !sameSet(draftSelectedIds, savedSelectedIds));
+
+  function toggleService(serviceId: string) {
+    if (draftFullAccess) return;
+    setDraftSelectedIds((prev) =>
+      prev.includes(serviceId)
+        ? prev.filter((id) => id !== serviceId)
+        : [...prev, serviceId],
+    );
+  }
+
+  function reset() {
+    setDraftFullAccess(savedFullAccess);
+    setDraftSelectedIds(savedSelectedIds);
+  }
+
+  function save() {
+    if (draftFullAccess) {
+      onSave(null);
+    } else {
+      onSave([...draftSelectedIds]);
+    }
+  }
+
+  return (
+    <Card>
+      <CardContent className="space-y-4 p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-foreground">
+              {roleLabel(role)}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {scopeSummary(scope.allowed_service_ids)}
+            </p>
+          </div>
+          {scope.is_default && (
+            <Badge variant="secondary" className="text-[11px]">
+              Default
+            </Badge>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
+          <Label
+            htmlFor={`role-scope-full-${role}`}
+            className="text-sm font-medium"
+          >
+            Full access
+          </Label>
+          <Switch
+            id={`role-scope-full-${role}`}
+            checked={draftFullAccess}
+            disabled={pending}
+            onCheckedChange={(checked) => setDraftFullAccess(checked === true)}
+            aria-label={`Toggle full access for ${roleLabel(role)}`}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label className="text-xs font-medium text-muted-foreground">
+            Services
+          </Label>
+          {services.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+              This org has no services yet.
+            </div>
+          ) : (
+            <div className="max-h-72 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
+              {services.map((service) => {
+                const id = `role-scope-${role}-${service.id}`;
+                const checked =
+                  draftFullAccess || draftSelectedIds.includes(service.id);
+                return (
+                  <div
+                    key={service.id}
+                    className="flex items-start gap-3 rounded px-2 py-1.5 hover:bg-accent/40"
+                  >
+                    <Checkbox
+                      id={id}
+                      checked={checked}
+                      disabled={pending || draftFullAccess}
+                      onCheckedChange={() => toggleService(service.id)}
+                      className="mt-1"
+                    />
+                    <Label
+                      htmlFor={id}
+                      className="flex-1 cursor-pointer space-y-0.5"
+                    >
+                      <span className="block text-sm font-medium text-foreground">
+                        {service.label}
+                      </span>
+                      <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                        {service.service_type === "ssh" ? (
+                          <KeyRound className="h-3 w-3" aria-hidden />
+                        ) : (
+                          <Globe className="h-3 w-3" aria-hidden />
+                        )}
+                        <span className="font-mono">{service.slug}</span>
+                      </span>
+                    </Label>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={reset}
+            disabled={!dirty || pending}
+          >
+            Reset
+          </Button>
+          <Button
+            size="sm"
+            onClick={save}
+            disabled={!dirty}
+            isLoading={pending}
+          >
+            Save
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function sameSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const aSet = new Set(a);
+  return b.every((id) => aSet.has(id));
+}
+
+function defaultRoleScope(role: OrgRole): OrgRoleScope {
+  return {
+    role,
+    allowed_service_ids: null,
+    is_default: true,
+    updated_at: null,
+    updated_by: null,
+  };
+}
+
+function roleLabel(role: OrgRole): string {
+  return role.charAt(0).toUpperCase() + role.slice(1);
+}
+
+function scopeSummary(allowedServiceIds: readonly string[] | null): string {
+  if (allowedServiceIds === null) return "Full access";
+  if (allowedServiceIds.length === 0) return "No services";
+  return `${String(allowedServiceIds.length)} service${allowedServiceIds.length === 1 ? "" : "s"}`;
 }
 
 interface SettingsPanelProps {

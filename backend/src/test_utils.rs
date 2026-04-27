@@ -10,7 +10,7 @@ use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::jwks::JwksCache;
 use crate::crypto::jwt::JwtKeys;
 use crate::models::mcp_session::McpSessionStore;
-use crate::models::org_membership::{OrgMembership, OrgRole};
+use crate::models::org_membership::{MemberScopeSource, OrgMembership, OrgRole};
 use crate::models::user::{User, UserType};
 use crate::models::user_endpoint::UserEndpoint;
 use crate::models::user_service::UserService;
@@ -262,6 +262,7 @@ pub(crate) fn test_membership(
         org_user_id: org_user_id.to_string(),
         member_user_id: member_user_id.to_string(),
         role,
+        scope_source: MemberScopeSource::Override,
         allowed_service_ids,
         created_at: chrono::Utc::now(),
         revoked_at: None,

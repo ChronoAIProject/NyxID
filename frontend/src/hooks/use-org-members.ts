@@ -45,6 +45,7 @@ export function useAddMember() {
         queryKey: orgsQueryKeys.detail(variables.orgId),
       });
       void queryClient.invalidateQueries({ queryKey: orgsQueryKeys.list() });
+      void queryClient.invalidateQueries({ queryKey: ["keys"] });
     },
   });
 }
@@ -83,6 +84,7 @@ export function useUpdateMember() {
         queryKey: orgsQueryKeys.detail(variables.orgId),
       });
       void queryClient.invalidateQueries({ queryKey: orgsQueryKeys.list() });
+      void queryClient.invalidateQueries({ queryKey: ["keys"] });
     },
   });
 }
@@ -110,6 +112,7 @@ export function useRemoveMember() {
         queryKey: orgsQueryKeys.detail(variables.orgId),
       });
       void queryClient.invalidateQueries({ queryKey: orgsQueryKeys.list() });
+      void queryClient.invalidateQueries({ queryKey: ["keys"] });
     },
   });
 }

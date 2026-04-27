@@ -275,7 +275,9 @@ async fn resolve_admin_org_branches(
         if !matches!(m.role, crate::models::org_membership::OrgRole::Admin) {
             continue;
         }
-        let service_id_scope: Option<Vec<String>> = match m.allowed_service_ids {
+        let effective_scope =
+            crate::services::org_role_scope_service::effective_scope_for_membership(db, &m).await?;
+        let service_id_scope: Option<Vec<String>> = match effective_scope {
             None => None,
             Some(ids) => Some(resolve_scope_storage_service_ids(db, &m.org_user_id, &ids).await?),
         };
@@ -1459,8 +1461,13 @@ pub async fn list_service_configs(
             }
             let org_configs =
                 approval_service::list_service_approval_configs(&state.db, &m.org_user_id).await?;
+            let effective_scope =
+                crate::services::org_role_scope_service::effective_scope_for_membership(
+                    &state.db, &m,
+                )
+                .await?;
             for c in org_configs {
-                let in_scope = match &m.allowed_service_ids {
+                let in_scope = match &effective_scope {
                     None => true,
                     Some(allowed) => {
                         let user_service_ids = scope_user_service_ids_for_config(

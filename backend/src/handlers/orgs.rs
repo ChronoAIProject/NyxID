@@ -23,10 +23,10 @@ use validator::Validate;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::org_invite::OrgInvite;
-use crate::models::org_membership::{OrgMembership, OrgRole};
+use crate::models::org_membership::{MemberScopeSource, OrgMembership, OrgRole};
 use crate::models::user::User;
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, org_invite_service, org_service};
+use crate::services::{audit_service, org_invite_service, org_role_scope_service, org_service};
 
 /// Maximum invite TTL accepted by `POST /orgs/{id}/invites` and the
 /// matching CLI command. Mirrors the 30-day bound the web schema enforces
@@ -65,6 +65,11 @@ pub struct UpdateOrgRequest {
 pub struct AddMemberRequest {
     pub user_id: String,
     pub role: OrgRoleWire,
+    /// Service scope mode. If omitted, new members inherit from the role
+    /// default unless `allowed_service_ids` is provided, in which case the
+    /// request is treated as an explicit override for backwards
+    /// compatibility with older callers.
+    pub scope_source: Option<MemberScopeSourceWire>,
     #[serde(default)]
     pub allowed_service_ids: Option<Vec<String>>,
 }
@@ -72,6 +77,16 @@ pub struct AddMemberRequest {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateMemberRequest {
     pub role: Option<OrgRoleWire>,
+    /// Sending `scope_source` always rewrites `allowed_service_ids`:
+    /// - `"inherit"` clears the stored list (role scope applies instead).
+    /// - `"override"` with no `allowed_service_ids` field clears the stored
+    ///   list and grants full-access override.
+    ///
+    /// If you want to keep an existing override list, send it explicitly
+    /// alongside `"override"`. Clients should always send both fields
+    /// together — omit `scope_source` only when you are touching the
+    /// scope list under the caller's existing mode.
+    pub scope_source: Option<MemberScopeSourceWire>,
     /// Pass `null` to clear the scope (full access). Pass an array to restrict.
     ///
     /// The custom deserializer distinguishes an absent field (leave
@@ -90,6 +105,10 @@ pub struct UpdateMemberRequest {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateInviteRequest {
     pub role: OrgRoleWire,
+    /// Service scope mode applied when the invite is redeemed. If omitted,
+    /// the invite inherits from the role default unless `allowed_service_ids`
+    /// is provided, in which case it becomes an explicit override.
+    pub scope_source: Option<MemberScopeSourceWire>,
     #[serde(default)]
     pub allowed_service_ids: Option<Vec<String>>,
     /// Time-to-live in hours. Defaults to 24.
@@ -142,7 +161,9 @@ pub struct MemberResponse {
     pub display_name: Option<String>,
     pub email: Option<String>,
     pub role: OrgRoleWire,
+    pub scope_source: MemberScopeSourceWire,
     pub allowed_service_ids: Option<Vec<String>>,
+    pub effective_allowed_service_ids: Option<Vec<String>>,
     pub created_at: String,
     pub revoked_at: Option<String>,
 }
@@ -157,6 +178,7 @@ pub struct InviteResponse {
     pub id: String,
     pub nonce: String,
     pub role: OrgRoleWire,
+    pub scope_source: MemberScopeSourceWire,
     pub allowed_service_ids: Option<Vec<String>>,
     pub created_by: String,
     pub expires_at: String,
@@ -210,6 +232,31 @@ impl From<OrgRoleWire> for OrgRole {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, ToSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberScopeSourceWire {
+    Inherit,
+    Override,
+}
+
+impl From<MemberScopeSource> for MemberScopeSourceWire {
+    fn from(source: MemberScopeSource) -> Self {
+        match source {
+            MemberScopeSource::Inherit => Self::Inherit,
+            MemberScopeSource::Override => Self::Override,
+        }
+    }
+}
+
+impl From<MemberScopeSourceWire> for MemberScopeSource {
+    fn from(source: MemberScopeSourceWire) -> Self {
+        match source {
+            MemberScopeSourceWire::Inherit => Self::Inherit,
+            MemberScopeSourceWire::Override => Self::Override,
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -225,17 +272,25 @@ async fn fetch_user(db: &mongodb::Database, user_id: &str) -> AppResult<Option<U
     Ok(row)
 }
 
-fn membership_to_response(m: OrgMembership, member: Option<&User>) -> MemberResponse {
-    MemberResponse {
+async fn membership_to_response(
+    db: &mongodb::Database,
+    m: OrgMembership,
+    member: Option<&User>,
+) -> AppResult<MemberResponse> {
+    let effective_allowed_service_ids =
+        org_role_scope_service::effective_scope_for_membership(db, &m).await?;
+    Ok(MemberResponse {
         membership_id: m.id,
         user_id: m.member_user_id,
         display_name: member.and_then(|u| u.display_name.clone()),
         email: member.map(|u| u.email.clone()),
         role: m.role.into(),
+        scope_source: m.scope_source.into(),
         allowed_service_ids: m.allowed_service_ids,
+        effective_allowed_service_ids,
         created_at: m.created_at.to_rfc3339(),
         revoked_at: m.revoked_at.map(|d| d.to_rfc3339()),
-    }
+    })
 }
 
 fn invite_to_response(invite: OrgInvite, redeemer: Option<&User>) -> InviteResponse {
@@ -243,6 +298,7 @@ fn invite_to_response(invite: OrgInvite, redeemer: Option<&User>) -> InviteRespo
         id: invite.id,
         nonce: invite.nonce,
         role: invite.role.into(),
+        scope_source: invite.scope_source.into(),
         allowed_service_ids: invite.allowed_service_ids,
         created_by: invite.created_by,
         expires_at: invite.expires_at.to_rfc3339(),
@@ -252,6 +308,28 @@ fn invite_to_response(invite: OrgInvite, redeemer: Option<&User>) -> InviteRespo
         redeemed_at: invite.redeemed_at.map(|d| d.to_rfc3339()),
         created_at: invite.created_at.to_rfc3339(),
     }
+}
+
+fn resolve_scope_source_for_create(
+    explicit: Option<MemberScopeSourceWire>,
+    allowed_service_ids: Option<&Vec<String>>,
+) -> MemberScopeSource {
+    explicit
+        .map(Into::into)
+        .unwrap_or(if allowed_service_ids.is_some() {
+            MemberScopeSource::Override
+        } else {
+            MemberScopeSource::Inherit
+        })
+}
+
+fn resolve_scope_source_for_update(
+    explicit: Option<MemberScopeSourceWire>,
+    allowed_service_ids: Option<&Option<Vec<String>>>,
+) -> Option<MemberScopeSource> {
+    explicit
+        .map(Into::into)
+        .or_else(|| allowed_service_ids.map(|_| MemberScopeSource::Override))
 }
 
 /// Batch-fetch the users referenced by `redeemed_by` across a list of
@@ -290,7 +368,7 @@ async fn fetch_invite_redeemers(
 /// error. Without that check, a caller poking at arbitrary UUIDs gets
 /// `OrgRoleInsufficient` for every id and cannot tell "org does not
 /// exist" from "I'm not an admin of this real org".
-async fn require_org_admin(
+pub(crate) async fn require_org_admin(
     db: &mongodb::Database,
     actor_user_id: &str,
     org_user_id: &str,
@@ -400,6 +478,7 @@ pub async fn create_org(
         &org.id,
         &actor,
         OrgRole::Admin,
+        MemberScopeSource::Inherit,
         None,
     )
     .await
@@ -611,7 +690,7 @@ pub async fn list_members(
     let mut members = Vec::with_capacity(memberships.len());
     for m in memberships {
         let user = fetch_user(&state.db, &m.member_user_id).await?;
-        members.push(membership_to_response(m, user.as_ref()));
+        members.push(membership_to_response(&state.db, m, user.as_ref()).await?);
     }
 
     Ok(Json(MemberListResponse { members }))
@@ -630,11 +709,14 @@ pub async fn add_member(
     let actor = auth_user.user_id.to_string();
     require_org_admin(&state.db, &actor, &org_id).await?;
 
+    let scope_source =
+        resolve_scope_source_for_create(body.scope_source, body.allowed_service_ids.as_ref());
     let membership = org_service::create_membership(
         &state.db,
         &org_id,
         &body.user_id,
         body.role.into(),
+        scope_source,
         body.allowed_service_ids,
     )
     .await?;
@@ -658,7 +740,7 @@ pub async fn add_member(
 
     Ok((
         StatusCode::CREATED,
-        Json(membership_to_response(membership, user.as_ref())),
+        Json(membership_to_response(&state.db, membership, user.as_ref()).await?),
     ))
 }
 
@@ -688,10 +770,13 @@ pub async fn update_member(
         }
     }
 
+    let scope_source =
+        resolve_scope_source_for_update(body.scope_source, body.allowed_service_ids.as_ref());
     let updated = org_service::update_membership(
         &state.db,
         &current.id,
         body.role.map(Into::into),
+        scope_source,
         body.allowed_service_ids,
     )
     .await?;
@@ -712,7 +797,9 @@ pub async fn update_member(
         auth_user.api_key_name.clone(),
     );
 
-    Ok(Json(membership_to_response(updated, user.as_ref())))
+    Ok(Json(
+        membership_to_response(&state.db, updated, user.as_ref()).await?,
+    ))
 }
 
 /// DELETE /api/v1/orgs/{org_id}/members/{member_id}
@@ -784,11 +871,14 @@ pub async fn create_invite(
         }
     };
 
+    let scope_source =
+        resolve_scope_source_for_create(body.scope_source, body.allowed_service_ids.as_ref());
     let invite = org_invite_service::create_invite(
         &state.db,
         &org_id,
         &actor,
         body.role.into(),
+        scope_source,
         body.allowed_service_ids,
         ttl,
     )

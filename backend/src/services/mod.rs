@@ -40,6 +40,7 @@ pub mod oauth_service;
 pub mod openapi_parser;
 pub mod openclaw_channel_service;
 pub mod org_invite_service;
+pub mod org_role_scope_service;
 pub mod org_service;
 pub mod provider_service;
 pub mod provider_token_exchange_service;

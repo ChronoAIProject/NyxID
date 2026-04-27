@@ -62,9 +62,21 @@ graph LR
 | **Member** | No | Yes | Yes |
 | **Viewer** | No | No (`allowed: false`, 403 on proxy) | Yes (read-only) |
 
-### Scope: `allowed_service_ids`
+### Scope: role defaults + per-member overrides
 
-Each membership can carry an optional list of `UserService.id`s that the member is allowed to manage or use. `None` means unrestricted (the entire org). `Some(ids)` restricts the member to that subset. The check is enforced both at proxy time (members cannot call services outside their scope) and at write time (admins cannot edit services outside their own scope).
+Service scope has two layers: org-wide **role defaults** (`org_role_scopes`, one row per `(org_user_id, role)`) and **per-membership overrides** on `OrgMembership`. Each membership carries a `scope_source` discriminator:
+
+- `scope_source = Inherit` (default for new members) — follow the current role's scope, resolved on every check. Changes to the role's allowed services take effect immediately for every inheriting member. No snapshotting.
+- `scope_source = Override` — use this row's own `allowed_service_ids` as-is. `None` means full access (explicit override). `Some(ids)` restricts the member to that subset. Override wins over the role default for this member only.
+
+A missing role-scope row is the default "full access" state for that role; admins only pin a row when they want to restrict. The effective scope a proxy / handler enforces is:
+
+```
+effective = if scope_source == Override { m.allowed_service_ids }
+            else { org_role_scopes.get(org_user_id, role).allowed_service_ids }
+```
+
+Enforcement runs at proxy time (members cannot call services outside their effective scope), at write time (admins cannot edit services outside their effective scope), and on every secondary read path that resolves org-inherited credentials (catalog, LLM gateway, MCP, approvals). Deleting an org-owned service automatically prunes its id from every role scope and every membership override so stale ids cannot linger.
 
 ### Org user vs. person user
 
@@ -86,6 +98,7 @@ Both rows live in the `users` collection. The differences:
 erDiagram
     User ||--o{ OrgMembership : "member_user_id"
     User ||--o{ OrgMembership : "org_user_id (when user_type=org)"
+    User ||--o{ OrgRoleScope : "org_user_id (when user_type=org)"
     User ||--o{ UserService : "user_id"
     User ||--o{ UserApiKey : "user_id"
     User ||--o{ UserEndpoint : "user_id"
@@ -108,7 +121,8 @@ erDiagram
         string org_user_id FK
         string member_user_id FK
         enum role "Admin|Member|Viewer"
-        array allowed_service_ids "nullable"
+        enum scope_source "Inherit|Override"
+        array allowed_service_ids "nullable; used only when Override"
         datetime created_at
         datetime revoked_at "nullable"
     }
@@ -118,11 +132,21 @@ erDiagram
         string org_user_id FK
         string nonce UK
         enum role
-        array allowed_service_ids "nullable"
+        enum scope_source "Inherit|Override"
+        array allowed_service_ids "nullable; used only when Override"
         string created_by FK
         datetime expires_at "TTL indexed"
         string redeemed_by FK "nullable"
         datetime redeemed_at "nullable"
+    }
+
+    OrgRoleScope {
+        string id PK
+        string org_user_id FK
+        enum role "Admin|Member|Viewer"
+        array allowed_service_ids "nullable; null = full access"
+        datetime updated_at
+        string updated_by FK
     }
 ```
 
@@ -152,15 +176,23 @@ pub struct OrgMembership {
     pub org_user_id: String,                        // User where user_type = Org
     pub member_user_id: String,                     // User where user_type = Person
     pub role: OrgRole,
-    pub allowed_service_ids: Option<Vec<String>>,   // None = entire org
+    pub scope_source: MemberScopeSource,            // Inherit (default) | Override
+    pub allowed_service_ids: Option<Vec<String>>,   // used only when Override
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
 pub enum OrgRole { Admin, Member, Viewer }
+
+pub enum MemberScopeSource {
+    Inherit,   // Follow org_role_scopes for this role
+    Override,  // Use this row's allowed_service_ids as-is
+}
 ```
 
 `COLLECTION_NAME = "org_memberships"`. Soft-deletes use `revoked_at`; rows are kept so re-invites can reactivate the same row in place and audit history is preserved across revoke / rejoin cycles.
+
+**Legacy rows.** Membership rows written before this feature don't have a `scope_source` field. Serde deserializes missing values as `Override` to preserve behavior (null `allowed_service_ids` = full access, previously), and a startup backfill in `db::ensure_indexes` idempotently writes `scope_source = "override"` on any row still missing the field. New memberships created through `create_membership` default to `Inherit`.
 
 ### `OrgInvite`
 
@@ -170,6 +202,7 @@ pub struct OrgInvite {
     pub org_user_id: String,                   // The org being joined
     pub nonce: String,                         // URL-safe one-time token
     pub role: OrgRole,                         // Role granted on redemption
+    pub scope_source: MemberScopeSource,       // applied to the redeemed membership
     pub allowed_service_ids: Option<Vec<String>>,
     pub created_by: String,                    // Admin who issued it
     pub expires_at: DateTime<Utc>,             // TTL-indexed
@@ -179,7 +212,22 @@ pub struct OrgInvite {
 }
 ```
 
-`COLLECTION_NAME = "org_invites"`. Distinct from the existing `InviteCode` model (which is for new-user registration); the two have different shapes and lifecycles and never share storage.
+`COLLECTION_NAME = "org_invites"`. Distinct from the existing `InviteCode` model (which is for new-user registration); the two have different shapes and lifecycles and never share storage. Pre-feature invites get the same serde default + backfill treatment as memberships so in-flight invites don't silently flip semantics.
+
+### `OrgRoleScope`
+
+```rust
+pub struct OrgRoleScope {
+    pub id: String,                              // UUID v4
+    pub org_user_id: String,                     // User where user_type = Org
+    pub role: OrgRole,
+    pub allowed_service_ids: Option<Vec<String>>, // None = full access
+    pub updated_at: DateTime<Utc>,
+    pub updated_by: String,                      // admin user id of the last writer
+}
+```
+
+`COLLECTION_NAME = "org_role_scopes"`. One row per `(org_user_id, role)`, enforced by a compound unique index. A missing row is treated as "full access" for that role — so an org with no rows has no scope restrictions anywhere, matching the pre-feature default. `org_role_scope_service` provides the CRUD + `effective_scope_for_membership` resolver used by proxy and every secondary path.
 
 ### Indexes
 
@@ -191,6 +239,7 @@ Set up in `backend/src/db.rs::ensure_indexes()`:
 | `org_memberships` | `{ member_user_id: 1, revoked_at: 1 }` | normal | proxy resolve walks active memberships of the actor |
 | `org_memberships` | `{ org_user_id: 1, member_user_id: 1 }` | unique | one row per (org, member) pair across active+revoked |
 | `org_memberships` | `{ org_user_id: 1, revoked_at: 1 }` | normal | admin-side member listing |
+| `org_role_scopes` | `{ org_user_id: 1, role: 1 }` | unique | one scope row per `(org, role)`; drives `get_scope`/`list_scopes` |
 | `org_invites` | `{ nonce: 1 }` | unique | redeem-by-nonce lookup |
 | `org_invites` | `{ expires_at: 1 }` | TTL | auto-expire pending invites |
 | `org_invites` | `{ org_user_id: 1 }` | normal | admin invite listing |
@@ -260,7 +309,7 @@ curl -H "Authorization: Bearer $TOKEN" \
   -d '...'
 ```
 
-Access check mirrors the auto-resolution: direct owners always pass, org admins must pass `allowed_service_ids` scope, org members must also have `role.can_proxy()`, and viewers are denied. If the specified `UserService.id` doesn't exist or the actor doesn't have proxy access, the endpoint returns `404`.
+Access check mirrors the auto-resolution: direct owners always pass, org admins must pass the **effective** scope (role default when `scope_source = Inherit`, membership override otherwise), org members must also have `role.can_proxy()`, and viewers are denied. If the specified `UserService.id` doesn't exist or the actor doesn't have proxy access, the endpoint returns `404`.
 
 **Route constraint.** The selected UserService must match the service named in the URL path. The slug handler verifies `UserService.slug == {slug}` and the catalog-id handler verifies `UserService.catalog_service_id == {service_id}`. If they don't match the endpoint returns `400 BadRequest` with a clear error — this prevents a caller from using `_nyxid_via` on a `/proxy/s/llm-openai/...` URL to silently proxy through an `api-github` credential.
 
@@ -379,7 +428,7 @@ Personal-routed calls record `routed_via: "personal"` and omit the org fields. A
 
 ## REST API
 
-All routes are under `/api/v1`. Org-aware mutation handlers gate on the new `org_service::resolve_owner_access(actor, target_owner_id)` helper, which returns one of `Direct | AsOrgAdmin | AsOrgMember | Forbidden` and carries the membership's `allowed_service_ids` so per-resource scope checks compose with role checks.
+All routes are under `/api/v1`. Org-aware mutation handlers gate on the `org_service::resolve_owner_access(actor, target_owner_id)` helper, which returns one of `Direct | AsOrgAdmin | AsOrgMember | Forbidden` and carries the membership's **effective** `allowed_service_ids` (role scope merged with any per-member override, resolved live via `org_role_scope_service::effective_scope_for_membership`) so per-resource scope checks compose with role checks.
 
 ### Org CRUD
 
@@ -397,10 +446,17 @@ All routes are under `/api/v1`. Org-aware mutation handlers gate on the new `org
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET` | `/orgs/{id}/members` | org member | List members |
-| `POST` | `/orgs/{id}/members` | org admin | Add member by user_id (admin add path) |
-| `PATCH` | `/orgs/{id}/members/{member_user_id}` | org admin | Change role or `allowed_service_ids` |
+| `GET` | `/orgs/{id}/members` | org member | List members (response includes `scope_source` and `effective_allowed_service_ids`) |
+| `POST` | `/orgs/{id}/members` | org admin | Add member by user_id (admin add path). Accepts optional `scope_source` and `allowed_service_ids` |
+| `PATCH` | `/orgs/{id}/members/{member_user_id}` | org admin | Change role, `scope_source`, or `allowed_service_ids` |
 | `DELETE` | `/orgs/{id}/members/{member_user_id}` | org admin | Revoke membership |
+
+**Scope-mode resolution rules** when `POST`/`PATCH` are ambiguous:
+
+- Explicit `scope_source` always wins. Sending `"inherit"` clears the row's `allowed_service_ids` server-side even if a list is also provided (Inherit mode ignores the field by construction).
+- If `scope_source` is omitted but `allowed_service_ids` is present, the request is treated as `scope_source = "override"` for backwards compatibility with pre-feature callers.
+- If both are omitted on `POST`, the new membership defaults to `Inherit`.
+- `PATCH` with just `{"scope_source": "override"}` (no `allowed_service_ids`) is a rewrite: the membership ends up with a null list = full-access override. Clients should send both fields together when they want to preserve an existing list; the old behavior of "sending only `allowed_service_ids` to tweak the list" continues to work because the shortcut above promotes it to override.
 
 **Last-admin guard.** `PATCH` and `DELETE` on a member refuse to remove the last active admin. An admin who tries to demote or revoke themselves while they are the only admin gets `409 Conflict` with the message "cannot remove or demote the last active admin". The intent is to keep the org recoverable: `DELETE /orgs/{id}` also requires a current admin and would otherwise leave any owned services / keys / policies stranded. Admins who actually want to dissolve the org must `DELETE /orgs/{id}` instead, which cascades memberships once the live blockers are clear.
 
@@ -415,9 +471,19 @@ All routes are under `/api/v1`. Org-aware mutation handlers gate on the new `org
 | `DELETE` | `/orgs/{id}/invites/{invite_id}` | org admin | Cancel a pending invite |
 | `POST` | `/orgs/join/{nonce}` | session | Redeem an invite — caller joins the org |
 
-Invites carry their own `role` and optional `allowed_service_ids`. Once redeemed, the invite is marked `redeemed_by` + `redeemed_at` and the corresponding `OrgMembership` is created (or reactivated if a revoked row exists for the same pair).
+Invites carry their own `role`, `scope_source`, and optional `allowed_service_ids`, with the same resolution rules as the member add path. Once redeemed, the invite is marked `redeemed_by` + `redeemed_at` and the corresponding `OrgMembership` is created with the invite's scope mode (or reactivated if a revoked row exists for the same pair; in that case the existing id is kept and the new scope replaces the old one).
 
 **`ttl_hours` is bounded server-side** to `1..=720` (30 days, mirroring the web schema cap). The CLI enforces the same bound as a fail-fast UX. Out-of-range values get `400 ValidationError` instead of falling through to `chrono::Duration::hours`, which panics on integers that don't fit its internal representation.
+
+### Role scopes
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `GET` | `/orgs/{id}/role-scopes` | org admin | List the default scope for every role. Always returns three entries (Admin / Member / Viewer); unconfigured roles come back with `is_default = true` and `allowed_service_ids = null`. |
+| `PUT` | `/orgs/{id}/role-scopes/{role}` | org admin | Upsert the scope. Body: `{"allowed_service_ids": [<UserService.id>...] \| null}` (null = full access). Rejects phantom service ids with `400 BadRequest`. Emits `org_role_scope_set` audit event. |
+| `DELETE` | `/orgs/{id}/role-scopes/{role}` | org admin | Remove the row; the role falls back to the default (full access). Equivalent to `PUT` with `null`, except the row is deleted rather than stored. Emits `org_role_scope_cleared`. |
+
+Changes propagate live to every inheriting membership — no snapshot, no per-member rewrite. Members in `Override` mode are unaffected until they are reset back to `Inherit`.
 
 ### Personal multi-org tiebreaker
 
@@ -469,18 +535,35 @@ nyxid org delete <ORG_ID> --yes
 nyxid org set-primary --org-id <ORG_ID>      # set
 nyxid org set-primary --clear                # revert to earliest-joined
 
-# Members
+# Members  (table columns: User ID, Name/Email, Role, Mode, Effective scope, Joined)
 nyxid org member list <ORG_ID>
 nyxid org member add <ORG_ID> --user-id <USER_ID> --role member
 nyxid org member update <ORG_ID> <MEMBER_USER_ID> --role admin
+
+# Flip a member back to the role default
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> --scope-source inherit
+
+# Per-member override (explicit)
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> \
+  --scope-source override --allowed-service-ids "<svc1>,<svc2>"
+
+# Legacy shortcut: passing --allowed-service-ids without --scope-source implies override
 nyxid org member update <ORG_ID> <MEMBER_USER_ID> --allowed-service-ids "<svc1>,<svc2>"
-nyxid org member update <ORG_ID> <MEMBER_USER_ID> --allowed-service-ids ""    # clear scope
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> --allowed-service-ids ""    # clear to full-access override
+
 nyxid org member remove <ORG_ID> <MEMBER_USER_ID> --yes
+
+# Role scopes (defaults that every `inherit` member follows)
+nyxid org role-scope list <ORG_ID>
+nyxid org role-scope set <ORG_ID> --role member --allowed-service-ids "<svc1>,<svc2>"
+nyxid org role-scope set <ORG_ID> --role admin --full-access
+nyxid org role-scope clear <ORG_ID> --role viewer
 
 # Invites
 nyxid org invite create <ORG_ID> --role member
 nyxid org invite create <ORG_ID> --role viewer --ttl-hours 168
-nyxid org invite create <ORG_ID> --role member --allowed-service-ids "<svc1>,<svc2>"
+nyxid org invite create <ORG_ID> --role member --allowed-service-ids "<svc1>,<svc2>"   # implies override
+nyxid org invite create <ORG_ID> --role member --scope-source inherit                  # force inherit
 nyxid org invite list <ORG_ID>
 nyxid org invite cancel <ORG_ID> <INVITE_ID> --yes
 nyxid org join ORGINV-ABCDEF12345678
@@ -516,13 +599,15 @@ Service create with `--org X --via-node Y` is supported: the node remains person
 | Page | Route | Purpose |
 |---|---|---|
 | Orgs list | `/orgs` | All orgs the caller belongs to, with role badges and a "Create org" CTA |
-| Org detail | `/orgs/{id}` | Tabs: **Members**, **Invites**, **Approvals**, **Settings** (admin-only tabs hidden for non-admins) |
+| Org detail | `/orgs/{id}` | Tabs: **Members**, **Role permissions**, **Invites**, **Approvals**, **Settings** (admin-only tabs hidden for non-admins) |
 | Org join | `/orgs/join/{nonce}` | Redeem an invite link, then redirect to `/orgs/{id}` |
 | AI Services / Keys | `/keys` | Personal vs. each org section, with viewer-role and out-of-scope items rendered read-only |
 
 Auth-aware behavior:
 
 - `useUpdateMember` invalidates the org detail query in addition to the members list, so if an admin self-demotes, the admin-only tabs disappear immediately (no stale UI requiring a hard refresh).
+- The **Role permissions** tab renders three cards (Admin / Member / Viewer), each with a "Full access" switch and per-service checkboxes. Edits are staged locally and committed via a **Save** button per card (no per-toggle mutation); a **Reset** button discards unsaved changes. The card is keyed on `${role}-${scope.updated_at}` so an external invalidation (another admin saves concurrently) discards the stale local draft.
+- The **Members** tab shows a **Custom scope** badge next to any member with `scope_source === "override"` and a **Reset to role defaults** action on the row. The scope-edit dialog offers an Inherit / Customize radio; switching a currently-inherited member to Customize renders an amber snapshot-warning explaining that saving freezes them at the current role scope and future role edits won't apply until they're reset.
 - The Approvals tab includes a per-service policy editor and an org grants list. The picker only offers services with a `catalog_service_id` (custom-only services have no per-service approval surface) and submits the `catalog_service_id` to match the backend's expected key space.
 - Items with `credential_source.type === "org" && credential_source.allowed === false` are visible (so viewers see what exists) but rendered read-only and not actionable from agent flows.
 
@@ -561,15 +646,17 @@ pub enum CredentialSource {
 | `ServiceApprovalConfig` | `user_id` | `?org_id=X` on the service-config endpoints |
 | `ApprovalGrant` | `user_id` | created under the org when an org-policy approval is decided in grant mode |
 
-### Resource scope and `allowed_service_ids`
+### Resource scope and effective `allowed_service_ids`
 
-`OrgMembership.allowed_service_ids` is keyed by **`UserService.id`**, not by catalog id and not by ApiKey/OauthClient id. The owner-resolver helpers translate as needed:
+Scope lists — on `OrgRoleScope`, on `OrgMembership`, and on the effective list returned by `effective_scope_for_membership` — are all keyed by **`UserService.id`**, not by catalog id and not by ApiKey/OauthClient id. The owner-resolver helpers translate as needed, always against the *effective* scope (role default merged with any per-member override), never against `OrgMembership.allowed_service_ids` directly:
 
 - **`UserEndpoint`** → look up every `UserService` whose `endpoint_id` matches; gate via `allows_any_resource(&user_service_ids)`. An orphan endpoint (no backing service) is only writable by Direct owners and unscoped admins.
 - **`UserApiKey` (external)** → look up every `UserService` whose `api_key_id` matches; same `allows_any_resource` gate.
 - **`ApiKey` (NyxID agent identity)** → no resource scope. The membership scope governs which **services** the admin can manage, not whether they can rotate an API key. The API key has its own `allowed_service_ids` field that bounds what its bearer can call at runtime.
 - **`OauthClient`** → no resource scope. OAuth clients are developer-app identities, not services.
-- **`AgentServiceBinding`** → enforced per-binding: the binding's `user_service_id` is checked against the membership scope on create / list (filter) / delete.
+- **`AgentServiceBinding`** → enforced per-binding: the binding's `user_service_id` is checked against the membership's effective scope on create / list (filter) / delete.
+
+**Cascade cleanup.** Deleting an org-owned `UserService` calls `org_role_scope_service::remove_service_from_all_scopes(db, org_user_id, service_id)` before it returns, so stale ids don't accumulate on role scopes. Per-membership override lists are not rewritten automatically (matching the pre-feature behavior) — a scoped id that no longer matches any live service simply no-ops at proxy time.
 
 ### Approval requests and the catalog id translation
 
@@ -621,7 +708,7 @@ If `list_admin_user_ids` returns empty (e.g. the last admin removed themselves),
 
 ### Service-config CRUD scope
 
-`PUT` / `DELETE` / `GET` on `/approvals/service-configs/{service_id}?org_id=X` enforce the same per-service scope as the decide path. After confirming the actor is an admin of the target org, the handler translates the catalog id in the URL to the underlying `UserService.id`s via `user_service_service::user_service_ids_for_catalog` and checks `OwnerAccess::allows_any_resource`. A scoped admin (`allowed_service_ids = [svc-A]`) gets `OrgRoleInsufficient` when they try to set or delete a policy on `svc-B`. The list endpoint applies the same scope as a filter so a scoped admin only ever sees policies they manage.
+`PUT` / `DELETE` / `GET` on `/approvals/service-configs/{service_id}?org_id=X` enforce the same per-service scope as the decide path. After confirming the actor is an admin of the target org, the handler translates the catalog id in the URL to the underlying `UserService.id`s via `user_service_service::user_service_ids_for_catalog` and checks `OwnerAccess::allows_any_resource` against the admin's **effective** scope. A scoped admin whose effective scope is `[svc-A]` (whether from their role default or a per-member override) gets `OrgRoleInsufficient` when they try to set or delete a policy on `svc-B`. The list endpoint applies the same scope as a filter so a scoped admin only ever sees policies they manage.
 
 **Orphan handling is symmetric across list and delete.** When the catalog id has no backing `UserService` (e.g. the service was already removed but the policy row lingers), `allows_any_resource(&[])` is `true` for unscoped admins and `false` for scoped admins. The list filter uses that directly, and `ensure_service_config_in_scope` matches it -- so an unscoped admin can see *and* delete a stale config, while a scoped admin sees neither. Without this symmetry, an admin could see a config they couldn't remove and the org would accumulate undeletable rows.
 
@@ -750,7 +837,7 @@ Org-related errors live in the 8100–8199 range (8000–8099 is reserved for no
 | `8100` | `OrgQueryTimeout` | 503 | Org-fallback membership query exceeded its 500 ms wall-clock budget; usually means MongoDB is degraded |
 | `8101` | `OrgNotFound` | 404 | Target org id does not exist |
 | `8102` | `OrgMembershipRequired` | 403 | You tried to access an org you do not belong to |
-| `8103` | `OrgRoleInsufficient` | 403 | Viewer tried to proxy, or non-admin tried to manage; also surfaced when an admin's `allowed_service_ids` excludes the target |
+| `8103` | `OrgRoleInsufficient` | 403 | Viewer tried to proxy, or non-admin tried to manage; also surfaced when an admin's effective scope (role default or override) excludes the target |
 | `8104` | `OrgInviteInvalid` | 400 | Unknown nonce or already-redeemed invite |
 | `8105` | `OrgInviteExpired` | 410 | Invite TTL elapsed; ask the admin for a new one |
 | `8106` | `OrgApprovalNoAdmin` | 503 | Org approval policy fired but the org has no active admins to decide; add an admin and retry |
@@ -765,11 +852,12 @@ What `db.rs::ensure_indexes()` does at first start with this code deployed:
 
 1. Drops the legacy `email_1` unique index on `users` if it exists.
 2. Creates the partial-unique replacement `{ email: 1 }` filtered to `{ user_type: "person" }`. Safe because every existing row deserializes with `user_type = Person` via serde default.
-3. Creates the three `org_memberships` indexes and the three `org_invites` indexes (`nonce` unique, `expires_at` TTL, `org_user_id`).
+3. Creates the three `org_memberships` indexes, the three `org_invites` indexes (`nonce` unique, `expires_at` TTL, `org_user_id`), and the one `org_role_scopes` unique index (`(org_user_id, role)`).
+4. Idempotently backfills `scope_source = "override"` on every `org_memberships` and `org_invites` row that lacks the field (pre-role-scopes data). This preserves the pre-feature semantic where `allowed_service_ids = null` meant "full access" — which is exactly "Override with null".
 
-Existing users have no memberships and the `/orgs` page shows an empty state for them. The proxy resolution chain short-circuits at the personal `UserService` lookup for any user who already has one, so the new fallback path is invisible to migration users.
+Existing users have no memberships and the `/orgs` page shows an empty state for them. The proxy resolution chain short-circuits at the personal `UserService` lookup for any user who already has one, so the new fallback path is invisible to migration users. Existing members whose row was backfilled to `Override` keep their current access; admins who want them to follow role defaults flip them with `PATCH /orgs/{id}/members/{id}` `{"scope_source":"inherit"}` (or the Members tab's "Reset to role defaults" action).
 
-**Rollback:** drop the `/orgs` routes and the org fallback branch in `proxy_service.rs`. Leave the collections and indexes in place — they cost nothing if unused. No data migration to reverse.
+**Rollback:** drop the `/orgs` routes, the role-scope endpoints, and the org fallback branch in `proxy_service.rs`. Leave the collections and indexes in place — they cost nothing if unused. No data migration to reverse; the `scope_source` field is ignored by older backend builds because they don't declare it.
 
 ---
 

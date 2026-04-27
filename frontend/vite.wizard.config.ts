@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { viteSingleFile } from "vite-plugin-singlefile"
 import path from "path"
+import { wizardManifest } from "./vite-plugins/wizard-manifest"
 
 /**
  * Separate Vite build for the CLI's locally-served wizard (Mode A).
@@ -22,7 +23,7 @@ import path from "path"
  * dashboard at port 3000 — this file only governs the wizard bundle build.
  */
 export default defineConfig({
-  plugins: [react(), tailwindcss(), viteSingleFile()],
+  plugins: [react(), tailwindcss(), viteSingleFile(), wizardManifest()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

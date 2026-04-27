@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::bson_datetime;
-use super::org_membership::OrgRole;
+use super::org_membership::{MemberScopeSource, OrgRole, default_scope_source};
 
 pub const COLLECTION_NAME: &str = "org_invites";
 
@@ -21,7 +21,14 @@ pub struct OrgInvite {
     pub nonce: String,
     /// Role granted to the new member when redeemed.
     pub role: OrgRole,
-    /// Optional service scope applied to the new membership.
+    /// Where the redeemed membership's service scope comes from.
+    ///
+    /// Missing values deserialize as `Override` to preserve behavior for
+    /// invites issued before role defaults existed.
+    #[serde(default = "default_scope_source")]
+    pub scope_source: MemberScopeSource,
+    /// Optional service scope applied to the new membership when
+    /// `scope_source = Override`.
     #[serde(default)]
     pub allowed_service_ids: Option<Vec<String>>,
     /// User id of the org admin who issued this invite.
@@ -59,6 +66,7 @@ mod tests {
             org_user_id: uuid::Uuid::new_v4().to_string(),
             nonce: "INV-ABCDEFGH".to_string(),
             role: OrgRole::Member,
+            scope_source: MemberScopeSource::Override,
             allowed_service_ids: None,
             created_by: uuid::Uuid::new_v4().to_string(),
             expires_at: Utc::now() + Duration::hours(24),
@@ -104,6 +112,16 @@ mod tests {
         assert_eq!(invite.nonce, restored.nonce);
         assert_eq!(invite.org_user_id, restored.org_user_id);
         assert_eq!(invite.role, restored.role);
+        assert_eq!(invite.scope_source, restored.scope_source);
         assert!(!restored.is_redeemed());
+    }
+
+    #[test]
+    fn missing_scope_source_defaults_to_override() {
+        let invite = make_invite();
+        let mut doc = bson::to_document(&invite).expect("serialize");
+        doc.remove("scope_source");
+        let restored: OrgInvite = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.scope_source, MemberScopeSource::Override);
     }
 }

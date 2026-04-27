@@ -580,6 +580,15 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             patch(handlers::orgs::update_member).delete(handlers::orgs::remove_member),
         )
         .route(
+            "/{org_id}/role-scopes",
+            get(handlers::org_role_scopes::list_role_scopes),
+        )
+        .route(
+            "/{org_id}/role-scopes/{role}",
+            put(handlers::org_role_scopes::set_role_scope)
+                .delete(handlers::org_role_scopes::clear_role_scope),
+        )
+        .route(
             "/{org_id}/invites",
             get(handlers::orgs::list_invites).post(handlers::orgs::create_invite),
         )

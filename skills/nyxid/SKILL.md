@@ -759,7 +759,8 @@ NyxID supports **organizations** for sharing a single set of credentials across 
 ### Mental model
 
 - An **org is just a special user** (`user_type: "org"`) that cannot log in directly. It owns its own services, endpoints, API keys, etc., the same way a person does.
-- **Membership** lives in `org_memberships`. Each member has a **role** (`admin` / `member` / `viewer`) and an optional service-id scope. Admins manage everything; members can use org services through the proxy; viewers can see them in `nyxid service list` but cannot proxy through them.
+- **Membership** lives in `org_memberships`. Each member has a **role** (`admin` / `member` / `viewer`) and a `scope_source` — either `inherit` (follow the role's default) or `override` (use the membership row's own list). Admins manage everything; members can use org services through the proxy; viewers can see them in `nyxid service list` but cannot proxy through them.
+- **Role-level defaults** live in `org_role_scopes` (one row per `(org_user_id, role)`). Admins pin each role's allowed services via `nyxid org role-scope set`; new members default to `scope_source = inherit` and pick up changes immediately. `override` members are unaffected by role edits until reset back to `inherit`. Missing role-scope rows mean "full access" — nothing is restricted until an admin configures one.
 - **Resolution priority:** when a proxy request comes in, NyxID first looks for a personal `UserService` matching the slug. Only if that misses does it walk the user's active memberships (in `primary_org_id` order, then earliest-joined) and try the org's services. Personal credentials always win.
 - **`credential_source` on `nyxid service list`**: every service in the response is tagged with `{ "type": "personal" }` or `{ "type": "org", "org_id": ..., "org_name": ..., "role": ..., "allowed": ... }`. Use this to tell the user which credentials are theirs vs. shared.
 
@@ -816,7 +817,7 @@ nyxid service add llm-openai --org 1c3f8e2a-... --via-node my-laptop-node
 nyxid node credentials setup --service llm-openai
 ```
 
-The backend enforces that the caller is an admin of the target org before writing the row (returns `8103 org_role_insufficient` otherwise). Creating or updating an org-owned service respects the membership's `allowed_service_ids` scope just like the proxy path.
+The backend enforces that the caller is an admin of the target org before writing the row (returns `8103 org_role_insufficient` otherwise). Creating or updating an org-owned service respects the admin's **effective** scope (per-member override if set, otherwise the role's default) just like the proxy path — a scoped admin cannot reach a service outside their effective allow-list.
 
 > **How org-OAuth works under the hood.** The CLI creates a placeholder `UserApiKey` under the org's user_id (`POST /keys` with `target_org_id`), then initiates the OAuth / device-code flow with `target_org_id=X` on the query string. The backend stores the resulting `UserProviderToken` with `user_id = org`, and the sync routine matches it to the placeholder because both share the same user_id. The admin's personal scope is untouched -- the grant lives entirely under the org. If you prefer a dedicated identity for the org's OAuth grants (so personal account compromise does not leak the org credential), create a dedicated service account and use its token for the initial `nyxid login` before running `nyxid service add ... --oauth --org <X>`.
 
@@ -831,8 +832,11 @@ The frontend `/keys` page groups personal vs. each org section, with viewer-role
 nyxid org invite create <ORG_ID> --role member
 nyxid org invite create <ORG_ID> --role viewer --ttl-hours 168
 
-# Restrict the invitee to specific UserService IDs (comma-separated)
+# Restrict the invitee to specific UserService IDs (comma-separated, implies override)
 nyxid org invite create <ORG_ID> --role member --allowed-service-ids "<svc1>,<svc2>"
+
+# Force inherit mode (ignores any --allowed-service-ids you also pass)
+nyxid org invite create <ORG_ID> --role member --scope-source inherit
 
 # The output includes a join link AND a bare nonce. Share whichever is convenient:
 #   Join link: https://<frontend>/orgs/join/ORGINV-...
@@ -856,17 +860,53 @@ nyxid org member add <ORG_ID> --user-id <USER_ID> --role member
 ### Managing members
 
 ```bash
-# List members of an org (any member can read)
+# List members of an org (any member can read). Shows each member's role,
+# scope mode (inherit/override), and effective allowed services.
 nyxid org member list <ORG_ID>
 
-# Change a member's role or scope (admin only)
+# Change a member's role (admin only)
 nyxid org member update <ORG_ID> <MEMBER_USER_ID> --role admin
+
+# Flip a member back to the role's default scope
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> --scope-source inherit
+
+# Set a per-member override
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> \
+  --scope-source override --allowed-service-ids "<svc1>,<svc2>"
+
+# Shortcut: passing --allowed-service-ids without --scope-source implies override
 nyxid org member update <ORG_ID> <MEMBER_USER_ID> --allowed-service-ids "<svc1>,<svc2>"
-nyxid org member update <ORG_ID> <MEMBER_USER_ID> --allowed-service-ids ""    # clear scope
+nyxid org member update <ORG_ID> <MEMBER_USER_ID> --allowed-service-ids ""    # clear to full-access override
 
 # Remove a member (admin only). Re-adding later reactivates the same membership row.
 nyxid org member remove <ORG_ID> <MEMBER_USER_ID> --yes
 ```
+
+### Managing role-level scopes (per-role defaults)
+
+Admins can pin a default allowed-services list for each role. New members (and
+any member with `scope_source = inherit`) automatically pick up the role's
+scope. Per-member overrides win and are unaffected by role edits — so
+tightening a role's scope never silently narrows an explicitly-overridden
+member.
+
+```bash
+# Show defaults for admin / member / viewer (admin only)
+nyxid org role-scope list <ORG_ID>
+
+# Restrict the `member` role to two specific services
+nyxid org role-scope set <ORG_ID> --role member \
+  --allowed-service-ids "<svc1>,<svc2>"
+
+# Grant the `admin` role full access (the default, but pins an explicit row)
+nyxid org role-scope set <ORG_ID> --role admin --full-access
+
+# Remove the row entirely — role reverts to the default (full access)
+nyxid org role-scope clear <ORG_ID> --role viewer
+```
+
+Deleting an org-owned service automatically prunes its ID from every role
+scope and every membership override, so stale IDs never linger.
 
 ### Multi-org tiebreaker: `primary_org_id`
 

@@ -16,6 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/lib/api-client";
 import { useKeys } from "@/hooks/use-keys";
 import { useUpdateMember } from "@/hooks/use-org-members";
+import { useOrgRoleScopes } from "@/hooks/use-org-role-scopes";
 import type { MemberResponse } from "@/schemas/orgs";
 import type { KeyInfo } from "@/types/keys";
 
@@ -72,6 +73,8 @@ function MemberScopeForm({
   readonly onClose: () => void;
 }) {
   const { data: keys, isLoading: keysLoading } = useKeys();
+  const { data: roleScopes, isLoading: roleScopesLoading } =
+    useOrgRoleScopes(orgId);
   const updateMutation = useUpdateMember();
 
   const orgServices = useMemo(
@@ -84,12 +87,18 @@ function MemberScopeForm({
     [keys, orgId],
   );
 
-  // Seed local state from the member's current scope. `null` on the wire
-  // means "no restriction" which the dialog presents as the allow-all toggle.
-  const initialScope = member.allowed_service_ids;
-  const [allowAll, setAllowAll] = useState(initialScope === null);
+  const initialOverrideScope = member.allowed_service_ids;
+  const initialEffectiveScope = member.effective_allowed_service_ids;
+  const [scopeMode, setScopeMode] = useState(member.scope_source);
+  const [allowAll, setAllowAll] = useState(
+    member.scope_source === "override"
+      ? initialOverrideScope === null
+      : initialEffectiveScope === null,
+  );
   const [selectedIds, setSelectedIds] = useState<readonly string[]>(
-    initialScope ?? [],
+    member.scope_source === "override"
+      ? (initialOverrideScope ?? [])
+      : (initialEffectiveScope ?? []),
   );
 
   function toggleService(serviceId: string) {
@@ -105,10 +114,13 @@ function MemberScopeForm({
       await updateMutation.mutateAsync({
         orgId,
         memberId: member.user_id,
-        // `null` clears the scope (full access). A concrete array restricts.
-        body: {
-          allowed_service_ids: allowAll ? null : [...selectedIds],
-        },
+        body:
+          scopeMode === "inherit"
+            ? { scope_source: "inherit" }
+            : {
+                scope_source: "override",
+                allowed_service_ids: allowAll ? null : [...selectedIds],
+              },
       });
       toast.success("Service access updated");
       onClose();
@@ -120,6 +132,11 @@ function MemberScopeForm({
   }
 
   const memberName = member.display_name ?? member.email ?? member.user_id;
+  const inheritedScope =
+    roleScopes?.find((scope) => scope.role === member.role)
+      ?.allowed_service_ids ?? null;
+  const previewLoading = keysLoading || roleScopesLoading;
+  const inheritedSummary = describeScope(inheritedScope, orgServices);
 
   return (
     <>
@@ -127,33 +144,84 @@ function MemberScopeForm({
         <DialogTitle>Edit service access</DialogTitle>
         <DialogDescription>
           Choose which org services <strong>{memberName}</strong> is allowed
-          to proxy through. Admins always have full access.
+          to proxy through.
         </DialogDescription>
       </DialogHeader>
 
       <div className="space-y-4">
-        <div className="flex items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
-          <Checkbox
-            id="member-scope-allow-all"
-            checked={allowAll}
-            onCheckedChange={(checked) => setAllowAll(checked === true)}
-            className="mt-0.5"
-          />
-          <div className="space-y-1">
-            <Label
-              htmlFor="member-scope-allow-all"
-              className="cursor-pointer text-sm font-medium"
-            >
-              Allow all org services
-            </Label>
-            <p className="text-xs text-muted-foreground">
-              When enabled, the member can use every current and future
-              service this org owns.
-            </p>
-          </div>
+        <div className="grid gap-2">
+          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
+            <input
+              type="radio"
+              name="member-scope-mode"
+              value="inherit"
+              checked={scopeMode === "inherit"}
+              onChange={() => setScopeMode("inherit")}
+              className="mt-1"
+            />
+            <span className="space-y-1">
+              <span className="block text-sm font-medium text-foreground">
+                Inherit from role default
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                {previewLoading
+                  ? "Loading current role permissions..."
+                  : `This member can access: ${inheritedSummary}`}
+              </span>
+            </span>
+          </label>
+
+          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
+            <input
+              type="radio"
+              name="member-scope-mode"
+              value="override"
+              checked={scopeMode === "override"}
+              onChange={() => setScopeMode("override")}
+              className="mt-1"
+            />
+            <span className="space-y-1">
+              <span className="block text-sm font-medium text-foreground">
+                Customize for this member
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                Custom scopes override role defaults until reset.
+              </span>
+              {scopeMode === "override" && member.scope_source === "inherit" && (
+                <span className="block text-xs font-medium text-amber-600 dark:text-amber-400">
+                  Snapshot warning: saving will freeze this member at the
+                  current role scope ({inheritedSummary}). Future changes to
+                  the role default won't apply until you reset to inherit.
+                </span>
+              )}
+            </span>
+          </label>
         </div>
 
-        {!allowAll && (
+        {scopeMode === "override" && (
+          <div className="flex items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
+            <Checkbox
+              id="member-scope-allow-all"
+              checked={allowAll}
+              onCheckedChange={(checked) => setAllowAll(checked === true)}
+              className="mt-0.5"
+            />
+            <div className="space-y-1">
+              <Label
+                htmlFor="member-scope-allow-all"
+                className="cursor-pointer text-sm font-medium"
+              >
+                Allow all org services
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                When enabled, the member can use every current and future
+                service this org owns.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {scopeMode === "override" && !allowAll && (
           <div className="space-y-2">
             <Label className="text-xs font-medium text-muted-foreground">
               Services
@@ -231,4 +299,24 @@ function MemberScopeForm({
       </DialogFooter>
     </>
   );
+}
+
+function describeScope(
+  allowedServiceIds: readonly string[] | null,
+  services: readonly KeyInfo[],
+): string {
+  if (allowedServiceIds === null) {
+    return "Full access";
+  }
+  if (allowedServiceIds.length === 0) {
+    return "No services";
+  }
+  const labels = allowedServiceIds.map((id) => {
+    const service = services.find((item) => item.id === id);
+    return service?.label ?? id;
+  });
+  if (labels.length <= 3) {
+    return labels.join(", ");
+  }
+  return `${labels.slice(0, 3).join(", ")} and ${String(labels.length - 3)} more`;
 }

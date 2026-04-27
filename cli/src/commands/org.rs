@@ -12,7 +12,9 @@ use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::Value;
 
 use crate::api::ApiClient;
-use crate::cli::{AuthArgs, OrgCommands, OrgInviteCommands, OrgMemberCommands, OutputFormat};
+use crate::cli::{
+    AuthArgs, OrgCommands, OrgInviteCommands, OrgMemberCommands, OrgRoleScopeCommands, OutputFormat,
+};
 
 pub async fn run(command: OrgCommands) -> Result<()> {
     match command {
@@ -55,6 +57,8 @@ pub async fn run(command: OrgCommands) -> Result<()> {
         OrgCommands::Member { command } => run_member(command).await,
 
         OrgCommands::Invite { command } => run_invite(command).await,
+
+        OrgCommands::RoleScope { command } => run_role_scope(command).await,
     }
 }
 
@@ -65,6 +69,7 @@ async fn run_member(command: OrgMemberCommands) -> Result<()> {
             org_id,
             user_id,
             role,
+            scope_source,
             allowed_service_ids,
             auth,
         } => {
@@ -73,6 +78,7 @@ async fn run_member(command: OrgMemberCommands) -> Result<()> {
                 &org_id,
                 &user_id,
                 &role,
+                scope_source.as_deref(),
                 allowed_service_ids.as_deref(),
             )
             .await
@@ -81,6 +87,7 @@ async fn run_member(command: OrgMemberCommands) -> Result<()> {
             org_id,
             member_id,
             role,
+            scope_source,
             allowed_service_ids,
             auth,
         } => {
@@ -89,6 +96,7 @@ async fn run_member(command: OrgMemberCommands) -> Result<()> {
                 &org_id,
                 &member_id,
                 role.as_deref(),
+                scope_source.as_deref(),
                 allowed_service_ids.as_deref(),
             )
             .await
@@ -107,6 +115,7 @@ async fn run_invite(command: OrgInviteCommands) -> Result<()> {
         OrgInviteCommands::Create {
             org_id,
             role,
+            scope_source,
             allowed_service_ids,
             ttl_hours,
             auth,
@@ -115,6 +124,7 @@ async fn run_invite(command: OrgInviteCommands) -> Result<()> {
                 &auth,
                 &org_id,
                 &role,
+                scope_source.as_deref(),
                 allowed_service_ids.as_deref(),
                 ttl_hours,
             )
@@ -127,6 +137,31 @@ async fn run_invite(command: OrgInviteCommands) -> Result<()> {
             yes,
             auth,
         } => cancel_invite(&auth, &org_id, &invite_id, yes).await,
+    }
+}
+
+async fn run_role_scope(command: OrgRoleScopeCommands) -> Result<()> {
+    match command {
+        OrgRoleScopeCommands::List { org_id, auth } => list_role_scopes(&auth, &org_id).await,
+        OrgRoleScopeCommands::Set {
+            org_id,
+            role,
+            allowed_service_ids,
+            full_access,
+            auth,
+        } => {
+            set_role_scope(
+                &auth,
+                &org_id,
+                &role,
+                allowed_service_ids.as_deref(),
+                full_access,
+            )
+            .await
+        }
+        OrgRoleScopeCommands::Clear { org_id, role, auth } => {
+            clear_role_scope(&auth, &org_id, &role).await
+        }
     }
 }
 
@@ -381,7 +416,14 @@ async fn list_members(auth: &AuthArgs, org_id: &str) -> Result<()> {
 
             let mut table = Table::new();
             table.load_preset(UTF8_FULL_CONDENSED);
-            table.set_header(["User ID", "Name / Email", "Role", "Scope", "Joined"]);
+            table.set_header([
+                "User ID",
+                "Name / Email",
+                "Role",
+                "Mode",
+                "Effective scope",
+                "Joined",
+            ]);
             for m in items {
                 let user_id = m["user_id"].as_str().unwrap_or("-");
                 let name = m["display_name"]
@@ -389,13 +431,14 @@ async fn list_members(auth: &AuthArgs, org_id: &str) -> Result<()> {
                     .or_else(|| m["email"].as_str())
                     .unwrap_or("-");
                 let role = m["role"].as_str().unwrap_or("-");
-                let scope = match m["allowed_service_ids"].as_array() {
+                let mode = m["scope_source"].as_str().unwrap_or("override");
+                let scope = match m["effective_allowed_service_ids"].as_array() {
                     Some(arr) if arr.is_empty() => "(none)".to_string(),
                     Some(arr) => format!("{} services", arr.len()),
                     None => "all".to_string(),
                 };
                 let joined = m["created_at"].as_str().unwrap_or("-");
-                table.add_row([user_id, name, role, &scope, joined]);
+                table.add_row([user_id, name, role, mode, &scope, joined]);
             }
             eprintln!("{table}");
         }
@@ -408,15 +451,22 @@ async fn add_member(
     org_id: &str,
     user_id: &str,
     role: &str,
+    scope_source: Option<&str>,
     allowed_service_ids: Option<&str>,
 ) -> Result<()> {
     validate_role(role)?;
+    if let Some(src) = scope_source {
+        validate_scope_source(src)?;
+    }
     let mut api = ApiClient::from_auth(auth)?;
 
     let mut body = serde_json::json!({
         "user_id": user_id,
         "role": role,
     });
+    if let Some(src) = scope_source {
+        body["scope_source"] = Value::String(src.to_string());
+    }
     if let Some(ids_csv) = allowed_service_ids {
         let ids: Vec<&str> = ids_csv
             .split(',')
@@ -438,14 +488,18 @@ async fn update_member(
     org_id: &str,
     member_id: &str,
     role: Option<&str>,
+    scope_source: Option<&str>,
     allowed_service_ids: Option<&str>,
 ) -> Result<()> {
     if let Some(role) = role {
         validate_role(role)?;
     }
-    if role.is_none() && allowed_service_ids.is_none() {
+    if let Some(src) = scope_source {
+        validate_scope_source(src)?;
+    }
+    if role.is_none() && scope_source.is_none() && allowed_service_ids.is_none() {
         return Err(anyhow!(
-            "Provide at least one of --role or --allowed-service-ids"
+            "Provide at least one of --role, --scope-source, or --allowed-service-ids"
         ));
     }
 
@@ -453,6 +507,9 @@ async fn update_member(
     let mut body = serde_json::Map::new();
     if let Some(role) = role {
         body.insert("role".into(), Value::String(role.to_string()));
+    }
+    if let Some(src) = scope_source {
+        body.insert("scope_source".into(), Value::String(src.to_string()));
     }
     if let Some(ids_csv) = allowed_service_ids {
         // Empty string clears the scope (full access). Otherwise, parse a list.
@@ -511,13 +568,20 @@ async fn create_invite(
     auth: &AuthArgs,
     org_id: &str,
     role: &str,
+    scope_source: Option<&str>,
     allowed_service_ids: Option<&str>,
     ttl_hours: Option<i64>,
 ) -> Result<()> {
     validate_role(role)?;
+    if let Some(src) = scope_source {
+        validate_scope_source(src)?;
+    }
     let mut api = ApiClient::from_auth(auth)?;
 
     let mut body = serde_json::json!({ "role": role });
+    if let Some(src) = scope_source {
+        body["scope_source"] = Value::String(src.to_string());
+    }
     if let Some(ids_csv) = allowed_service_ids {
         let ids: Vec<&str> = ids_csv
             .split(',')
@@ -650,6 +714,110 @@ async fn cancel_invite(auth: &AuthArgs, org_id: &str, invite_id: &str, yes: bool
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Role scopes
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn list_role_scopes(auth: &AuthArgs, org_id: &str) -> Result<()> {
+    let mut api = ApiClient::from_auth(auth)?;
+    let resp: Value = api.get(&format!("/orgs/{org_id}/role-scopes")).await?;
+
+    match auth.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&resp)?),
+        OutputFormat::Table => {
+            let items = resp.get("role_scopes").and_then(|v| v.as_array());
+            let Some(items) = items else {
+                eprintln!("No role scopes.");
+                return Ok(());
+            };
+            let mut table = Table::new();
+            table.load_preset(UTF8_FULL_CONDENSED);
+            table.set_header(["Role", "Mode", "Services", "Updated", "Updated by"]);
+            for s in items {
+                let role = s["role"].as_str().unwrap_or("-");
+                let is_default = s["is_default"].as_bool().unwrap_or(false);
+                let mode = if is_default { "default" } else { "configured" };
+                let scope = match s["allowed_service_ids"].as_array() {
+                    Some(arr) if arr.is_empty() => "(none)".to_string(),
+                    Some(arr) => format!("{} services", arr.len()),
+                    None => "all".to_string(),
+                };
+                let updated = s["updated_at"].as_str().unwrap_or("-");
+                let updated_by = s["updated_by"].as_str().unwrap_or("-");
+                table.add_row([role, mode, &scope, updated, updated_by]);
+            }
+            eprintln!("{table}");
+            eprintln!();
+            eprintln!(
+                "Mode `default` = no row stored (full access). `configured` = scope pinned via `nyxid org role-scope set`."
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn set_role_scope(
+    auth: &AuthArgs,
+    org_id: &str,
+    role: &str,
+    allowed_service_ids: Option<&str>,
+    full_access: bool,
+) -> Result<()> {
+    validate_role(role)?;
+    if !full_access && allowed_service_ids.is_none() {
+        return Err(anyhow!(
+            "Provide either --allowed-service-ids or --full-access"
+        ));
+    }
+
+    let body = if full_access {
+        serde_json::json!({ "allowed_service_ids": Value::Null })
+    } else {
+        let ids: Vec<&str> = allowed_service_ids
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        serde_json::json!({ "allowed_service_ids": ids })
+    };
+
+    let mut api = ApiClient::from_auth(auth)?;
+    let updated: Value = api
+        .put(&format!("/orgs/{org_id}/role-scopes/{role}"), &body)
+        .await?;
+    match auth.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&updated)?),
+        OutputFormat::Table => {
+            if full_access {
+                eprintln!("Role scope set: {role} → full access");
+            } else {
+                let count = updated["allowed_service_ids"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                eprintln!("Role scope set: {role} → {count} service(s)");
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn clear_role_scope(auth: &AuthArgs, org_id: &str, role: &str) -> Result<()> {
+    validate_role(role)?;
+    let mut api = ApiClient::from_auth(auth)?;
+    api.delete_empty(&format!("/orgs/{org_id}/role-scopes/{role}"))
+        .await?;
+    match auth.output {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "ok": true }))?
+        ),
+        OutputFormat::Table => eprintln!("Role scope cleared: {role} now defaults to full access."),
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -658,6 +826,15 @@ fn validate_role(role: &str) -> Result<()> {
         "admin" | "member" | "viewer" => Ok(()),
         _ => Err(anyhow!(
             "Role must be one of: admin, member, viewer (got '{role}')"
+        )),
+    }
+}
+
+fn validate_scope_source(source: &str) -> Result<()> {
+    match source {
+        "inherit" | "override" => Ok(()),
+        _ => Err(anyhow!(
+            "Scope source must be one of: inherit, override (got '{source}')"
         )),
     }
 }
@@ -704,5 +881,18 @@ mod tests {
         assert!(validate_role("owner").is_err());
         assert!(validate_role("ADMIN").is_err());
         assert!(validate_role("").is_err());
+    }
+
+    #[test]
+    fn validate_scope_source_accepts_valid() {
+        assert!(validate_scope_source("inherit").is_ok());
+        assert!(validate_scope_source("override").is_ok());
+    }
+
+    #[test]
+    fn validate_scope_source_rejects_invalid() {
+        assert!(validate_scope_source("custom").is_err());
+        assert!(validate_scope_source("INHERIT").is_err());
+        assert!(validate_scope_source("").is_err());
     }
 }

@@ -15,6 +15,9 @@ export const ORG_ROLES = ["admin", "member", "viewer"] as const;
 export const orgRoleSchema = z.enum(ORG_ROLES);
 export type OrgRole = z.infer<typeof orgRoleSchema>;
 
+export const scopeSourceSchema = z.enum(["inherit", "override"]);
+export type ScopeSource = z.infer<typeof scopeSourceSchema>;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Response shapes (match backend wire format exactly)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,7 +72,9 @@ export const memberResponseSchema = z.object({
   display_name: z.string().nullable(),
   email: z.string().nullable(),
   role: orgRoleSchema,
+  scope_source: scopeSourceSchema,
   allowed_service_ids: z.array(z.string()).nullable(),
+  effective_allowed_service_ids: z.array(z.string()).nullable(),
   created_at: z.string(),
   revoked_at: z.string().nullable(),
 });
@@ -91,6 +96,7 @@ export const inviteResponseSchema = z.object({
   id: z.string(),
   nonce: z.string(),
   role: orgRoleSchema,
+  scope_source: scopeSourceSchema,
   allowed_service_ids: z.array(z.string()).nullable(),
   created_by: z.string(),
   expires_at: z.string(),
@@ -164,12 +170,14 @@ export type UpdateOrgRequest = z.infer<typeof updateOrgRequestSchema>;
 export const addMemberRequestSchema = z.object({
   user_id: z.string().min(1, "User id is required"),
   role: orgRoleSchema,
+  scope_source: scopeSourceSchema.optional(),
   allowed_service_ids: z.array(z.string()).optional(),
 });
 export type AddMemberRequest = z.infer<typeof addMemberRequestSchema>;
 
 export const updateMemberRequestSchema = z.object({
   role: orgRoleSchema.optional(),
+  scope_source: scopeSourceSchema.optional(),
   /**
    * Backend uses Option<Option<Vec<String>>>: omit to leave unchanged, `null`
    * to clear (full access), or an array to restrict.
@@ -181,6 +189,7 @@ export type UpdateMemberRequest = z.infer<typeof updateMemberRequestSchema>;
 
 export const createInviteRequestSchema = z.object({
   role: orgRoleSchema,
+  scope_source: scopeSourceSchema.optional(),
   allowed_service_ids: z.array(z.string()).optional(),
   /**
    * TTL in hours. Defaults server-side to 24 if omitted.

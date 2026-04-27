@@ -1099,6 +1099,17 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── org_role_scopes ──
+    let org_role_scopes = db.collection::<Document>(crate::models::org_role_scope::COLLECTION_NAME);
+    org_role_scopes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "org_user_id": 1, "role": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // ── org_invites ──
     let org_invites = db.collection::<Document>("org_invites");
     org_invites
@@ -1145,6 +1156,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     backfill_downstream_service_types(db).await?;
+    backfill_org_scope_sources(db).await?;
     purge_legacy_channel_message_content(db).await?;
 
     Ok(())
@@ -1259,6 +1271,40 @@ async fn backfill_downstream_service_types(db: &Database) -> Result<(), mongodb:
         tracing::info!(
             count = migration.modified_count,
             "Backfilled missing downstream service_type to http"
+        );
+    }
+
+    Ok(())
+}
+
+/// Preserve legacy org member/invite behavior by marking rows that predate
+/// `scope_source` as explicit overrides.
+async fn backfill_org_scope_sources(db: &Database) -> Result<(), mongodb::error::Error> {
+    let memberships = db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME);
+    let member_result = memberships
+        .update_many(
+            doc! { "scope_source": { "$exists": false } },
+            doc! { "$set": { "scope_source": "override" } },
+        )
+        .await?;
+    if member_result.modified_count > 0 {
+        tracing::info!(
+            count = member_result.modified_count,
+            "Backfilled missing org_memberships.scope_source to override"
+        );
+    }
+
+    let invites = db.collection::<Document>(crate::models::org_invite::COLLECTION_NAME);
+    let invite_result = invites
+        .update_many(
+            doc! { "scope_source": { "$exists": false } },
+            doc! { "$set": { "scope_source": "override" } },
+        )
+        .await?;
+    if invite_result.modified_count > 0 {
+        tracing::info!(
+            count = invite_result.modified_count,
+            "Backfilled missing org_invites.scope_source to override"
         );
     }
 

@@ -724,14 +724,18 @@ pub async fn resolve_proxy_target_from_user_service(
             continue;
         }
 
-        // Scope check: allowed_service_ids may restrict access to a subset.
-        if !membership.allows_service(&org_us.id) {
+        // Scope check: inherited role defaults or member overrides may
+        // restrict access to a subset.
+        let effective_scope =
+            crate::services::org_role_scope_service::effective_scope_for_membership(db, membership)
+                .await?;
+        if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &org_us.id) {
             role_denied = true;
             tracing::debug!(
                 user_id = %user_id,
                 org_user_id = %membership.org_user_id,
                 user_service_id = %org_us.id,
-                "User not in allowed_service_ids scope for this org membership"
+                "User not in effective service scope for this org membership"
             );
             continue;
         }
@@ -1012,9 +1016,9 @@ pub async fn guard_slug_against_viewer_orgs(
 ///
 /// Access check mirrors what the auto-resolution cascade enforces:
 /// - **Direct owner:** always allowed.
-/// - **Org admin:** allowed if `allowed_service_ids` scope passes.
+/// - **Org admin:** allowed if the effective service scope passes.
 /// - **Org member (non-viewer):** allowed if `role.can_proxy()` AND
-///   `allowed_service_ids` scope passes.
+///   the effective service scope passes.
 /// - **Viewer / Forbidden:** denied.
 ///
 /// `expected_slug` and `expected_catalog_service_id` constrain the
@@ -1176,7 +1180,13 @@ pub async fn find_effective_service_owner(
         if !membership.role.can_proxy() {
             continue;
         }
-        if !membership.allows_service(&org_us.id) {
+        let effective_scope =
+            crate::services::org_role_scope_service::effective_scope_for_membership(
+                db,
+                &membership,
+            )
+            .await?;
+        if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &org_us.id) {
             continue;
         }
         return Ok(Some(org_us.user_id));
@@ -2203,6 +2213,15 @@ fn inject_credential_into_json_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, MemberScopeSource, OrgMembership, OrgRole,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
+    use crate::test_utils::{
+        connect_test_database, test_encryption_keys, test_membership, test_user,
+        test_user_endpoint, test_user_service,
+    };
     use axum::{
         Router,
         body::Bytes,
@@ -2287,6 +2306,137 @@ mod tests {
     /// `provider_token_exchange_service::tests`.
     fn empty_token_cache() -> TokenExchangeCache {
         TokenExchangeCache::new()
+    }
+
+    #[tokio::test]
+    async fn org_inherited_role_scope_allows_and_denies_proxy_targets() {
+        let Some(db) = connect_test_database("proxy_org_role_scope").await else {
+            eprintln!("skipping proxy org role-scope integration test: no local MongoDB available");
+            return;
+        };
+
+        let member_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_a_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_c_id = uuid::Uuid::new_v4().to_string();
+        let service_a_id = uuid::Uuid::new_v4().to_string();
+        let service_c_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&member_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_many([
+                test_user_endpoint(
+                    &endpoint_a_id,
+                    &org_id,
+                    "Service A",
+                    "https://a.example.test",
+                    None,
+                    None,
+                ),
+                test_user_endpoint(
+                    &endpoint_c_id,
+                    &org_id,
+                    "Service C",
+                    "https://c.example.test",
+                    None,
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+        db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .insert_many([
+                test_user_service(&service_a_id, &org_id, "svc-a", &endpoint_a_id, None, None),
+                test_user_service(&service_c_id, &org_id, "svc-c", &endpoint_c_id, None, None),
+            ])
+            .await
+            .unwrap();
+
+        let mut membership = test_membership(&org_id, &member_id, OrgRole::Member, None);
+        membership.scope_source = MemberScopeSource::Inherit;
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(membership.clone())
+            .await
+            .unwrap();
+        crate::services::org_role_scope_service::set_scope(
+            &db,
+            &org_id,
+            OrgRole::Member,
+            Some(vec![service_a_id.clone()]),
+            &member_id,
+        )
+        .await
+        .unwrap();
+
+        let node_manager = Arc::new(NodeWsManager::new(30, 100));
+        let resolved = resolve_proxy_target_from_user_service(
+            &db,
+            &test_encryption_keys(),
+            &node_manager,
+            &member_id,
+            Some("svc-a"),
+            None,
+        )
+        .await
+        .expect("service A should resolve")
+        .expect("org service A resolution");
+        assert_eq!(resolved.user_service_id, service_a_id);
+        assert_eq!(
+            resolved
+                .org_routing
+                .as_ref()
+                .map(|r| r.org_user_id.as_str()),
+            Some(org_id.as_str())
+        );
+
+        let denied = match resolve_proxy_target_from_user_service(
+            &db,
+            &test_encryption_keys(),
+            &node_manager,
+            &member_id,
+            Some("svc-c"),
+            None,
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(_) => panic!("service C should be denied by inherited role scope"),
+        };
+        assert!(matches!(denied, AppError::OrgRoleInsufficient(_)));
+
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .update_one(
+                doc! { "_id": &membership.id },
+                doc! {
+                    "$set": {
+                        "scope_source": "override",
+                        "allowed_service_ids": Vec::<String>::new(),
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        let denied = match resolve_proxy_target_from_user_service(
+            &db,
+            &test_encryption_keys(),
+            &node_manager,
+            &member_id,
+            Some("svc-a"),
+            None,
+        )
+        .await
+        {
+            Err(err) => err,
+            Ok(_) => panic!("empty override should lock member out"),
+        };
+        assert!(matches!(denied, AppError::OrgRoleInsufficient(_)));
     }
 
     // ---- credential_header_name tests (NyxID#356) ----

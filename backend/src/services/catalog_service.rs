@@ -8,6 +8,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
 };
+#[cfg(test)]
 use crate::models::org_membership::OrgMembership;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::service_provider_requirement::{
@@ -497,9 +498,8 @@ pub async fn get_catalog_entry(
 /// Org services store `UserService.user_id = org_user_id`, so a plain
 /// `{user_id}` lookup would miss them and deny catalog visibility to
 /// legitimate org members. Uses `OrgMembership.allows_resource` to
-/// respect per-membership `allowed_service_ids` scopes — a viewer with
-/// a scoped membership does NOT inherit visibility to services outside
-/// their scope.
+/// respect effective member scopes — a viewer with a scoped membership
+/// does NOT inherit visibility to services outside their scope.
 async fn has_active_user_service_for_catalog(
     db: &mongodb::Database,
     user_id: &str,
@@ -538,7 +538,19 @@ async fn has_active_user_service_for_catalog(
         .try_collect()
         .await?;
 
-    Ok(any_org_service_reachable(&candidates, &memberships))
+    for us in candidates {
+        let Some(membership) = memberships.iter().find(|m| m.org_user_id == us.user_id) else {
+            continue;
+        };
+        let effective_scope =
+            crate::services::org_role_scope_service::effective_scope_for_membership(db, membership)
+                .await?;
+        if crate::services::org_role_scope_service::scope_allows(&effective_scope, &us.id) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 /// Pure-function matcher: is there a `UserService` in `candidates` whose
@@ -546,14 +558,28 @@ async fn has_active_user_service_for_catalog(
 /// `allowed_service_ids` scope covers that `UserService.id`?
 ///
 /// Extracted so the scope-matching logic is unit-testable without Mongo.
+///
+/// **Caveat:** this compares against `m.allowed_service_ids` directly and
+/// does NOT resolve `scope_source = Inherit` via the role-scope collection.
+/// Callers constructing test memberships must set `scope_source = Override`
+/// with the desired explicit list — otherwise Inherit memberships look
+/// like "full access" here even when a stricter role scope exists.
+/// Production enforcement always flows through
+/// [`has_active_user_service_for_catalog`], which uses
+/// `org_role_scope_service::effective_scope_for_membership`.
+#[cfg(test)]
 pub(crate) fn any_org_service_reachable(
     candidates: &[UserService],
     memberships: &[OrgMembership],
 ) -> bool {
     candidates.iter().any(|us| {
-        memberships
-            .iter()
-            .any(|m| m.org_user_id == us.user_id && m.allows_service(&us.id))
+        memberships.iter().any(|m| {
+            m.org_user_id == us.user_id
+                && crate::services::org_role_scope_service::scope_allows(
+                    &m.allowed_service_ids,
+                    &us.id,
+                )
+        })
     })
 }
 
@@ -667,6 +693,7 @@ mod tests {
             org_user_id: org_user_id.to_string(),
             member_user_id: "bob".to_string(),
             role: crate::models::org_membership::OrgRole::Member,
+            scope_source: crate::models::org_membership::MemberScopeSource::Override,
             allowed_service_ids: allowed,
             created_at: Utc::now(),
             revoked_at: None,
