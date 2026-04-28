@@ -115,9 +115,9 @@ function WizardApp() {
   const [slugPicked, setSlugPicked] = useState<boolean>(
     Boolean((bootstrap?.prefill as { slug?: string } | undefined)?.slug),
   )
-  // `true` after two consecutive heartbeat misses. Surfaced as a
-  // banner + disables destructive action buttons so we don't show
-  // "Loading…" forever against a dead CLI.
+  // `true` after several consecutive heartbeat misses. Surfaced as a
+  // non-blocking banner while the CLI's more tolerant watchdog gives
+  // the browser a chance to recover.
   const [disconnected, setDisconnected] = useState(false)
 
   // Shim is installed at module-load above; here we kick off the

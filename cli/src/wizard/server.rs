@@ -99,27 +99,35 @@ struct Assets;
 /// Overall ceiling. If a heartbeat is never missed but the user never
 /// completes, this kills the session so a walked-away tab eventually frees.
 const WIZARD_MAX_DURATION: Duration = Duration::from_secs(1800); // 30 min
-/// Browser pings `/api/proxy/heartbeat` every 1.2 s; miss a handful in
-/// a row and the CLI treats the tab as dead. 4 s covers ~3 missed
-/// beats on loopback. The frontend's own disconnect banner fires at
-/// ~3.6 s (3 misses), so the two timings are aligned.
-const HEARTBEAT_DEAD_AFTER: Duration = Duration::from_secs(4);
-/// Rotation / DisplayOnce flows render a one-time secret. Users may
-/// alt-tab into a password manager / vault / paper to copy it, and
-/// Chrome throttles `setInterval` in hidden tabs (sometimes to once
-/// per minute). A wider window keeps casual alt-tabs from burying the
-/// panel under a "disconnected" overlay. 30 s is the compromise —
-/// down from 60 s since the shorter heartbeat + tighter dead-after
-/// makes the overall watchdog responsive elsewhere, but still tolerant
-/// of a ~25 s alt-tab to 1Password.
-const HEARTBEAT_DEAD_AFTER_ROTATION: Duration = Duration::from_secs(30);
-/// Grace period at startup before we start enforcing the heartbeat dead
-/// line. Lets the browser actually load the page.
-const HEARTBEAT_STARTUP_GRACE: Duration = Duration::from_secs(5);
+/// Wait for the first browser heartbeat before arming the active watchdog.
+/// The first successful beat proves the HTML loaded, the JS bundle ran, and
+/// the browser can reach this local server. Keep this wide enough for slow
+/// browser startup and manual URL copy/paste when auto-open fails.
+const FIRST_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Browser pings `/api/proxy/heartbeat` every 1.2 s, but the CLI should not
+/// cancel at the same cadence as the frontend's quick disconnect banner
+/// (~3.6 s). A 20 s active window keeps heartbeat as the source of truth
+/// while tolerating ordinary browser scheduling delays.
+const HEARTBEAT_DEAD_AFTER: Duration = Duration::from_secs(20);
+/// DisplayOnce flows render a one-time secret. Keep a separately named window
+/// so those flows can tolerate a longer alt-tab into a password manager.
+const HEARTBEAT_DEAD_AFTER_ROTATION: Duration = Duration::from_secs(60);
 /// How often the CLI checks the last-heartbeat timestamp. 500 ms is
-/// tight enough that a watchdog-triggered exit fires within ~4.5 s of
-/// the last successful beat.
+/// tight enough that a watchdog-triggered exit fires promptly after the
+/// current timeout window expires.
 const HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+
+fn heartbeat_watchdog_dead(
+    started_at: Instant,
+    last_heartbeat: Option<Instant>,
+    dead_after: Duration,
+    now: Instant,
+) -> bool {
+    match last_heartbeat {
+        Some(t) => now.saturating_duration_since(t) > dead_after,
+        None => now.saturating_duration_since(started_at) > FIRST_HEARTBEAT_TIMEOUT,
+    }
+}
 
 /// A single entry in the proxy allowlist. `path_template` supports literal
 /// segments and `:param` placeholders (e.g. `/api/v1/catalog/:slug`). The
@@ -1483,16 +1491,16 @@ pub async fn run_flow(
         eprintln!("  (NYXID_WIZARD_NO_OPEN set — not opening a browser)");
     }
 
-    // Heartbeat watchdog: if the browser stops pinging /api/proxy/heartbeat
-    // for longer than HEARTBEAT_DEAD_AFTER (after a startup grace window),
-    // we treat the tab as closed and cancel.
+    // Heartbeat watchdog: wait for the browser's first heartbeat before
+    // arming active liveness. After that, heartbeat is the source of truth,
+    // but the CLI timeout is intentionally more tolerant than the frontend's
+    // quick disconnect warning.
     let watchdog_state = state.clone();
     let watchdog_shutdown = shutdown.clone();
     let (watchdog_tx, watchdog_rx) = oneshot::channel::<()>();
     // Per-flow dead-after window. DisplayOnce flows render a one-time
-    // secret; users may alt-tab into a password manager mid-save and
-    // browsers throttle hidden-tab `setInterval` heartbeats. Cap is
-    // still bounded (60s) so a truly-dead tab still gets cleaned up.
+    // secret; keep the branch explicit even though both windows are
+    // currently equal.
     let dead_after = if kind.is_display_once() {
         HEARTBEAT_DEAD_AFTER_ROTATION
     } else {
@@ -1505,14 +1513,13 @@ pub async fn run_flow(
                 _ = watchdog_shutdown.notified() => return,
                 _ = tokio::time::sleep(HEARTBEAT_CHECK_INTERVAL) => {}
             }
-            if watchdog_state.started_at.elapsed() < HEARTBEAT_STARTUP_GRACE {
-                continue;
-            }
             let last = *watchdog_state.last_heartbeat.lock().await;
-            let dead = match last {
-                Some(t) => t.elapsed() > dead_after,
-                None => watchdog_state.started_at.elapsed() > HEARTBEAT_STARTUP_GRACE + dead_after,
-            };
+            let dead = heartbeat_watchdog_dead(
+                watchdog_state.started_at,
+                last,
+                dead_after,
+                Instant::now(),
+            );
             if dead {
                 let _ = tx.send(());
                 return;
@@ -1644,6 +1651,55 @@ mod tests {
             pending_keys: Arc::new(tokio::sync::Mutex::new(set)),
             prefill: Arc::new(Value::Null),
         }
+    }
+
+    #[test]
+    fn heartbeat_watchdog_waits_for_first_heartbeat_timeout() {
+        let started = Instant::now();
+
+        assert!(
+            !heartbeat_watchdog_dead(
+                started,
+                None,
+                HEARTBEAT_DEAD_AFTER,
+                started + FIRST_HEARTBEAT_TIMEOUT - Duration::from_millis(1),
+            ),
+            "watchdog must not enforce the active heartbeat window before the first heartbeat"
+        );
+        assert!(
+            heartbeat_watchdog_dead(
+                started,
+                None,
+                HEARTBEAT_DEAD_AFTER,
+                started + FIRST_HEARTBEAT_TIMEOUT + Duration::from_millis(1),
+            ),
+            "watchdog should give up if the browser never sends an initial heartbeat"
+        );
+    }
+
+    #[test]
+    fn heartbeat_watchdog_uses_active_timeout_after_first_heartbeat() {
+        let started = Instant::now();
+        let first_heartbeat = started + Duration::from_secs(1);
+
+        assert!(
+            !heartbeat_watchdog_dead(
+                started,
+                Some(first_heartbeat),
+                HEARTBEAT_DEAD_AFTER,
+                first_heartbeat + HEARTBEAT_DEAD_AFTER - Duration::from_millis(1),
+            ),
+            "active heartbeat timeout should be independent of startup time"
+        );
+        assert!(
+            heartbeat_watchdog_dead(
+                started,
+                Some(first_heartbeat),
+                HEARTBEAT_DEAD_AFTER,
+                first_heartbeat + HEARTBEAT_DEAD_AFTER + Duration::from_millis(1),
+            ),
+            "watchdog should cancel after the active heartbeat window is missed"
+        );
     }
 
     /// Issue #448 fix: drain_pending_keys must empty the HashSet so a

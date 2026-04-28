@@ -195,12 +195,10 @@ const HEARTBEAT_INTERVAL_MS = 1200
  * "disconnected". 3 × 1200ms = ~3.6s detection window. Fast enough
  * to feel snappy, loose enough to tolerate one hiccup.
  *
- * The CLI's server-side watchdog (`HEARTBEAT_DEAD_AFTER` =
- * 22s / `HEARTBEAT_DEAD_AFTER_ROTATION` = 60s in
- * `cli/src/wizard/server.rs:102-112`) is far more generous — we
- * don't need to touch it, it exists to tolerate browser tab
- * visibility throttling (Chrome pauses setInterval in hidden tabs),
- * which is unrelated to network latency on 127.0.0.1.
+ * The CLI's server-side watchdog is intentionally more generous:
+ * it waits for the first successful heartbeat, then allows a longer
+ * active miss window before cancelling. This UI warning is only a
+ * quick signal that heartbeat checks are currently failing.
  */
 const DISCONNECT_THRESHOLD = 3
 
