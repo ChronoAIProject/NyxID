@@ -5,9 +5,15 @@ import {
   isOidcService,
   SERVICE_TYPE_LABELS,
 } from "@/lib/constants";
+import { useNodes } from "@/hooks/use-nodes";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Lock, Trash2 } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Lock, Router, Trash2 } from "lucide-react";
 
 interface ServiceCardProps {
   readonly service: DownstreamService;
@@ -22,6 +28,18 @@ export function ServiceCard({
   isDeleting,
 }: ServiceCardProps) {
   const navigate = useNavigate();
+  // Issue #416: surface the viewer's node binding for this catalog row
+  // so admins can see at a glance which service routes through which
+  // node without opening each detail page. Multiple cards on one page
+  // share a single `useNodes()` query via TanStack Query's dedupe.
+  const { data: nodes } = useNodes();
+  const node = service.node_id
+    ? nodes?.find((n) => n.id === service.node_id)
+    : undefined;
+  const nodeLabel = service.node_id
+    ? (node?.name ?? service.node_id.slice(0, 8))
+    : null;
+
   const secondaryLabel =
     service.service_type === "ssh"
       ? `${service.ssh_config?.host ?? "ssh"}:${String(service.ssh_config?.port ?? 22)}`
@@ -81,8 +99,32 @@ export function ServiceCard({
         </p>
       )}
 
-      {/* Target */}
-      <span className="text-xs text-text-tertiary">{secondaryLabel}</span>
+      {/* Target + Routing */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-text-tertiary">{secondaryLabel}</span>
+        {nodeLabel && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              {/* asChild + span keeps Radix happy without nesting buttons. */}
+              <span className="inline-flex">
+                <Badge
+                  variant={node?.status === "online" ? "default" : "outline"}
+                  className="gap-1"
+                >
+                  <Router className="h-2.5 w-2.5" />
+                  <span>&rarr; {nodeLabel}</span>
+                </Badge>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p className="text-xs">
+                Your routing: {node?.name ?? service.node_id}
+                {node?.status ? ` (${node.status})` : ""}
+              </p>
+            </TooltipContent>
+          </Tooltip>
+        )}
+      </div>
     </div>
   );
 }

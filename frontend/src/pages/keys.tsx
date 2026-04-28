@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { useNodes } from "@/hooks/use-nodes";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ApiKeyTable } from "@/components/dashboard/api-key-table";
 import { ApiKeyCreateDialog } from "@/components/dashboard/api-key-create-dialog";
@@ -57,6 +58,14 @@ interface KeyCardProps {
 function KeyCardContent({ keyInfo, source }: KeyCardProps) {
   const isSsh = keyInfo.service_type === "ssh";
   const hasSshCertificateAuth = isSsh && keyInfo.ssh_ca_public_key !== null;
+  // Issue #416: resolve the bound node's name so the list card shows
+  // "Via my-node" instead of bare "Via node". TanStack Query dedupes
+  // the request across all rendered cards.
+  const { data: nodes } = useNodes();
+  const nodeName = keyInfo.node_id
+    ? (nodes?.find((n) => n.id === keyInfo.node_id)?.name ??
+      keyInfo.node_id.slice(0, 8))
+    : null;
   const displayUrl = isSsh
     ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
     : keyInfo.endpoint_url.length > 50
@@ -160,7 +169,9 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
           </div>
           <div className="flex items-center gap-1.5">
             <Router className="h-3 w-3 shrink-0" />
-            <span>{keyInfo.node_id ? "Via node" : "Direct"}</span>
+            <span className="truncate">
+              {nodeName ? `→ ${nodeName}` : "Direct"}
+            </span>
           </div>
         </div>
       </CardContent>

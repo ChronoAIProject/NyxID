@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use mongodb::bson::doc;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -12,11 +14,107 @@ use crate::models::downstream_service::{
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
-use crate::models::user_service::UserService;
+use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
 use crate::services::{org_service, user_service_service};
 
 use super::services::{ServiceResponse, SshServiceConfigResponse};
+
+/// Per-viewer routing summary for a single catalog `DownstreamService`.
+///
+/// Resolved from the viewer's personal `UserService` rows (rows where
+/// `user_id == viewer_user_id`). Org-shared bindings are intentionally
+/// excluded -- editing those silently from a catalog page would leak
+/// across org boundaries.
+#[derive(Clone, Debug, Default)]
+pub struct ViewerRouting {
+    pub node_id: Option<String>,
+    pub user_service_id: Option<String>,
+    pub binding_count: u32,
+}
+
+impl ViewerRouting {
+    /// `binding_count == 1` -- safe to populate `node_id` /
+    /// `your_user_service_id` on the response. Zero or many bindings
+    /// leave both flat fields unset; the FE renders the corresponding
+    /// empty / disambiguation state from `binding_count` alone.
+    fn single(node_id: Option<String>, user_service_id: String) -> Self {
+        Self {
+            node_id,
+            user_service_id: Some(user_service_id),
+            binding_count: 1,
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            node_id: None,
+            user_service_id: None,
+            binding_count: 0,
+        }
+    }
+
+    fn ambiguous(count: u32) -> Self {
+        Self {
+            node_id: None,
+            user_service_id: None,
+            binding_count: count,
+        }
+    }
+}
+
+/// Batch-resolve the viewer's personal routing for a set of catalog
+/// `DownstreamService` ids in a single MongoDB query.
+///
+/// Returns a `HashMap<catalog_service_id, ViewerRouting>` for every
+/// catalog id passed in (missing entries are treated as
+/// `ViewerRouting::empty()` by the caller via `.unwrap_or_default()`).
+pub async fn compute_viewer_routing(
+    db: &mongodb::Database,
+    viewer_user_id: &str,
+    catalog_service_ids: &[&str],
+) -> AppResult<HashMap<String, ViewerRouting>> {
+    if catalog_service_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let id_strings: Vec<String> = catalog_service_ids.iter().map(|s| s.to_string()).collect();
+    let user_services: Vec<UserService> = db
+        .collection::<UserService>(USER_SERVICES)
+        .find(doc! {
+            "user_id": viewer_user_id,
+            "catalog_service_id": { "$in": &id_strings },
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    // Group by catalog_service_id so we can detect "multiple bindings".
+    let mut grouped: HashMap<String, Vec<UserService>> = HashMap::new();
+    for us in user_services {
+        let Some(catalog_id) = us.catalog_service_id.clone() else {
+            continue;
+        };
+        grouped.entry(catalog_id).or_default().push(us);
+    }
+
+    let mut out = HashMap::with_capacity(grouped.len());
+    for (catalog_id, mut bindings) in grouped {
+        let entry = match bindings.len() {
+            0 => ViewerRouting::empty(),
+            1 => {
+                let us = bindings.pop().unwrap();
+                ViewerRouting::single(us.node_id.clone(), us.id)
+            }
+            // Don't pick arbitrarily when the viewer has multiple
+            // personal bindings -- the FE shows a disambiguation hint.
+            n => ViewerRouting::ambiguous(u32::try_from(n).unwrap_or(u32::MAX)),
+        };
+        out.insert(catalog_id, entry);
+    }
+
+    Ok(out)
+}
 
 /// Verify that the authenticated user has admin privileges.
 pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
@@ -126,7 +224,17 @@ pub async fn resolve_service_or_user_service(
 }
 
 /// Build a `ServiceResponse` from a `DownstreamService` model.
-pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
+///
+/// `viewer` carries the viewer's personal routing for this catalog row
+/// (issue #416). Pass `None` for handlers that don't have viewer
+/// context or know the result will always be "no binding" (e.g.
+/// the create handler, where the catalog row didn't exist a moment
+/// ago). See [`compute_viewer_routing`] for batched resolution and
+/// [`ViewerRouting`] for the multi-binding semantics.
+pub fn service_to_response_with_viewer(
+    s: DownstreamService,
+    viewer: Option<&ViewerRouting>,
+) -> ServiceResponse {
     ServiceResponse {
         id: s.id,
         name: s.name,
@@ -180,6 +288,9 @@ pub fn service_to_response(s: DownstreamService) -> ServiceResponse {
         created_by: s.created_by,
         created_at: s.created_at.to_rfc3339(),
         updated_at: s.updated_at.to_rfc3339(),
+        node_id: viewer.and_then(|v| v.node_id.clone()),
+        your_user_service_id: viewer.and_then(|v| v.user_service_id.clone()),
+        your_binding_count: viewer.map_or(0, |v| v.binding_count),
     }
 }
 
@@ -432,5 +543,249 @@ mod tests {
             .expect_err("missing service should 404");
 
         assert!(matches!(err, AppError::NotFound(message) if message == "Service not found"));
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #416: viewer-scoped routing lookup for /services responses
+    // ----------------------------------------------------------------
+
+    use super::compute_viewer_routing;
+
+    /// Empty input -> empty result; no DB hit needed.
+    #[tokio::test]
+    async fn viewer_routing_short_circuits_on_empty_input() {
+        let Some(db) = connect_test_database("viewer_routing_empty").await else {
+            eprintln!("skipping services_helpers integration test: no local MongoDB available");
+            return;
+        };
+        let viewer_id = Uuid::new_v4().to_string();
+        let routing = compute_viewer_routing(&db, &viewer_id, &[]).await.unwrap();
+        assert!(routing.is_empty());
+    }
+
+    /// No personal binding for the viewer -> map omits the catalog id
+    /// (the caller's `.unwrap_or_default()` then renders count=0).
+    #[tokio::test]
+    async fn viewer_routing_no_binding() {
+        let Some(db) = connect_test_database("viewer_routing_zero").await else {
+            eprintln!("skipping services_helpers integration test: no local MongoDB available");
+            return;
+        };
+        let viewer_id = Uuid::new_v4().to_string();
+        let catalog_id = Uuid::new_v4().to_string();
+
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&viewer_id, UserType::Person))
+            .await
+            .unwrap();
+
+        let routing = compute_viewer_routing(&db, &viewer_id, &[catalog_id.as_str()])
+            .await
+            .unwrap();
+        assert!(!routing.contains_key(&catalog_id));
+    }
+
+    /// Single personal binding routed via a node -> all three fields
+    /// populated (`node_id`, `your_user_service_id`, count=1).
+    #[tokio::test]
+    async fn viewer_routing_single_binding_via_node() {
+        let Some(db) = connect_test_database("viewer_routing_single_via").await else {
+            eprintln!("skipping services_helpers integration test: no local MongoDB available");
+            return;
+        };
+        let viewer_id = Uuid::new_v4().to_string();
+        let catalog_id = Uuid::new_v4().to_string();
+        let node_id = Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &viewer_id,
+            "Bound",
+            "https://bound.example.com",
+            None,
+            None,
+        );
+        let us = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &viewer_id,
+            "bound",
+            &endpoint.id,
+            Some(&catalog_id),
+            Some(&node_id),
+        );
+
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&viewer_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(us.clone())
+            .await
+            .unwrap();
+
+        let routing = compute_viewer_routing(&db, &viewer_id, &[catalog_id.as_str()])
+            .await
+            .unwrap();
+        let entry = routing.get(&catalog_id).expect("entry present");
+        assert_eq!(entry.node_id.as_deref(), Some(node_id.as_str()));
+        assert_eq!(entry.user_service_id.as_deref(), Some(us.id.as_str()));
+        assert_eq!(entry.binding_count, 1);
+    }
+
+    /// Single personal binding with direct routing -> `node_id` is
+    /// `None` but `your_user_service_id` is populated (admin can still
+    /// edit via the RoutingSection).
+    #[tokio::test]
+    async fn viewer_routing_single_binding_direct() {
+        let Some(db) = connect_test_database("viewer_routing_single_direct").await else {
+            eprintln!("skipping services_helpers integration test: no local MongoDB available");
+            return;
+        };
+        let viewer_id = Uuid::new_v4().to_string();
+        let catalog_id = Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &viewer_id,
+            "Direct",
+            "https://direct.example.com",
+            None,
+            None,
+        );
+        let us = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &viewer_id,
+            "direct",
+            &endpoint.id,
+            Some(&catalog_id),
+            None,
+        );
+
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&viewer_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(us.clone())
+            .await
+            .unwrap();
+
+        let routing = compute_viewer_routing(&db, &viewer_id, &[catalog_id.as_str()])
+            .await
+            .unwrap();
+        let entry = routing.get(&catalog_id).expect("entry present");
+        assert!(entry.node_id.is_none());
+        assert_eq!(entry.user_service_id.as_deref(), Some(us.id.as_str()));
+        assert_eq!(entry.binding_count, 1);
+    }
+
+    /// Multiple personal bindings -> count >= 2, neither flat field
+    /// populated (FE shows a "manage in AI Services" link instead of
+    /// silently picking one).
+    #[tokio::test]
+    async fn viewer_routing_multiple_bindings_dont_pick() {
+        let Some(db) = connect_test_database("viewer_routing_multi").await else {
+            eprintln!("skipping services_helpers integration test: no local MongoDB available");
+            return;
+        };
+        let viewer_id = Uuid::new_v4().to_string();
+        let catalog_id = Uuid::new_v4().to_string();
+
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&viewer_id, UserType::Person))
+            .await
+            .unwrap();
+
+        for slug in ["binding-a", "binding-b"] {
+            let endpoint = test_user_endpoint(
+                &Uuid::new_v4().to_string(),
+                &viewer_id,
+                slug,
+                "https://multi.example.com",
+                None,
+                None,
+            );
+            let us = test_user_service(
+                &Uuid::new_v4().to_string(),
+                &viewer_id,
+                slug,
+                &endpoint.id,
+                Some(&catalog_id),
+                None,
+            );
+            db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                .insert_one(endpoint)
+                .await
+                .unwrap();
+            db.collection::<UserService>(USER_SERVICES)
+                .insert_one(us)
+                .await
+                .unwrap();
+        }
+
+        let routing = compute_viewer_routing(&db, &viewer_id, &[catalog_id.as_str()])
+            .await
+            .unwrap();
+        let entry = routing.get(&catalog_id).expect("entry present");
+        assert!(entry.node_id.is_none());
+        assert!(entry.user_service_id.is_none());
+        assert_eq!(entry.binding_count, 2);
+    }
+
+    /// Org-shared binding (different `user_id`) doesn't surface for the
+    /// admin viewing the catalog -- editing org state from the catalog
+    /// page would leak across org boundaries.
+    #[tokio::test]
+    async fn viewer_routing_excludes_org_shared_bindings() {
+        let Some(db) = connect_test_database("viewer_routing_org_only").await else {
+            eprintln!("skipping services_helpers integration test: no local MongoDB available");
+            return;
+        };
+        let viewer_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        let catalog_id = Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "Org",
+            "https://org.example.com",
+            None,
+            None,
+        );
+        let us = test_user_service(
+            &Uuid::new_v4().to_string(),
+            &org_id,
+            "org",
+            &endpoint.id,
+            Some(&catalog_id),
+            Some(&Uuid::new_v4().to_string()),
+        );
+
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_many([
+                test_user(&viewer_id, UserType::Person),
+                test_user(&org_id, UserType::Person),
+            ])
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(us)
+            .await
+            .unwrap();
+
+        let routing = compute_viewer_routing(&db, &viewer_id, &[catalog_id.as_str()])
+            .await
+            .unwrap();
+        assert!(!routing.contains_key(&catalog_id));
     }
 }

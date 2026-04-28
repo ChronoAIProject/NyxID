@@ -18,13 +18,28 @@ import { EndpointList } from "@/components/dashboard/endpoint-list";
 import { McpConnectionInfo } from "@/components/dashboard/mcp-connection-info";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { ServiceRequirementsView } from "@/components/dashboard/service-requirements-editor";
+import { RoutingSection } from "@/components/dashboard/routing-section";
 import { useMyProviderTokens } from "@/hooks/use-providers";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Pencil, Trash2, AlertCircle, Terminal } from "lucide-react";
+import {
+  Pencil,
+  Trash2,
+  AlertCircle,
+  Terminal,
+  Router,
+  ExternalLink,
+} from "lucide-react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { toast } from "sonner";
 
 const PROPAGATION_MODE_LABELS: Readonly<Record<string, string>> = {
@@ -211,6 +226,23 @@ export function ServiceDetailPage() {
         <DetailRow label="Created" value={formatDate(service.created_at)} />
         <DetailRow label="Updated" value={formatDate(service.updated_at)} />
       </DetailSection>
+
+      {/*
+        Issue #416: Your Routing — viewer-scoped node binding for this
+        catalog row. Mirrors the section on /keys/$id so admins can
+        manage routing on whichever surface they happen to be on,
+        rather than tunneling through "go look in AI Services".
+      */}
+      <Separator />
+      <YourRoutingSection
+        service={service}
+        onBindClick={() =>
+          void navigate({
+            to: "/keys",
+            search: { tab: "services", slug: service.slug },
+          })
+        }
+      />
 
       {isSshService ? (
         <>
@@ -525,5 +557,85 @@ export function ServiceDetailPage() {
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Issue #416: viewer-scoped routing for an admin-catalog row.
+ *
+ * Three states driven by `service.your_binding_count`:
+ *
+ *   - `0`: viewer has no personal `UserService` for this catalog row.
+ *     Show a "Bind in AI Services" CTA that hands off to `/keys` with
+ *     the catalog slug pre-selected (the existing AddKeyDialog
+ *     auto-open flow handles credential / endpoint / node selection).
+ *   - `1`: exactly one personal binding -> render the editable
+ *     `RoutingSection` so the admin can change routing in place. Same
+ *     widget as `/keys/$id`; mutates the underlying `UserService`.
+ *   - `>= 2`: multiple personal bindings -> show a disambiguation hint
+ *     with a link to `/keys`. Picking arbitrarily would silently
+ *     mutate one of the user's other bindings.
+ */
+function YourRoutingSection({
+  service,
+  onBindClick,
+}: {
+  readonly service: { readonly slug: string } & Pick<
+    import("@/types/api").DownstreamService,
+    "node_id" | "your_user_service_id" | "your_binding_count"
+  >;
+  readonly onBindClick: () => void;
+}) {
+  const count = service.your_binding_count ?? 0;
+  const userServiceId = service.your_user_service_id ?? null;
+
+  if (count === 1 && userServiceId) {
+    return (
+      <RoutingSection
+        nodeId={service.node_id ?? null}
+        serviceId={userServiceId}
+        title="Your Routing"
+        description="Your personal routing for this service. Other users have their own."
+      />
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <Router className="h-4 w-4 text-primary" />
+          <CardTitle className="text-sm">Your Routing</CardTitle>
+        </div>
+        <CardDescription>
+          Your personal routing for this service. Other users have their own.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {count === 0 ? (
+          <>
+            <p className="text-xs text-muted-foreground">
+              You haven't bound this service to your account yet, so there's
+              no routing to configure here.
+            </p>
+            <Button size="sm" variant="outline" onClick={onBindClick}>
+              Bind in AI Services
+              <ExternalLink className="ml-1 h-3 w-3" />
+            </Button>
+          </>
+        ) : (
+          <>
+            <p className="text-xs text-muted-foreground">
+              You have {String(count)} personal bindings for this service.
+              Manage each one's routing in AI Services.
+            </p>
+            <Button size="sm" variant="outline" onClick={onBindClick}>
+              Manage in AI Services
+              <ExternalLink className="ml-1 h-3 w-3" />
+            </Button>
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }

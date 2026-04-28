@@ -25,8 +25,8 @@ use crate::services::{api_docs_service, audit_service, oauth_client_service, ssh
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 use super::services_helpers::{
-    DeleteServiceResponse, fetch_service, require_admin_or_creator, service_to_response,
-    validate_developer_app_ids,
+    DeleteServiceResponse, compute_viewer_routing, fetch_service, require_admin_or_creator,
+    service_to_response_with_viewer, validate_developer_app_ids,
 };
 
 // --- Request / Response types ---
@@ -187,6 +187,33 @@ pub struct ServiceResponse {
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
+
+    // -- Viewer-scoped routing fields (issue #416) --
+    //
+    // These three fields describe **the current viewer's** personal
+    // `UserService` binding for this catalog row -- not a property of the
+    // catalog itself. They let the admin `/services` UI render the same
+    // routing UX as `/keys` without picking arbitrarily when the viewer
+    // has 0 or many bindings.
+    //
+    // Read-only mirror; mutations go through `PUT /api/v1/keys/{id}`
+    // using `your_user_service_id` as the path parameter.
+    /// Viewer's current `UserService.node_id` for this catalog row, or
+    /// `None` when the viewer has no personal binding (or has multiple
+    /// and no single answer applies; see `your_binding_count`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// Viewer's `UserService._id` for this catalog row, used as the
+    /// mutation target by the editable Routing UI. `None` when the
+    /// viewer has zero or multiple personal bindings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub your_user_service_id: Option<String>,
+    /// Number of personal `UserService` rows the viewer owns for this
+    /// catalog row. `0` = no binding (UI offers a "Bind" CTA), `1` =
+    /// editable single binding, `>=2` = multiple bindings (UI offers a
+    /// "manage in AI Services" link instead of picking one silently).
+    #[serde(default)]
+    pub your_binding_count: u32,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -562,7 +589,19 @@ pub async fn list_services(
         .try_collect()
         .await?;
 
-    let items: Vec<ServiceResponse> = services.into_iter().map(service_to_response).collect();
+    // Issue #416: batch-resolve the viewer's personal `UserService`
+    // bindings for these catalog rows so the FE can render an editable
+    // Routing section on the admin /services list/detail surfaces.
+    let catalog_ids: Vec<&str> = services.iter().map(|s| s.id.as_str()).collect();
+    let mut viewer_routing = compute_viewer_routing(&state.db, &user_id_str, &catalog_ids).await?;
+
+    let items: Vec<ServiceResponse> = services
+        .into_iter()
+        .map(|svc| {
+            let routing = viewer_routing.remove(&svc.id);
+            service_to_response_with_viewer(svc, routing.as_ref())
+        })
+        .collect();
 
     Ok(Json(ServiceListResponse { services: items }))
 }
@@ -1004,7 +1043,10 @@ pub async fn create_service(
         },
     );
 
-    Ok(Json(service_to_response(new_service)))
+    // Brand-new catalog row -- no `UserService` can reference it yet,
+    // so the viewer-routing fields default to "no binding" without a
+    // lookup query.
+    Ok(Json(service_to_response_with_viewer(new_service, None)))
 }
 
 /// DELETE /api/v1/services/:service_id
@@ -1130,11 +1172,20 @@ pub async fn delete_service(
 )]
 pub async fn get_service(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Path(service_id): Path<String>,
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
-    Ok(Json(service_to_response(service)))
+    let viewer_id = auth_user.user_id.to_string();
+    // Issue #416: surface the viewer's own routing for this catalog row
+    // so /services/$id can render the editable Routing section.
+    let mut viewer_routing =
+        compute_viewer_routing(&state.db, &viewer_id, &[service.id.as_str()]).await?;
+    let routing = viewer_routing.remove(&service.id);
+    Ok(Json(service_to_response_with_viewer(
+        service,
+        routing.as_ref(),
+    )))
 }
 
 /// PUT /api/v1/services/{service_id}
@@ -1821,7 +1872,17 @@ pub async fn update_service(
         },
     );
 
-    Ok(Json(service_to_response(updated)))
+    // Issue #416: include the actor's own routing for response shape
+    // parity with GET / list (the actor may already have a personal
+    // binding for this catalog row).
+    let actor_id = auth_user.user_id.to_string();
+    let mut viewer_routing =
+        compute_viewer_routing(&state.db, &actor_id, &[updated.id.as_str()]).await?;
+    let routing = viewer_routing.remove(&updated.id);
+    Ok(Json(service_to_response_with_viewer(
+        updated,
+        routing.as_ref(),
+    )))
 }
 
 /// GET /api/v1/services/{service_id}/oidc-credentials

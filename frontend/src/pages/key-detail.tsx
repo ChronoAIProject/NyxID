@@ -24,6 +24,7 @@ import { copyToClipboard } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { Breadcrumb } from "@/components/shared/breadcrumb";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
+import { RoutingSection } from "@/components/dashboard/routing-section";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,13 +38,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -55,7 +49,6 @@ import {
   Globe,
   KeyRound,
   Server,
-  Router,
   Pencil,
   Trash2,
   RefreshCw,
@@ -672,103 +665,9 @@ function ServiceSection({
   );
 }
 
-function RoutingSection({
-  nodeId,
-  serviceId,
-  readOnly = false,
-}: {
-  readonly nodeId: string | null;
-  readonly serviceId: string;
-  readonly readOnly?: boolean;
-}) {
-  const [picking, setPicking] = useState(false);
-  const { data: nodes } = useNodes();
-  const updateService = useUpdateUserService();
-
-  function handleSelectNode(selectedNodeId: string) {
-    const id = selectedNodeId === "direct" ? "" : selectedNodeId;
-    updateService.mutate(
-      { serviceId, node_id: id },
-      {
-        onSuccess: () => {
-          toast.success(id ? "Route updated" : "Switched to direct routing");
-          setPicking(false);
-        },
-        onError: (err) => {
-          const message =
-            err instanceof ApiError ? err.message : "Failed to update routing";
-          toast.error(message);
-        },
-      },
-    );
-  }
-
-  const allNodes = nodes ?? [];
-  const currentNodeName = nodeId
-    ? (nodes?.find((n) => n.id === nodeId)?.name ?? nodeId)
-    : null;
-
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-center gap-2">
-          <Router className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">Routing</CardTitle>
-        </div>
-        <CardDescription>How requests reach the endpoint</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="flex items-center gap-2">
-          <Badge variant={nodeId ? "default" : "outline"}>
-            {nodeId ? `Via node: ${currentNodeName}` : "Direct"}
-          </Badge>
-        </div>
-
-        {!readOnly && picking ? (
-          <div className="space-y-2">
-            <Label className="text-xs">Select routing</Label>
-            <Select
-              onValueChange={handleSelectNode}
-              defaultValue={nodeId ?? "direct"}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Select routing" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="direct">Direct (no node)</SelectItem>
-                {allNodes.map((n) => (
-                  <SelectItem
-                    key={n.id}
-                    value={n.id}
-                    disabled={n.status !== "online"}
-                  >
-                    {n.name} ({n.status})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {allNodes.length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                No nodes registered. Register a node first.
-              </p>
-            )}
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setPicking(false)}
-            >
-              Cancel
-            </Button>
-          </div>
-        ) : !readOnly ? (
-          <Button size="sm" variant="outline" onClick={() => setPicking(true)}>
-            {nodeId ? "Change Route" : "Route via Node"}
-          </Button>
-        ) : null}
-      </CardContent>
-    </Card>
-  );
-}
+// `RoutingSection` lives in `components/dashboard/routing-section.tsx`
+// so the admin `/services/$id` page can reuse the same editable widget
+// (issue #416). Imported at the top of this file.
 
 function NodeSetupHelper({
   slug,
@@ -1545,6 +1444,15 @@ export function KeyDetailPage() {
     readonly message?: string;
   };
   const { data: keyInfo, isLoading, error } = useKey(keyId);
+  // Issue #416: resolve the bound node's name so the auto-connected
+  // detail branch can show real routing instead of a hardcoded
+  // "Direct" label. Auto-connected services don't expose a routing
+  // editor (they're platform-managed), so this stays read-only here.
+  const { data: nodes } = useNodes();
+  const nodeName = keyInfo?.node_id
+    ? (nodes?.find((n) => n.id === keyInfo.node_id)?.name ??
+      keyInfo.node_id.slice(0, 8))
+    : null;
   // Fetch the catalog entry by slug directly instead of scanning the
   // filtered `/catalog` listing. The list endpoint hides no-auth /
   // internal services that don't need credential setup, but a key can
@@ -1762,7 +1670,16 @@ export function KeyDetailPage() {
                   <span className="text-xs font-medium text-muted-foreground">
                     Routing
                   </span>
-                  <p className="text-xs">Direct</p>
+                  {/*
+                    Issue #416: read the actual routing rather than
+                    hardcoding "Direct". Auto-connected keys are
+                    platform-managed so the editor stays absent here,
+                    but the display now reflects reality if the key
+                    happens to be node-routed.
+                  */}
+                  <p className="text-xs">
+                    {nodeName ? `Via ${nodeName}` : "Direct"}
+                  </p>
                 </div>
               </div>
             </CardContent>

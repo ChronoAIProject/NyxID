@@ -160,6 +160,25 @@ export interface DownstreamService {
    */
   readonly default_request_headers?: readonly DefaultRequestHeader[] | null;
   readonly ws_frame_injections?: readonly WsFrameInjection[] | null;
+  /**
+   * Viewer-scoped (issue #416): the current viewer's
+   * `UserService.node_id` for this catalog row. Read-only mirror —
+   * change via `PUT /api/v1/keys/{your_user_service_id}`.
+   */
+  readonly node_id?: string | null;
+  /**
+   * Viewer-scoped: `UserService._id` to use as the mutation target for
+   * the editable Routing section. `null` when the viewer has zero or
+   * multiple personal bindings (see `your_binding_count`).
+   */
+  readonly your_user_service_id?: string | null;
+  /**
+   * Viewer-scoped: number of personal `UserService` rows the viewer
+   * owns for this catalog row. `0` = no binding (UI offers "Bind"
+   * CTA), `1` = editable single binding, `>=2` = multiple bindings
+   * (UI offers a "manage in AI Services" link).
+   */
+  readonly your_binding_count?: number;
 }
 
 export interface DefaultRequestHeader {
