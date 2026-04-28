@@ -167,7 +167,16 @@ export function AiKeyConfirm({
   onSuccess,
   onSlugPicked,
 }: AiKeyConfirmProps) {
-  const [slug, setSlug] = useState(prefill.slug ?? "");
+  // Issue #414: when the CLI passes `--custom`, drop straight onto
+  // the `__custom__` step so the user lands on the custom-service
+  // form (skipping the catalog grid). The form pre-populates from
+  // prefill.label / endpoint_url / auth_method / auth_key_name /
+  // custom_slug / via_node and asks the user for whatever's still
+  // missing (typically the credential).
+  const initialSlug = prefill.custom
+    ? "__custom__"
+    : (prefill.slug ?? "");
+  const [slug, setSlug] = useState(initialSlug);
   const trimmedSlug = slug.trim();
 
   // Signal up whenever we transition into credential-form territory
@@ -272,7 +281,71 @@ export function AiKeyConfirm({
 
 // ── custom / self-hosted form (no catalog entry) ───────────────────
 
-type CustomAuthMethod = "bearer" | "header" | "query" | "basic" | "none";
+// All auth methods the backend's `POST /keys` accepts for custom
+// services. Mirrors the CLI's `--auth-method` choices in
+// `cli/src/cli.rs`. Issue #414 added the previously-missing
+// `bot_bearer` / `path` / `body` so the wizard can fully replace
+// the scripted CLI path for via-node + custom services.
+type CustomAuthMethod =
+  | "bearer"
+  | "header"
+  | "query"
+  | "path"
+  | "basic"
+  | "body"
+  | "bot_bearer"
+  | "none";
+
+/** Sensible default auth-key-name per method. Mirrors the CLI's
+ *  `default_auth_key_name` in `cli/src/commands/service.rs:1437`. */
+function defaultAuthKeyName(method: CustomAuthMethod): string {
+  switch (method) {
+    case "header":
+      return "X-API-Key";
+    case "query":
+      return "key";
+    case "path":
+      return "bot";
+    case "body":
+      return "app_secret";
+    default:
+      return "Authorization";
+  }
+}
+
+/** Validates that an arbitrary CLI-supplied string is a known auth
+ *  method. Falls back to "bearer" on unrecognized values so a
+ *  future CLI release can't break older bundles. */
+function coerceAuthMethod(raw: string | undefined): CustomAuthMethod {
+  switch (raw) {
+    case "bearer":
+    case "header":
+    case "query":
+    case "path":
+    case "basic":
+    case "body":
+    case "bot_bearer":
+    case "none":
+      return raw;
+    default:
+      return "bearer";
+  }
+}
+
+/** Whether this auth method needs a separate "key name" input
+ *  beside the credential. `bearer` / `bot_bearer` always use
+ *  `Authorization`; `basic` is `Authorization: Basic <user:pass>`;
+ *  `none` has no credential at all. The remaining methods (header,
+ *  query, path, body) each inject the credential into a named
+ *  field, so they need the input. */
+function authMethodNeedsKeyName(method: CustomAuthMethod): boolean {
+  return (
+    method === "header"
+    || method === "query"
+    || method === "path"
+    || method === "body"
+  );
+}
 
 interface CustomServiceFormProps {
   readonly prefill: AiKeyPrefill;
@@ -287,19 +360,37 @@ function CustomServiceForm({
   onSuccess,
   onBack,
 }: CustomServiceFormProps) {
+  // Issue #414: when the CLI passed `--auth-method`, `--auth-key-name`,
+  // `--slug`, `--via-node`, etc. alongside `--custom`, those values
+  // pre-populate the form and let the user submit with just the
+  // credential filled in. Without prefill the form starts at the same
+  // bearer / Authorization defaults as before.
   const [label, setLabel] = useState(prefill.label ?? "");
   const [endpointUrl, setEndpointUrl] = useState(prefill.endpoint_url ?? "");
   const [credential, setCredential] = useState("");
-  const [authMethod, setAuthMethod] = useState<CustomAuthMethod>("bearer");
-  const [authKeyName, setAuthKeyName] = useState("Authorization");
-  const [slug, setSlug] = useState("");
+  const [authMethod, setAuthMethod] = useState<CustomAuthMethod>(
+    coerceAuthMethod(prefill.auth_method),
+  );
+  const [authKeyName, setAuthKeyName] = useState(
+    prefill.auth_key_name
+      ?? defaultAuthKeyName(coerceAuthMethod(prefill.auth_method)),
+  );
+  const [slug, setSlug] = useState(prefill.custom_slug ?? "");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // CLI-bound node — the user already chose this with `--via-node`
+  // at the command line; the SPA shows it as a read-only badge and
+  // forwards it on submit so the backend marks the credential as
+  // pushable to the bound node (existing flow at
+  // `backend/src/handlers/keys.rs:611-632`).
+  const viaNode = prefill.via_node?.trim() ?? "";
 
   const trimmedLabel = label.trim();
   const trimmedEndpoint = endpointUrl.trim();
   const trimmedCredential = credential.trim();
   const needsCredential = authMethod !== "none";
+  const needsKeyName = authMethodNeedsKeyName(authMethod);
   const submitDisabled =
     loading ||
     !trimmedLabel ||
@@ -316,11 +407,21 @@ function CustomServiceForm({
         auth_method: authMethod,
       };
       if (needsCredential) body.credential = trimmedCredential;
-      if (authMethod === "header" || authMethod === "query") {
-        body.auth_key_name = authKeyName.trim() || "Authorization";
+      // For methods that target a named field (header / query /
+      // path / body) keep the user's auth-key-name override.
+      // bearer / bot_bearer / basic always use `Authorization`,
+      // so we omit the field there to match the CLI's scripted
+      // body shape (see `cli/src/commands/service.rs:340-341`).
+      if (needsKeyName) {
+        body.auth_key_name = authKeyName.trim() || defaultAuthKeyName(authMethod);
       }
       const trimmedSlug = slug.trim();
       if (trimmedSlug) body.slug = trimmedSlug;
+      // Issue #414: forward the CLI-supplied node id so the backend
+      // `POST /keys` handler creates a node-routed UserService and
+      // pushes the credential to that node over the existing WS
+      // channel. Falls through to direct routing when not set.
+      if (viaNode) body.node_id = viaNode;
 
       await reservePairingAction(pairingId);
       const res = await withRewindOnError(pairingId, () =>
@@ -381,14 +482,33 @@ function CustomServiceForm({
             id="pair-custom-auth-method"
             value={authMethod}
             onChange={(e) => {
-              setAuthMethod(e.target.value as CustomAuthMethod);
+              const next = e.target.value as CustomAuthMethod;
+              setAuthMethod(next);
+              // Reset the key-name to the new method's default if the
+              // user hadn't customized it yet — saves them re-typing
+              // for every method switch. We only overwrite when the
+              // current value matches some other method's default
+              // (or is empty); user-typed values stay put.
+              const knownDefaults: readonly string[] = [
+                "Authorization",
+                "X-API-Key",
+                "key",
+                "bot",
+                "app_secret",
+              ];
+              if (!authKeyName.trim() || knownDefaults.includes(authKeyName.trim())) {
+                setAuthKeyName(defaultAuthKeyName(next));
+              }
             }}
             className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <option value="bearer">bearer (Authorization: Bearer …)</option>
+            <option value="bot_bearer">bot_bearer (Authorization: Bot …)</option>
             <option value="header">header (custom header)</option>
             <option value="query">query (?key=…)</option>
+            <option value="path">path (path-prefix injection)</option>
             <option value="basic">basic (Authorization: Basic …)</option>
+            <option value="body">body (JSON-body field injection)</option>
             <option value="none">none (no auth injection)</option>
           </select>
           <p className="text-xs text-muted-foreground">
@@ -398,7 +518,15 @@ function CustomServiceForm({
 
         {needsCredential ? (
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="pair-custom-credential">API key / credential</Label>
+            <Label htmlFor="pair-custom-credential">
+              {authMethod === "bot_bearer"
+                ? "Bot token"
+                : authMethod === "basic"
+                  ? "user:pass"
+                  : authMethod === "body"
+                    ? `${authKeyName.trim() || defaultAuthKeyName(authMethod)} value`
+                    : "API key / credential"}
+            </Label>
             <Input
               id="pair-custom-credential"
               type="password"
@@ -409,6 +537,7 @@ function CustomServiceForm({
               placeholder={
                 authMethod === "basic" ? "user:pass" : "sk-..."
               }
+              autoFocus={Boolean(prefill.custom)}
             />
             <p className="text-xs text-muted-foreground">
               Pasted once, encrypted at rest.
@@ -417,10 +546,16 @@ function CustomServiceForm({
           </div>
         ) : null}
 
-        {(authMethod === "header" || authMethod === "query") ? (
+        {needsKeyName ? (
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="pair-custom-auth-key-name">
-              {authMethod === "header" ? "Header name" : "Query parameter name"}
+              {authMethod === "header"
+                ? "Header name"
+                : authMethod === "query"
+                  ? "Query parameter name"
+                  : authMethod === "path"
+                    ? "Path prefix segment"
+                    : "Body field name"}
             </Label>
             <Input
               id="pair-custom-auth-key-name"
@@ -428,8 +563,25 @@ function CustomServiceForm({
               onChange={(e) => {
                 setAuthKeyName(e.target.value);
               }}
-              placeholder="Authorization"
+              placeholder={defaultAuthKeyName(authMethod)}
             />
+          </div>
+        ) : null}
+
+        {viaNode ? (
+          // Issue #414: surface the bound node so the user can see
+          // which agent will receive the pushed credential. The node
+          // id is locked at this point — to change it the user
+          // re-runs the CLI with a different `--via-node`.
+          <div className="rounded-[10px] border border-border bg-muted/40 px-3 py-2">
+            <p className="text-xs font-medium text-foreground">Routed via node</p>
+            <code className="font-mono text-[11px] text-muted-foreground">
+              {viaNode}
+            </code>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Credential will be encrypted and pushed to this node over
+              the existing WebSocket channel. NyxID never logs it.
+            </p>
           </div>
         ) : null}
 

@@ -52,12 +52,37 @@ pub struct ProxyContext {
 /// encoded into the browser URL as a query parameter and picked up by
 /// `wizard.js` on page load — it pre-selects the catalog card, jumps
 /// to Step 2, and fills matching inputs.
+///
+/// Issue #414: the wizard also supports `--custom` mode where the
+/// user is creating a custom (non-catalog) endpoint. In that case
+/// the wizard's confirm panel skips the catalog grid and renders
+/// the form directly with the prefilled definitional fields
+/// (label, endpoint_url, auth_method, auth_key_name, via_node,
+/// optional custom_slug). The user fills in the remaining required
+/// fields (typically just the credential) and submits. Same
+/// `POST /keys` body shape as the catalog flow with `custom: true`.
 #[derive(Debug, Clone, Default)]
 pub struct WizardPrefill {
     pub slug: Option<String>,
     pub label: Option<String>,
     pub via_node: Option<String>,
     pub endpoint_url: Option<String>,
+    /// `true` when the user passed `--custom`. The wizard SPA reads
+    /// this and skips Step 1 (catalog grid), going straight to the
+    /// custom-service form pre-populated with the other fields.
+    pub custom: bool,
+    /// `--slug <s>` override for custom services. Distinct from the
+    /// catalog `slug` above, which selects a catalog entry. The user
+    /// can supply this to choose their own proxy slug; otherwise the
+    /// wizard auto-derives it from `label`.
+    pub custom_slug: Option<String>,
+    /// Auth method (bearer, header, query, path, basic, body,
+    /// bot_bearer, none). Required for custom services since there's
+    /// no catalog default to inherit.
+    pub auth_method: Option<String>,
+    /// Auth key name (e.g. Authorization, X-API-Key, app_secret).
+    /// When unset, defaults are derived per auth_method by the SPA.
+    pub auth_key_name: Option<String>,
 }
 
 /// CLI-supplied prefill for rotation flows (`api-key rotate`,

@@ -152,12 +152,22 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // Wizard dispatch (docs/CLI_WIZARD_V2.md §3.1): route to
             // the browser flow when the invocation isn't "scripted-
             // complete". Flags compatible with prefill (slug, label,
-            // via-node, endpoint-url) just seed the form; flags that
+            // via-node, endpoint-url, plus `--custom` definitional
+            // fields per issue #414) just seed the form; flags that
             // declare a specific scripted flow (--credential,
-            // --credential-env, --oauth, --device-code, --custom,
-            // --auth-method, --auth-key-name, --output json) fall
-            // through to the existing non-interactive path so scripted
-            // behavior for existing users is unchanged.
+            // --credential-env, --oauth, --device-code, --output
+            // json) fall through to the existing non-interactive path
+            // so scripted behavior for existing users is unchanged.
+            //
+            // Issue #414 — `--custom` and its companion flags
+            // (`--auth-method`, `--auth-key-name`, `--slug` in the
+            // override sense) are *not* scripted markers; they're
+            // definitional values for the wizard's custom-service
+            // form. The exception: when `--auth-method` /
+            // `--auth-key-name` / `--slug` are passed WITHOUT
+            // `--custom`, they're acting as *overrides* on a catalog
+            // entry — that's the existing scripted-override use case
+            // and stays scripted.
             //
             // Headless contexts (SSH sessions, no local display on
             // Linux, AI-agent bash tool) NO LONGER fall through to the
@@ -167,19 +177,21 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // `NYXID_NO_WIZARD=1` to restore the pre-wizard stdin
             // prompt path for CI jobs or scripts that rely on it.
             let interactive_output = matches!(auth.output, OutputFormat::Table);
-            let explicit_scripted = credential.is_some()
-                || credential_env.is_some()
-                || oauth
-                || device_code
-                || custom
-                || custom_slug.is_some()
-                || auth_method.is_some()
-                || auth_key_name.is_some()
-                || !scopes.is_empty()
-                || org.is_some()
-                || openapi_spec_url.is_some()
-                || ws_frame_preset.is_some()
-                || ws_frame_clear;
+            let explicit_scripted = is_explicit_scripted(
+                credential.is_some(),
+                credential_env.is_some(),
+                oauth,
+                device_code,
+                custom,
+                custom_slug.is_some(),
+                auth_method.is_some(),
+                auth_key_name.is_some(),
+                !scopes.is_empty(),
+                org.is_some(),
+                openapi_spec_url.is_some(),
+                ws_frame_preset.is_some(),
+                ws_frame_clear,
+            );
             // `--no-wait` forces the pairing variant even when a local
             // browser is available and wins over `--output json`
             // (agent wrappers use JSON specifically to automate the
@@ -194,6 +206,16 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     label: label.clone(),
                     via_node: via_node.clone(),
                     endpoint_url: endpoint_url.clone(),
+                    // Issue #414 — definitional fields for custom mode.
+                    // When `--custom` is set, the SPA skips the catalog
+                    // grid and renders a custom-service form pre-
+                    // populated with auth_method / auth_key_name /
+                    // custom_slug (all optional, with sensible defaults
+                    // applied SPA-side).
+                    custom,
+                    custom_slug: custom_slug.clone(),
+                    auth_method: auth_method.clone(),
+                    auth_key_name: auth_key_name.clone(),
                 };
                 return crate::wizard::run_ai_key_wizard(&auth, prefill, no_wait).await;
             }
@@ -1338,6 +1360,53 @@ fn requires_credential_prompt(method: &str, has_node: bool) -> bool {
     !has_node && method != "none"
 }
 
+/// Issue #414: should `service add` route to the wizard, or fall
+/// through to the legacy scripted path? `true` = scripted (the
+/// existing user-facing semantics, where the CLI either reads from
+/// stdin or prints "Next step:" instructions).
+///
+/// Caller hands in pre-resolved booleans for each gating flag —
+/// pure inputs → pure boolean keeps this unit-testable.
+///
+/// The nuance is `auth_method` / `auth_key_name` / `custom_slug`:
+/// these are *override* flags on a catalog entry (existing scripted
+/// use case), but *definitional* values for `--custom` (issue #414's
+/// new wizard form). They only mark the call as scripted when used
+/// WITHOUT `--custom`.
+//
+// One bool per CLI flag is the simplest mapping for this decision —
+// extracting a struct would just relocate the same set of fields and
+// obscure which flag drives which arm. Allow the long signature.
+#[allow(clippy::too_many_arguments)]
+fn is_explicit_scripted(
+    has_credential: bool,
+    has_credential_env: bool,
+    oauth: bool,
+    device_code: bool,
+    custom: bool,
+    has_custom_slug: bool,
+    has_auth_method: bool,
+    has_auth_key_name: bool,
+    has_scopes: bool,
+    has_org: bool,
+    has_openapi_spec_url: bool,
+    has_ws_frame_preset: bool,
+    ws_frame_clear: bool,
+) -> bool {
+    has_credential
+        || has_credential_env
+        || oauth
+        || device_code
+        || (has_auth_method && !custom)
+        || (has_auth_key_name && !custom)
+        || (has_custom_slug && !custom)
+        || has_scopes
+        || has_org
+        || has_openapi_spec_url
+        || has_ws_frame_preset
+        || ws_frame_clear
+}
+
 /// Default auth key name for a given auth method. Mirrors the frontend
 /// defaults in `add-key-dialog.tsx` so CLI and UI stay in sync.
 fn default_auth_key_name(method: &str) -> &'static str {
@@ -1485,6 +1554,157 @@ mod tests {
     fn node_routing_skips_credential_prompt_regardless_of_method() {
         assert!(!requires_credential_prompt("bearer", true));
         assert!(!requires_credential_prompt("none", true));
+    }
+
+    // ── Issue #414: explicit_scripted dispatch nuance ─────────────────
+
+    /// Test helper: build a clean "no flags" baseline so each test
+    /// can flip the one bit it cares about without restating thirteen
+    /// `false` arguments.
+    #[allow(clippy::too_many_arguments)]
+    fn scripted(
+        custom: bool,
+        has_credential: bool,
+        has_credential_env: bool,
+        oauth: bool,
+        device_code: bool,
+        has_custom_slug: bool,
+        has_auth_method: bool,
+        has_auth_key_name: bool,
+    ) -> bool {
+        is_explicit_scripted(
+            has_credential,
+            has_credential_env,
+            oauth,
+            device_code,
+            custom,
+            has_custom_slug,
+            has_auth_method,
+            has_auth_key_name,
+            false, // has_scopes
+            false, // has_org
+            false, // has_openapi_spec_url
+            false, // has_ws_frame_preset
+            false, // ws_frame_clear
+        )
+    }
+
+    #[test]
+    fn issue_414_no_flags_routes_to_wizard() {
+        // `nyxid service add` with no flags falls through to the
+        // wizard (catalog grid). Existing behavior, preserved.
+        assert!(!scripted(
+            false, false, false, false, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn issue_414_custom_alone_routes_to_wizard() {
+        // `service add --custom` — was scripted (stdin prompts) before
+        // issue #414, now routes to wizard so user lands on the
+        // custom-service form.
+        assert!(!scripted(
+            true, false, false, false, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn issue_414_custom_with_definitional_flags_routes_to_wizard() {
+        // The exact issue repro: `--custom --auth-method bearer
+        // --auth-key-name Authorization --slug X`. All three flags
+        // are *definitional* values for the wizard form when paired
+        // with `--custom`.
+        assert!(!scripted(
+            true, // custom
+            false, false, false, false, true, // has_custom_slug
+            true, // has_auth_method
+            true, // has_auth_key_name
+        ));
+    }
+
+    #[test]
+    fn issue_414_credential_always_keeps_scripted() {
+        // `--credential foo` is the canonical "I'm scripting this"
+        // marker — must stay scripted regardless of --custom. The
+        // existing scripted-with-credential users shouldn't see any
+        // behavior change.
+        assert!(scripted(
+            false, true, false, false, false, false, false, false
+        ));
+        assert!(scripted(
+            true, true, false, false, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn issue_414_credential_env_always_keeps_scripted() {
+        assert!(scripted(
+            false, false, true, false, false, false, false, false
+        ));
+        assert!(scripted(
+            true, false, true, false, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn issue_414_oauth_and_device_code_always_keep_scripted() {
+        assert!(scripted(
+            false, false, false, true, false, false, false, false
+        ));
+        assert!(scripted(
+            false, false, false, false, true, false, false, false
+        ));
+    }
+
+    #[test]
+    fn issue_414_auth_method_alone_is_a_catalog_override_and_stays_scripted() {
+        // `service add openai-chat --auth-method bearer` is the
+        // existing "override the catalog entry's auth method" case.
+        // Has been scripted forever; must stay scripted (no --custom
+        // means it's an override, not a definitional value).
+        assert!(scripted(
+            false, false, false, false, false, false, true, false
+        ));
+    }
+
+    #[test]
+    fn issue_414_auth_key_name_alone_is_a_catalog_override_and_stays_scripted() {
+        assert!(scripted(
+            false, false, false, false, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn issue_414_custom_slug_alone_is_a_catalog_override_and_stays_scripted() {
+        // `service add openai-chat --slug my-openai` — slug override
+        // on a catalog entry. Stays scripted.
+        assert!(scripted(
+            false, false, false, false, false, true, false, false
+        ));
+    }
+
+    #[test]
+    fn issue_414_advanced_flags_keep_scripted() {
+        // --scope / --org / --openapi-spec-url / --ws-frame-preset /
+        // --ws-frame-clear are advanced flags we don't want to expose
+        // in the wizard form. They keep their existing scripted
+        // semantics.
+        for (scopes, org, spec_url, ws_preset, ws_clear) in [
+            (true, false, false, false, false),
+            (false, true, false, false, false),
+            (false, false, true, false, false),
+            (false, false, false, true, false),
+            (false, false, false, false, true),
+        ] {
+            assert!(
+                is_explicit_scripted(
+                    false, false, false, false, false, false, false, false, scopes, org, spec_url,
+                    ws_preset, ws_clear,
+                ),
+                "expected scripted with scopes={scopes} org={org} \
+                 spec_url={spec_url} ws_preset={ws_preset} ws_clear={ws_clear}",
+            );
+        }
     }
 
     #[test]

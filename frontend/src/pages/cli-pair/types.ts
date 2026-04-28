@@ -127,11 +127,31 @@ export interface NodeRegisterPrefill {
 
 /**
  * Prefill sent by the CLI for `nyxid service add`. Mirrors the URL
- * query-string the local-server wizard uses.
+ * query-string the local-server wizard uses, and the `prefill_ai_key`
+ * JSON shape from `cli/src/wizard/pairing.rs`.
+ *
+ * Issue #414 — `--custom` mode adds four optional fields the wizard
+ * SPA reads to skip the catalog grid entirely and render the custom-
+ * service form directly with the user's CLI-supplied definitional
+ * values pre-populated.
  */
 export interface AiKeyPrefill {
   readonly slug?: string;
   readonly label?: string;
   readonly via_node?: string;
   readonly endpoint_url?: string;
+  /** `true` when `--custom` was passed at the CLI. The SPA skips
+   *  Step 1 (catalog grid) and renders `CustomServiceForm` on first
+   *  render. */
+  readonly custom?: boolean;
+  /** `--slug <s>` override for custom services. Distinct from
+   *  `slug` above which selects a catalog entry. */
+  readonly custom_slug?: string;
+  /** Auth method (bearer, header, query, path, basic, body,
+   *  bot_bearer, none). Required for custom services since there's
+   *  no catalog default to inherit. */
+  readonly auth_method?: string;
+  /** Auth key name (e.g. Authorization, X-API-Key, app_secret).
+   *  Defaults are derived per auth_method by the SPA when unset. */
+  readonly auth_key_name?: string;
 }

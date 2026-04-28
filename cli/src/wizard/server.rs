@@ -1257,6 +1257,17 @@ fn prefill_query(prefill: &PrefillData) -> String {
             push_opt(&mut parts, "label", &p.label);
             push_opt(&mut parts, "via_node", &p.via_node);
             push_opt(&mut parts, "endpoint_url", &p.endpoint_url);
+            // Issue #414 — custom-mode definitional fields. The SPA
+            // primarily reads these out of `__WIZARD_BOOTSTRAP__.prefill`
+            // (see `prefill_to_json` below); we also emit them here so
+            // the URL is self-describing for any consumer that reads
+            // query params (e.g. legacy wizard.js, debug tools).
+            if p.custom {
+                parts.push("custom=1".to_string());
+            }
+            push_opt(&mut parts, "custom_slug", &p.custom_slug);
+            push_opt(&mut parts, "auth_method", &p.auth_method);
+            push_opt(&mut parts, "auth_key_name", &p.auth_key_name);
         }
         PrefillData::Rotate(p) => {
             push(&mut parts, "resource_id", &p.resource_id);
@@ -1317,6 +1328,19 @@ fn prefill_to_json(prefill: &PrefillData) -> serde_json::Value {
             put_opt(&mut obj, "label", &p.label);
             put_opt(&mut obj, "via_node", &p.via_node);
             put_opt(&mut obj, "endpoint_url", &p.endpoint_url);
+            // Issue #414 — the SPA's `AiKeyConfirm` reads these to
+            // skip the catalog grid (`prefill.custom === true`) and
+            // pre-populate the custom-service form. See
+            // `frontend/src/components/cli-wizard/ai-key-confirm-panel.tsx`.
+            // `custom: false` is omitted to keep the catalog flow's
+            // bootstrap byte-identical (matches `prefill_ai_key`'s
+            // pairing-transport semantics).
+            if p.custom {
+                obj.insert("custom".to_string(), Value::Bool(true));
+            }
+            put_opt(&mut obj, "custom_slug", &p.custom_slug);
+            put_opt(&mut obj, "auth_method", &p.auth_method);
+            put_opt(&mut obj, "auth_key_name", &p.auth_key_name);
         }
         PrefillData::Rotate(p) => {
             put_str(&mut obj, "resource_id", &p.resource_id);

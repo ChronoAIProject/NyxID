@@ -765,6 +765,24 @@ pub fn prefill_ai_key(p: &WizardPrefill) -> Value {
     if let Some(v) = &p.endpoint_url {
         obj.insert("endpoint_url".into(), Value::String(v.clone()));
     }
+    // Issue #414: custom-mode fields. Only emit `custom: true` when
+    // it's set so existing catalog-flow pairing records stay
+    // byte-identical (for the freshness test + any pairing-record
+    // log consumers). The other three are only meaningful in custom
+    // mode and follow the same `Some => emit` pattern as the
+    // catalog-flow fields above.
+    if p.custom {
+        obj.insert("custom".into(), Value::Bool(true));
+    }
+    if let Some(v) = &p.custom_slug {
+        obj.insert("custom_slug".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &p.auth_method {
+        obj.insert("auth_method".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &p.auth_key_name {
+        obj.insert("auth_key_name".into(), Value::String(v.clone()));
+    }
     Value::Object(obj)
 }
 
@@ -804,6 +822,73 @@ mod tests {
         assert!(!obj.contains_key("label"));
         assert!(!obj.contains_key("via_node"));
         assert!(!obj.contains_key("endpoint_url"));
+        // Issue #414: custom-mode fields default to absent. The
+        // existing catalog flow's pairing records stay byte-identical
+        // — important for the wizard freshness test and for any
+        // pairing-record consumers that might pattern-match on shape.
+        assert!(!obj.contains_key("custom"));
+        assert!(!obj.contains_key("custom_slug"));
+        assert!(!obj.contains_key("auth_method"));
+        assert!(!obj.contains_key("auth_key_name"));
+    }
+
+    #[test]
+    fn prefill_ai_key_emits_custom_mode_fields_when_set() {
+        // Issue #414: when --custom is passed at the CLI, the wizard
+        // SPA reads `custom: true` from the prefill JSON to skip the
+        // catalog grid. The other custom-mode fields ride along with
+        // the same Some=>emit semantics as the catalog-flow fields.
+        let p = WizardPrefill {
+            label: Some("Home Assistant".into()),
+            via_node: Some("node-uuid".into()),
+            endpoint_url: Some("http://homeassistant.local:8123".into()),
+            custom: true,
+            custom_slug: Some("home-assistant".into()),
+            auth_method: Some("bearer".into()),
+            auth_key_name: Some("Authorization".into()),
+            ..WizardPrefill::default()
+        };
+        let v = prefill_ai_key(&p);
+        let obj = v.as_object().expect("object");
+        // catalog `slug` stays absent in custom mode (no catalog
+        // entry); SPA differentiates by `custom: true`.
+        assert!(!obj.contains_key("slug"));
+        assert_eq!(obj.get("custom").and_then(|x| x.as_bool()), Some(true));
+        assert_eq!(
+            obj.get("custom_slug").and_then(|x| x.as_str()),
+            Some("home-assistant")
+        );
+        assert_eq!(
+            obj.get("auth_method").and_then(|x| x.as_str()),
+            Some("bearer")
+        );
+        assert_eq!(
+            obj.get("auth_key_name").and_then(|x| x.as_str()),
+            Some("Authorization")
+        );
+        assert_eq!(
+            obj.get("via_node").and_then(|x| x.as_str()),
+            Some("node-uuid")
+        );
+        assert_eq!(
+            obj.get("endpoint_url").and_then(|x| x.as_str()),
+            Some("http://homeassistant.local:8123")
+        );
+    }
+
+    #[test]
+    fn prefill_ai_key_skips_custom_flag_when_false() {
+        // Default state for the catalog flow (custom is bool, default
+        // false). The serializer must not emit `custom: false` —
+        // existing pairing records stay byte-identical.
+        let p = WizardPrefill {
+            slug: Some("llm-openai".into()),
+            custom: false,
+            ..WizardPrefill::default()
+        };
+        let v = prefill_ai_key(&p);
+        let obj = v.as_object().expect("object");
+        assert!(!obj.contains_key("custom"));
     }
 
     #[test]
