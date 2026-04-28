@@ -597,7 +597,7 @@ pub async fn create_key(
         let endpoint = user_endpoint_service::create_endpoint(
             db,
             user_id,
-            &svc.name,
+            label,
             &ep_url,
             Some(&svc.id),
             resolved_spec_url.as_deref(),
@@ -3194,6 +3194,65 @@ mod tests {
         .unwrap();
 
         assert_eq!(created.service.slug, "explicit-slug");
+    }
+
+    #[tokio::test]
+    async fn create_key_persists_user_label_on_no_auth_catalog_service() {
+        // Regression for issue #429. The catalog branch used to seed
+        // `UserEndpoint.label` with `svc.name` (the catalog default)
+        // instead of the user-supplied `label`. For no-auth services
+        // there is no `UserApiKey` to mask this, so `build_key_view`'s
+        // endpoint-label fallback surfaced the wrong value in the
+        // wizard's success page and in `nyxid service list`.
+        let Some(db) = connect_test_database("ukey_label_429").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("noauth-{}", uuid::Uuid::new_v4());
+        catalog.name = "Catalog Default Name".to_string();
+        catalog.auth_method = "none".to_string();
+        catalog.requires_user_credential = false;
+
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let custom_label = "User Custom Label";
+        let created = create_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "",
+            custom_label,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            created.api_key.is_none(),
+            "no-auth catalog flow should skip UserApiKey creation"
+        );
+        assert_eq!(
+            created.endpoint.label, custom_label,
+            "user-supplied label must persist on UserEndpoint (issue #429)"
+        );
     }
 
     #[tokio::test]
