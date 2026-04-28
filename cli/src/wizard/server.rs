@@ -1204,27 +1204,35 @@ fn is_uuid_like(s: &str) -> bool {
     s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
 }
 
-async fn signal_and_shutdown(state: ServerState, outcome: WizardOutcome) {
-    // Drain tracked placeholder keys before the CLI exits. Closes the
-    // tab-close-before-POST-response race: even if the browser never
-    // learned the key_id, we observed it in the proxy response and can
-    // still best-effort clean it up. Bounded timeout so a slow backend
-    // can't hold the CLI open indefinitely after the user cancels.
+/// Drain tracked placeholder keys, best-effort. Closes the
+/// tab-close-before-POST-response race: even if the browser never learned
+/// the key_id, we observed it in the proxy response and can still clean
+/// up the `pending_auth` row server-side. Bounded timeout so a slow
+/// backend can't hold the CLI open indefinitely. Called from both the
+/// browser-driven shutdown path (`signal_and_shutdown`) and the
+/// CLI-side abandonment paths (heartbeat watchdog, overall timeout,
+/// Ctrl-C) — see issue #448.
+async fn drain_pending_keys(state: &ServerState) {
     let drained: Vec<String> = {
         let mut set = state.pending_keys.lock().await;
         set.drain().collect()
     };
-    if !drained.is_empty() {
-        let cleanup = {
-            let state = state.clone();
-            async move {
-                for key_id in drained {
-                    conditional_abandon_key(&state, &key_id).await;
-                }
-            }
-        };
-        let _ = tokio::time::timeout(Duration::from_secs(5), cleanup).await;
+    if drained.is_empty() {
+        return;
     }
+    let cleanup = {
+        let state = state.clone();
+        async move {
+            for key_id in drained {
+                conditional_abandon_key(&state, &key_id).await;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(5), cleanup).await;
+}
+
+async fn signal_and_shutdown(state: ServerState, outcome: WizardOutcome) {
+    drain_pending_keys(&state).await;
 
     let mut guard = state.done_tx.lock().await;
     if let Some(tx) = guard.take() {
@@ -1513,19 +1521,26 @@ pub async fn run_flow(
     });
 
     // Wait for: completion signal, OR overall ceiling, OR watchdog (dead
-    // heartbeat), OR Ctrl-C.
+    // heartbeat), OR Ctrl-C. The non-`done_rx` branches must drain
+    // `pending_keys` themselves — the browser never reached `/cancel` or
+    // `/cancel-unload` to call `signal_and_shutdown` for us, so without
+    // this the placeholder service stays in `pending_auth` forever
+    // (issue #448).
     let outcome = tokio::select! {
         v = done_rx => {
             v.map_err(|_| anyhow!("wizard completion channel closed unexpectedly"))?
         }
         _ = watchdog_rx => {
             eprintln!("  Browser stopped responding (tab closed?) — cancelling.");
+            drain_pending_keys(&state).await;
             WizardOutcome::Cancelled
         }
         _ = tokio::time::sleep(WIZARD_MAX_DURATION) => {
+            drain_pending_keys(&state).await;
             WizardOutcome::TimedOut
         }
         _ = tokio::signal::ctrl_c() => {
+            drain_pending_keys(&state).await;
             WizardOutcome::Cancelled
         }
     };
@@ -1536,4 +1551,154 @@ pub async fn run_flow(
     let _ = server_handle.await;
 
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Json as AxumJson, Router,
+        extract::{Path, State as AxumState},
+        routing::get,
+    };
+    use std::sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Clone, Default)]
+    struct MockBackend {
+        deletes: Arc<StdMutex<Vec<String>>>,
+        gets: Arc<AtomicUsize>,
+    }
+
+    async fn mock_get_key(
+        AxumState(mock): AxumState<MockBackend>,
+        Path(id): Path<String>,
+    ) -> AxumJson<Value> {
+        mock.gets.fetch_add(1, Ordering::SeqCst);
+        // ID convention: anything starting with "pending-" reports as
+        // pending_auth; anything else as active. Lets the test drive
+        // both branches of conditional_abandon_key.
+        let status = if id.starts_with("pending-") {
+            "pending_auth"
+        } else {
+            "active"
+        };
+        AxumJson(json!({ "id": id, "status": status }))
+    }
+
+    async fn mock_delete_key(
+        AxumState(mock): AxumState<MockBackend>,
+        Path(id): Path<String>,
+    ) -> StatusCode {
+        mock.deletes.lock().unwrap().push(id);
+        StatusCode::NO_CONTENT
+    }
+
+    /// Spin up a tiny axum mock backend. Returns (base_url, mock state).
+    async fn spawn_mock() -> (String, MockBackend) {
+        let mock = MockBackend::default();
+        let app = Router::new()
+            .route(
+                "/api/v1/keys/{id}",
+                get(mock_get_key).delete(mock_delete_key),
+            )
+            .with_state(mock.clone());
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("bind mock");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://127.0.0.1:{}", addr.port()), mock)
+    }
+
+    fn make_state(base_url: String, initial_keys: Vec<&str>) -> ServerState {
+        let (done_tx, _done_rx) = oneshot::channel::<WizardOutcome>();
+        let mut set = HashSet::new();
+        for k in initial_keys {
+            set.insert(k.to_string());
+        }
+        ServerState {
+            csrf_token: Arc::new(String::from("test-csrf")),
+            done_tx: Arc::new(tokio::sync::Mutex::new(Some(done_tx))),
+            shutdown: Arc::new(Notify::new()),
+            started_at: Instant::now(),
+            last_heartbeat: Arc::new(tokio::sync::Mutex::new(None)),
+            proxy: Arc::new(ProxyContext {
+                base_url_root: base_url,
+                access_token: "test-token".into(),
+                profile: None,
+            }),
+            allowlist: Arc::new(Vec::new()),
+            upstream: ReqwestClient::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            flow: FlowKind::AiKey,
+            access_token: Arc::new(tokio::sync::Mutex::new("test-token".into())),
+            in_flight_mutations: Arc::new(AtomicUsize::new(0)),
+            bound_port: 0,
+            pending_keys: Arc::new(tokio::sync::Mutex::new(set)),
+            prefill: Arc::new(Value::Null),
+        }
+    }
+
+    /// Issue #448 fix: drain_pending_keys must empty the HashSet so a
+    /// later wizard cancellation path (watchdog / timeout / Ctrl-C)
+    /// can't leave behind stale `pending_auth` placeholder services.
+    #[tokio::test]
+    async fn drain_pending_keys_empties_the_set() {
+        let (base_url, _mock) = spawn_mock().await;
+        let state = make_state(base_url, vec!["pending-1", "pending-2"]);
+
+        drain_pending_keys(&state).await;
+
+        assert!(
+            state.pending_keys.lock().await.is_empty(),
+            "drain must leave pending_keys empty"
+        );
+    }
+
+    /// Safety: drain must NOT delete a key that has flipped to `active`
+    /// in the time between the placeholder creation and the wizard
+    /// being abandoned (race where the user finished authorizing
+    /// moments before closing the tab). Only `pending_auth` keys
+    /// should be DELETEd.
+    #[tokio::test]
+    async fn drain_pending_keys_only_deletes_pending_auth() {
+        let (base_url, mock) = spawn_mock().await;
+        let state = make_state(
+            base_url,
+            vec!["pending-keep", "active-keep", "pending-other"],
+        );
+
+        drain_pending_keys(&state).await;
+
+        let deleted: Vec<String> = {
+            let mut v = mock.deletes.lock().unwrap().clone();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            deleted,
+            vec!["pending-keep".to_string(), "pending-other".to_string()],
+            "only pending_auth keys should be DELETEd; got {deleted:?}"
+        );
+        assert!(state.pending_keys.lock().await.is_empty());
+    }
+
+    /// Empty set is a no-op — must not call the backend at all.
+    #[tokio::test]
+    async fn drain_pending_keys_empty_is_noop() {
+        let (base_url, mock) = spawn_mock().await;
+        let state = make_state(base_url, vec![]);
+
+        drain_pending_keys(&state).await;
+
+        assert_eq!(mock.gets.load(Ordering::SeqCst), 0);
+        assert!(mock.deletes.lock().unwrap().is_empty());
+    }
 }
