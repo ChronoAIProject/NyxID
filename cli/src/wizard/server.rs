@@ -116,6 +116,16 @@ const HEARTBEAT_DEAD_AFTER_ROTATION: Duration = Duration::from_secs(30);
 /// Grace period at startup before we start enforcing the heartbeat dead
 /// line. Lets the browser actually load the page.
 const HEARTBEAT_STARTUP_GRACE: Duration = Duration::from_secs(5);
+/// First-heartbeat deadline when `NYXID_WIZARD_NO_OPEN` is set. With
+/// auto-open the browser is loading by the time the watchdog starts,
+/// so the default `HEARTBEAT_STARTUP_GRACE + HEARTBEAT_DEAD_AFTER`
+/// (~9 s) is enough. Without auto-open the user pastes the URL by
+/// hand, so the first ping arrives on human time — 9 s reliably kills
+/// the wizard mid copy-paste. 20 s gives a comfortable manual window
+/// without giving up the eventual cleanup of a wizard nobody loaded.
+/// Once the first ping lands, `HEARTBEAT_DEAD_AFTER` takes over so a
+/// truly-dead tab is still detected at the normal cadence.
+const HEARTBEAT_FIRST_PING_DEADLINE_NO_OPEN: Duration = Duration::from_secs(20);
 /// How often the CLI checks the last-heartbeat timestamp. 500 ms is
 /// tight enough that a watchdog-triggered exit fires within ~4.5 s of
 /// the last successful beat.
@@ -1490,6 +1500,15 @@ pub async fn run_flow(
     } else {
         HEARTBEAT_DEAD_AFTER
     };
+    // `NYXID_WIZARD_NO_OPEN` makes the user paste the URL by hand, so
+    // the first heartbeat arrives on human time. Widen the no-first-
+    // ping deadline without changing post-ping silence detection — once
+    // a real browser pings, `dead_after` takes over as before.
+    let first_ping_deadline = if std::env::var_os("NYXID_WIZARD_NO_OPEN").is_some() {
+        HEARTBEAT_FIRST_PING_DEADLINE_NO_OPEN
+    } else {
+        HEARTBEAT_STARTUP_GRACE + dead_after
+    };
     let watchdog_handle = tokio::spawn(async move {
         let tx = watchdog_tx;
         loop {
@@ -1503,7 +1522,7 @@ pub async fn run_flow(
             let last = *watchdog_state.last_heartbeat.lock().await;
             let dead = match last {
                 Some(t) => t.elapsed() > dead_after,
-                None => watchdog_state.started_at.elapsed() > HEARTBEAT_STARTUP_GRACE + dead_after,
+                None => watchdog_state.started_at.elapsed() > first_ping_deadline,
             };
             if dead {
                 let _ = tx.send(());
