@@ -162,7 +162,7 @@ nyxid --version                                   # verify
 
 Once your stack is up and you've registered an account, the next step is to connect a real downstream AI Service (OpenAI, Anthropic, GitHub, etc.) and verify the proxy actually works. **Wiring MCP alone won't show real tools** — until a real service is connected and verified, your AI agent will only see NyxID's `nyx__...` meta-tools and you'll wonder why nothing's working.
 
-The full flow lives in **[docs/CONNECTING_SERVICES.md](CONNECTING_SERVICES.md)**. It's base-URL-agnostic and covers all four paths (AI-driven, CLI, web console, direct API). Use `http://localhost:3001` as your `<BASE_URL>` for self-host.
+The full flow lives in **[docs/connecting-services/](connecting-services/)**. Start with the [Web UI walkthrough](connecting-services/web-ui.md) if it's your first service; for CLI / AI-driven (MCP) / Direct API, the [hub](connecting-services/README.md) links to one walkthrough per path. Use `http://localhost:3001` as your `<BASE_URL>` for self-host.
 
 ---
 
