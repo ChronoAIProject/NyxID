@@ -10,15 +10,15 @@ import { WhyNyx } from "./components/why-nyx";
 import { HowItWorks } from "./components/how-it-works";
 import { WhoItsFor } from "./components/who-its-for";
 import { AppCarousel } from "./components/app-carousel";
-import { WaitlistForm } from "./components/waitlist-form";
+import { BetaAccess } from "./components/beta-access";
 import { ScrollFab } from "./components/scroll-fab";
 import { LandingFooter } from "./components/landing-footer";
 
 export function LandingPage() {
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (window.location.hash === "#waitlist") {
-        document.getElementById("waitlist")?.scrollIntoView({ behavior: "smooth" });
+      if (window.location.hash === "#beta") {
+        document.getElementById("beta")?.scrollIntoView({ behavior: "smooth" });
       }
     }, 1000);
     return () => clearTimeout(timer);
@@ -35,7 +35,7 @@ export function LandingPage() {
         <HowItWorks />
         <WhoItsFor />
         <AppCarousel />
-        <WaitlistForm />
+        <BetaAccess />
       </main>
       <LandingFooter />
     </div>

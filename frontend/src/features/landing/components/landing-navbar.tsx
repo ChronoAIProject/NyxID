@@ -33,10 +33,10 @@ export function LandingNavbar() {
             {t("nav.login")}
           </a>
           <a
-            href="#waitlist"
+            href="#beta"
             className="hidden rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-void-400 md:inline-block"
           >
-            {t("nav.joinWaitlist")}
+            {t("nav.requestBeta")}
           </a>
         </div>
       </div>

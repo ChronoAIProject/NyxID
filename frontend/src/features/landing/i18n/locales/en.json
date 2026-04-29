@@ -1,12 +1,12 @@
 {
-  "nav.joinWaitlist": "Join the Waitlist",
+  "nav.requestBeta": "Request Beta",
   "nav.login": "Login",
 
   "hero.eyebrow": "Open-source Agent Connectivity Gateway",
   "hero.title": "Connect Claude, Cursor, or your own agents to public, internal, and localhost APIs — with secure access control.",
   "hero.subtitle": "Approve every connection from your phone. Your credentials never leave NyxID.",
   "hero.cta": "Get Early Access",
-  "hero.ctaSubtext": "Nyx guards the gate — only the waitlist holds the key",
+  "hero.ctaSubtext": "Nyx guards the gate — Discord holds the key",
 
   "features.heading": "What Nyx protects",
   "features.subheading": "Every feature guards the threshold between access and breach. You always know exactly what you're approving — nothing passes unseen.",
@@ -46,21 +46,9 @@
   "carousel.heading": "See what Nyx sees",
   "carousel.subheading": "Every request, every decision, every credential — visible to you, hidden from everything else.",
 
-  "waitlist.heading": "Step into the dark with us",
-  "waitlist.subheading": "Be first to place Nyx at your threshold.",
-  "waitlist.socialProof": "Early access is limited — reserve your spot",
-  "waitlist.labelName": "First Name",
-  "waitlist.labelLastName": "Last Name",
-  "waitlist.labelEmail": "Work Email",
-  "waitlist.labelCompany": "Company / Organization",
-  "waitlist.placeholderName": "Jamie",
-  "waitlist.placeholderLastName": "Lee",
-  "waitlist.placeholderEmail": "jamie@company.com",
-  "waitlist.placeholderCompany": "Acme Inc.",
-  "waitlist.errorRequired": "Name and email are required.",
-  "waitlist.errorEmail": "Please enter a valid email address.",
-  "waitlist.submit": "Request Early Access →",
-  "waitlist.disclaimer": "We'll only use this to notify you when NyxID opens. No spam, ever.",
-  "waitlist.successTitle": "You're on the list.",
-  "waitlist.successMessage": "We'll reach out when NyxID opens access. Thanks for your interest."
+  "beta.heading": "Step into the dark with us",
+  "beta.subheading": "NyxID is in closed beta. Join us on Discord and our team will share an invitation code when there's room.",
+  "beta.socialProof": "Invitation-only — earned at the threshold",
+  "beta.discordCta": "Join Discord →",
+  "beta.disclaimer": "Invites are limited and rolled out as capacity opens. No spam, ever."
 }

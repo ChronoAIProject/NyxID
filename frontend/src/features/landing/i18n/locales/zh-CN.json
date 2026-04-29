@@ -1,12 +1,12 @@
 {
-  "nav.joinWaitlist": "加入候补名单",
+  "nav.requestBeta": "申请内测",
   "nav.login": "登录",
 
   "hero.eyebrow": "开源智能体连接网关",
   "hero.title": "将 Claude、Cursor 或你自己的智能体连接到公共、内部和本地 API — 并具备安全访问控制。",
   "hero.subtitle": "在手机上审批每一个连接。你的凭证永远不会离开 NyxID。",
   "hero.cta": "抢先体验",
-  "hero.ctaSubtext": "Nyx 守护着大门 — 只有候补名单持有钥匙",
+  "hero.ctaSubtext": "Nyx 守护着大门 — Discord 持有钥匙",
 
   "features.heading": "Nyx 守护什么",
   "features.subheading": "每项功能都守护着访问与入侵之间的门槛。你始终清楚自己在批准什么 — 一切尽在掌握。",
@@ -46,21 +46,9 @@
   "carousel.heading": "看看 Nyx 看到了什么",
   "carousel.subheading": "每个请求、每个决定、每个凭证 — 对你可见，对其他一切隐藏。",
 
-  "waitlist.heading": "与我们一同步入暗夜",
-  "waitlist.subheading": "率先将 Nyx 部署在你的门槛。",
-  "waitlist.socialProof": "名额有限 — 预留你的位置",
-  "waitlist.labelName": "名",
-  "waitlist.labelLastName": "姓",
-  "waitlist.labelEmail": "工作邮箱",
-  "waitlist.labelCompany": "公司 / 组织",
-  "waitlist.placeholderName": "三",
-  "waitlist.placeholderLastName": "张",
-  "waitlist.placeholderEmail": "zhangsan@company.com",
-  "waitlist.placeholderCompany": "示例科技有限公司",
-  "waitlist.errorRequired": "姓名和邮箱为必填项。",
-  "waitlist.errorEmail": "请输入有效的邮箱地址。",
-  "waitlist.submit": "申请抢先体验 →",
-  "waitlist.disclaimer": "我们仅在 NyxID 开放时通知你。绝不发送垃圾邮件。",
-  "waitlist.successTitle": "你已加入名单。",
-  "waitlist.successMessage": "NyxID 开放访问时我们会联系你。感谢你的关注。"
+  "beta.heading": "与我们一同步入暗夜",
+  "beta.subheading": "NyxID 目前处于封闭内测。加入我们的 Discord，名额开放时团队将向你发送邀请码。",
+  "beta.socialProof": "仅限邀请 — 在门槛之上获得",
+  "beta.discordCta": "加入 Discord →",
+  "beta.disclaimer": "邀请名额有限，将随容量开放滚动发放。绝不发送垃圾邮件。"
 }

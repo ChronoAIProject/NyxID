@@ -566,12 +566,12 @@ export function AuthFlow({
               <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
                 NyxID is in closed beta.{" "}
                 <a
-                  href="https://nyx.chrono-ai.fun/#waitlist"
+                  href="https://discord.gg/QMvcs8UQBW"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
                 >
-                  Join the waitlist
+                  Join our Discord
                 </a>{" "}
                 to request an invite code.
               </p>

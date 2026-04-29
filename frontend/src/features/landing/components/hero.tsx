@@ -100,7 +100,7 @@ export function Hero() {
         </p>
 
         <a
-          href="#waitlist"
+          href="#beta"
           className="mt-10 inline-flex items-center gap-2 rounded-xl bg-primary px-8 py-4 text-lg font-semibold text-white transition-all hover:bg-void-400 hover:shadow-lg hover:shadow-primary/25"
         >
           {t("hero.cta")}
