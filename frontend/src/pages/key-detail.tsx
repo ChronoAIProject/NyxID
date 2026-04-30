@@ -901,18 +901,19 @@ function ApiUsageSection({
       ? "This service requires no upstream credentials, but you still need to authenticate with NyxID."
       : "NyxID injects your stored credentials automatically when proxying.";
 
+  // Examples use `/models` as the verification path: it's a GET, requires no
+  // body, and works for OpenAI-compatible LLM services (OpenAI, Anthropic,
+  // DeepSeek, Mistral, Cohere, etc.) whose endpoint URLs already include the
+  // version prefix (`/v1`, `/v2`). For non-LLM services (GitHub, Discord,
+  // Telegram bot), substitute the path you want to call.
   const curlExample = [
-    `curl ${proxyUrl}/v1/chat/completions \\`,
-    `  -H "Authorization: Bearer <NYXID_ACCESS_TOKEN>" \\`,
-    `  -H "Content-Type: application/json" \\`,
-    `  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'`,
+    `curl ${proxyUrl}/models \\`,
+    `  -H "Authorization: Bearer <NYXID_ACCESS_TOKEN>"`,
   ].join("\n");
 
   const apiKeyExample = [
-    `curl ${proxyUrl}/v1/chat/completions \\`,
-    `  -H "X-API-Key: nyx_..." \\`,
-    `  -H "Content-Type: application/json" \\`,
-    `  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'`,
+    `curl ${proxyUrl}/models \\`,
+    `  -H "X-API-Key: nyx_..."`,
   ].join("\n");
 
   function handleCopyUrl() {
@@ -958,10 +959,9 @@ function ApiUsageSection({
           </div>
           <p className="mt-1.5 text-[11px] text-muted-foreground">
             Append the downstream API path after this URL (e.g.{" "}
-            <code className="rounded bg-background px-1">
-              /v1/chat/completions
-            </code>
-            ). {authNote}
+            <code className="rounded bg-background px-1">/models</code> for
+            OpenAI-compatible LLMs, or whatever path the service exposes —
+            NyxID forwards it onto the configured endpoint URL). {authNote}
           </p>
         </div>
 
