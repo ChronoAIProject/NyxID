@@ -45,7 +45,7 @@ dotenvy = "0.15.7"
 clap = { version = "4.6", features = ["derive"] }
 dirs = "6"
 open = "5"
-rpassword = "7"
+rpassword = "7.5.1"
 subtle = "2"
 url = "2.5"
 urlencoding = "2.1"
