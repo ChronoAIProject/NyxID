@@ -119,34 +119,10 @@ There are two ways to use NyxID — pick the one that fits your situation:
 
 Start using NyxID in under a minute — no Docker, no setup.
 
-**Get an account:**
-
 1. Go to **[nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register)**
 2. Enter invite code: **`NYX-FGNY85AF`**
 3. Sign in with Google, GitHub, or Apple
-
-**Add an AI Service** (the downstream API your agent will use):
-
-4. Click **AI Services** in the sidebar (you're on the **External Services** tab by default).
-5. Click **Add Service**.
-6. In the **Add AI Service** dialog, pick **OpenAI** from the catalog — its example curl works out of the box for verification.
-7. On the routing step ("How should requests reach this service?"), click the **Direct** card, then click **Next: Enter Credentials**.
-8. Paste your **provider API key** (an OpenAI `sk-...` key — this is the *external* service's credential, **not** a NyxID `nyx_...` key). NyxID stores it encrypted.
-9. Click **Create Service**. You land on the new service's detail page — keep this page open.
-
-**Create a NyxID Agent Key** (the `nyx_...` key your terminal will use to talk to NyxID's proxy):
-
-10. Open a new tab on **AI Services**, switch to the **Agent Keys** tab, click **Create API Key**.
-11. Name it (anything), then in the **Scopes** field click the `proxy` badge so it's selected. Click **Create**.
-12. Copy the `nyx_...` key — it's shown **once**.
-
-**Verify the proxy works** (target: `HTTP/1.1 200`):
-
-13. Go back to the service detail tab. Scroll to the **API Usage** section and click the **copy icon** on the **Example (with API key)** curl block.
-14. Paste it in your terminal and **replace `nyx_...` with your Agent Key**. Run it.
-15. You should see a chat-completion JSON response from OpenAI (with `"choices": [...]`). That's your first proxied call.
-
-Screenshots, troubleshooting, and other paths (CLI / AI-driven / Direct API, plus how to verify GitHub or other non-chat services) are in **[docs/connecting-services/](docs/connecting-services/)**.
+4. **[Add your first AI Service](docs/connecting-services/web-ui.md)** — pick OpenAI, create an Agent Key with the `proxy` scope, and run the example curl from the service detail page. Target: `HTTP/1.1 200`.
 
 Early access — limited to 20 users.
 
@@ -185,13 +161,15 @@ Prefer to run each step yourself, or need the full troubleshooting guide? The co
 - Optional [CLI install](docs/QUICKSTART.md#optional-install-the-nyxid-cli)
 - [Uninstall & reinstall](docs/QUICKSTART.md#uninstall--reinstall), [orphan volume recovery](docs/QUICKSTART.md#recovering-an-orphan-volume), and [SCRAM failure](docs/QUICKSTART.md#stuck-on-scram-failure) troubleshooting
 
-Once NyxID is running, follow [docs/connecting-services/](docs/connecting-services/) to connect your first downstream API. Set `<BASE_URL>` to `http://localhost:3001` in any examples.
+Once NyxID is running and you've registered at `http://localhost:3000`:
+
+**Next: [Add your first AI Service](docs/connecting-services/web-ui.md)** — same flow as hosted, with `<BASE_URL>` = `http://localhost:3001`. Target: `HTTP/1.1 200`.
 
 For production deployment (TLS, custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Connecting AI Services
 
-The Hosted Quick Start above walks through the **Web UI** path end-to-end. For **CLI**, **AI-driven** (Claude Code / Codex / Cursor via MCP), or **Direct API** (curl, n8n, CI/CD) — and for the same flow on self-host — see **[docs/connecting-services/](docs/connecting-services/)**. The hub explains the deliverable (`HTTP/1.1 200` from a real downstream call), distinguishes external service credentials from NyxID API keys, and links to one walkthrough per path.
+The Quick Start above (Hosted and Self-Host) sends you to the **Web UI** walkthrough. For **CLI**, **AI-driven** (Claude Code / Codex / Cursor via MCP), or **Direct API** (curl, n8n, CI/CD), see **[docs/connecting-services/](docs/connecting-services/)**. The hub explains the deliverable (`HTTP/1.1 200` from a real downstream call), distinguishes external service credentials from NyxID Agent Keys, and links to one walkthrough per path.
 
 ## Reach Local Services (Optional)
 

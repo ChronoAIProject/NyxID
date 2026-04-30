@@ -13,8 +13,6 @@ This guide works for **hosted** (`https://nyx.chrono-ai.fun`) and **self-host** 
 | **External service credential** | The real third-party API key (e.g. an OpenAI `sk-...` key, a GitHub PAT). NyxID stores this encrypted and never returns it to your agent. | Pasted once when you add a service (**External Services** tab). |
 | **NyxID Agent Key** (`nyx_...`) | A scoped key your terminal or agent uses to call NyxID. NyxID injects the external credential server-side. | Created in **AI Services → Agent Keys → Create API Key**, with the `proxy` scope. Used in `X-API-Key` headers. |
 
-Issue #567 reported that "API Key" was ambiguous in earlier docs. When this guide says **credential**, it means the external one. When it says **API key** or `nyx_...`, it means NyxID's.
-
 ## Pick your path
 
 | Path | When to use | Time to first 200 |
