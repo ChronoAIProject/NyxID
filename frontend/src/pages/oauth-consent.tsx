@@ -7,7 +7,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
 import { AlertTriangle, ShieldCheck } from "lucide-react";
 import {
   OAUTH_SCOPE_META,
@@ -89,9 +88,8 @@ export function OAuthConsentPage() {
     >
       <Card className="w-full">
         <CardHeader className="space-y-4">
-          <div className="flex items-center gap-3">
-            <PortalMarkLogo size={26} />
-            <p className="logo-wordmark text-xl">NyxID</p>
+          <div className="flex items-center">
+            <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-7 w-auto" />
           </div>
           <CardTitle>Authorize Application</CardTitle>
           <CardDescription>

@@ -1,7 +1,6 @@
 import { useNavigate } from "@tanstack/react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
 import { ShieldAlert } from "lucide-react";
 
 const ERROR_LABELS: Record<string, string> = {
@@ -34,9 +33,8 @@ export function OAuthErrorPage() {
       }}
     >
       <div className="flex w-full max-w-[460px] flex-col items-center gap-8">
-        <div className="flex items-center gap-3">
-          <PortalMarkLogo size={36} className="shrink-0" />
-          <span className="logo-wordmark text-[22px]">NyxID</span>
+        <div className="flex items-center">
+          <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-9 w-auto" />
         </div>
 
         <Card className="w-full">
