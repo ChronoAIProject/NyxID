@@ -51,7 +51,7 @@ Real downstream tools (`chat_completions`, `list_models`, `get_repo`) appear **a
 - You connected to a different account than the one your MCP client is authenticated as.
 - Your client cached the old tool list — restart it.
 
-This is the trap from [issue #298](https://github.com/ChronoAIProject/NyxID/issues/298). If you're stuck, fall back to the [Web UI](web-ui.md) path to confirm the service connected at all.
+If you're stuck here, fall back to the [Web UI](web-ui.md) path to confirm the service connected at all.
 
 ## Adding more services
 

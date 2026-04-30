@@ -36,7 +36,7 @@ If you got a 401, 403, or 5xx from the proxy:
 - **401 from NyxID (`Missing API key` / `Invalid API key`):** you didn't replace the `nyx_...` placeholder in the copied example with your real Agent Key.
 - **403 from NyxID:** your Agent Key is missing the `proxy` scope (required for `/api/v1/proxy/...`), or the key has an `allowed_service_ids` restriction that excludes this service. Edit the key under **AI Services → Agent Keys → \[your key\]**.
 - **5xx from NyxID:** check `docker logs nyxid-backend` (self-host) or the status page (hosted).
-- **MCP client only shows `nyx__...` tools and nothing real:** the credential never connected. This is the trap from [issue #298](https://github.com/ChronoAIProject/NyxID/issues/298) — wiring MCP doesn't connect a service. Run the [Web UI](web-ui.md) path first, then reconnect MCP.
+- **MCP client only shows `nyx__...` tools and nothing real:** wiring MCP doesn't connect a downstream service by itself. Run the [Web UI](web-ui.md) walkthrough first, then reconnect MCP.
 
 ## Adding more services later
 
