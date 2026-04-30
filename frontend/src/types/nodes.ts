@@ -51,20 +51,6 @@ export interface NodeAdminsResponse {
   readonly admins: readonly NodeAdminInfo[];
 }
 
-export interface NodeBindingInfo {
-  readonly id: string;
-  readonly service_id: string;
-  readonly service_name: string;
-  readonly service_slug: string;
-  readonly is_active: boolean;
-  readonly priority: number;
-  readonly created_at: string;
-}
-
-export interface BindingListResponse {
-  readonly bindings: readonly NodeBindingInfo[];
-}
-
 export interface CreateRegistrationTokenResponse {
   readonly token_id: string;
   readonly token: string;
@@ -75,13 +61,6 @@ export interface CreateRegistrationTokenResponse {
 export interface RotateNodeTokenResponse {
   readonly auth_token: string;
   readonly signing_secret: string;
-  readonly message: string;
-}
-
-export interface CreateBindingResponse {
-  readonly id: string;
-  readonly service_id: string;
-  readonly service_name: string;
   readonly message: string;
 }
 

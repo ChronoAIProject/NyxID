@@ -5,11 +5,8 @@ import type {
   NodeListResponse,
   NodeAdminInfo,
   NodeAdminsResponse,
-  NodeBindingInfo,
-  BindingListResponse,
   CreateRegistrationTokenResponse,
   RotateNodeTokenResponse,
-  CreateBindingResponse,
   TransferNodeResponse,
   NodePendingCredentialInfo,
   NodePendingCredentialsResponse,
@@ -62,19 +59,6 @@ export function useNodeAdmins(nodeId: string) {
     queryFn: async (): Promise<readonly NodeAdminInfo[]> => {
       const res = await api.get<NodeAdminsResponse>(`/nodes/${nodeId}/admins`);
       return res.admins;
-    },
-    enabled: Boolean(nodeId),
-  });
-}
-
-export function useNodeBindings(nodeId: string) {
-  return useQuery({
-    queryKey: ["nodes", nodeId, "bindings"],
-    queryFn: async (): Promise<readonly NodeBindingInfo[]> => {
-      const res = await api.get<BindingListResponse>(
-        `/nodes/${nodeId}/bindings`,
-      );
-      return res.bindings;
     },
     enabled: Boolean(nodeId),
   });
@@ -161,9 +145,6 @@ export function useTransferNode() {
         queryKey: ["nodes", variables.nodeId],
       });
       void queryClient.invalidateQueries({
-        queryKey: ["nodes", variables.nodeId, "bindings"],
-      });
-      void queryClient.invalidateQueries({
         queryKey: ["nodes", variables.nodeId, "admins"],
       });
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
@@ -208,73 +189,3 @@ export function useCancelNodePendingCredential(nodeId: string) {
   });
 }
 
-export function useCreateBinding() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async ({
-      nodeId,
-      serviceId,
-    }: {
-      readonly nodeId: string;
-      readonly serviceId: string;
-    }): Promise<CreateBindingResponse> => {
-      return api.post<CreateBindingResponse>(`/nodes/${nodeId}/bindings`, {
-        service_id: serviceId,
-      });
-    },
-    onSuccess: (_data, variables) => {
-      void queryClient.invalidateQueries({
-        queryKey: ["nodes", variables.nodeId, "bindings"],
-      });
-      void queryClient.invalidateQueries({ queryKey: ["nodes"] });
-    },
-  });
-}
-
-export function useUpdateBinding() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async ({
-      nodeId,
-      bindingId,
-      priority,
-    }: {
-      readonly nodeId: string;
-      readonly bindingId: string;
-      readonly priority: number;
-    }): Promise<void> => {
-      return api.patch<void>(`/nodes/${nodeId}/bindings/${bindingId}`, {
-        priority,
-      });
-    },
-    onSuccess: (_data, variables) => {
-      void queryClient.invalidateQueries({
-        queryKey: ["nodes", variables.nodeId, "bindings"],
-      });
-    },
-  });
-}
-
-export function useDeleteBinding() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async ({
-      nodeId,
-      bindingId,
-    }: {
-      readonly nodeId: string;
-      readonly bindingId: string;
-    }): Promise<void> => {
-      return api.delete<void>(`/nodes/${nodeId}/bindings/${bindingId}`);
-    },
-    onSuccess: (_data, variables) => {
-      void queryClient.invalidateQueries({
-        queryKey: ["nodes", variables.nodeId, "bindings"],
-      });
-      void queryClient.invalidateQueries({ queryKey: ["nodes"] });
-    },
-  });
-}
