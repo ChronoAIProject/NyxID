@@ -791,6 +791,7 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             get(handlers::docs::service_asyncapi_json),
         )
         .route("/proxy/services", get(handlers::proxy::list_proxy_services))
+        .route("/demo", get(handlers::demo::get_demo))
         .nest("/channel-relay", channel_relay_routes)
         .nest("/channel-events", channel_event_routes)
         .merge(proxy_passthrough_routes);

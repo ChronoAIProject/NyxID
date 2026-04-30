@@ -50,7 +50,9 @@
         crate::handlers::api_keys::create_key,
         crate::handlers::api_keys::update_key,
         crate::handlers::api_keys::delete_key,
-        crate::handlers::api_keys::rotate_key
+        crate::handlers::api_keys::rotate_key,
+        // Demo
+        crate::handlers::demo::get_demo
     ),
     components(
         schemas(
@@ -104,7 +106,9 @@
             crate::handlers::api_keys::AllowedNodeInfo,
             crate::handlers::api_keys::ApiKeyResponse,
             crate::handlers::api_keys::ApiKeyListResponse,
-            crate::handlers::api_keys::DeleteApiKeyResponse
+            crate::handlers::api_keys::DeleteApiKeyResponse,
+            // Demo
+            crate::handlers::demo::DemoResponse
         )
     ),
     tags(
@@ -118,7 +122,8 @@
         (name = "Endpoints", description = "User-managed target URLs"),
         (name = "External API Keys", description = "User's external API keys and credentials"),
         (name = "User Services", description = "User's proxy routing configuration"),
-        (name = "API Keys", description = "NyxID API keys with service and node scope")
+        (name = "API Keys", description = "NyxID API keys with service and node scope"),
+        (name = "Demo", description = "First-success verification: returns 200 with no downstream call")
     )
 )]
 pub struct ApiDoc;

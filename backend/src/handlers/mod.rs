@@ -21,6 +21,7 @@ pub mod cli_pairings;
 pub mod connections;
 pub mod consent;
 pub mod delegation;
+pub mod demo;
 pub mod developer_apps;
 pub mod device_tokens;
 pub mod docs;
