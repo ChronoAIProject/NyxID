@@ -2014,6 +2014,61 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     },
 ];
 
+/// Catalog seed for unauthenticated public APIs (e.g. arXiv, OpenAlex,
+/// Crossref). Distinct from `DefaultServiceSeed` because there's no
+/// `ProviderConfig` to bind to — the proxy injects nothing, we just route
+/// requests through NyxID for centralised audit logging and future
+/// rate-limit / polite-pool management.
+///
+/// The resulting `DownstreamService` has `provider_config_id: None`,
+/// `auth_method: "none"`, `requires_user_credential: false`, and no
+/// `ServiceProviderRequirement`. `build_catalog_entry` already handles
+/// `provider: None` and emits `requires_credential: false`, so the AI
+/// Services dialog renders these as one-click no-auth services.
+struct DefaultPublicServiceSeed {
+    service_slug: &'static str,
+    service_name: &'static str,
+    base_url: &'static str,
+    description: &'static str,
+    homepage_url: Option<&'static str>,
+}
+
+const DEFAULT_PUBLIC_SERVICE_SEEDS: &[DefaultPublicServiceSeed] = &[
+    DefaultPublicServiceSeed {
+        service_slug: "arxiv-api",
+        service_name: "arXiv API",
+        base_url: "http://export.arxiv.org/api",
+        description: "arXiv search and metadata API. Returns Atom XML feeds; no \
+                      authentication required. Routing through NyxID provides \
+                      centralised audit logging and a single place to manage \
+                      polite-pool / rate-limit headers across agents. Docs: \
+                      https://info.arxiv.org/help/api/index.html",
+        homepage_url: Some("https://arxiv.org"),
+    },
+    DefaultPublicServiceSeed {
+        service_slug: "api-openalex",
+        service_name: "OpenAlex API",
+        base_url: "https://api.openalex.org",
+        description: "Open scholarly database covering 240M+ works, authors, \
+                      institutions, concepts, and citations. No authentication \
+                      required. Polite pool: append `?mailto=you@example.com` \
+                      (or set as a default request header) for higher rate limits. \
+                      Docs: https://docs.openalex.org",
+        homepage_url: Some("https://openalex.org"),
+    },
+    DefaultPublicServiceSeed {
+        service_slug: "api-crossref",
+        service_name: "Crossref API",
+        base_url: "https://api.crossref.org",
+        description: "DOI metadata and citation graph for ~150M scholarly works. \
+                      No authentication required. Polite pool: set \
+                      `User-Agent: <app>/<version> (mailto:you@example.com)` for \
+                      higher rate limits. Docs: \
+                      https://api.crossref.org/swagger-ui/index.html",
+        homepage_url: Some("https://www.crossref.org"),
+    },
+];
+
 /// Apply per-slug capability / streaming overrides to pre-existing seeded
 /// downstream services. Designed to be a one-shot migration that runs on
 /// every startup but only mutates rows that still carry the legacy
@@ -2560,6 +2615,77 @@ pub async fn seed_default_services(
             provider = seed.provider_slug,
             direct_auth = is_direct_auth,
             "Seeded default downstream service"
+        );
+        seeded_count += 1;
+    }
+
+    // Seed unauthenticated public APIs (e.g. arXiv, OpenAlex, Crossref).
+    // These have no provider binding — `provider_config_id` stays None and
+    // no SPR is created. `build_catalog_entry` already tolerates `provider:
+    // None` and emits `requires_credential: false`.
+    for seed in DEFAULT_PUBLIC_SERVICE_SEEDS {
+        let existing = service_col
+            .find_one(doc! { "slug": seed.service_slug })
+            .await?;
+        if existing.is_some() {
+            continue;
+        }
+
+        let empty_credential = encryption_keys.encrypt(b"").await?;
+        let service_id = Uuid::new_v4().to_string();
+
+        let service = DownstreamService {
+            id: service_id.clone(),
+            name: seed.service_name.to_string(),
+            slug: seed.service_slug.to_string(),
+            description: Some(seed.description.to_string()),
+            base_url: seed.base_url.to_string(),
+            service_type: "http".to_string(),
+            visibility: "public".to_string(),
+            auth_method: "none".to_string(),
+            auth_key_name: String::new(),
+            credential_encrypted: empty_credential,
+            auth_type: None,
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
+            ssh_config: None,
+            oauth_client_id: None,
+            service_category: "internal".to_string(),
+            requires_user_credential: false,
+            is_active: true,
+            created_by: "system".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: "proxy:*".to_string(),
+            provider_config_id: None,
+            homepage_url: seed.homepage_url.map(String::from),
+            repository_url: None,
+            issues_url: None,
+            capabilities: None,
+            auth_notes: None,
+            known_limitations: None,
+            required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
+            custom_user_agent: None,
+            default_request_headers: None,
+            ws_frame_injections: Vec::new(),
+            developer_app_ids: None,
+            token_exchange_config: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        service_col.insert_one(&service).await?;
+        tracing::info!(
+            slug = seed.service_slug,
+            "Seeded default public (no-auth) downstream service"
         );
         seeded_count += 1;
     }
@@ -3356,9 +3482,9 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 #[cfg(test)]
 mod tests {
     use super::{
-        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, SeededHeader,
-        normalize_telegram_bot_token, normalize_telegram_bot_username, reconcile_seeded_headers,
-        seed_capability_override,
+        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_PUBLIC_SERVICE_SEEDS, DEFAULT_SERVICE_SEEDS,
+        SeededHeader, normalize_telegram_bot_token, normalize_telegram_bot_username,
+        reconcile_seeded_headers, seed_capability_override,
     };
     use crate::errors::AppError;
     use crate::models::default_request_header::DefaultRequestHeader;
@@ -3381,6 +3507,50 @@ mod tests {
 
         assert_eq!(seed.service_auth_method, Some("path"));
         assert_eq!(seed.service_auth_key_name, Some("bot"));
+    }
+
+    #[test]
+    fn public_service_seeds_have_unique_slugs_and_no_collision_with_default_seeds() {
+        let mut public_slugs: Vec<&str> = DEFAULT_PUBLIC_SERVICE_SEEDS
+            .iter()
+            .map(|s| s.service_slug)
+            .collect();
+        public_slugs.sort_unstable();
+        let dedup_count = public_slugs
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        assert_eq!(
+            dedup_count,
+            DEFAULT_PUBLIC_SERVICE_SEEDS.len(),
+            "DEFAULT_PUBLIC_SERVICE_SEEDS must have unique slugs"
+        );
+
+        let default_slugs: std::collections::BTreeSet<&str> = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .map(|s| s.service_slug)
+            .collect();
+        for s in &public_slugs {
+            assert!(
+                !default_slugs.contains(s),
+                "public seed slug {s} collides with a provider-backed seed slug"
+            );
+        }
+    }
+
+    #[test]
+    fn arxiv_public_seed_is_present_and_unauthenticated() {
+        let seed = DEFAULT_PUBLIC_SERVICE_SEEDS
+            .iter()
+            .find(|s| s.service_slug == "arxiv-api")
+            .expect("arxiv-api seed should be in DEFAULT_PUBLIC_SERVICE_SEEDS");
+
+        assert_eq!(seed.base_url, "http://export.arxiv.org/api");
+        assert_eq!(seed.homepage_url, Some("https://arxiv.org"));
+        assert!(
+            !seed.description.is_empty(),
+            "arxiv-api description should explain the no-auth policy and audit-logging benefit"
+        );
     }
 
     #[test]
