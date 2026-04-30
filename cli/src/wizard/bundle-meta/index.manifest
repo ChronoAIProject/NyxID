@@ -12,7 +12,6 @@ frontend/src/components/cli-wizard/scope-picker.tsx
 frontend/src/components/cli-wizard/shell.tsx
 frontend/src/components/cli-wizard/step-label.tsx
 frontend/src/components/cli-wizard/wizard-footer.tsx
-frontend/src/components/shared/portal-mark-logo.tsx
 frontend/src/components/ui/button.tsx
 frontend/src/components/ui/checkbox.tsx
 frontend/src/components/ui/input.tsx
