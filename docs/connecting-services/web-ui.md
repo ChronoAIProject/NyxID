@@ -2,7 +2,7 @@
 
 Click-through walkthrough. End state: an `HTTP/1.1 200` response from your first proxied call.
 
-This is the default path for [issue #567](https://github.com/ChronoAIProject/NyxID/issues/567). If you want CLI, AI-driven, or curl instead, see the [hub](README.md).
+This is the Web UI flow. If you want CLI, AI-driven, or curl instead, see the [hub](README.md).
 
 ## Hosted (recommended for first-time users)
 

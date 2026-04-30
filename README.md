@@ -163,7 +163,7 @@ Prefer to run each step yourself, or need the full troubleshooting guide? The co
 
 Once NyxID is running and you've registered at `http://localhost:3000`:
 
-**Next: [Add your first AI Service](docs/connecting-services/web-ui.md)** — same flow as hosted, with `<BASE_URL>` = `http://localhost:3001`. Target: `HTTP/1.1 200`.
+**Next: [Add your first AI Service](docs/connecting-services/web-ui.md)**
 
 For production deployment (TLS, custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
