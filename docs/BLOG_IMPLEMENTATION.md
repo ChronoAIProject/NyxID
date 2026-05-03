@@ -1,12 +1,12 @@
 # Blog Implementation
 
-> **Status (2026-05-03):** Frontend-only first cut. Three public routes are live and rendering against an in-bundle mock dataset. The backend / CDN endpoint is **not** wired yet; see [Production checklist](#production-checklist) before shipping.
+> **Status (2026-05-04):** Frontend-only first cut. Three public routes are live and rendering against an **in-bundle mock layer that exists purely as a reference implementation**. Both `frontend/src/features/blog/mock-api.ts` and `frontend/src/features/blog/mock-data.ts` are placeholders — they will be **deleted and replaced** when the Directus CMS + CDN go live (Directus serves the article metadata and the markdown body via a CDN-fronted endpoint). See [Mock layer](#mock-layer-placeholder-for-directus--cdn) and the [Production checklist](#production-checklist) for the swap path.
 
 ## Overview
 
 The blog is a public-facing reading surface for product writing — engineering deep-dives, security notes, design decisions. It lives entirely on the frontend SPA, alongside the landing page, and reuses the landing's chrome (logo, footer, navbar styling) so it reads as the same product, not a separate microsite.
 
-The data model mirrors a Directus `blog_articles` collection so that, when the CMS lands, the frontend swap is one-line per endpoint.
+The data model mirrors a Directus `blog_articles` collection so that, when the Directus CMS + CDN endpoint land, the frontend swap is one line per fetch helper. **Until then, the mock files in `frontend/src/features/blog/` stand in as a reference implementation only.** Nothing in the mock is intended to ship to production.
 
 ---
 
@@ -64,7 +64,11 @@ interface DirectusItemResponse<T> { data: T | null }
 
 ---
 
-## Mock vs production
+## Mock layer (placeholder for Directus + CDN)
+
+> **Reference implementation only.** `mock-api.ts` and `mock-data.ts` exist so the routes, components, loading states, and prose styling can be developed end-to-end before the Directus CMS and CDN endpoint exist. **Both files will be deleted** when the real backend is wired. Treat them as scaffolding, not as code that ships.
+
+### What's here today
 
 `frontend/src/features/blog/mock-api.ts` exposes three async helpers with the same signatures the real client will need:
 
@@ -74,7 +78,29 @@ fetchArticleBySlug(slug: string): Promise<DirectusItemResponse<BlogArticle>>
 fetchArticleById(id: string): Promise<DirectusItemResponse<BlogArticle>>
 ```
 
-Today these read from `mock-data.ts` with a 250 ms simulated latency. **In production they should be replaced with `fetch()` calls against the CDN-fronted endpoint** (Directus `/items/blog_articles`, or whatever proxy fronts it). The mock file carries a `SHIP NOTE` comment at the top calling this out.
+These read from `mock-data.ts` (5 articles — 4 published, 1 draft for preview testing) with a 250 ms simulated latency. The mock file carries a `SHIP NOTE` comment at the top reiterating that it must not ship.
+
+### What replaces them
+
+When the Directus CMS lands and a CDN bucket is configured, the future state is:
+
+| Today (mock) | Future (Directus + CDN) |
+|---|---|
+| `mock-data.ts` — markdown bodies bundled into the JS chunk | Directus stores articles; markdown bodies live in the `body` field (or in a content repo committed by a publish Flow) and are served via the CDN-fronted endpoint |
+| `mock-api.ts` — `Promise.resolve(MOCK_ARTICLES)` after a `setTimeout` | Real `fetch(import.meta.env.VITE_BLOG_CDN_URL + '/items/blog_articles?...')` calls returning the same `{ data: ... }` envelope |
+| Hero images — Unsplash URLs hardcoded | `hero_image.url` resolved by Directus to a CDN asset URL |
+| Preview UUID — hardcoded in the bundle, recoverable from JS | Server-enforced lookup at the CDN/Directus layer; the UUID is the only entry point and cannot be enumerated |
+
+### The swap, file by file
+
+When the backend is ready:
+
+1. **Replace** the body of each function in `mock-api.ts` with a `fetch()` call against the configured CDN URL. Keep the function signatures and the `{ data: ... }` envelope identical so no caller changes.
+2. **Delete** `mock-data.ts` entirely. Anything still importing it is a leak to fix.
+3. **Add** `VITE_BLOG_CDN_URL` (and any read token / preview token) to `frontend/.env.example` and document them in [`docs/ENV.md`](./ENV.md).
+4. **Keep** `types.ts`, `utils.ts`, `article-body.tsx`, every page component, every other component, and the routing untouched. They consume the same `BlogArticle` shape regardless of where it comes from.
+
+The contract that protects this is: nothing outside `mock-api.ts` imports `mock-data.ts`. Page components import only the API helpers, not the data. So replacing the data source is a one-file change.
 
 ---
 
@@ -138,14 +164,14 @@ All mappings live in `frontend/src/features/blog/components/article-body.tsx`.
 
 ```
 frontend/src/features/blog/
-├── types.ts                          # Directus-shape TypeScript interfaces
-├── mock-data.ts                      # 5 articles (4 published + 1 draft for preview testing)
-├── mock-api.ts                       # 3 async fetch helpers (250 ms simulated latency)
-├── utils.ts                          # estimateReadingMinutes(body)
-├── blog-index-page.tsx               # /blog
-├── blog-detail-page.tsx              # /blog/$slug
-├── blog-preview-page.tsx             # /preview/$id
-└── components/
+├── types.ts                          # Directus-shape TypeScript interfaces (KEEP)
+├── mock-data.ts                      # ⚠ PLACEHOLDER — 5 reference articles. DELETE when Directus + CDN land.
+├── mock-api.ts                       # ⚠ PLACEHOLDER — async helpers reading mock-data. REWRITE bodies to fetch() against the CDN; keep signatures.
+├── utils.ts                          # estimateReadingMinutes(body) (KEEP)
+├── blog-index-page.tsx               # /blog (KEEP)
+├── blog-detail-page.tsx              # /blog/$slug (KEEP)
+├── blog-preview-page.tsx             # /preview/$id (KEEP)
+└── components/                       # All KEEP — consume the BlogArticle shape, not the data source
     ├── blog-shell.tsx                # navbar (matches landing) + LandingFooter wrapper
     ├── article-card.tsx              # grid item: cover + mono category + serif title
     ├── article-meta.tsx              # author chip + date + reading time strip
@@ -155,10 +181,12 @@ frontend/src/features/blog/
     └── status-badge.tsx              # for the preview banner
 
 frontend/src/pages/
-├── blog-index.tsx                    # thin lazy re-export
-├── blog-detail.tsx                   # thin lazy re-export
-└── blog-preview.tsx                  # thin lazy re-export
+├── blog-index.tsx                    # thin lazy re-export (KEEP)
+├── blog-detail.tsx                   # thin lazy re-export (KEEP)
+└── blog-preview.tsx                  # thin lazy re-export (KEEP)
 ```
+
+**Boundary contract:** only `mock-api.ts` imports `mock-data.ts`. No page or component imports the mock data directly. This is what makes the swap a one-file change rather than a refactor.
 
 Wired into:
 
@@ -174,8 +202,9 @@ Markdown deps in `frontend/package.json`: `react-markdown`, `remark-gfm`, `rehyp
 
 Before shipping the blog publicly:
 
-- [ ] **Replace the mock API.** Wire `mock-api.ts` to a real `fetch()` against the CDN endpoint. Delete `mock-data.ts` so unpublished article bodies don't ship in the JS bundle.
-- [ ] **Confirm the preview-URL secret is server-enforced.** With the mock, the draft article and its UUID are bundled into the public JS — anyone who reads the bundle can recover the preview URL. The real backend must gate `/preview/<uuid>` behind a server-side lookup that doesn't enumerate.
+- [ ] **Replace the mock layer with Directus + CDN.** Rewrite the function bodies in `mock-api.ts` as real `fetch()` calls against `VITE_BLOG_CDN_URL` (Directus `/items/blog_articles` or whatever proxy fronts it), keeping the signatures and `{ data: ... }` envelope identical. **Delete `mock-data.ts` entirely** so reference content (including the draft article body) doesn't ship in the JS bundle. See [Mock layer](#mock-layer-placeholder-for-directus--cdn).
+- [ ] **Confirm the preview-URL secret is server-enforced.** With the mock, the draft article and its UUID are bundled into the public JS — anyone who reads the bundle can recover the preview URL. The real Directus + CDN must gate `/preview/<uuid>` behind a server-side lookup that doesn't enumerate.
+- [ ] **Add CDN env vars.** `VITE_BLOG_CDN_URL` (and any read/preview tokens) need to land in `frontend/.env.example` and be documented in [`docs/ENV.md`](./ENV.md).
 - [ ] **CORS / CDN cache headers.** The CDN endpoint should serve `published` articles with long cache TTLs and `draft`/`in_review` with `no-store`.
 - [ ] **Sitemap + RSS.** Neither is implemented yet. `/sitemap.xml` should list all `published` articles; an RSS feed at `/blog/rss.xml` is the smallest meaningful affordance for subscribers.
 - [ ] **SEO meta tags.** Detail pages currently set no `<title>` or `<meta description>` on the document. Add an `og:image` fallback to the hero image.
