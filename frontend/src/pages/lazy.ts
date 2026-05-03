@@ -227,3 +227,12 @@ export const OrgDeveloperAppDetailPage = lazy(() =>
 export const OrgJoinPage = lazy(() =>
   import("@/pages/org-join").then((m) => ({ default: m.OrgJoinPage })),
 );
+export const BlogIndexPage = lazy(() =>
+  import("@/pages/blog-index").then((m) => ({ default: m.BlogIndexPage })),
+);
+export const BlogDetailPage = lazy(() =>
+  import("@/pages/blog-detail").then((m) => ({ default: m.BlogDetailPage })),
+);
+export const BlogPreviewPage = lazy(() =>
+  import("@/pages/blog-preview").then((m) => ({ default: m.BlogPreviewPage })),
+);

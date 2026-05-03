@@ -69,6 +69,9 @@ import {
   OrgServiceAccountDetailPage,
   OrgDeveloperAppDetailPage,
   OrgJoinPage,
+  BlogIndexPage,
+  BlogDetailPage,
+  BlogPreviewPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
@@ -158,6 +161,24 @@ const privacyRoute = createRoute({
   path: "/privacy",
   getParentRoute: () => rootRoute,
   component: PrivacyPage,
+});
+
+const blogIndexRoute = createRoute({
+  path: "/blog",
+  getParentRoute: () => rootRoute,
+  component: BlogIndexPage,
+});
+
+const blogDetailRoute = createRoute({
+  path: "/blog/$slug",
+  getParentRoute: () => rootRoute,
+  component: BlogDetailPage,
+});
+
+const blogPreviewRoute = createRoute({
+  path: "/preview/$id",
+  getParentRoute: () => rootRoute,
+  component: BlogPreviewPage,
 });
 
 const cliAuthRoute = createRoute({
@@ -568,6 +589,9 @@ const routeTree = rootRoute.addChildren([
   oauthConsentRoute,
   oauthErrorRoute,
   privacyRoute,
+  blogIndexRoute,
+  blogDetailRoute,
+  blogPreviewRoute,
   cliAuthRoute,
   cliPairRoute,
   sshTerminalRoute,
