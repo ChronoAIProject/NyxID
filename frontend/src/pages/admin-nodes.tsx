@@ -195,7 +195,6 @@ export function AdminNodesPage() {
                   <TableHead>Name</TableHead>
                   <TableHead>User</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Bindings</TableHead>
                   <TableHead>Requests</TableHead>
                   <TableHead>Success Rate</TableHead>
                   <TableHead>Avg Latency</TableHead>
@@ -228,11 +227,6 @@ export function AdminNodesPage() {
                         status={node.status}
                         isConnected={node.is_connected}
                       />
-                    </TableCell>
-                    <TableCell>
-                      <span className="text-sm text-muted-foreground">
-                        {String(node.binding_count)}
-                      </span>
                     </TableCell>
                     <TableCell>
                       <span className="text-sm tabular-nums text-muted-foreground">
@@ -343,7 +337,7 @@ export function AdminNodesPage() {
             <DialogDescription>
               {actionTarget?.action === "disconnect"
                 ? `Are you sure you want to force-disconnect "${actionTarget.node.name}"? The node will need to reconnect.`
-                : `Are you sure you want to delete "${actionTarget?.node.name ?? ""}"? This will remove the node and all its service bindings. This action cannot be undone.`}
+                : `Are you sure you want to delete "${actionTarget?.node.name ?? ""}"? This will remove the node and detach any AI Services routed through it. This action cannot be undone.`}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

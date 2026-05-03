@@ -19,7 +19,6 @@
  */
 
 import type { ReactNode } from "react"
-import { PortalMarkLogo } from "@/components/shared/portal-mark-logo"
 import { WizardFooter } from "./wizard-footer"
 import { formatStepLabel, type WizardStep } from "./step-label"
 
@@ -35,11 +34,8 @@ export function WizardShell({ step, context, localOrigin, children }: WizardShel
     <div className="min-h-screen bg-background text-foreground">
     <div className="mx-auto flex min-h-screen max-h-screen w-full max-w-[1040px] flex-col px-6 pt-10 pb-6">
       <header className="mb-6 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <PortalMarkLogo size={36} className="shrink-0" />
-          <span className="font-serif text-[24px] leading-none tracking-[0.5px] text-void-300">
-            NyxID
-          </span>
+        <div className="flex items-center">
+          <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-9 w-auto" />
         </div>
         {step ? (
           <div className="text-sm text-muted-foreground">{formatStepLabel(step)}</div>
