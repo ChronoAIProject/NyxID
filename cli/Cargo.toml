@@ -39,7 +39,7 @@ russh = "0.58.0"
 # Node agent dependencies
 toml = "1.0"
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.12"
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive"] }
