@@ -132,7 +132,7 @@ The full click-through flow is in **[Add your first AI Service](docs/connecting-
 
 Run NyxID on your own machine. This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
 
-**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash-compatible terminal. The `nyxid` CLI is optional. Full prereqs and disk budgets in [docs/QUICKSTART.md](docs/QUICKSTART.md#prerequisites).
+**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a terminal — bash *or* PowerShell, whichever your machine has. Pick the matching quickstart: **[Bash](docs/QUICKSTART_BASH.md)** (macOS, Linux, [WSL](https://learn.microsoft.com/en-us/windows/wsl/install), or [Git Bash](https://gitforwindows.org/) on Windows) or **[PowerShell](docs/QUICKSTART_POWERSHELL.md)** (native Windows, PS 7+ and OpenSSL). The `nyxid` CLI is optional. Per-shell prereqs and disk budgets are listed in each quickstart's intro.
 
 #### AI-Assisted (Recommended)
 
@@ -141,7 +141,7 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste the prom
 <details>
 <summary><strong>Click to expand the full AI-assisted self-host prompt</strong></summary>
 
-> I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full quickstart interactively. If anything fails or I'd prefer to follow the manual steps myself, the full step-by-step with troubleshooting is at https://github.com/ChronoAIProject/NyxID/blob/main/docs/QUICKSTART.md.
+> I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full quickstart interactively. If anything fails or I'd prefer to follow the manual steps myself, the full step-by-step with troubleshooting is at https://github.com/ChronoAIProject/NyxID/blob/main/docs/QUICKSTART_BASH.md (or https://github.com/ChronoAIProject/NyxID/blob/main/docs/QUICKSTART_POWERSHELL.md if I'm on native Windows PowerShell).
 > 1. Confirm Docker is installed and running before touching anything (check `git`, `docker`, `openssl`, `curl`, `docker compose` v2, and `docker info`).
 > 2. **Before cloning or generating anything, check whether NyxID install STATE is present** — look for a `./NyxID/.env.dev` file OR any Docker volume matching `nyx*_mongodb_data` (run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$'` — this catches the default `nyxid_mongodb_data` plus any variant from a renamed checkout). A bare `./NyxID` directory alone does NOT count as "installed" — `uninstall.sh` leaves the source tree in place, so the directory can exist with no state. **If install state is present, stop and tell me the quickstart is a first-time-only install.** Ask whether I want to (a) uninstall first — if `./NyxID` exists, run `cd NyxID && ./scripts/uninstall.sh --yes && cd ..`; if only the stale Docker volume is orphaned (checkout was manually deleted earlier), run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` directly. Either path wipes the volume, containers, and (for the script path) `.env.dev`/keys — destroys all NyxID accounts and encrypted credentials. Or (b) keep my existing install and stop here — I can verify it's still running with `curl -sf http://localhost:3001/health`. Do not proceed to step 3 until I answer.
 > 3. If `./NyxID` already exists (post-uninstall reinstall), `cd` into it; otherwise clone the repo into the current directory and `cd` in. Generate `.env.dev` with a fresh `ENCRYPTION_KEY` and `MONGO_ROOT_PASSWORD` (set `ENVIRONMENT=development`, `INVITE_CODE_REQUIRED=false`, `AUTO_VERIFY_EMAIL=true`, and `EMAIL_AUTH_ENABLED=true` so I don't get stuck on email verification or a locked-down signup page), symlink it to `.env.production`, create the PKCS#1 JWT signing keys under `keys/` (with a LibreSSL fallback using `-pubout` if `-RSAPublicKey_out` isn't supported), then pull images and start the stack with `docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d`. Wait up to 90 seconds for `http://localhost:3001/health` to return 200 — if it times out, tell me to run `docker logs nyxid-backend`. If the logs show `SCRAM failure: Authentication failed`, that means the MongoDB volume has a stale password from a previous install — tell me to run `./scripts/uninstall.sh --yes` (or, if the checkout is gone, `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` to remove any nyx-flavored orphan volume) and retry. Show me the generated `ENCRYPTION_KEY` so I can back it up.
@@ -155,13 +155,13 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste the prom
 
 #### Manual Setup
 
-Prefer to run each step yourself, or need the full troubleshooting guide? The complete manual flow lives in **[docs/QUICKSTART.md](docs/QUICKSTART.md)**:
+Prefer to run each step yourself, or need the full troubleshooting guide? The complete manual flow lives in **[docs/QUICKSTART_BASH.md](docs/QUICKSTART_BASH.md)** (or **[docs/QUICKSTART_POWERSHELL.md](docs/QUICKSTART_POWERSHELL.md)** for native Windows PowerShell):
 
-- System preflight check — [Step 1](docs/QUICKSTART.md#step-1-of-3--check-your-system)
-- One paste-block install — [Step 2](docs/QUICKSTART.md#step-2-of-3--install-and-start)
-- Register your account — [Step 3](docs/QUICKSTART.md#step-3-of-3--register-and-connect)
-- Optional [CLI install](docs/QUICKSTART.md#optional-install-the-nyxid-cli)
-- [Uninstall & reinstall](docs/QUICKSTART.md#uninstall--reinstall), [orphan volume recovery](docs/QUICKSTART.md#recovering-an-orphan-volume), and [SCRAM failure](docs/QUICKSTART.md#stuck-on-scram-failure) troubleshooting
+- System preflight check — [Step 1](docs/QUICKSTART_BASH.md#step-1-of-3--check-your-system)
+- One paste-block install — [Step 2](docs/QUICKSTART_BASH.md#step-2-of-3--install-and-start)
+- Register your account — [Step 3](docs/QUICKSTART_BASH.md#step-3-of-3--register-and-connect)
+- Optional [CLI install](docs/QUICKSTART_BASH.md#optional-install-the-nyxid-cli)
+- [Uninstall & reinstall](docs/QUICKSTART_BASH.md#uninstall--reinstall), [orphan volume recovery](docs/QUICKSTART_BASH.md#recovering-an-orphan-volume), and [SCRAM failure](docs/QUICKSTART_BASH.md#stuck-on-scram-failure) troubleshooting
 
 Once NyxID is running and you've registered at `http://localhost:3000`:
 
@@ -202,7 +202,8 @@ nyxid catalog endpoints my-local-api
 | Topic | Link | Description |
 |-------|------|-------------|
 | Connecting AI Services | [docs/connecting-services/](docs/connecting-services/) | Add your first (or Nth) AI Service — Web UI / CLI / AI-driven / Direct API |
-| Quickstart (manual) | [docs/QUICKSTART.md](docs/QUICKSTART.md) | Step-by-step self-host + troubleshooting |
+| Quickstart (Bash, default) | [docs/QUICKSTART_BASH.md](docs/QUICKSTART_BASH.md) | Step-by-step self-host + troubleshooting |
+| Quickstart (PowerShell) | [docs/QUICKSTART_POWERSHELL.md](docs/QUICKSTART_POWERSHELL.md) | Native Windows PowerShell equivalent |
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
 | Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |

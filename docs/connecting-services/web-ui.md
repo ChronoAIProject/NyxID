@@ -57,7 +57,7 @@ The example curl on the service detail page authenticates to NyxID with `X-API-K
 3. Paste it in your terminal. **Replace the literal `nyx_...` placeholder with the Agent Key you just copied** (the example block is a template — the placeholder won't work as-is).
 4. Run it.
 
-> **Windows users:** If you paste the copied curl into PowerShell, change bash `\` continuations to backticks and run `curl.exe`. In CMD, use `^` for continuations. If you set environment variables manually, PowerShell uses `$env:NAME="value"` and CMD uses `set NAME=value`.
+> **Windows users:** This curl is bash. Run it from [Git Bash](https://gitforwindows.org/) or [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) — pasting into raw PowerShell or CMD will fail on the `\` line continuations.
 
 You should see a chat-completion JSON response from OpenAI — the body has `"choices": [...]` with a generated message. That's your first proxied call. The same Agent Key works for every service you add later (as long as the key has the `proxy` scope).
 
@@ -65,7 +65,7 @@ You should see a chat-completion JSON response from OpenAI — the body has `"ch
 
 Console URL: **http://localhost:3000** (port 3000, while the API runs on 3001).
 
-Same steps as hosted, except you sign in with the account you registered against your local instance. If you don't have NyxID running locally yet, see [docs/QUICKSTART.md](../QUICKSTART.md) first.
+Same steps as hosted, except you sign in with the account you registered against your local instance. If you don't have NyxID running locally yet, see [docs/QUICKSTART_BASH.md](../QUICKSTART_BASH.md) first (or [docs/QUICKSTART_POWERSHELL.md](../QUICKSTART_POWERSHELL.md) on native Windows PowerShell).
 
 ## What if the curl errors?
 

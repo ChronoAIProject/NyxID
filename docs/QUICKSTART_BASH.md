@@ -1,6 +1,8 @@
-# NyxID Self-Host Quickstart
+# NyxID Self-Host Quickstart (Bash)
 
 Step-by-step manual setup for running NyxID on your own machine, plus troubleshooting, uninstall/reinstall, and post-install AI-agent wiring.
+
+> **On Windows native PowerShell?** This quickstart uses bash heredocs, `openssl`, and POSIX path tools. See **[QUICKSTART_POWERSHELL.md](QUICKSTART_POWERSHELL.md)** for the PowerShell equivalent. Otherwise, run this from macOS Terminal, a Linux shell, [WSL](https://learn.microsoft.com/en-us/windows/wsl/install), or [Git Bash](https://gitforwindows.org/).
 
 For the one-paragraph overview and the AI-assisted setup prompt (drive the whole flow from Claude Code / Cursor), see the [README Quick Start](../README.md#quick-start).
 
@@ -8,8 +10,8 @@ For the one-paragraph overview and the AI-assisted setup prompt (drive the whole
 
 ## Prerequisites
 
+- **A bash-compatible shell** — required. macOS Terminal, any Linux shell, [WSL (Windows Subsystem for Linux)](https://learn.microsoft.com/en-us/windows/wsl/install), or [Git Bash](https://gitforwindows.org/) on Windows. Steps 1 and 2 use bash heredocs (`<< 'CHECK'`, `<< 'INSTALL'`) and POSIX tools (`openssl`, `xargs`, `grep -E`) that don't run in raw PowerShell or CMD. *On native PowerShell? Use [QUICKSTART_POWERSHELL.md](QUICKSTART_POWERSHELL.md) instead.*
 - [Docker](https://docs.docker.com/get-docker/) — required for the server stack (backend, frontend, MongoDB). ~2 GB disk for images on first pull.
-- A bash-compatible terminal — macOS Terminal, Linux shell, or [WSL (Windows Subsystem for Linux)](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows.
 - [Rust / Cargo](https://www.rust-lang.org/tools/install) — **optional**, only needed if you install the `nyxid` CLI (see [Install the `nyxid` CLI](#optional-install-the-nyxid-cli) below). The installer will set this up automatically if missing. Budget ~1.5 GB disk (~300 MB for the toolchain plus ~1 GB for the build cache) and 3–10 minutes for the first compile.
 
 Total disk footprint: ~2 GB for the server only, ~3.5 GB if you also install the CLI from source.
