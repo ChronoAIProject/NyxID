@@ -63,19 +63,7 @@ The example curl on the service detail page authenticates to NyxID with `X-API-K
 3. Paste it in your terminal. **Replace the literal `nyx_...` placeholder with the Agent Key you just copied** (the example block is a template — the placeholder won't work as-is).
 4. Run it.
 
-> **Windows users:** This curl is bash. The simplest path is to run it from [Git Bash](https://gitforwindows.org/) or [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) — pasting into raw PowerShell or CMD will fail on the `\` line continuations.
->
-> Staying in raw PowerShell? The equivalent for the OpenAI verification path the walkthrough prescribes is:
->
-> ```powershell
-> $env:NYX_API_KEY = "nyx_..."  # replace with your Agent Key
-> curl.exe -X POST "https://nyx.chrono-ai.fun/api/v1/proxy/s/llm-openai/v1/chat/completions" `
->   -H "X-API-Key: $env:NYX_API_KEY" `
->   -H "Content-Type: application/json" `
->   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
-> ```
->
-> Use `curl.exe`, not `curl` — `curl` in PowerShell is an alias for `Invoke-WebRequest`. For services other than OpenAI, copy the bash curl from the UI and replace each `\` continuation with a backtick.
+> **Windows users:** Run this curl from a WSL Ubuntu shell — see [Windows setup](../../README.md#windows-setup) in the main README. Native PowerShell and CMD are not supported.
 
 You should see a chat-completion JSON response from OpenAI — the body has `"choices": [...]` with a generated message. That's your first proxied call. The same Agent Key works for every service you add later (as long as the key has the `proxy` scope).
 
@@ -83,7 +71,7 @@ You should see a chat-completion JSON response from OpenAI — the body has `"ch
 
 Console URL: **http://localhost:3000** (port 3000, while the API runs on 3001).
 
-Same steps as hosted, except you sign in with the account you registered against your local instance. If you don't have NyxID running locally yet, see [docs/QUICKSTART_BASH.md](../QUICKSTART_BASH.md) first (or [docs/QUICKSTART_POWERSHELL.md](../QUICKSTART_POWERSHELL.md) on native Windows PowerShell).
+Same steps as hosted, except you sign in with the account you registered against your local instance. If you don't have NyxID running locally yet, see [docs/QUICKSTART_BASH.md](../QUICKSTART_BASH.md) first.
 
 ## What if the curl errors?
 

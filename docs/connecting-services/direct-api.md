@@ -21,7 +21,7 @@ export NYX_API_KEY=nyx_...
 export NYXID_BASE=<BASE_URL>
 ```
 
-> **Windows users:** The examples below use bash syntax. In PowerShell, use `$env:NYX_API_KEY="nyx_..."` and `$env:NYXID_BASE="<BASE_URL>"`; in CMD, use `set NYX_API_KEY=nyx_...` and `set NYXID_BASE=<BASE_URL>`. Replace bash `\` continuations with PowerShell backticks or CMD `^`, and call `curl.exe` so PowerShell does not invoke its `curl` alias.
+> **Windows users:** Run these from a WSL Ubuntu shell — see [Windows setup](../../README.md#windows-setup) in the main README. Native PowerShell and CMD are not supported.
 
 ## Connect and verify
 
@@ -38,21 +38,6 @@ curl -X POST "$NYXID_BASE/api/v1/keys" \
     "credential": "<EXTERNAL_CREDENTIAL>",
     "label": "production-openai"
   }'
-```
-
-PowerShell equivalent:
-
-```powershell
-$body = @{
-  service_slug = "llm-openai"
-  credential = "<EXTERNAL_CREDENTIAL>"
-  label = "production-openai"
-} | ConvertTo-Json
-
-curl.exe -X POST "$env:NYXID_BASE/api/v1/keys" `
-  -H "X-API-Key: $env:NYX_API_KEY" `
-  -H "Content-Type: application/json" `
-  -d $body
 ```
 
 Verify the proxy. It should return a real OpenAI models response:

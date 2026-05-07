@@ -132,7 +132,17 @@ The full click-through flow is in **[Add your first AI Service](docs/connecting-
 
 Run NyxID on your own machine. This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
 
-**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a terminal — bash *or* PowerShell, whichever your machine has. Pick the matching quickstart: **[Bash](docs/QUICKSTART_BASH.md)** (macOS, Linux, [WSL](https://learn.microsoft.com/en-us/windows/wsl/install), or [Git Bash](https://gitforwindows.org/) on Windows) or **[PowerShell](docs/QUICKSTART_POWERSHELL.md)** (native Windows, PS 7+ and OpenSSL). The `nyxid` CLI is optional. Per-shell prereqs and disk budgets are listed in each quickstart's intro.
+**Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash shell. macOS and Linux already have one — Windows users, see [Windows setup](#windows-setup) below before going further. The `nyxid` CLI is optional. Full prereqs and disk budgets are in [QUICKSTART_BASH.md](docs/QUICKSTART_BASH.md).
+
+#### Windows setup
+
+Install WSL (Windows Subsystem for Linux) once, then run every command in the rest of this README from your Ubuntu shell:
+
+1. Open PowerShell as Administrator and run `wsl --install`. Restart when prompted.
+2. Install [Docker Desktop](https://docs.docker.com/desktop/install/windows-install/), then enable WSL integration: **Settings → Resources → WSL Integration → toggle on for your distro**.
+3. Launch Ubuntu (or your installed distro). Clone and work **inside the WSL filesystem** (e.g. `~/NyxID`) — avoid `/mnt/c/...` for I/O speed and to skip permission warnings during key generation.
+
+After that, the bash quickstart, `docker`, `nyxid`, and `curl` examples in this README run unchanged. NyxID does not support native PowerShell or CMD.
 
 #### AI-Assisted (Recommended)
 
@@ -141,7 +151,7 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste the prom
 <details>
 <summary><strong>Click to expand the full AI-assisted self-host prompt</strong></summary>
 
-> I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full quickstart interactively. If anything fails or I'd prefer to follow the manual steps myself, the full step-by-step with troubleshooting is at https://github.com/ChronoAIProject/NyxID/blob/main/docs/QUICKSTART_BASH.md (or https://github.com/ChronoAIProject/NyxID/blob/main/docs/QUICKSTART_POWERSHELL.md if I'm on native Windows PowerShell).
+> I want to self-host NyxID on this machine (the repo is https://github.com/ChronoAIProject/NyxID). Walk me through the full quickstart interactively. If anything fails or I'd prefer to follow the manual steps myself, the full step-by-step with troubleshooting is at https://github.com/ChronoAIProject/NyxID/blob/main/docs/QUICKSTART_BASH.md. If I'm on Windows, confirm I'm running from a WSL Ubuntu shell (not native PowerShell or CMD) before proceeding — see the README "Windows setup" section.
 > 1. Confirm Docker is installed and running before touching anything (check `git`, `docker`, `openssl`, `curl`, `docker compose` v2, and `docker info`).
 > 2. **Before cloning or generating anything, check whether NyxID install STATE is present** — look for a `./NyxID/.env.dev` file OR any Docker volume matching `nyx*_mongodb_data` (run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$'` — this catches the default `nyxid_mongodb_data` plus any variant from a renamed checkout). A bare `./NyxID` directory alone does NOT count as "installed" — `uninstall.sh` leaves the source tree in place, so the directory can exist with no state. **If install state is present, stop and tell me the quickstart is a first-time-only install.** Ask whether I want to (a) uninstall first — if `./NyxID` exists, run `cd NyxID && ./scripts/uninstall.sh --yes && cd ..`; if only the stale Docker volume is orphaned (checkout was manually deleted earlier), run `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` directly. Either path wipes the volume, containers, and (for the script path) `.env.dev`/keys — destroys all NyxID accounts and encrypted credentials. Or (b) keep my existing install and stop here — I can verify it's still running with `curl -sf http://localhost:3001/health`. Do not proceed to step 3 until I answer.
 > 3. If `./NyxID` already exists (post-uninstall reinstall), `cd` into it; otherwise clone the repo into the current directory and `cd` in. Generate `.env.dev` with a fresh `ENCRYPTION_KEY` and `MONGO_ROOT_PASSWORD` (set `ENVIRONMENT=development`, `INVITE_CODE_REQUIRED=false`, `AUTO_VERIFY_EMAIL=true`, and `EMAIL_AUTH_ENABLED=true` so I don't get stuck on email verification or a locked-down signup page), symlink it to `.env.production`, create the PKCS#1 JWT signing keys under `keys/` (with a LibreSSL fallback using `-pubout` if `-RSAPublicKey_out` isn't supported), then pull images and start the stack with `docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.production up -d`. Wait up to 90 seconds for `http://localhost:3001/health` to return 200 — if it times out, tell me to run `docker logs nyxid-backend`. If the logs show `SCRAM failure: Authentication failed`, that means the MongoDB volume has a stale password from a previous install — tell me to run `./scripts/uninstall.sh --yes` (or, if the checkout is gone, `docker volume ls --format '{{.Name}}' | grep -E 'nyx.*_mongodb_data$' | xargs -r docker volume rm` to remove any nyx-flavored orphan volume) and retry. Show me the generated `ENCRYPTION_KEY` so I can back it up.
@@ -155,12 +165,9 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste the prom
 
 #### Manual Setup
 
-Prefer to run each step yourself, or need the full troubleshooting guide? Pick the quickstart matching your shell:
+Prefer to run each step yourself, or need the full troubleshooting guide? Follow **[docs/QUICKSTART_BASH.md](docs/QUICKSTART_BASH.md)** (macOS, Linux, or Windows via WSL).
 
-- **Bash** — [docs/QUICKSTART_BASH.md](docs/QUICKSTART_BASH.md) (macOS, Linux, WSL, or Git Bash on Windows)
-- **PowerShell** — [docs/QUICKSTART_POWERSHELL.md](docs/QUICKSTART_POWERSHELL.md) (native Windows, PowerShell 7+ and OpenSSL)
-
-Each covers:
+It covers:
 
 - System preflight check — [Step 1](docs/QUICKSTART_BASH.md#step-1-of-3--check-your-system)
 - One paste-block install — [Step 2](docs/QUICKSTART_BASH.md#step-2-of-3--install-and-start)
@@ -207,8 +214,7 @@ nyxid catalog endpoints my-local-api
 | Topic | Link | Description |
 |-------|------|-------------|
 | Connecting AI Services | [docs/connecting-services/](docs/connecting-services/) | Add your first (or Nth) AI Service — Web UI / CLI / AI-driven / Direct API |
-| Quickstart (Bash, default) | [docs/QUICKSTART_BASH.md](docs/QUICKSTART_BASH.md) | Step-by-step self-host + troubleshooting |
-| Quickstart (PowerShell) | [docs/QUICKSTART_POWERSHELL.md](docs/QUICKSTART_POWERSHELL.md) | Native Windows PowerShell equivalent |
+| Quickstart | [docs/QUICKSTART_BASH.md](docs/QUICKSTART_BASH.md) | Step-by-step self-host + troubleshooting (macOS, Linux, Windows via WSL) |
 | Deployment | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Start here for production setup |
 | AI Agent Playbook | [docs/AI_AGENT_PLAYBOOK.md](docs/AI_AGENT_PLAYBOOK.md) | Start here for agent integration |
 | Architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flows |

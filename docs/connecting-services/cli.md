@@ -18,16 +18,7 @@ nyxid login --base-url <BASE_URL>
 
 `nyxid login` opens your browser and stores a session locally. The steps below reuse it.
 
-<details>
-<summary><strong>Windows / native PowerShell</strong></summary>
-
-The bash one-liner above runs as-is in [Git Bash](https://gitforwindows.org/) / [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). For native PowerShell, install the CLI via [cargo](../QUICKSTART_POWERSHELL.md#optional-install-the-nyxid-cli), then:
-
-```powershell
-nyxid login --base-url https://nyx-api.chrono-ai.fun  # or http://localhost:3001 for self-host
-```
-
-</details>
+> **Windows users:** run every command on this page from a WSL Ubuntu shell — see [Windows setup](../../README.md#windows-setup) in the main README.
 
 ## Connect and verify
 
@@ -56,19 +47,6 @@ nyxid proxy request <RETURNED_SERVICE_SLUG> models
 ```
 
 Success looks like an `HTTP/1.1 200` response carrying a real provider JSON body. For OpenAI's `models` endpoint that is `{"object":"list","data":[{"id":"gpt-...","object":"model",...}, ...]}`. If you see `401`, `403`, `5xx`, or an HTML error page instead, see [Did it work?](README.md#did-it-work) in the hub.
-
-<details>
-<summary><strong>Windows / native PowerShell</strong></summary>
-
-```powershell
-$env:OPENAI_API_KEY = "sk-..."
-nyxid service add llm-openai --credential-env OPENAI_API_KEY
-nyxid proxy request <RETURNED_SERVICE_SLUG> models
-```
-
-Replace `<RETURNED_SERVICE_SLUG>` with the slug `nyxid service add` prints.
-
-</details>
 
 You're done with the required path. The sections below are **optional**, **advanced**, or **maintenance** — skip them unless you need them.
 
