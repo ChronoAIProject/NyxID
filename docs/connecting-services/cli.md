@@ -18,7 +18,16 @@ nyxid login --base-url <BASE_URL>
 
 `nyxid login` opens your browser and stores a session locally. The steps below reuse it.
 
-> **Windows users:** The examples below use bash syntax. In PowerShell, set environment variables with `$env:NAME="value"` and use backticks instead of `\` for line continuations. In CMD, use `set NAME=value` and `^` for line continuations. If you adapt any `curl` example, run `curl.exe` so PowerShell does not invoke its `curl` alias.
+<details>
+<summary><strong>Windows / native PowerShell</strong></summary>
+
+The bash one-liner above runs as-is in [Git Bash](https://gitforwindows.org/) / [WSL](https://learn.microsoft.com/en-us/windows/wsl/install). For native PowerShell, install the CLI via [cargo](../QUICKSTART_POWERSHELL.md#optional-install-the-nyxid-cli), then:
+
+```powershell
+nyxid login --base-url https://nyx-api.chrono-ai.fun  # or http://localhost:3001 for self-host
+```
+
+</details>
 
 ## Connect and verify
 
@@ -26,16 +35,8 @@ Substitute your real OpenAI / Anthropic / GitHub key for `sk-...` below — this
 
 ### Step 1 — Set the provider credential
 
-macOS / Linux / Git Bash:
-
 ```bash
 export OPENAI_API_KEY=sk-...
-```
-
-Windows PowerShell:
-
-```powershell
-$env:OPENAI_API_KEY="sk-..."
 ```
 
 ### Step 2 — Add the service from the catalog
@@ -43,8 +44,6 @@ $env:OPENAI_API_KEY="sk-..."
 ```bash
 nyxid service add llm-openai --credential-env OPENAI_API_KEY
 ```
-
-The same command works in PowerShell once Step 1's env var is set.
 
 ### Step 3 — Copy the returned slug
 
@@ -57,6 +56,19 @@ nyxid proxy request <RETURNED_SERVICE_SLUG> models
 ```
 
 Success looks like an `HTTP/1.1 200` response carrying a real provider JSON body. For OpenAI's `models` endpoint that is `{"object":"list","data":[{"id":"gpt-...","object":"model",...}, ...]}`. If you see `401`, `403`, `5xx`, or an HTML error page instead, see [Did it work?](README.md#did-it-work) in the hub.
+
+<details>
+<summary><strong>Windows / native PowerShell</strong></summary>
+
+```powershell
+$env:OPENAI_API_KEY = "sk-..."
+nyxid service add llm-openai --credential-env OPENAI_API_KEY
+nyxid proxy request <RETURNED_SERVICE_SLUG> models
+```
+
+Replace `<RETURNED_SERVICE_SLUG>` with the slug `nyxid service add` prints.
+
+</details>
 
 You're done with the required path. The sections below are **optional**, **advanced**, or **maintenance** — skip them unless you need them.
 
