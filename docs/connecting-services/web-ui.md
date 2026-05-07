@@ -63,7 +63,7 @@ The example curl on the service detail page authenticates to NyxID with `X-API-K
 3. Paste it in your terminal. **Replace the literal `nyx_...` placeholder with the Agent Key you just copied** (the example block is a template — the placeholder won't work as-is).
 4. Run it.
 
-> **Windows users:** Run this curl from a Unix-compatible shell — WSL Ubuntu (recommended) or Git Bash both work. See [Windows setup](../../README.md#windows-setup) in the main README.
+> **Windows users:** Run this curl from a Unix-compatible shell — WSL Ubuntu (recommended) or Git Bash both work. See [docs/WINDOWS_SETUP.md](../WINDOWS_SETUP.md) for the one-time setup.
 
 You should see a chat-completion JSON response from OpenAI — the body has `"choices": [...]` with a generated message. That's your first proxied call. The same Agent Key works for every service you add later (as long as the key has the `proxy` scope).
 

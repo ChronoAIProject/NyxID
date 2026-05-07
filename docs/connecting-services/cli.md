@@ -18,7 +18,7 @@ nyxid login --base-url <BASE_URL>
 
 `nyxid login` opens your browser and stores a session locally. The steps below reuse it.
 
-> **Windows users:** Run every command on this page from a Unix-compatible shell — WSL Ubuntu (recommended) or Git Bash both work. See [Windows setup](../../README.md#windows-setup) in the main README.
+> **Windows users:** Run every command on this page from a Unix-compatible shell — WSL Ubuntu (recommended) or Git Bash both work. See [docs/WINDOWS_SETUP.md](../WINDOWS_SETUP.md) for the one-time setup.
 
 ## Connect and verify
 

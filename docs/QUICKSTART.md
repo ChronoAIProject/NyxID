@@ -2,7 +2,7 @@
 
 Step-by-step manual setup for running NyxID on your own machine, plus troubleshooting, uninstall/reinstall, and post-install AI-agent wiring.
 
-> **On Windows?** Install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (`wsl --install`), enable Docker Desktop's WSL integration (**Settings → Resources → WSL Integration**), then run this quickstart from your Ubuntu shell. The full one-time setup is in the [README "Windows setup" section](../README.md#windows-setup).
+> **On Windows?** Install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (`wsl --install`), enable Docker Desktop's WSL integration (**Settings → Resources → WSL Integration**), then run this quickstart from your Ubuntu shell. The full one-time setup is in [docs/WINDOWS_SETUP.md](WINDOWS_SETUP.md).
 
 For the one-paragraph overview and the AI-assisted setup prompt (drive the whole flow from Claude Code / Cursor), see the [README Quick Start](../README.md#quick-start).
 
