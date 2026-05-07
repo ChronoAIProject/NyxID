@@ -1,6 +1,6 @@
 # CLI — Connect an AI Service from the Terminal
 
-Three commands, one verification. End state: an `HTTP/1.1 200` response from your first proxied call.
+Four numbered steps. End state: an `HTTP/1.1 200` response from your first proxied call.
 
 For Web UI / AI-driven / Direct API, see the [hub](README.md).
 
@@ -16,48 +16,58 @@ nyxid login --base-url <BASE_URL>
 
 `<BASE_URL>` is `https://nyx-api.chrono-ai.fun` for hosted, `http://localhost:3001` for self-host.
 
-`nyxid login` opens your browser and stores a session locally. The next two commands reuse it.
+`nyxid login` opens your browser and stores a session locally. The steps below reuse it.
 
 > **Windows users:** The examples below use bash syntax. In PowerShell, set environment variables with `$env:NAME="value"` and use backticks instead of `\` for line continuations. In CMD, use `set NAME=value` and `^` for line continuations. If you adapt any `curl` example, run `curl.exe` so PowerShell does not invoke its `curl` alias.
 
 ## Connect and verify
 
-Set the **external service credential** in your shell first. This is your OpenAI / Anthropic / GitHub key, not a NyxID key. Substitute your real provider key:
+Substitute your real OpenAI / Anthropic / GitHub key for `sk-...` below — this is your **external service credential**, not a NyxID key.
+
+### Step 1 — Set the provider credential
+
+macOS / Linux / Git Bash:
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-In PowerShell, the same setup is:
+Windows PowerShell:
 
 ```powershell
 $env:OPENAI_API_KEY="sk-..."
 ```
 
-Connect a service from the catalog:
+### Step 2 — Add the service from the catalog
 
 ```bash
 nyxid service add llm-openai --credential-env OPENAI_API_KEY
 ```
 
-Copy the service slug returned by the CLI. If `llm-openai` already exists, the created slug may be `llm-openai-2` or another suffixed value. Use that returned slug in the verification call:
+The same command works in PowerShell once Step 1's env var is set.
+
+### Step 3 — Copy the returned slug
+
+The CLI prints a `Slug:` line in its output. If `llm-openai` already existed on your account, the new entry may be suffixed (e.g. `llm-openai-2`). **Use that exact slug in Step 4** — it is the only handle that addresses your specific service instance.
+
+### Step 4 — Verify with a proxied request
 
 ```bash
 nyxid proxy request <RETURNED_SERVICE_SLUG> models
 ```
 
-PowerShell uses the same `nyxid` commands after the environment variable is set:
+Success looks like an `HTTP/1.1 200` response carrying a real provider JSON body. For OpenAI's `models` endpoint that is `{"object":"list","data":[{"id":"gpt-...","object":"model",...}, ...]}`. If you see `401`, `403`, `5xx`, or an HTML error page instead, see [Did it work?](README.md#did-it-work) in the hub.
 
-```powershell
-nyxid service add llm-openai --credential-env OPENAI_API_KEY
-nyxid proxy request <RETURNED_SERVICE_SLUG> models
-```
+You're done with the required path. The sections below are **optional**, **advanced**, or **maintenance** — skip them unless you need them.
 
-If `proxy request` returns a real JSON response (not an auth error), you're done. The service is connected and the credential is good.
+## Optional — Browse the catalog
 
-## Browse the catalog
+To preview what slugs are available before adding a service:
 
-To see what slugs are available before adding, run the commands you need. `catalog list` shows connectable services only; `catalog list --all` also includes system services; `catalog show` prints details and capabilities; `catalog endpoints` prints parsed OpenAPI endpoints.
+- `nyxid catalog list` — connectable services only.
+- `nyxid catalog list --all` — also includes system services.
+- `nyxid catalog show <slug>` — details and capabilities for one service.
+- `nyxid catalog endpoints <slug>` — parsed OpenAPI endpoints for one service.
 
 ```bash
 nyxid catalog list
@@ -66,9 +76,9 @@ nyxid catalog show llm-openai
 nyxid catalog endpoints llm-openai
 ```
 
-## Custom (non-catalog) services
+## Advanced — Custom (non-catalog) services
 
-For a private API the catalog doesn't know about — `--custom` plus an `--endpoint-url`:
+For a private API the catalog doesn't know about, pass `--custom` plus an `--endpoint-url`:
 
 ```bash
 nyxid service add my-internal-api \
@@ -80,9 +90,9 @@ nyxid service add my-internal-api \
 
 For private APIs behind a firewall, see [docs/NODE_PROXY.md](../NODE_PROXY.md) for the credential node setup that punches through NAT.
 
-## Rotating credentials
+## Maintenance — Rotate credentials
 
-First find the service ID:
+Find the service ID:
 
 ```bash
 nyxid service list
