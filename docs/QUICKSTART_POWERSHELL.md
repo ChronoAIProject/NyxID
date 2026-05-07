@@ -73,7 +73,9 @@ if ((Test-Path 'NyxID/.env.dev') -or $staleVolume) {
     Write-Host "    cd NyxID; bash ./scripts/uninstall.sh --yes; cd .."
   } else {
     Write-Host "NyxID/ is gone but a stale MongoDB volume remains. Remove it, then re-paste:"
-    Write-Host "    docker volume ls --format '{{.Name}}' | Select-String 'nyx.*_mongodb_data$' | ForEach-Object { docker volume rm \$_.ToString().Trim() }"
+    Write-Host @'
+    docker volume ls --format '{{.Name}}' | Select-String 'nyx.*_mongodb_data$' | ForEach-Object { docker volume rm $_.ToString().Trim() }
+'@
   }
   return
 }
