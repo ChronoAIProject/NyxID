@@ -9,10 +9,10 @@ For Web UI / CLI / AI-driven, see the [hub](README.md).
 The recommended auth method for unattended automation is `X-API-Key`. Generate one in the web console:
 
 1. Sign in.
-2. Open **AI Services**, switch to the **Agent Keys** tab.
-3. Click **Create API Key**, give it a name.
-4. Under **Scopes**, select `proxy` (required for `/api/v1/proxy/...` — without it the proxy returns 403). If your script will also create / update / delete services via `POST /api/v1/keys`, add `write` as well — the management routes gate on `write` or `admin` only (the `services:write` badge is valid as a scope but is **not** honored by the management write check, so don't use it on its own).
-5. Click **Create** and copy the raw key (starts with `nyx_...`). It's shown once.
+2. Open `AI Services`, switch to the `Agent Keys` tab.
+3. Click `Create API Key`, give it a name.
+4. Under `Scopes`, select `proxy` (required for `/api/v1/proxy/...` — without it the proxy returns 403). If your script will also create / update / delete services via `POST /api/v1/keys`, add `write` as well — the management routes gate on `write` or `admin` only (the `services:write` badge is valid as a scope but is **not** honored by the management write check, so don't use it on its own).
+5. Click `Create` and copy the raw key (starts with `nyx_...`). It's shown once.
 
 Set it in your shell. `<BASE_URL>` is `https://nyx-api.chrono-ai.fun` for hosted, `http://localhost:3001` for self-host:
 

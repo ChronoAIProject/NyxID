@@ -14,46 +14,46 @@ If you don't have an account yet, register at [nyx.chrono-ai.fun/register](https
 
 ### 2. Add an AI Service
 
-1. Click **AI Services** in the left sidebar (you'll be on the **External Services** tab). The page shows your existing services and the **Add Service** button at top right.
+1. Click `AI Services` in the left sidebar (you'll be on the `External Services` tab). The page shows your existing services and the `Add Service` button at top right.
 
    ![AI Services page](img/01-ai-services.png)
 
-2. Click **Add Service**. The **Add AI Service** dialog opens with the catalog.
+2. Click `Add Service`. The `Add AI Service` dialog opens with the catalog.
 
    ![Add AI Service catalog](img/02-add-service-catalog.png)
 
-3. Pick **OpenAI** from the catalog. (Use OpenAI for verification — its example curl works out of the box. You can add Anthropic, GitHub, etc. afterward.)
+3. Pick `OpenAI` from the catalog. (Use OpenAI for verification — its example curl works out of the box. You can add Anthropic, GitHub, etc. afterward.)
 
-4. The **Configure Routing** step appears. Click the **Direct** card (NyxID proxies to OpenAI directly — the **Via Node** option is for self-hosted services behind a firewall). Then click **Next: Enter Credentials**.
+4. The `Configure Routing` step appears. Click the `Direct` card (NyxID proxies to OpenAI directly — the `Via Node` option is for self-hosted services behind a firewall). Then click `Next: Enter Credentials`.
 
    ![Configure Routing — Direct vs Via Node](img/03-routing-step.png)
 
-5. The **Configure Service** step appears. Paste your **provider API key** in the **API Key / Credential** field — for OpenAI, an `sk-...` key. This is the **external service's** credential, **not** a NyxID `nyx_...` key. NyxID stores it encrypted.
+5. The `Configure Service` step appears. Paste your **provider API key** in the `API Key / Credential` field — for OpenAI, an `sk-...` key. This is the **external service's** credential, **not** a NyxID `nyx_...` key. NyxID stores it encrypted.
 
    ![Configure Service — credential entry](img/04-credential-entry.png)
 
-6. Click **Create Service**. You land on the new service's detail page. Keep this tab open.
+6. Click `Create Service`. You land on the new service's detail page. Keep this tab open.
 
 ### 3. Create a NyxID Agent Key
 
 The example curl on the service detail page authenticates to NyxID with `X-API-Key: nyx_...` — that's a placeholder. You need to create the real key separately.
 
-1. Open a new tab on **AI Services** and switch to the **Agent Keys** tab.
-2. Click **Create API Key**. The **Create API Key** dialog opens.
+1. Open a new tab on `AI Services` and switch to the `Agent Keys` tab.
+2. Click `Create API Key`. The `Create API Key` dialog opens.
 
    ![Create API Key dialog with scope picker](img/06-create-agent-key.png)
 
 3. Give it a name (anything — `quickstart-test` is fine).
-4. Under **Scopes**, click the `proxy` badge so it's highlighted. The `proxy` scope is required for `/api/v1/proxy/...` requests; without it the proxy returns 403.
-5. Click **Create key**. The dialog shows your `nyx_...` key **once** — copy it now.
+4. Under `Scopes`, click the `proxy` badge so it's highlighted. The `proxy` scope is required for `/api/v1/proxy/...` requests; without it the proxy returns 403.
+5. Click `Create key`. The dialog shows your `nyx_...` key **once** — copy it now.
 
 ### 4. Run the verification curl
 
-1. Switch back to the service detail tab. Scroll to the **API Usage** section.
+1. Switch back to the service detail tab. Scroll to the `API Usage` section.
 
    ![API Usage section on service detail page](img/05-service-detail.png)
 
-2. Click the **copy icon** on the **Example (with API key)** curl block.
+2. Click the **copy icon** on the `Example (with API key)` curl block.
 3. Paste it in your terminal. **Replace the literal `nyx_...` placeholder with the Agent Key you just copied** (the example block is a template — the placeholder won't work as-is).
 4. Run it.
 
@@ -70,13 +70,13 @@ Same steps as hosted, except you sign in with the account you registered against
 ## What if the curl errors?
 
 - **401 Unauthorized from OpenAI** (downstream): the **provider** key you pasted in section 2 is wrong or revoked. Open the service's detail page and update the credential.
-- **403 Forbidden from NyxID**: your Agent Key is missing the `proxy` scope. Go back to **Agent Keys**, edit the key (or create a new one), and add `proxy`.
+- **403 Forbidden from NyxID**: your Agent Key is missing the `proxy` scope. Go back to `Agent Keys`, edit the key (or create a new one), and add `proxy`.
 - **401 from NyxID with `Missing API key`**: you forgot to replace the literal `nyx_...` placeholder in the copied curl with your real Agent Key.
 
 For other failure modes, see the **Did it work?** section in the [hub](README.md#did-it-work).
 
 ## Next
 
-- **Want your AI agent to use this service?** After the service is added, connected, and verified from **AI Services**, wire MCP — see [ai-driven.md](ai-driven.md).
+- **Want your AI agent to use this service?** After the service is added, connected, and verified from `AI Services`, wire MCP — see [ai-driven.md](ai-driven.md).
 - **Want to script this for more services?** See [cli.md](cli.md) or [direct-api.md](direct-api.md).
 - **Want to expose a private API behind your firewall?** See [docs/NODE_PROXY.md](../NODE_PROXY.md).

@@ -123,7 +123,7 @@ Start using NyxID in under a minute — no Docker, no setup.
 1. Open **[nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register)** in a new tab (Cmd/Ctrl-click, or right-click → Open Link in New Tab) so you can keep this checklist open.
 2. Enter invite code: **`NYX-FGNY85AF`**
 3. Sign in with Google, GitHub, or Apple
-4. Open **AI Services**, add and connect your first external service, and run the API Usage verification curl
+4. Open `AI Services`, add and connect your first external service, and run the API Usage verification curl
 5. After the service is verified, wire your AI tool to NyxID's MCP endpoint
 
 The full click-through flow is in **[Add your first AI Service](docs/connecting-services/web-ui.md)**. Early access is limited to 20 users.
