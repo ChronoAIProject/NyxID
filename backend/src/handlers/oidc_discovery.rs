@@ -3,6 +3,11 @@ use axum::{Json, extract::State};
 use crate::AppState;
 use crate::services::oauth_broker_service;
 
+pub(crate) const OPENID_CONFIGURATION_SCOPES_SUPPORTED: &[&str] =
+    &["openid", "profile", "email", "roles", "groups"];
+pub(crate) const OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED: &[&str] =
+    &["openid", "profile", "email", "roles", "groups", "proxy"];
+
 /// GET /.well-known/openid-configuration
 ///
 /// OpenID Connect Discovery endpoint. Returns the provider metadata
@@ -38,14 +43,7 @@ pub async fn openid_configuration(State(state): State<AppState>) -> Json<serde_j
         "tls_client_certificate_bound_access_tokens": true,
         "introspection_endpoint": format!("{base}/oauth/introspect"),
         "revocation_endpoint": format!("{base}/oauth/revoke"),
-        "scopes_supported": [
-            "openid",
-            "profile",
-            "email",
-            "roles",
-            "groups",
-            oauth_broker_service::BROKER_BINDING_SCOPE,
-        ],
+        "scopes_supported": OPENID_CONFIGURATION_SCOPES_SUPPORTED,
         "claims_supported": ["sub", "iss", "aud", "exp", "iat", "email", "email_verified", "name", "picture", "nonce", "at_hash", "roles", "groups", "permissions", "acr", "amr", "auth_time", "sid"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post", "none"],
@@ -75,15 +73,7 @@ pub async fn oauth_authorization_server_metadata(
         "jwks_uri": format!("{base}/.well-known/jwks.json"),
         "introspection_endpoint": format!("{base}/oauth/introspect"),
         "revocation_endpoint": format!("{base}/oauth/revoke"),
-        "scopes_supported": [
-            "openid",
-            "profile",
-            "email",
-            "roles",
-            "groups",
-            "proxy",
-            oauth_broker_service::BROKER_BINDING_SCOPE,
-        ],
+        "scopes_supported": OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED,
         "response_types_supported": ["code"],
         "response_modes_supported": ["query"],
         "grant_types_supported": [
@@ -129,4 +119,18 @@ pub async fn jwks(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "keys": [state.jwk_json]
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED, OPENID_CONFIGURATION_SCOPES_SUPPORTED,
+    };
+    use crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
+
+    #[test]
+    fn public_discovery_scopes_do_not_include_broker_binding_scope() {
+        assert!(!OPENID_CONFIGURATION_SCOPES_SUPPORTED.contains(&BROKER_BINDING_SCOPE));
+        assert!(!OAUTH_AUTHORIZATION_SERVER_SCOPES_SUPPORTED.contains(&BROKER_BINDING_SCOPE));
+    }
 }

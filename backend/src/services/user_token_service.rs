@@ -1333,8 +1333,12 @@ pub async fn handle_oauth_callback(
 
     // SEC-H2: Use no-redirect client for token exchange
     let mut request =
-        oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(token_url))
-            .form(&params);
+        oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(token_url));
+    request = if uses_json_oauth_token_exchange(&provider) {
+        request.json(&params_to_json_body(&params))
+    } else {
+        request.form(&params)
+    };
     if use_basic_auth {
         request = request.basic_auth(&resolved.client_id, resolved.client_secret.as_deref());
     }
@@ -1365,13 +1369,30 @@ pub async fn handle_oauth_callback(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to parse token response: {e}")))?;
 
-    let access_token = token_data["access_token"]
+    if token_data
+        .get("code")
+        .and_then(|value| value.as_i64())
+        .is_some_and(|code| code != 0)
+    {
+        tracing::error!(
+            provider_id = %provider_id,
+            response = %token_data,
+            "OAuth token exchange returned provider error"
+        );
+        return Err(AppError::Internal(
+            "OAuth token exchange failed".to_string(),
+        ));
+    }
+
+    let token_payload = oauth_token_payload(&token_data);
+
+    let access_token = token_payload["access_token"]
         .as_str()
         .ok_or_else(|| AppError::Internal("Missing access_token in response".to_string()))?;
 
-    let refresh_token = token_data["refresh_token"].as_str();
-    let expires_in = token_data["expires_in"].as_i64();
-    let scope = token_data["scope"].as_str();
+    let refresh_token = token_payload["refresh_token"].as_str();
+    let expires_in = token_payload["expires_in"].as_i64();
+    let scope = token_payload["scope"].as_str();
 
     let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
     let refresh_enc = match refresh_token {
@@ -1422,6 +1443,40 @@ pub async fn handle_oauth_callback(
     );
 
     Ok(token)
+}
+
+fn uses_json_oauth_token_exchange(provider: &ProviderConfig) -> bool {
+    matches!(provider.slug.as_str(), "lark" | "feishu")
+        || provider.token_url.as_deref().is_some_and(|url| {
+            url.contains("/open-apis/authen/v2/oauth/token")
+                && (url.contains("open.larksuite.com") || url.contains("open.feishu.cn"))
+        })
+}
+
+fn params_to_json_body(params: &[(String, String)]) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    for (key, value) in params {
+        body.insert(key.clone(), serde_json::Value::String(value.clone()));
+    }
+    serde_json::Value::Object(body)
+}
+
+fn oauth_token_payload(token_data: &serde_json::Value) -> &serde_json::Value {
+    if token_data
+        .get("access_token")
+        .and_then(|value| value.as_str())
+        .is_some()
+    {
+        return token_data;
+    }
+    token_data
+        .get("data")
+        .filter(|data| {
+            data.get("access_token")
+                .and_then(|value| value.as_str())
+                .is_some()
+        })
+        .unwrap_or(token_data)
 }
 
 /// Get a user's decrypted token for a provider, with lazy refresh for OAuth tokens.
@@ -1757,7 +1812,8 @@ mod tests {
     use super::{
         build_telegram_identity_metadata, build_telegram_identity_update_doc,
         build_user_token_summary, ensure_additional_scopes_supported, merge_scopes,
-        normalize_telegram_bot_api_key, parse_additional_scopes,
+        normalize_telegram_bot_api_key, oauth_token_payload, params_to_json_body,
+        parse_additional_scopes, uses_json_oauth_token_exchange,
     };
     use crate::crypto::telegram::TelegramLoginData;
     use crate::models::provider_config::ProviderConfig;
@@ -1826,6 +1882,79 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn lark_and_feishu_token_exchange_use_json_body() {
+        let mut provider = make_provider("oauth2");
+        provider.slug = "lark".to_string();
+        assert!(uses_json_oauth_token_exchange(&provider));
+
+        provider.slug = "feishu".to_string();
+        assert!(uses_json_oauth_token_exchange(&provider));
+    }
+
+    #[test]
+    fn lark_token_exchange_detection_matches_known_endpoint_urls() {
+        let mut provider = make_provider("oauth2");
+        provider.slug = "custom-lark".to_string();
+        provider.token_url =
+            Some("https://open.larksuite.com/open-apis/authen/v2/oauth/token".to_string());
+        assert!(uses_json_oauth_token_exchange(&provider));
+
+        provider.token_url =
+            Some("https://open.feishu.cn/open-apis/authen/v2/oauth/token".to_string());
+        assert!(uses_json_oauth_token_exchange(&provider));
+    }
+
+    #[test]
+    fn standard_oauth_token_exchange_uses_form_body() {
+        let provider = make_provider("oauth2");
+        assert!(!uses_json_oauth_token_exchange(&provider));
+    }
+
+    #[test]
+    fn params_to_json_body_preserves_token_exchange_fields() {
+        let params = vec![
+            ("grant_type".to_string(), "authorization_code".to_string()),
+            ("code".to_string(), "abc123".to_string()),
+            (
+                "redirect_uri".to_string(),
+                "http://localhost/cb".to_string(),
+            ),
+        ];
+
+        let body = params_to_json_body(&params);
+
+        assert_eq!(body["grant_type"], "authorization_code");
+        assert_eq!(body["code"], "abc123");
+        assert_eq!(body["redirect_uri"], "http://localhost/cb");
+    }
+
+    #[test]
+    fn oauth_token_payload_supports_standard_and_lark_shapes() {
+        let standard = serde_json::json!({
+            "access_token": "standard-access",
+            "refresh_token": "standard-refresh",
+        });
+        assert_eq!(
+            oauth_token_payload(&standard)["access_token"],
+            "standard-access"
+        );
+
+        let lark = serde_json::json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "access_token": "lark-access",
+                "refresh_token": "lark-refresh",
+                "expires_in": 7200,
+            }
+        });
+        let payload = oauth_token_payload(&lark);
+        assert_eq!(payload["access_token"], "lark-access");
+        assert_eq!(payload["refresh_token"], "lark-refresh");
+        assert_eq!(payload["expires_in"], 7200);
     }
 
     #[test]

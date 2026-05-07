@@ -14,8 +14,10 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
+use crate::services::node_ws_manager::NodeWebTerminalAuthMode;
 use crate::services::{audit_service, node_routing_service, node_service, ssh_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -74,10 +76,22 @@ pub async fn ssh_web_terminal(
         .ok()
         .map(|s| s.slug)
         .unwrap_or_else(|| service_id.clone());
+    let auth_context = ssh_service::resolve_ssh_auth_context(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        &service_id,
+        &service_slug,
+    )
+    .await?;
 
-    if !ssh_svc.certificate_auth_enabled {
-        return Err(AppError::BadRequest(
-            "Web terminal requires SSH certificate auth to be enabled".to_string(),
+    if auth_context.mode == SshAuthMode::ProxyOnly {
+        return Err(AppError::SshAuthModeUnsupportedForOperation(
+            "web terminal is not supported for proxy-only SSH services".to_string(),
+        ));
+    }
+    if auth_context.mode == SshAuthMode::Cert && !ssh_svc.certificate_auth_enabled {
+        return Err(AppError::SshAuthModeUnsupportedForOperation(
+            "web terminal requires certificate auth for cert-mode SSH services".to_string(),
         ));
     }
     if ssh_svc.allowed_principals.is_empty() {
@@ -126,9 +140,10 @@ pub async fn ssh_web_terminal(
                 state,
                 auth_user,
                 service_id,
-                service_slug,
+                auth_context.service_slug,
                 ssh_svc,
                 principal,
+                auth_context.mode,
                 cols,
                 rows,
                 socket,
@@ -149,6 +164,7 @@ async fn handle_web_terminal(
     service_slug: String,
     ssh_svc: crate::models::downstream_service::SshServiceConfig,
     principal: String,
+    auth_mode: SshAuthMode,
     cols: u32,
     rows: u32,
     mut socket: WebSocket,
@@ -170,22 +186,20 @@ async fn handle_web_terminal(
         }
     }
 
-    // ----- Generate ephemeral SSH credentials -----
-    let ephemeral = match generate_ephemeral_credentials(
-        &state,
-        &ssh_svc,
-        &service_id,
-        &user_id,
-        &principal,
-    )
-    .await
-    {
-        Ok(creds) => creds,
-        Err(error) => {
-            tracing::warn!(service_id = %service_id, error = %error, "Web terminal: credential gen failed");
-            send_error_and_close(&mut socket, "Failed to generate SSH credentials").await;
-            return;
+    // ----- Generate ephemeral SSH credentials for cert-mode sessions -----
+    let ephemeral = if auth_mode == SshAuthMode::Cert {
+        match generate_ephemeral_credentials(&state, &ssh_svc, &service_id, &user_id, &principal)
+            .await
+        {
+            Ok(creds) => Some(creds),
+            Err(error) => {
+                tracing::warn!(service_id = %service_id, error = %error, "Web terminal: credential gen failed");
+                send_error_and_close(&mut socket, "Failed to generate SSH credentials").await;
+                return;
+            }
         }
+    } else {
+        None
     };
 
     // ----- Check for node route -----
@@ -206,6 +220,7 @@ async fn handle_web_terminal(
             service_slug,
             ssh_svc,
             principal,
+            auth_mode,
             cols,
             rows,
             socket,
@@ -250,6 +265,7 @@ async fn handle_node_web_terminal(
     service_slug: String,
     ssh_svc: crate::models::downstream_service::SshServiceConfig,
     principal: String,
+    auth_mode: SshAuthMode,
     cols: u32,
     rows: u32,
     mut socket: WebSocket,
@@ -260,7 +276,7 @@ async fn handle_node_web_terminal(
     ip_address: Option<String>,
     user_agent: Option<String>,
     node_route: node_routing_service::NodeRoute,
-    ephemeral: EphemeralSshCredentials,
+    ephemeral: Option<EphemeralSshCredentials>,
     tele: TelemetryContext,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
@@ -294,6 +310,25 @@ async fn handle_node_web_terminal(
             None
         };
 
+        let request_auth_mode = match auth_mode {
+            SshAuthMode::Cert => {
+                let Some(ephemeral) = ephemeral.as_ref() else {
+                    tracing::warn!(
+                        service_id = %service_id,
+                        node_id = %node_id,
+                        "Web terminal cert-mode request missing ephemeral credentials"
+                    );
+                    continue;
+                };
+                NodeWebTerminalAuthMode::Cert {
+                    private_key_pem: ephemeral.private_key_pem.clone(),
+                    certificate_openssh: ephemeral.certificate_openssh.clone(),
+                }
+            }
+            SshAuthMode::NodeKey => NodeWebTerminalAuthMode::NodeKey,
+            SshAuthMode::ProxyOnly => unreachable!("proxy-only returned before node dispatch"),
+        };
+
         match state
             .node_ws_manager
             .open_web_terminal(
@@ -301,11 +336,11 @@ async fn handle_node_web_terminal(
                 crate::services::node_ws_manager::NodeWebTerminalRequest {
                     session_id: session_id.clone(),
                     service_id: service_id.clone(),
+                    service_slug: service_slug.clone(),
+                    auth_mode: request_auth_mode,
                     host: ssh_svc.host.clone(),
                     port: ssh_svc.port,
                     principal: principal.clone(),
-                    private_key_pem: ephemeral.private_key_pem.clone(),
-                    certificate_openssh: ephemeral.certificate_openssh.clone(),
                     cols,
                     rows,
                 },

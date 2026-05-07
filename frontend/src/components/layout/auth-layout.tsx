@@ -1,5 +1,4 @@
 import { Link, Outlet } from "@tanstack/react-router";
-import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
 
 /* ── VoidPortal Auth Layout ── */
 export function AuthLayout() {
@@ -14,10 +13,9 @@ export function AuthLayout() {
       }}
     >
       <div className="flex w-full max-w-[420px] flex-col items-center gap-8">
-        {/* ── Logo (Portal Mark + wordmark) ── */}
-        <div className="flex items-center gap-3">
-          <PortalMarkLogo size={36} className="shrink-0" />
-          <span className="logo-wordmark text-[22px]">NyxID</span>
+        {/* ── Logo (NyxID wordmark lockup) ── */}
+        <div className="flex items-center">
+          <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-9 w-auto" />
         </div>
 
         {/* ── Auth Card ── */}

@@ -36,7 +36,7 @@ pub async fn run(command: McpCommands) -> Result<()> {
                     "claude-code" => {
                         println!("Run in terminal:");
                         println!();
-                        println!("  claude mcp add --transport http nyxid {mcp_url}");
+                        println!("  claude mcp add --transport http --scope user nyxid {mcp_url}");
                         println!();
                         println!("Or add to .claude/settings.json:");
                         println!();

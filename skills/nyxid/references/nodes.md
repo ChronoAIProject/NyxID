@@ -174,6 +174,47 @@ nyxid node credentials accept <SLUG>                   # enter and store the sec
 nyxid node credentials decline <SLUG> --reason "..."   # refuse a pending credential push
 nyxid node credentials list                            # list configured credentials
 nyxid node credentials remove --service <SLUG>         # remove credential
+
+# SSH node-key credentials (stored only on the node)
+nyxid node ssh-credentials add --service <SLUG> --principal <USER> --key-file ~/.ssh/id_ed25519 --host <HOST> --port 22
+
+# Encrypted private key: pass the passphrase via env var (never as a flag value)
+PRIVKEY_PASS=... nyxid node ssh-credentials add --service <SLUG> --principal <USER> \
+  --key-file ~/.ssh/id_ed25519 --host <HOST> --port 22 --passphrase-env PRIVKEY_PASS
+
+# Skip host-key pinning (TOFU off) -- only when the operator cannot capture the
+# fingerprint upfront. Default is to pin; pinning prevents 1012 SshHostKeyMismatch
+# regressions when targets rotate keys legitimately, but a missing pin trades that
+# safety for first-connect convenience.
+nyxid node ssh-credentials add --service <SLUG> --principal <USER> \
+  --key-file ~/.ssh/id_ed25519 --host <HOST> --port 22 --no-pin-host-key
+
+# Per-credential SSH algorithm allowlist (for legacy appliances like RouterOS,
+# old MikroTik, or OOB management gear that only offer a narrow algorithm set).
+# When unset, russh defaults are used. When set, only the listed algorithms are
+# proposed for that credential. Each flag accepts a comma-separated list or
+# can be repeated. `none` is rejected for kex/cipher/mac; only Ed25519, RSA,
+# and ECDSA host-key families are accepted.
+nyxid node ssh-credentials add --service routeros --principal admin \
+  --key-file ~/.ssh/routeros_admin --host 10.0.0.1 --port 22 \
+  --kex diffie-hellman-group-exchange-sha256 \
+  --host-key rsa-sha2-256,ssh-rsa \
+  --cipher aes256-ctr \
+  --mac hmac-sha2-256
+
+# Update or reset the allowlist on an existing credential without re-importing
+# the key. `--reset-all` clears every category back to russh defaults; the
+# per-category `--reset-<kex|host-key|cipher|mac>` flags clear one at a time.
+# Setting a list and resetting the same category in one call is rejected.
+nyxid node ssh-credentials set-algos --service routeros --principal admin \
+  --cipher aes256-ctr,aes192-ctr
+nyxid node ssh-credentials set-algos --service routeros --principal admin --reset-all
+
+nyxid node ssh-credentials list --service <SLUG>
+nyxid node ssh-credentials show --service <SLUG> --principal <USER>
+nyxid node ssh-credentials test --service <SLUG> --principal <USER>
+nyxid node ssh-credentials remove --service <SLUG> --principal <USER>
+nyxid node ssh-credentials prune --stale
 ```
 
 > `credentials setup` works for **catalog services**: it auto-detects whether the service needs an API key, OAuth, or gateway URL, guides the user through the right flow, and auto-registers the service in the backend with the node's ID. For **custom endpoints**, use `nyxid service add --custom --via-node <node>` first, then `nyxid node credentials add`.
@@ -204,3 +245,40 @@ nyxid service list --output json | jq '.keys[] | select(.service_type == "ssh")'
 ```
 
 The SSH `--org` behavior matches `nyxid service add --org`: the service is created under the org owner, and members discover it through their own account. See [`organizations.md`](organizations.md#sharing-a-service-with-the-org) for org-scoped service ownership details.
+
+### SSH auth modes
+
+SSH services have an `ssh_auth_mode`:
+
+- `cert`: NyxID issues short-lived SSH certificates. Supports `ssh proxy`, `ssh exec`, browser terminal, and `ssh issue-cert`.
+- `node_key`: The node agent authenticates to the target using a node-local private key. Supports `ssh exec` and browser terminal. `ssh proxy` is intentionally unsupported.
+- `proxy_only`: NyxID provides only the SSH-over-WebSocket transport.
+
+Create a node-key service:
+
+```bash
+nyxid service add-ssh routeros --host 10.0.0.1 --port 22 --via-node edge-node --node-key --principals nyxid-ro,nyxid-admin
+nyxid node ssh-credentials add --service routeros --principal nyxid-ro --key-file ~/.ssh/routeros_ro --host 10.0.0.1 --port 22
+```
+
+One service can have multiple node-local credentials keyed by `(service_slug, principal)`. If exactly one principal is registered locally, `nyxid ssh exec <SERVICE> -- <cmd>` selects it automatically. If two or more are registered, pass `--principal`; otherwise the CLI returns `1014 SshPrincipalAmbiguous`. If the selected node-local credential is missing, the backend returns `1011 SshNodeKeyMissing`.
+
+Convert an existing SSH service:
+
+```bash
+nyxid service convert-ssh routeros --to-node-key
+nyxid service convert-ssh routeros --to-cert
+nyxid service convert-ssh routeros --to-proxy-only
+```
+
+After converting away from `node_key`, run `nyxid node ssh-credentials prune --stale` on the node to remove orphaned local SSH keys.
+
+SSH error codes (1011-1015 are reserved for SSH; surface the code and the suggested fix to the user):
+
+| Code | Name | What it means | What to do |
+|------|------|---------------|------------|
+| 1011 | `SshNodeKeyMissing` | Service is `node_key` but no credential exists for `(service_slug, principal)` on the node | Run `nyxid node ssh-credentials add --service <SLUG> --principal <USER> ...` |
+| 1012 | `SshHostKeyMismatch` | Pinned host-key sha256 doesn't match what the target presented | Investigate first (could be a real MITM); if the target legitimately rotated keys, `remove` and re-`add` the credential |
+| 1013 | `SshNodeExecChannelClosed` | russh channel error (auth, network, kex, or invalid algorithm config) | Check target reachability and the principal's authorized_keys. For "Key exchange init failed" against legacy appliances (RouterOS, old MikroTik), pin the algorithms with `ssh-credentials add --kex/--host-key/--cipher/--mac` or `set-algos`. Capture `RUST_LOG=russh=trace` if needed. |
+| 1014 | `SshPrincipalAmbiguous` | Multiple principals registered locally and `--principal` was not passed | Pass `--principal <USER>` explicitly |
+| 1015 | `SshAuthModeUnsupportedForOperation` | e.g. `ssh proxy` against a `node_key` service, or `ssh exec` against `proxy_only` | Use `ssh exec` / browser terminal for `node_key`; convert with `service convert-ssh` if the service should support a different operation set |

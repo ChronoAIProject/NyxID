@@ -27,6 +27,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY backend/ backend/
 COPY cli/ cli/
+COPY mcp-demo/ mcp-demo/
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 
 # Build only the CLI binary (includes node agent subcommand)

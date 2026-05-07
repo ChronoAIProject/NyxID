@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod cli;
 mod commands;
+mod error_format;
 pub mod node;
 pub mod org_resolver;
 mod skill_self_heal;
@@ -17,6 +18,11 @@ use crate::cli::{Cli, Commands};
 
 #[tokio::main]
 async fn main() {
+    // `--output` is flattened into many subcommands, so this best-effort
+    // pre-parse only controls final error formatting. Clap remains the source
+    // of truth for command parsing and success-path output.
+    let json_output_from_argv = error_format::detect_json_output_from_argv();
+
     // Wrap all work so we can emit one telemetry event with exit code
     // and duration after dispatch returns, regardless of success.
     let start = std::time::Instant::now();
@@ -87,7 +93,7 @@ async fn main() {
     }
 
     if let Err(e) = result {
-        eprintln!("Error: {e:#}");
+        eprintln!("{}", error_format::render_error(&e, json_output_from_argv));
         std::process::exit(1);
     }
 }

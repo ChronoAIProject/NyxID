@@ -83,9 +83,16 @@ Add new entries here when introducing additional vendored URN types.
 - Node metrics (`node_metrics_service`) are recorded asynchronously (fire-and-forget) after each proxy request; stored as embedded `NodeMetrics` document on the Node model
 - Node-routed audit events include `"routed_via": "node"` and `"node_id"` in event data
 - Error codes 8000-8003 are reserved for node errors (`NodeNotFound`, `NodeOffline`, `NodeProxyTimeout`, `NodeRegistrationFailed`)
+- Error codes 1011-1019 are reserved for SSH-specific node-key/auth-mode errors:
+  - 1011 `SshNodeKeyMissing`
+  - 1012 `SshHostKeyMismatch`
+  - 1013 `SshNodeExecChannelClosed`
+  - 1014 `SshPrincipalAmbiguous`
+  - 1015 `SshAuthModeUnsupportedForOperation`
 - `NodeStatus` is an enum (`Online`/`Offline`/`Draining`) -- not a bare string
 - WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
 - WebSocket auth-frame injection rules live on `DownstreamService.ws_frame_injections` and `UserService.ws_frame_injections`; they are additive and separate from HTTP `auth_method` injection. `WsFrameDirection` is the trigger direction, so a `downstream` rule matches frames from the service and injects the configured response back toward that service. Direct and node-routed WS paths emit metadata-only `ws_frame_auth_injected` audit events; never log injected payloads or credentials.
+- SSH services use `ssh_auth_mode` (`cert`, `node_key`, `proxy_only`) instead of deriving behavior from `certificate_auth_enabled` alone. Legacy `certificate_auth_enabled=true` maps to `cert`; `false` maps to `proxy_only`. Node-key SSH credentials live only in the node-local encrypted store and are keyed by `(service_slug, principal)`. `ssh proxy` is unsupported for `node_key`; use `ssh exec` or the browser terminal.
 - Admin node endpoints (`handlers/admin_nodes.rs`) require admin role and have no ownership check
 - `nyxid node daemon` subcommands manage background service lifecycle (`cli/src/node/daemon.rs`): `install` creates a launchd LaunchAgent on macOS or systemd user unit on Linux; `start`/`stop`/`restart`/`status`/`logs`/`uninstall` wrap platform service managers
 - All node commands support `--profile` for multi-instance operation. Profile-aware service labels: `dev.nyxid.node.{profile}` (macOS) / `nyxid-node-{profile}.service` (Linux). Config stored at `~/.nyxid-node/profiles/{name}/`

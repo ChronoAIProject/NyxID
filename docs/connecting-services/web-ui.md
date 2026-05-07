@@ -57,6 +57,8 @@ The example curl on the service detail page authenticates to NyxID with `X-API-K
 3. Paste it in your terminal. **Replace the literal `nyx_...` placeholder with the Agent Key you just copied** (the example block is a template — the placeholder won't work as-is).
 4. Run it.
 
+> **Windows users:** If you paste the copied curl into PowerShell, change bash `\` continuations to backticks and run `curl.exe`. In CMD, use `^` for continuations. If you set environment variables manually, PowerShell uses `$env:NAME="value"` and CMD uses `set NAME=value`.
+
 You should see a chat-completion JSON response from OpenAI — the body has `"choices": [...]` with a generated message. That's your first proxied call. The same Agent Key works for every service you add later (as long as the key has the `proxy` scope).
 
 ## Self-host
@@ -75,6 +77,6 @@ For other failure modes, see the **Did it work?** section in the [hub](README.md
 
 ## Next
 
-- **Want your AI agent to use this service?** Wire MCP — see [ai-driven.md](ai-driven.md).
+- **Want your AI agent to use this service?** After the service is added, connected, and verified from **AI Services**, wire MCP — see [ai-driven.md](ai-driven.md).
 - **Want to script this for more services?** See [cli.md](cli.md) or [direct-api.md](direct-api.md).
 - **Want to expose a private API behind your firewall?** See [docs/NODE_PROXY.md](../NODE_PROXY.md).

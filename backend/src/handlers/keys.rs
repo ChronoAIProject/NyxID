@@ -8,6 +8,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_api_key::UserApiKey;
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
@@ -18,6 +19,61 @@ use crate::services::{
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
+/// Resolve a `/keys/{id_or_slug}` path component to a UserService row,
+/// walking org membership in the same priority order as the proxy's
+/// effective-owner lookup. Returns the row so callers can continue with the
+/// canonical service id even when the request used a slug.
+async fn find_user_service_for_actor(
+    state: &AppState,
+    actor: &str,
+    id_or_slug: &str,
+) -> AppResult<Option<UserService>> {
+    if let Some(svc) = state
+        .db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! { "_id": id_or_slug, "is_active": true })
+        .await?
+    {
+        return Ok(Some(svc));
+    }
+
+    if let Some(svc) = state
+        .db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! {
+            "user_id": actor,
+            "slug": id_or_slug,
+            "is_active": true,
+        })
+        .await?
+    {
+        return Ok(Some(svc));
+    }
+
+    let memberships = org_service::find_active_memberships_with_timeout(&state.db, actor).await?;
+    for membership in memberships {
+        if let Some(svc) = state
+            .db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {
+                "user_id": &membership.org_user_id,
+                "slug": id_or_slug,
+                "is_active": true,
+            })
+            .await?
+        {
+            return Ok(Some(svc));
+        }
+    }
+
+    Ok(None)
+}
+
+struct KeyWriteAccess {
+    owner_id: String,
+    service_id: String,
+}
+
 /// Resolve which user_id owns this unified key (= UserService) and whether
 /// the actor may modify it. Returns the effective owner_id (which may be an
 /// org user_id) for downstream service calls.
@@ -26,11 +82,12 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 /// per-service `allowed_service_ids` scope. A scoped admin whose scope does
 /// not include this key returns NotFound (same shape as a non-existent key)
 /// to avoid leaking org topology.
-async fn resolve_key_write_owner(state: &AppState, actor: &str, key_id: &str) -> AppResult<String> {
-    let svc = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! { "_id": key_id })
+async fn resolve_key_write_owner(
+    state: &AppState,
+    actor: &str,
+    key_id: &str,
+) -> AppResult<KeyWriteAccess> {
+    let svc = find_user_service_for_actor(state, actor, key_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Key not found".to_string()))?;
 
@@ -43,13 +100,17 @@ async fn resolve_key_write_owner(state: &AppState, actor: &str, key_id: &str) ->
             "you do not have permission to modify this key".to_string(),
         ));
     }
-    Ok(svc.user_id)
+    Ok(KeyWriteAccess {
+        owner_id: svc.user_id,
+        service_id: svc.id,
+    })
 }
 
 /// Outcome of `resolve_key_read_owner`: the effective owner id used for
 /// downstream service calls, plus the credential source for the response.
 struct KeyReadAccess {
     owner_id: String,
+    service_id: String,
     source: crate::services::user_service_service::CredentialSource,
 }
 
@@ -68,10 +129,7 @@ async fn resolve_key_read_owner(
 ) -> AppResult<KeyReadAccess> {
     use crate::services::user_service_service::CredentialSource;
 
-    let svc = state
-        .db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! { "_id": key_id })
+    let svc = find_user_service_for_actor(state, actor, key_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Key not found".to_string()))?;
 
@@ -135,6 +193,7 @@ async fn resolve_key_read_owner(
 
     Ok(KeyReadAccess {
         owner_id: svc.user_id,
+        service_id: svc.id,
         source,
     })
 }
@@ -164,6 +223,8 @@ pub struct CreateKeyRequest {
     pub ssh_port: Option<u16>,
     /// Enable SSH certificate auth (default: true)
     pub ssh_certificate_auth: Option<bool>,
+    /// SSH auth mode: "cert", "node_key", or "proxy_only"
+    pub ssh_auth_mode: Option<SshAuthMode>,
     /// Comma-separated allowed principals
     pub ssh_principals: Option<String>,
     /// Certificate TTL in minutes (default: 30)
@@ -218,6 +279,7 @@ impl std::fmt::Debug for CreateKeyRequest {
             .field("ssh_host", &self.ssh_host)
             .field("ssh_port", &self.ssh_port)
             .field("ssh_certificate_auth", &self.ssh_certificate_auth)
+            .field("ssh_auth_mode", &self.ssh_auth_mode)
             .field("ssh_principals", &self.ssh_principals)
             .field(
                 "ssh_certificate_ttl_minutes",
@@ -254,6 +316,8 @@ pub struct KeyResponse {
     pub node_id: Option<String>,
     pub node_priority: i32,
     pub service_type: String,
+    pub ssh_auth_mode: SshAuthMode,
+    pub ssh_node_keys_stale: bool,
     pub is_active: bool,
     pub identity_propagation_mode: String,
     pub identity_include_user_id: bool,
@@ -551,10 +615,15 @@ pub async fn create_key(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        let certificate_auth = body.ssh_certificate_auth.unwrap_or(true);
+        let ssh_auth_mode = body
+            .ssh_auth_mode
+            .unwrap_or_else(|| SshAuthMode::from_certificate_auth_enabled(certificate_auth));
         unified_key_service::SshCreateParams {
             host,
             port: body.ssh_port.unwrap_or(22),
-            certificate_auth: body.ssh_certificate_auth.unwrap_or(true),
+            certificate_auth,
+            ssh_auth_mode,
             principals,
             certificate_ttl_minutes: body.ssh_certificate_ttl_minutes.unwrap_or(30),
         }
@@ -613,6 +682,7 @@ pub async fn create_key(
         identity,
         openapi_input,
         body.ws_frame_injections.as_deref(),
+        state.config.is_production(),
     )
     .await?;
 
@@ -734,7 +804,7 @@ pub async fn list_keys(
     get,
     path = "/api/v1/keys/{key_id}",
     params(
-        ("key_id" = String, Path, description = "User service ID")
+        ("key_id" = String, Path, description = "User service ID or slug")
     ),
     responses(
         (status = 200, description = "Key details", body = KeyResponse),
@@ -751,7 +821,8 @@ pub async fn get_key(
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
     let access = resolve_key_read_owner(&state, &actor, &key_id).await?;
-    let mut view = unified_key_service::get_key(&state.db, &access.owner_id, &key_id).await?;
+    let mut view =
+        unified_key_service::get_key(&state.db, &access.owner_id, &access.service_id).await?;
     // Override the placeholder Personal that get_key returns; the handler is
     // the only layer that knows whether the actor is the direct owner or
     // accessing via an org membership.
@@ -778,7 +849,7 @@ pub async fn get_key(
     put,
     path = "/api/v1/keys/{key_id}",
     params(
-        ("key_id" = String, Path, description = "User service ID")
+        ("key_id" = String, Path, description = "User service ID or slug")
     ),
     request_body = UpdateKeyRequest,
     responses(
@@ -797,7 +868,9 @@ pub async fn update_key(
     Json(body): Json<UpdateKeyRequest>,
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
-    let user_id_str = resolve_key_write_owner(&state, &actor, &key_id).await?;
+    let access = resolve_key_write_owner(&state, &actor, &key_id).await?;
+    let user_id_str = access.owner_id;
+    let key_id = access.service_id;
 
     // Load current state to find sub-resource IDs
     let view = unified_key_service::get_key(&state.db, &user_id_str, &key_id).await?;
@@ -824,6 +897,25 @@ pub async fn update_key(
     // deferred label write runs — returning an error despite the
     // credential change having already applied.
     validate_optional_label_for_update(body.label.as_deref())?;
+
+    if let Some(endpoint_url) = body.endpoint_url.as_deref() {
+        let effective_node_id = match body.node_id.as_deref() {
+            Some("") => None,
+            Some(node_id) => Some(node_id),
+            None => view
+                .node_id
+                .as_deref()
+                .filter(|node_id| !node_id.is_empty()),
+        };
+        if effective_node_id.is_none() {
+            crate::services::url_validation::validate_user_endpoint_url(
+                endpoint_url,
+                state.config.is_production(),
+                "endpoint_url",
+            )
+            .await?;
+        }
+    }
 
     // NOTE: `body.endpoint_url` is intentionally NOT written to the DB
     // here. For node-routed services we must keep the endpoint URL and
@@ -1578,7 +1670,7 @@ pub struct DeleteKeyQuery {
     delete,
     path = "/api/v1/keys/{key_id}",
     params(
-        ("key_id" = String, Path, description = "User service ID"),
+        ("key_id" = String, Path, description = "User service ID or slug"),
         ("only_if_pending" = Option<bool>, Query, description = "When true, skip the delete if the key is no longer pending_auth")
     ),
     responses(
@@ -1597,7 +1689,9 @@ pub async fn delete_key(
     Query(query): Query<DeleteKeyQuery>,
 ) -> AppResult<Json<DeleteKeyResponse>> {
     let actor = auth_user.user_id.to_string();
-    let user_id_str = resolve_key_write_owner(&state, &actor, &key_id).await?;
+    let access = resolve_key_write_owner(&state, &actor, &key_id).await?;
+    let user_id_str = access.owner_id;
+    let key_id = access.service_id;
 
     let view = unified_key_service::get_key(&state.db, &user_id_str, &key_id).await?;
     if view.auto_connected {
@@ -1679,6 +1773,8 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         node_id: result.service.node_id.clone(),
         node_priority: result.service.node_priority,
         service_type: result.service.service_type.clone(),
+        ssh_auth_mode: result.service.ssh_auth_mode,
+        ssh_node_keys_stale: result.service.ssh_node_keys_stale,
         is_active: result.service.is_active,
         identity_propagation_mode: result.service.identity_propagation_mode.clone(),
         identity_include_user_id: result.service.identity_include_user_id,
@@ -1738,6 +1834,8 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         node_id: view.node_id,
         node_priority: view.node_priority,
         service_type: view.service_type,
+        ssh_auth_mode: view.ssh_auth_mode,
+        ssh_node_keys_stale: view.ssh_node_keys_stale,
         is_active: view.is_active,
         identity_propagation_mode: view.identity_propagation_mode,
         identity_include_user_id: view.identity_include_user_id,
@@ -1782,8 +1880,23 @@ mod tests {
     use crate::crypto::aes::EncryptionKeys;
     use crate::crypto::local_key_provider::LocalKeyProvider;
     use crate::errors::AppError;
+    use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
+    use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
     use crate::models::user_api_key::UserApiKey;
+    use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::telemetry::TelemetryContext;
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+        test_user_endpoint, test_user_service,
+    };
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
     use chrono::Utc;
+    use mongodb::bson::doc;
 
     fn test_encryption_keys() -> EncryptionKeys {
         EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x22; 32], None)))
@@ -1810,6 +1923,80 @@ mod tests {
             source_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    async fn insert_user(db: &mongodb::Database, user_id: &str, user_type: UserType) {
+        db.collection(USERS)
+            .insert_one(test_user(user_id, user_type))
+            .await
+            .unwrap();
+    }
+
+    async fn insert_membership(
+        db: &mongodb::Database,
+        org_id: &str,
+        actor_id: &str,
+        role: OrgRole,
+    ) {
+        db.collection(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(org_id, actor_id, role, None))
+            .await
+            .unwrap();
+    }
+
+    async fn insert_key_fixture(
+        db: &mongodb::Database,
+        owner_id: &str,
+        service_id: &str,
+        slug: &str,
+        label: &str,
+    ) {
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        db.collection(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                owner_id,
+                label,
+                "https://api.example.com",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        db.collection(USER_SERVICES)
+            .insert_one(test_user_service(
+                service_id,
+                owner_id,
+                slug,
+                &endpoint_id,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+    }
+
+    fn empty_update_request() -> super::UpdateKeyRequest {
+        super::UpdateKeyRequest {
+            label: None,
+            endpoint_url: None,
+            auth_method: None,
+            auth_key_name: None,
+            node_id: None,
+            credential: None,
+            is_active: None,
+            identity_propagation_mode: None,
+            identity_include_user_id: None,
+            identity_include_email: None,
+            identity_include_name: None,
+            identity_jwt_audience: None,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
+            custom_user_agent: None,
+            default_request_headers: None,
+            openapi_spec_url: None,
         }
     }
 
@@ -1961,5 +2148,329 @@ mod tests {
         let err = validate_optional_label_for_update(Some(&"x".repeat(201)))
             .expect_err("overlong label should be rejected before any mutation");
         assert!(matches!(err, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn get_key_by_slug_returns_personal_service() {
+        let Some(db) = connect_test_database("keys_get_slug_personal").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let slug = "routeros";
+        insert_user(&db, &actor_id, UserType::Person).await;
+        insert_key_fixture(&db, &actor_id, &service_id, slug, "Personal RouterOS").await;
+
+        let Json(response) = super::get_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(slug.to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.id, service_id);
+        assert_eq!(response.slug, slug);
+        assert_eq!(response.label, "Personal RouterOS");
+    }
+
+    #[tokio::test]
+    async fn get_key_by_slug_returns_org_service_for_admin() {
+        let Some(db) = connect_test_database("keys_get_slug_org_admin").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let slug = "routeros";
+        insert_user(&db, &actor_id, UserType::Person).await;
+        insert_user(&db, &org_id, UserType::Org).await;
+        insert_membership(&db, &org_id, &actor_id, OrgRole::Admin).await;
+        insert_key_fixture(&db, &org_id, &service_id, slug, "Org RouterOS").await;
+
+        let Json(response) = super::get_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(slug.to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.id, service_id);
+        assert_eq!(response.label, "Org RouterOS");
+    }
+
+    #[tokio::test]
+    async fn get_key_by_slug_returns_org_service_for_member() {
+        let Some(db) = connect_test_database("keys_get_slug_org_member").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let slug = "routeros";
+        insert_user(&db, &actor_id, UserType::Person).await;
+        insert_user(&db, &org_id, UserType::Org).await;
+        insert_membership(&db, &org_id, &actor_id, OrgRole::Member).await;
+        insert_key_fixture(&db, &org_id, &service_id, slug, "Org RouterOS").await;
+
+        let Json(response) = super::get_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(slug.to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.id, service_id);
+        assert_eq!(response.label, "Org RouterOS");
+    }
+
+    #[tokio::test]
+    async fn get_key_by_slug_returns_not_found_without_relationship() {
+        let Some(db) = connect_test_database("keys_get_slug_no_relationship").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let slug = "routeros";
+        insert_user(&db, &actor_id, UserType::Person).await;
+        insert_user(&db, &org_id, UserType::Org).await;
+        insert_key_fixture(&db, &org_id, &service_id, slug, "Org RouterOS").await;
+
+        let err = super::get_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(slug.to_string()),
+        )
+        .await
+        .expect_err("unrelated actor should not resolve org slug");
+
+        assert!(matches!(
+            err,
+            AppError::NotFound(message) if message == "Key not found"
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_key_by_slug_prefers_personal_service_over_org_service() {
+        let Some(db) = connect_test_database("keys_get_slug_personal_first").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let personal_service_id = uuid::Uuid::new_v4().to_string();
+        let org_service_id = uuid::Uuid::new_v4().to_string();
+        let slug = "routeros";
+        insert_user(&db, &actor_id, UserType::Person).await;
+        insert_user(&db, &org_id, UserType::Org).await;
+        insert_membership(&db, &org_id, &actor_id, OrgRole::Admin).await;
+        insert_key_fixture(
+            &db,
+            &actor_id,
+            &personal_service_id,
+            slug,
+            "Personal RouterOS",
+        )
+        .await;
+        insert_key_fixture(&db, &org_id, &org_service_id, slug, "Org RouterOS").await;
+
+        let Json(response) = super::get_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(slug.to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.id, personal_service_id);
+        assert_eq!(response.label, "Personal RouterOS");
+    }
+
+    #[tokio::test]
+    async fn get_key_by_uuid_continues_to_work() {
+        let Some(db) = connect_test_database("keys_get_uuid").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor_id, UserType::Person).await;
+        insert_key_fixture(&db, &actor_id, &service_id, "routeros", "Personal RouterOS").await;
+
+        let Json(response) = super::get_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(service_id.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.id, service_id);
+        assert_eq!(response.slug, "routeros");
+    }
+
+    #[tokio::test]
+    async fn get_key_by_uuid_returns_not_found_for_inactive_service() {
+        let Some(db) = connect_test_database("keys_get_uuid_inactive").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor_id, UserType::Person).await;
+        insert_key_fixture(&db, &actor_id, &service_id, "routeros", "Personal RouterOS").await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service_id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+
+        let err = super::get_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path(service_id.clone()),
+        )
+        .await
+        .expect_err("inactive service should not resolve by uuid");
+
+        assert!(matches!(
+            err,
+            AppError::NotFound(message) if message == "Key not found"
+        ));
+    }
+
+    #[tokio::test]
+    async fn update_key_by_slug_allows_admin_and_rejects_member_write() {
+        let Some(db) = connect_test_database("keys_put_slug_org_roles").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let member_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let slug = "routeros";
+        insert_user(&db, &admin_id, UserType::Person).await;
+        insert_user(&db, &member_id, UserType::Person).await;
+        insert_user(&db, &org_id, UserType::Org).await;
+        insert_membership(&db, &org_id, &admin_id, OrgRole::Admin).await;
+        insert_membership(&db, &org_id, &member_id, OrgRole::Member).await;
+        insert_key_fixture(&db, &org_id, &service_id, slug, "Org RouterOS").await;
+
+        let mut admin_update = empty_update_request();
+        admin_update.label = Some("Renamed RouterOS".to_string());
+        let Json(response) = super::update_key(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Path(slug.to_string()),
+            Json(admin_update),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.id, service_id);
+        assert_eq!(response.label, "Renamed RouterOS");
+
+        let mut member_update = empty_update_request();
+        member_update.label = Some("Member Rename".to_string());
+        let err = super::update_key(
+            State(state),
+            test_auth_user(&member_id),
+            Path(slug.to_string()),
+            Json(member_update),
+        )
+        .await
+        .expect_err("org member should not be allowed to update org key");
+
+        assert!(matches!(err, AppError::OrgRoleInsufficient(_)));
+    }
+
+    #[tokio::test]
+    async fn create_key_rejects_empty_header_auth_key_name_before_writes() {
+        let Some(db) = connect_test_database("keys_post_empty_header_auth_key").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let body = super::CreateKeyRequest {
+            service_slug: None,
+            credential: Some("secret-token".to_string()),
+            label: "Header Service".to_string(),
+            endpoint_url: Some("https://api.example.com".to_string()),
+            slug: Some("header-service".to_string()),
+            auth_method: Some("header".to_string()),
+            auth_key_name: Some(String::new()),
+            node_id: None,
+            ssh_host: None,
+            ssh_port: None,
+            ssh_certificate_auth: None,
+            ssh_auth_mode: None,
+            ssh_principals: None,
+            ssh_certificate_ttl_minutes: None,
+            identity_propagation_mode: None,
+            identity_include_user_id: None,
+            identity_include_email: None,
+            identity_include_name: None,
+            identity_jwt_audience: None,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
+            target_org_id: None,
+            openapi_spec_url: None,
+            ws_frame_injections: None,
+        };
+
+        let err = super::create_key(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .expect_err("POST /api/v1/keys should reject empty header auth_key_name");
+
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message.contains("auth_method is 'header'")
+        ));
+
+        let endpoint_count = db
+            .collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let api_key_count = db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        let service_count = db
+            .collection::<mongodb::bson::Document>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+
+        assert_eq!(endpoint_count, 0);
+        assert_eq!(api_key_count, 0);
+        assert_eq!(service_count, 0);
     }
 }

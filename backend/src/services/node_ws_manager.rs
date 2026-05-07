@@ -167,6 +167,14 @@ pub(crate) enum PendingWebTerminal {
 
 pub(crate) type PendingSshExec = oneshot::Sender<NodeSshExecResult>;
 
+const SSH_NODE_EXEC_MAX_OUTPUT_BYTES: usize = 1_048_576;
+
+#[derive(Default)]
+struct PendingSshNodeExecStream {
+    stdout: String,
+    stderr: String,
+}
+
 /// Request sent to a node to execute an SSH command.
 #[derive(Clone)]
 pub struct NodeSshExecRequest {
@@ -180,6 +188,19 @@ pub struct NodeSshExecRequest {
     pub timeout_secs: u32,
 }
 
+/// Request sent to a node to execute an SSH command using a node-local key.
+#[derive(Clone)]
+pub struct NodeSshNodeKeyExecRequest {
+    pub request_id: String,
+    pub service_slug: String,
+    pub principal: String,
+    pub command: String,
+    pub timeout_secs: u32,
+    pub target_host: Option<String>,
+    pub target_port: Option<u16>,
+    pub host_key_sha256: Option<String>,
+}
+
 /// Result received from a node after SSH command execution.
 #[derive(Debug)]
 pub struct NodeSshExecResult {
@@ -190,6 +211,7 @@ pub struct NodeSshExecResult {
     pub duration_ms: u64,
     pub timed_out: bool,
     pub error: Option<String>,
+    pub error_code: Option<u32>,
 }
 
 /// Request sent to a node to open a web terminal session.
@@ -197,13 +219,23 @@ pub struct NodeSshExecResult {
 pub struct NodeWebTerminalRequest {
     pub session_id: String,
     pub service_id: String,
+    pub service_slug: String,
+    pub auth_mode: NodeWebTerminalAuthMode,
     pub host: String,
     pub port: u16,
     pub principal: String,
-    pub private_key_pem: String,
-    pub certificate_openssh: String,
     pub cols: u32,
     pub rows: u32,
+}
+
+/// SSH credential mode for a node-backed web terminal.
+#[derive(Clone)]
+pub enum NodeWebTerminalAuthMode {
+    Cert {
+        private_key_pem: String,
+        certificate_openssh: String,
+    },
+    NodeKey,
 }
 
 /// Outbound command for a node connection writer task.
@@ -226,6 +258,8 @@ struct NodeConnection {
     web_terminals: Arc<DashMap<String, PendingWebTerminal>>,
     /// Pending SSH exec requests keyed by request_id
     ssh_exec_requests: Arc<DashMap<String, PendingSshExec>>,
+    /// Accumulated node-key SSH exec chunks keyed by request_id
+    ssh_node_exec_streams: Arc<DashMap<String, PendingSshNodeExecStream>>,
     /// Pending and active WS proxy sessions keyed by session_id
     ws_proxies: Arc<DashMap<String, PendingWsProxy>>,
     /// Pending `credential_update` / `credential_remove` acks keyed by
@@ -404,10 +438,35 @@ struct WsSshExec {
     host: String,
     port: u16,
     principal: String,
+    auth_mode: &'static str,
     private_key_pem: String,
     certificate_openssh: String,
     command: String,
     timeout_secs: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hmac: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WsSshNodeExecOpen {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    request_id: String,
+    service_slug: String,
+    principal: String,
+    auth_mode: &'static str,
+    command: String,
+    timeout_secs: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_key_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -422,13 +481,18 @@ struct WsWebTerminalOpen {
     msg_type: &'static str,
     session_id: String,
     service_id: String,
+    service_slug: String,
+    auth_mode: &'static str,
     host: String,
     port: u16,
     principal: String,
-    private_key_pem: String,
-    certificate_openssh: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    private_key_pem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    certificate_openssh: Option<String>,
     cols: u32,
     rows: u32,
+    term: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -597,6 +661,41 @@ pub struct WsSshExecResultMsg {
     pub timed_out: bool,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub error_code: Option<u32>,
+}
+
+/// JSON ssh_node_exec_data from node.
+#[derive(Debug, Deserialize)]
+pub struct WsSshNodeExecDataMsg {
+    pub request_id: String,
+    #[serde(default)]
+    pub stream: Option<String>,
+    #[serde(default)]
+    pub data: Option<String>,
+}
+
+/// JSON ssh_node_exec_close from node.
+#[derive(Debug, Deserialize)]
+pub struct WsSshNodeExecCloseMsg {
+    pub request_id: String,
+    #[serde(default)]
+    pub exit_code: i32,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub timed_out: bool,
+}
+
+/// JSON ssh_node_exec_error from node.
+#[derive(Debug, Deserialize)]
+pub struct WsSshNodeExecErrorMsg {
+    pub request_id: String,
+    pub error: String,
+    #[serde(default)]
+    pub error_code: Option<u32>,
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 /// JSON web_terminal_started from node.
@@ -721,6 +820,29 @@ pub(crate) fn map_retryable_node_failure(message: String, reason: Option<&str>) 
     }
 }
 
+fn map_ssh_exec_result_error(message: String, code: Option<u32>, node_key: bool) -> AppError {
+    match code {
+        Some(1011) => AppError::SshNodeKeyMissing(message),
+        Some(1012) => AppError::SshHostKeyMismatch(message),
+        Some(1013) => AppError::SshNodeExecChannelClosed(message),
+        Some(1014) => AppError::SshPrincipalAmbiguous(message),
+        Some(1015) => AppError::SshAuthModeUnsupportedForOperation(message),
+        Some(_) => AppError::SshNodeExecChannelClosed(message),
+        None if node_key => AppError::SshNodeExecChannelClosed(message),
+        None => AppError::Internal(format!("Node SSH exec error: {message}")),
+    }
+}
+
+fn append_lossy_capped(target: &mut String, chunk: &str) {
+    let remaining = SSH_NODE_EXEC_MAX_OUTPUT_BYTES.saturating_sub(target.len());
+    if remaining == 0 {
+        return;
+    }
+    let take = chunk.len().min(remaining);
+    let boundary = chunk.floor_char_boundary(take);
+    target.push_str(&chunk[..boundary]);
+}
+
 /// Compute HMAC-SHA256 signature for a proxy request.
 pub fn compute_hmac_signature(
     secret: &[u8],
@@ -779,24 +901,75 @@ pub fn compute_ssh_tunnel_hmac_signature(
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Compute HMAC-SHA256 signature for an SSH exec request.
-/// Message format matches the node agent's `verify_ssh_exec_signature`:
-/// `{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}`
-pub fn compute_ssh_exec_hmac_signature(
+/// Compute HMAC-SHA256 signature for a cert-mode SSH exec request.
+/// Message format:
+/// `{timestamp}\n{nonce}\n{request_id}\n{host}\n{port}\n{principal}\n{auth_mode}\n{sha256(command)}\n{sha256(certificate_openssh)}`.
+pub struct SshExecHmacEnvelope<'a> {
+    pub timestamp: &'a str,
+    pub nonce: &'a str,
+    pub request_id: &'a str,
+    pub host: &'a str,
+    pub port: u16,
+    pub principal: &'a str,
+    pub auth_mode: &'a str,
+    pub command: &'a str,
+    pub certificate_openssh: &'a str,
+}
+
+pub fn compute_ssh_exec_hmac_signature(secret: &[u8], envelope: SshExecHmacEnvelope<'_>) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+
+    let command_hash = hex::encode(Sha256::digest(envelope.command.as_bytes()));
+    let certificate_hash = hex::encode(Sha256::digest(envelope.certificate_openssh.as_bytes()));
+    let message = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        envelope.timestamp,
+        envelope.nonce,
+        envelope.request_id,
+        envelope.host,
+        envelope.port,
+        envelope.principal,
+        envelope.auth_mode,
+        command_hash,
+        certificate_hash,
+    );
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
+    mac.update(message.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Compute HMAC-SHA256 signature for a node-key SSH exec request.
+/// Message format:
+/// `{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}\n{auth_mode}\n{sha256(command)}`.
+pub struct SshNodeExecHmacEnvelope<'a> {
+    pub timestamp: &'a str,
+    pub nonce: &'a str,
+    pub request_id: &'a str,
+    pub service_slug: &'a str,
+    pub principal: &'a str,
+    pub auth_mode: &'a str,
+    pub command: &'a str,
+}
+
+pub fn compute_ssh_node_exec_hmac_signature(
     secret: &[u8],
-    timestamp: &str,
-    nonce: &str,
-    request_id: &str,
-    host: &str,
-    port: u16,
-    principal: &str,
+    envelope: SshNodeExecHmacEnvelope<'_>,
 ) -> String {
     use hmac::{Hmac, Mac};
-    use sha2::Sha256;
+    use sha2::{Digest, Sha256};
 
+    let command_hash = hex::encode(Sha256::digest(envelope.command.as_bytes()));
     let message = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
-        timestamp, nonce, request_id, host, port, principal
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        envelope.timestamp,
+        envelope.nonce,
+        envelope.request_id,
+        envelope.service_slug,
+        envelope.principal,
+        envelope.auth_mode,
+        command_hash,
     );
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
@@ -805,23 +978,42 @@ pub fn compute_ssh_exec_hmac_signature(
 }
 
 /// Compute HMAC-SHA256 signature for a web terminal open request.
-/// Message format matches the node agent's `verify_web_terminal_signature`:
-/// `{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}`
+/// Message format:
+/// `{timestamp}\n{nonce}\n{session_id}\n{host}\n{port}\n{principal}\n{auth_mode}\n{service_slug}\n{sha256(auth_material)}`.
+/// For cert terminals, `auth_material` is the OpenSSH user certificate. For
+/// node-key terminals, the frame carries no private key, certificate, or host
+/// key pin, so `auth_material` is the empty string.
+pub struct WebTerminalHmacEnvelope<'a> {
+    pub timestamp: &'a str,
+    pub nonce: &'a str,
+    pub session_id: &'a str,
+    pub host: &'a str,
+    pub port: u16,
+    pub principal: &'a str,
+    pub auth_mode: &'a str,
+    pub service_slug: &'a str,
+    pub auth_material: &'a str,
+}
+
 pub fn compute_web_terminal_hmac_signature(
     secret: &[u8],
-    timestamp: &str,
-    nonce: &str,
-    session_id: &str,
-    host: &str,
-    port: u16,
-    principal: &str,
+    envelope: WebTerminalHmacEnvelope<'_>,
 ) -> String {
     use hmac::{Hmac, Mac};
-    use sha2::Sha256;
+    use sha2::{Digest, Sha256};
 
+    let auth_material_hash = hex::encode(Sha256::digest(envelope.auth_material.as_bytes()));
     let message = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
-        timestamp, nonce, session_id, host, port, principal
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        envelope.timestamp,
+        envelope.nonce,
+        envelope.session_id,
+        envelope.host,
+        envelope.port,
+        envelope.principal,
+        envelope.auth_mode,
+        envelope.service_slug,
+        auth_material_hash,
     );
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
@@ -892,6 +1084,7 @@ impl NodeWsManager {
         let ssh_tunnels = Arc::new(DashMap::new());
         let web_terminals = Arc::new(DashMap::new());
         let ssh_exec_requests = Arc::new(DashMap::new());
+        let ssh_node_exec_streams = Arc::new(DashMap::new());
         let ws_proxies = Arc::new(DashMap::new());
         let return_pending = pending.clone();
 
@@ -903,6 +1096,7 @@ impl NodeWsManager {
                 ssh_tunnels,
                 web_terminals,
                 ssh_exec_requests,
+                ssh_node_exec_streams,
                 ws_proxies,
                 credential_acks: Arc::new(DashMap::new()),
                 capabilities: Arc::new(std::sync::Mutex::new(NodeCapabilitiesFlags::default())),
@@ -922,6 +1116,7 @@ impl NodeWsManager {
             conn.ssh_tunnels.clear();
             conn.web_terminals.clear();
             conn.ssh_exec_requests.clear();
+            conn.ssh_node_exec_streams.clear();
             conn.ws_proxies.clear();
             // Drop pending credential-ack waiters so any in-flight
             // `send_credential_update_and_wait` / `_remove_and_wait`
@@ -943,6 +1138,7 @@ impl NodeWsManager {
             conn.ssh_tunnels.clear();
             conn.web_terminals.clear();
             conn.ssh_exec_requests.clear();
+            conn.ssh_node_exec_streams.clear();
             conn.ws_proxies.clear();
             conn.credential_acks.clear();
             let close_msg = NodeOutboundMessage::Close {
@@ -1904,18 +2100,25 @@ impl NodeWsManager {
 
         let (resp_tx, resp_rx) = oneshot::channel();
         conn.ssh_exec_requests.insert(request_id.clone(), resp_tx);
+        conn.ssh_node_exec_streams
+            .insert(request_id.clone(), PendingSshNodeExecStream::default());
 
         let (timestamp, nonce, hmac) = if let Some(secret) = signing_secret {
             let ts = chrono::Utc::now().to_rfc3339();
             let n = uuid::Uuid::new_v4().to_string();
             let sig = compute_ssh_exec_hmac_signature(
                 secret,
-                &ts,
-                &n,
-                &request.request_id,
-                &request.host,
-                request.port,
-                &request.principal,
+                SshExecHmacEnvelope {
+                    timestamp: &ts,
+                    nonce: &n,
+                    request_id: &request.request_id,
+                    host: &request.host,
+                    port: request.port,
+                    principal: &request.principal,
+                    auth_mode: "cert",
+                    command: &request.command,
+                    certificate_openssh: &request.certificate_openssh,
+                },
             );
             (Some(ts), Some(n), Some(sig))
         } else {
@@ -1928,6 +2131,7 @@ impl NodeWsManager {
             host: request.host,
             port: request.port,
             principal: request.principal,
+            auth_mode: "cert",
             private_key_pem: request.private_key_pem,
             certificate_openssh: request.certificate_openssh,
             command: request.command,
@@ -1967,7 +2171,11 @@ impl NodeWsManager {
         match tokio::time::timeout(total_timeout, resp_rx).await {
             Ok(Ok(result)) => {
                 if let Some(ref error) = result.error {
-                    Err(AppError::Internal(format!("Node SSH exec error: {error}")))
+                    Err(map_ssh_exec_result_error(
+                        error.clone(),
+                        result.error_code,
+                        false,
+                    ))
                 } else {
                     Ok(result)
                 }
@@ -1984,11 +2192,211 @@ impl NodeWsManager {
         }
     }
 
+    /// Execute an SSH command on a connected node using a node-local SSH key.
+    /// If `signing_secret` is provided, the request is HMAC-signed.
+    pub async fn exec_ssh_node_key_command(
+        &self,
+        node_id: &str,
+        request: NodeSshNodeKeyExecRequest,
+        signing_secret: Option<&[u8]>,
+    ) -> AppResult<NodeSshExecResult> {
+        let conn = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let request_id = request.request_id.clone();
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        conn.ssh_exec_requests.insert(request_id.clone(), resp_tx);
+        // Mirror the cert-mode handler: pre-create the stream buffer so
+        // ssh_node_exec_data frames have somewhere to land. Without this,
+        // every chunk arrives at deliver_ssh_node_exec_data, finds no
+        // entry, logs "Received SSH node-key data for unknown request",
+        // and is dropped. Then ssh_node_exec_close resolves the oneshot
+        // with an empty stream, and the follow-up ssh_exec_result frame
+        // (which contains the real bytes) finds the oneshot already
+        // consumed and is silently discarded.
+        conn.ssh_node_exec_streams
+            .insert(request_id.clone(), PendingSshNodeExecStream::default());
+
+        let (timestamp, nonce, hmac) = if let Some(secret) = signing_secret {
+            let ts = chrono::Utc::now().to_rfc3339();
+            let n = uuid::Uuid::new_v4().to_string();
+            let sig = compute_ssh_node_exec_hmac_signature(
+                secret,
+                SshNodeExecHmacEnvelope {
+                    timestamp: &ts,
+                    nonce: &n,
+                    request_id: &request.request_id,
+                    service_slug: &request.service_slug,
+                    principal: &request.principal,
+                    auth_mode: "node_key",
+                    command: &request.command,
+                },
+            );
+            (Some(ts), Some(n), Some(sig))
+        } else {
+            (None, None, None)
+        };
+
+        let msg = serde_json::to_string(&WsSshNodeExecOpen {
+            msg_type: "ssh_node_exec_open",
+            request_id: request.request_id,
+            service_slug: request.service_slug,
+            principal: request.principal,
+            auth_mode: "node_key",
+            command: request.command,
+            timeout_secs: request.timeout_secs,
+            target_host: request.target_host,
+            target_port: request.target_port,
+            host_key_sha256: request.host_key_sha256,
+            timestamp,
+            nonce,
+            hmac,
+        })
+        .map_err(|e| {
+            conn.ssh_exec_requests.remove(&request_id);
+            conn.ssh_node_exec_streams.remove(&request_id);
+            AppError::Internal(format!(
+                "Failed to serialize SSH node-key exec request: {e}"
+            ))
+        })?;
+
+        match conn.tx.try_send(NodeOutboundMessage::Text(msg)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                conn.ssh_exec_requests.remove(&request_id);
+                conn.ssh_node_exec_streams.remove(&request_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} write buffer full"
+                )));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                conn.ssh_exec_requests.remove(&request_id);
+                conn.ssh_node_exec_streams.remove(&request_id);
+                return Err(AppError::NodeOffline(format!(
+                    "Node {node_id} connection closed"
+                )));
+            }
+        }
+
+        drop(conn);
+
+        let total_timeout =
+            std::time::Duration::from_secs(self.proxy_timeout_secs + request.timeout_secs as u64);
+        match tokio::time::timeout(total_timeout, resp_rx).await {
+            Ok(Ok(result)) => {
+                if let Some(ref error) = result.error {
+                    Err(map_ssh_exec_result_error(
+                        error.clone(),
+                        result.error_code,
+                        true,
+                    ))
+                } else {
+                    Ok(result)
+                }
+            }
+            Ok(Err(_)) => Err(AppError::NodeOffline(format!(
+                "Node {node_id} disconnected during SSH node-key exec"
+            ))),
+            Err(_) => {
+                if let Some(conn) = self.connections.get(node_id) {
+                    conn.ssh_exec_requests.remove(&request_id);
+                    conn.ssh_node_exec_streams.remove(&request_id);
+                }
+                Err(AppError::NodeProxyTimeout)
+            }
+        }
+    }
+
+    /// Append a node-key SSH exec data chunk. Called by the WS reader task.
+    pub fn deliver_ssh_node_exec_data(
+        &self,
+        node_id: &str,
+        request_id: &str,
+        stream: Option<&str>,
+        data: Vec<u8>,
+    ) {
+        let Some(conn) = self.connections.get(node_id) else {
+            return;
+        };
+        let Some(mut pending) = conn.ssh_node_exec_streams.get_mut(request_id) else {
+            tracing::debug!(
+                node_id = %node_id,
+                request_id = %request_id,
+                "Received SSH node-key data for unknown request"
+            );
+            return;
+        };
+        let chunk = String::from_utf8_lossy(&data);
+        match stream.unwrap_or("stdout") {
+            "stderr" => append_lossy_capped(&mut pending.stderr, &chunk),
+            _ => append_lossy_capped(&mut pending.stdout, &chunk),
+        }
+    }
+
+    /// Complete a node-key SSH exec from streamed chunks. Called by the WS reader task.
+    pub fn deliver_ssh_node_exec_close(
+        &self,
+        node_id: &str,
+        request_id: String,
+        exit_code: i32,
+        duration_ms: u64,
+        timed_out: bool,
+    ) {
+        if let Some(conn) = self.connections.get(node_id) {
+            let stream = conn
+                .ssh_node_exec_streams
+                .remove(&request_id)
+                .map(|(_, stream)| stream)
+                .unwrap_or_default();
+            if let Some((_, sender)) = conn.ssh_exec_requests.remove(&request_id) {
+                let _ = sender.send(NodeSshExecResult {
+                    request_id,
+                    exit_code,
+                    stdout: stream.stdout,
+                    stderr: stream.stderr,
+                    duration_ms,
+                    timed_out,
+                    error: None,
+                    error_code: None,
+                });
+            }
+        }
+    }
+
+    /// Fail a node-key SSH exec from an explicit error frame. Called by the WS reader task.
+    pub fn deliver_ssh_node_exec_error(
+        &self,
+        node_id: &str,
+        request_id: String,
+        error: String,
+        error_code: Option<u32>,
+        duration_ms: u64,
+    ) {
+        if let Some(conn) = self.connections.get(node_id) {
+            conn.ssh_node_exec_streams.remove(&request_id);
+            if let Some((_, sender)) = conn.ssh_exec_requests.remove(&request_id) {
+                let _ = sender.send(NodeSshExecResult {
+                    request_id,
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration_ms,
+                    timed_out: false,
+                    error: Some(error),
+                    error_code,
+                });
+            }
+        }
+    }
+
     /// Deliver an ssh_exec_result from a node. Called by the WS reader task.
     pub fn deliver_ssh_exec_result(&self, node_id: &str, result: NodeSshExecResult) {
         if let Some(conn) = self.connections.get(node_id)
             && let Some((_, sender)) = conn.ssh_exec_requests.remove(&result.request_id)
         {
+            conn.ssh_node_exec_streams.remove(&result.request_id);
             let _ = sender.send(result);
         }
     }
@@ -2011,17 +2419,31 @@ impl NodeWsManager {
         conn.web_terminals
             .insert(session_id.clone(), PendingWebTerminal::Awaiting(ready_tx));
 
+        let (auth_mode, private_key_pem, certificate_openssh) = match request.auth_mode {
+            NodeWebTerminalAuthMode::Cert {
+                private_key_pem,
+                certificate_openssh,
+            } => ("cert", Some(private_key_pem), Some(certificate_openssh)),
+            NodeWebTerminalAuthMode::NodeKey => ("node_key", None, None),
+        };
+
         let (timestamp, nonce, signature) = if let Some(secret) = signing_secret {
             let ts = chrono::Utc::now().to_rfc3339();
             let n = uuid::Uuid::new_v4().to_string();
+            let auth_material = certificate_openssh.as_deref().unwrap_or("");
             let sig = compute_web_terminal_hmac_signature(
                 secret,
-                &ts,
-                &n,
-                &request.session_id,
-                &request.host,
-                request.port,
-                &request.principal,
+                WebTerminalHmacEnvelope {
+                    timestamp: &ts,
+                    nonce: &n,
+                    session_id: &request.session_id,
+                    host: &request.host,
+                    port: request.port,
+                    principal: &request.principal,
+                    auth_mode,
+                    service_slug: &request.service_slug,
+                    auth_material,
+                },
             );
             (Some(ts), Some(n), Some(sig))
         } else {
@@ -2032,13 +2454,16 @@ impl NodeWsManager {
             msg_type: "web_terminal_open",
             session_id: request.session_id,
             service_id: request.service_id,
+            service_slug: request.service_slug,
+            auth_mode,
             host: request.host,
             port: request.port,
             principal: request.principal,
-            private_key_pem: request.private_key_pem,
-            certificate_openssh: request.certificate_openssh,
+            private_key_pem,
+            certificate_openssh,
             cols: request.cols,
             rows: request.rows,
+            term: "xterm-256color".to_string(),
             timestamp,
             nonce,
             hmac: signature,
@@ -2736,6 +3161,154 @@ mod tests {
             None,
         );
         assert_ne!(sig1, sig2);
+    }
+
+    #[test]
+    fn ssh_exec_hmac_covers_command_certificate_and_auth_mode() {
+        let secret = b"test-secret-key-bytes-here-32byt";
+        let base = SshExecHmacEnvelope {
+            timestamp: "2026-03-12T10:00:00Z",
+            nonce: "nonce-123",
+            request_id: "req-1",
+            host: "10.0.0.5",
+            port: 22,
+            principal: "ubuntu",
+            auth_mode: "cert",
+            command: "uptime",
+            certificate_openssh: "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
+        };
+        let sig1 = compute_ssh_exec_hmac_signature(secret, SshExecHmacEnvelope { ..base });
+        let sig2 = compute_ssh_exec_hmac_signature(secret, SshExecHmacEnvelope { ..base });
+        assert_eq!(sig1, sig2);
+
+        let different_command = compute_ssh_exec_hmac_signature(
+            secret,
+            SshExecHmacEnvelope {
+                command: "whoami",
+                ..base
+            },
+        );
+        let different_cert = compute_ssh_exec_hmac_signature(
+            secret,
+            SshExecHmacEnvelope {
+                certificate_openssh: "ssh-rsa-cert-v01@openssh.com AAAAOTHER user-cert",
+                ..base
+            },
+        );
+        let different_auth_mode = compute_ssh_exec_hmac_signature(
+            secret,
+            SshExecHmacEnvelope {
+                auth_mode: "node_key",
+                ..base
+            },
+        );
+
+        assert_ne!(sig1, different_command);
+        assert_ne!(sig1, different_cert);
+        assert_ne!(sig1, different_auth_mode);
+    }
+
+    #[test]
+    fn ssh_node_exec_hmac_covers_request_id_auth_mode_and_command() {
+        let secret = b"test-secret-key-bytes-here-32byt";
+        let base = compute_ssh_node_exec_hmac_signature(
+            secret,
+            SshNodeExecHmacEnvelope {
+                timestamp: "2026-03-12T10:00:00Z",
+                nonce: "nonce-123",
+                request_id: "req-1",
+                service_slug: "routeros",
+                principal: "nyxid-ro",
+                auth_mode: "node_key",
+                command: "/system identity print",
+            },
+        );
+        let different_auth_mode = compute_ssh_node_exec_hmac_signature(
+            secret,
+            SshNodeExecHmacEnvelope {
+                timestamp: "2026-03-12T10:00:00Z",
+                nonce: "nonce-123",
+                request_id: "req-1",
+                service_slug: "routeros",
+                principal: "nyxid-ro",
+                auth_mode: "cert",
+                command: "/system identity print",
+            },
+        );
+        let different_request_id = compute_ssh_node_exec_hmac_signature(
+            secret,
+            SshNodeExecHmacEnvelope {
+                timestamp: "2026-03-12T10:00:00Z",
+                nonce: "nonce-123",
+                request_id: "req-2",
+                service_slug: "routeros",
+                principal: "nyxid-ro",
+                auth_mode: "node_key",
+                command: "/system identity print",
+            },
+        );
+        let different_command = compute_ssh_node_exec_hmac_signature(
+            secret,
+            SshNodeExecHmacEnvelope {
+                timestamp: "2026-03-12T10:00:00Z",
+                nonce: "nonce-123",
+                request_id: "req-1",
+                service_slug: "routeros",
+                principal: "nyxid-ro",
+                auth_mode: "node_key",
+                command: "/system reboot",
+            },
+        );
+
+        assert_ne!(base, different_auth_mode);
+        assert_ne!(base, different_request_id);
+        assert_ne!(base, different_command);
+    }
+
+    #[test]
+    fn web_terminal_hmac_covers_auth_mode_service_slug_and_auth_material() {
+        let secret = b"test-secret-key-bytes-here-32byt";
+        let base = WebTerminalHmacEnvelope {
+            timestamp: "2026-03-12T10:00:00Z",
+            nonce: "nonce-123",
+            session_id: "term-1",
+            host: "10.0.0.5",
+            port: 22,
+            principal: "ubuntu",
+            auth_mode: "cert",
+            service_slug: "linux-host",
+            auth_material: "ssh-rsa-cert-v01@openssh.com AAAATEST user-cert",
+        };
+        let sig1 = compute_web_terminal_hmac_signature(secret, WebTerminalHmacEnvelope { ..base });
+        let sig2 = compute_web_terminal_hmac_signature(secret, WebTerminalHmacEnvelope { ..base });
+        assert_eq!(sig1, sig2);
+
+        let different_auth_mode = compute_web_terminal_hmac_signature(
+            secret,
+            WebTerminalHmacEnvelope {
+                auth_mode: "node_key",
+                auth_material: "",
+                ..base
+            },
+        );
+        let different_service_slug = compute_web_terminal_hmac_signature(
+            secret,
+            WebTerminalHmacEnvelope {
+                service_slug: "routeros",
+                ..base
+            },
+        );
+        let different_auth_material = compute_web_terminal_hmac_signature(
+            secret,
+            WebTerminalHmacEnvelope {
+                auth_material: "ssh-rsa-cert-v01@openssh.com AAAAOTHER user-cert",
+                ..base
+            },
+        );
+
+        assert_ne!(sig1, different_auth_mode);
+        assert_ne!(sig1, different_service_slug);
+        assert_ne!(sig1, different_auth_material);
     }
 
     #[test]

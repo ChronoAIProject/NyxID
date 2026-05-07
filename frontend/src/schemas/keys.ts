@@ -5,6 +5,7 @@ import {
   defaultRequestHeaderUpdateSchema,
 } from "./default-request-headers";
 import { wsFrameInjectionSchema, wsFrameInjectionsSchema } from "./services";
+import { sshAuthModeSchema } from "./services";
 
 export { credentialSourceSchema } from "./orgs";
 export type {
@@ -56,6 +57,7 @@ export const userServiceResponseSchema = z.object({
   inject_delegation_token: z.boolean(),
   delegation_token_scope: z.string(),
   custom_user_agent: z.string().nullable().optional(),
+  ssh_auth_mode: sshAuthModeSchema.optional(),
   /// NyxID#356: per-user default request headers owned by this user
   /// service. Catalog-level admin defaults are surfaced separately.
   default_request_headers: z.array(defaultRequestHeaderSchema).optional(),

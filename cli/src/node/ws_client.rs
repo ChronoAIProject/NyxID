@@ -14,11 +14,13 @@ use zeroize::Zeroizing;
 
 use super::config::{NodeConfig, SshConfig};
 use super::credential_store::{CredentialStore, SharedCredentials, SharedCredentialsSender};
+use super::credentials::ssh_keys;
 use super::error::{Error, Result};
 use super::metrics::NodeMetrics;
 use super::proxy_executor;
 use super::secret_backend::SecretBackend;
 use super::signing::{self, ReplayGuard};
+use super::ssh_node_exec::{self, SshNodeExecError};
 use super::ws_frame_injector::{
     self, IncomingFrame, InjectorState, WsFrameDirection, WsFrameInjection, WsFrameKind,
 };
@@ -34,11 +36,17 @@ const SSH_EXEC_MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB
 
 type ActiveWebTerminalMap = Arc<tokio::sync::Mutex<HashMap<String, ActiveWebTerminal>>>;
 
-struct ActiveWebTerminal {
-    pty_writer: pty_process::OwnedWritePty,
-    child: tokio::process::Child,
-    task_handle: tokio::task::JoinHandle<()>,
-    _temp_dir: tempfile::TempDir,
+enum ActiveWebTerminal {
+    Cert {
+        pty_writer: pty_process::OwnedWritePty,
+        child: tokio::process::Child,
+        task_handle: tokio::task::JoinHandle<()>,
+        _temp_dir: tempfile::TempDir,
+    },
+    NodeKey {
+        control_tx: mpsc::Sender<ssh_node_exec::SshNodeShellControl>,
+        task_handle: tokio::task::JoinHandle<()>,
+    },
 }
 
 enum SshTunnelControl {
@@ -788,10 +796,16 @@ async fn connect_and_serve(
                 let terminals = active_web_terminals.clone();
                 let secret = signing_secret.clone();
                 let replay = replay_guard.clone();
+                let config_path = config_path.to_path_buf();
+                let config_dir = config_dir.to_path_buf();
+                let storage_backend = storage_backend.to_string();
                 tokio::spawn(async move {
                     handle_web_terminal_open(
                         &parsed,
                         &ssh_config,
+                        &config_path,
+                        &config_dir,
+                        &storage_backend,
                         tx_clone,
                         terminals,
                         secret,
@@ -816,6 +830,28 @@ async fn connect_and_serve(
                 let replay = replay_guard.clone();
                 tokio::spawn(async move {
                     handle_ssh_exec(&parsed, &ssh_config, tx_clone, secret, replay).await;
+                });
+            }
+            Some("ssh_node_exec_open") => {
+                let tx_clone = tx.clone();
+                let ssh_config = config.ssh.clone();
+                let config_path = config_path.to_path_buf();
+                let config_dir = config_dir.to_path_buf();
+                let storage_backend = storage_backend.to_string();
+                let secret = signing_secret.clone();
+                let replay = replay_guard.clone();
+                tokio::spawn(async move {
+                    handle_ssh_node_exec_open(
+                        &parsed,
+                        &ssh_config,
+                        &config_path,
+                        &config_dir,
+                        &storage_backend,
+                        tx_clone,
+                        secret,
+                        replay,
+                    )
+                    .await;
                 });
             }
             Some("credential_update") => {
@@ -1749,7 +1785,10 @@ async fn verify_signed_ssh_exec(
     };
 
     if !signing::verify_ssh_exec_signature(parsed, signing_secret, signature) {
-        tracing::warn!(request_id = %request_id, "ssh_exec HMAC verification failed");
+        tracing::warn!(
+            request_id = %request_id,
+            "HMAC verification failed for ssh_exec; this node may be running an older protocol version than the backend. Run 'nyxid node daemon stop' and upgrade the node binary, then 'nyxid node daemon start'."
+        );
         return Err("invalid_hmac_signature");
     }
 
@@ -1760,6 +1799,421 @@ async fn verify_signed_ssh_exec(
     }
 
     Ok(())
+}
+
+fn load_ssh_node_key_entry(
+    config_path: &std::path::Path,
+    config_dir: &std::path::Path,
+    storage_backend: &str,
+    service_slug: &str,
+    principal: &str,
+) -> Result<ssh_keys::SshKeyEntry> {
+    NodeConfig::load(config_path).and_then(|config| {
+        let backend = SecretBackend::from_storage_backend_str(storage_backend, config_dir)?;
+        match ssh_keys::config_find(&config, service_slug, principal) {
+            Some(stored) => ssh_keys::load_entry(stored, &backend),
+            None => Err(Error::Config(format!(
+                "SSH key missing for service '{service_slug}' principal '{principal}'"
+            ))),
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_ssh_node_exec_open(
+    parsed: &serde_json::Value,
+    ssh_config: &SshConfig,
+    config_path: &std::path::Path,
+    config_dir: &std::path::Path,
+    storage_backend: &str,
+    tx: mpsc::Sender<NodeWsMessage>,
+    signing_secret: Option<SharedSigningSecret>,
+    replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
+) {
+    let request_id = match parsed["request_id"].as_str() {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => {
+            tracing::warn!("ssh_node_exec_open missing request_id");
+            return;
+        }
+    };
+
+    if let Some(secret) = signing_secret.as_deref()
+        && let Err(error) =
+            verify_signed_ssh_node_exec(parsed, &request_id, secret.as_str(), &replay_guard).await
+    {
+        let _ = send_ssh_exec_result_with_code(
+            &tx,
+            &request_id,
+            -1,
+            &[],
+            &[],
+            0,
+            false,
+            Some(error),
+            Some(ssh_node_exec::SSH_NODE_EXEC_CHANNEL_CLOSED_CODE),
+        )
+        .await;
+        return;
+    }
+
+    let service_slug = match parsed["service_slug"].as_str() {
+        Some(slug) if !slug.is_empty() => slug.to_string(),
+        _ => {
+            tracing::warn!(request_id = %request_id, "ssh_node_exec_open missing service_slug");
+            let _ = send_ssh_exec_result_with_code(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some("missing_service_slug"),
+                Some(ssh_node_exec::SSH_NODE_EXEC_CHANNEL_CLOSED_CODE),
+            )
+            .await;
+            return;
+        }
+    };
+    let principal = match parsed["principal"].as_str() {
+        Some(principal) if !principal.is_empty() => principal.to_string(),
+        _ => {
+            tracing::warn!(request_id = %request_id, service_slug = %service_slug, "ssh_node_exec_open missing principal");
+            let _ = send_ssh_exec_result_with_code(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some("missing_principal"),
+                Some(ssh_node_exec::SSH_NODE_EXEC_CHANNEL_CLOSED_CODE),
+            )
+            .await;
+            return;
+        }
+    };
+    let command = match parsed["command"].as_str() {
+        Some(command) if !command.is_empty() => command.to_string(),
+        _ => {
+            tracing::warn!(request_id = %request_id, service_slug = %service_slug, principal = %principal, "ssh_node_exec_open missing command");
+            let _ = send_ssh_exec_result_with_code(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some("missing_command"),
+                Some(ssh_node_exec::SSH_NODE_EXEC_CHANNEL_CLOSED_CODE),
+            )
+            .await;
+            return;
+        }
+    };
+    let timeout_secs = parsed["timeout_secs"].as_u64().unwrap_or(30).clamp(1, 300);
+
+    let entry = {
+        let loaded = load_ssh_node_key_entry(
+            config_path,
+            config_dir,
+            storage_backend,
+            &service_slug,
+            &principal,
+        );
+        match loaded {
+            Ok(entry) => entry,
+            Err(Error::Config(message)) if message.contains("SSH key missing") => {
+                let error = SshNodeExecError::missing_key(&service_slug, &principal);
+                tracing::warn!(
+                    request_id = %request_id,
+                    service_slug = %service_slug,
+                    principal = %principal,
+                    "SSH node-key credential missing"
+                );
+                let _ =
+                    send_ssh_node_exec_error(&tx, &request_id, &error.message, Some(error.code), 0)
+                        .await;
+                let _ = send_ssh_exec_result_with_code(
+                    &tx,
+                    &request_id,
+                    -1,
+                    &[],
+                    &[],
+                    0,
+                    false,
+                    Some(&error.message),
+                    Some(error.code),
+                )
+                .await;
+                return;
+            }
+            Err(error) => {
+                let message = format!("failed to load SSH node key: {error}");
+                tracing::warn!(
+                    request_id = %request_id,
+                    service_slug = %service_slug,
+                    principal = %principal,
+                    error = %error,
+                    "Failed to load SSH node-key credential"
+                );
+                let _ = send_ssh_node_exec_error(
+                    &tx,
+                    &request_id,
+                    &message,
+                    Some(ssh_node_exec::SSH_NODE_EXEC_CHANNEL_CLOSED_CODE),
+                    0,
+                )
+                .await;
+                let _ = send_ssh_exec_result_with_code(
+                    &tx,
+                    &request_id,
+                    -1,
+                    &[],
+                    &[],
+                    0,
+                    false,
+                    Some(&message),
+                    Some(ssh_node_exec::SSH_NODE_EXEC_CHANNEL_CLOSED_CODE),
+                )
+                .await;
+                return;
+            }
+        }
+    };
+
+    if let Some(server_host) = parsed["target_host"]
+        .as_str()
+        .filter(|host| !host.is_empty())
+        && server_host != entry.target_host
+    {
+        // SECURITY: operator-provisioned (service_slug, principal) credentials
+        // are authoritative for host/port/host_key. Backend hints differing
+        // from the local store are logged and ignored to prevent a compromised
+        // backend from redirecting node SSH sessions to attacker-controlled hosts.
+        tracing::warn!(
+            request_id = %request_id,
+            service_slug = %service_slug,
+            principal = %principal,
+            server_host = %server_host,
+            local_host = %entry.target_host,
+            "Ignoring mismatched SSH node-key target host hint"
+        );
+    }
+    if let Some(server_port) = parsed["target_port"]
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        && server_port != entry.target_port
+    {
+        tracing::warn!(
+            request_id = %request_id,
+            service_slug = %service_slug,
+            principal = %principal,
+            server_port,
+            local_port = entry.target_port,
+            "Ignoring mismatched SSH node-key target port hint"
+        );
+    }
+
+    if let Err(error) =
+        validate_node_ssh_target(ssh_config, &entry.target_host, entry.target_port).await
+    {
+        let message = format!("target_not_allowed:{error}");
+        tracing::warn!(
+            request_id = %request_id,
+            service_slug = %service_slug,
+            principal = %principal,
+            host = %entry.target_host,
+            port = entry.target_port,
+            %error,
+            "SSH node-key target rejected by node policy"
+        );
+        let _ = send_ssh_node_exec_error(
+            &tx,
+            &request_id,
+            &message,
+            Some(ssh_node_exec::SSH_NODE_EXEC_CHANNEL_CLOSED_CODE),
+            0,
+        )
+        .await;
+        let _ = send_ssh_exec_result_with_code(
+            &tx,
+            &request_id,
+            -1,
+            &[],
+            &[],
+            0,
+            false,
+            Some(&message),
+            Some(ssh_node_exec::SSH_NODE_EXEC_CHANNEL_CLOSED_CODE),
+        )
+        .await;
+        return;
+    }
+
+    let host = entry.target_host.clone();
+    let port = entry.target_port;
+    let result = ssh_node_exec::exec_command(entry, command, timeout_secs).await;
+    match result {
+        Ok(output) => {
+            if !output.stdout.is_empty() {
+                let _ = send_ssh_node_exec_data(&tx, &request_id, "stdout", &output.stdout).await;
+            }
+            if !output.stderr.is_empty() {
+                let _ = send_ssh_node_exec_data(&tx, &request_id, "stderr", &output.stderr).await;
+            }
+            let _ = send_ssh_node_exec_close(
+                &tx,
+                &request_id,
+                output.exit_code,
+                output.duration_ms,
+                output.timed_out,
+            )
+            .await;
+            let _ = send_ssh_exec_result(
+                &tx,
+                &request_id,
+                output.exit_code,
+                &output.stdout,
+                &output.stderr,
+                output.duration_ms,
+                output.timed_out,
+                None,
+            )
+            .await;
+            tracing::info!(
+                request_id = %request_id,
+                service_slug = %service_slug,
+                principal = %principal,
+                host = %host,
+                port,
+                exit_code = output.exit_code,
+                duration_ms = output.duration_ms,
+                timed_out = output.timed_out,
+                "SSH node-key exec completed"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                request_id = %request_id,
+                service_slug = %service_slug,
+                principal = %principal,
+                host = %host,
+                port,
+                error_code = error.code,
+                error = %error.message,
+                "SSH node-key exec failed"
+            );
+            let _ = send_ssh_node_exec_error(&tx, &request_id, &error.message, Some(error.code), 0)
+                .await;
+            let _ = send_ssh_exec_result_with_code(
+                &tx,
+                &request_id,
+                -1,
+                &[],
+                &[],
+                0,
+                false,
+                Some(&error.message),
+                Some(error.code),
+            )
+            .await;
+        }
+    }
+}
+
+async fn verify_signed_ssh_node_exec(
+    parsed: &serde_json::Value,
+    request_id: &str,
+    signing_secret: &str,
+    replay_guard: &Arc<tokio::sync::Mutex<ReplayGuard>>,
+) -> std::result::Result<(), &'static str> {
+    let timestamp = parsed["timestamp"].as_str();
+    let nonce = parsed["nonce"].as_str();
+    let signature = parsed["hmac"].as_str();
+
+    let (Some(timestamp), Some(nonce), Some(signature)) = (timestamp, nonce, signature) else {
+        tracing::warn!(request_id = %request_id, "ssh_node_exec_open missing HMAC fields");
+        return Err("missing_hmac_fields");
+    };
+
+    if !signing::verify_ssh_node_exec_signature(parsed, signing_secret, signature) {
+        tracing::warn!(request_id = %request_id, "ssh_node_exec_open HMAC verification failed");
+        return Err("invalid_hmac_signature");
+    }
+
+    let mut guard = replay_guard.lock().await;
+    if !guard.check(timestamp, nonce) {
+        tracing::warn!(request_id = %request_id, "ssh_node_exec_open rejected by replay guard");
+        return Err("replay_or_expired_timestamp");
+    }
+
+    Ok(())
+}
+
+async fn send_ssh_node_exec_data(
+    tx: &mpsc::Sender<NodeWsMessage>,
+    request_id: &str,
+    stream: &str,
+    data: &[u8],
+) -> bool {
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(data);
+    send_ws_message(
+        tx,
+        serde_json::json!({
+            "type": "ssh_node_exec_data",
+            "request_id": request_id,
+            "stream": stream,
+            "data": data_b64,
+        })
+        .to_string(),
+    )
+    .await
+}
+
+async fn send_ssh_node_exec_close(
+    tx: &mpsc::Sender<NodeWsMessage>,
+    request_id: &str,
+    exit_code: i32,
+    duration_ms: u64,
+    timed_out: bool,
+) -> bool {
+    send_ws_message(
+        tx,
+        serde_json::json!({
+            "type": "ssh_node_exec_close",
+            "request_id": request_id,
+            "exit_code": exit_code,
+            "duration_ms": duration_ms,
+            "timed_out": timed_out,
+        })
+        .to_string(),
+    )
+    .await
+}
+
+async fn send_ssh_node_exec_error(
+    tx: &mpsc::Sender<NodeWsMessage>,
+    request_id: &str,
+    error: &str,
+    error_code: Option<u32>,
+    duration_ms: u64,
+) -> bool {
+    send_ws_message(
+        tx,
+        serde_json::json!({
+            "type": "ssh_node_exec_error",
+            "request_id": request_id,
+            "error": error,
+            "error_code": error_code,
+            "duration_ms": duration_ms,
+        })
+        .to_string(),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1773,33 +2227,62 @@ async fn send_ssh_exec_result(
     timed_out: bool,
     error: Option<&str>,
 ) -> bool {
-    let stdout_b64 = base64::engine::general_purpose::STANDARD.encode(stdout);
-    let stderr_b64 = base64::engine::general_purpose::STANDARD.encode(stderr);
-
-    send_ws_message(
+    send_ssh_exec_result_with_code(
         tx,
-        serde_json::json!({
-            "type": "ssh_exec_result",
-            "request_id": request_id,
-            "exit_code": exit_code,
-            "stdout": stdout_b64,
-            "stderr": stderr_b64,
-            "duration_ms": duration_ms,
-            "timed_out": timed_out,
-            "error": error,
-        })
-        .to_string(),
+        request_id,
+        exit_code,
+        stdout,
+        stderr,
+        duration_ms,
+        timed_out,
+        error,
+        None,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_ssh_exec_result_with_code(
+    tx: &mpsc::Sender<NodeWsMessage>,
+    request_id: &str,
+    exit_code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+    duration_ms: u64,
+    timed_out: bool,
+    error: Option<&str>,
+    error_code: Option<u32>,
+) -> bool {
+    let stdout_b64 = base64::engine::general_purpose::STANDARD.encode(stdout);
+    let stderr_b64 = base64::engine::general_purpose::STANDARD.encode(stderr);
+    let mut payload = serde_json::json!({
+        "type": "ssh_exec_result",
+        "request_id": request_id,
+        "exit_code": exit_code,
+        "stdout": stdout_b64,
+        "stderr": stderr_b64,
+        "duration_ms": duration_ms,
+        "timed_out": timed_out,
+        "error": error,
+    });
+    if let Some(error_code) = error_code {
+        payload["error_code"] = serde_json::json!(error_code);
+    }
+
+    send_ws_message(tx, payload.to_string()).await
 }
 
 // ---------------------------------------------------------------------------
 // Web terminal handlers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_web_terminal_open(
     parsed: &serde_json::Value,
     ssh_config: &SshConfig,
+    config_path: &std::path::Path,
+    config_dir: &std::path::Path,
+    storage_backend: &str,
     tx: mpsc::Sender<NodeWsMessage>,
     active_terminals: ActiveWebTerminalMap,
     signing_secret: Option<SharedSigningSecret>,
@@ -1847,6 +2330,28 @@ async fn handle_web_terminal_open(
             return;
         }
     };
+    let cols = parsed["cols"].as_u64().unwrap_or(80) as u16;
+    let rows = parsed["rows"].as_u64().unwrap_or(24) as u16;
+    let auth_mode = parsed["auth_mode"].as_str().unwrap_or("cert");
+
+    if auth_mode == "node_key" {
+        handle_node_key_web_terminal_open(
+            parsed,
+            ssh_config,
+            config_path,
+            config_dir,
+            storage_backend,
+            tx,
+            active_terminals,
+            session_id,
+            principal,
+            cols,
+            rows,
+        )
+        .await;
+        return;
+    }
+
     let private_key_pem = match parsed["private_key_pem"].as_str() {
         Some(k) if !k.is_empty() => k.to_string(),
         _ => {
@@ -1859,9 +2364,6 @@ async fn handle_web_terminal_open(
         .as_str()
         .filter(|s| !s.is_empty())
         .map(String::from);
-
-    let cols = parsed["cols"].as_u64().unwrap_or(80) as u16;
-    let rows = parsed["rows"].as_u64().unwrap_or(24) as u16;
 
     // Validate target against SSH config policy
     if let Err(error) = validate_node_ssh_target(ssh_config, &host, port).await {
@@ -2055,7 +2557,7 @@ async fn handle_web_terminal_open(
     // Store the terminal entry
     active_terminals.lock().await.insert(
         session_id.clone(),
-        ActiveWebTerminal {
+        ActiveWebTerminal::Cert {
             pty_writer,
             child,
             task_handle,
@@ -2069,6 +2571,186 @@ async fn handle_web_terminal_open(
         port,
         principal = %principal,
         "web terminal session started"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_node_key_web_terminal_open(
+    parsed: &serde_json::Value,
+    ssh_config: &SshConfig,
+    config_path: &std::path::Path,
+    config_dir: &std::path::Path,
+    storage_backend: &str,
+    tx: mpsc::Sender<NodeWsMessage>,
+    active_terminals: ActiveWebTerminalMap,
+    session_id: String,
+    principal: String,
+    cols: u16,
+    rows: u16,
+) {
+    let service_slug = match parsed["service_slug"].as_str() {
+        Some(slug) if !slug.is_empty() => slug.to_string(),
+        _ => {
+            tracing::warn!(session_id = %session_id, "node-key web_terminal_open missing service_slug");
+            let _ = send_web_terminal_closed(&tx, &session_id, Some("missing_service_slug")).await;
+            return;
+        }
+    };
+    let term = parsed["term"]
+        .as_str()
+        .unwrap_or("xterm-256color")
+        .to_string();
+
+    let entry = {
+        let loaded = load_ssh_node_key_entry(
+            config_path,
+            config_dir,
+            storage_backend,
+            &service_slug,
+            &principal,
+        );
+        match loaded {
+            Ok(entry) => entry,
+            Err(Error::Config(message)) if message.contains("SSH key missing") => {
+                let error = SshNodeExecError::missing_key(&service_slug, &principal);
+                tracing::warn!(
+                    session_id = %session_id,
+                    service_slug = %service_slug,
+                    principal = %principal,
+                    "SSH node-key web terminal credential missing"
+                );
+                let _ =
+                    send_web_terminal_closed(&tx, &session_id, Some(error.message.as_str())).await;
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    service_slug = %service_slug,
+                    principal = %principal,
+                    error = %error,
+                    "Failed to load SSH node-key web terminal credential"
+                );
+                let _ = send_web_terminal_closed(&tx, &session_id, Some("credential_load_failed"))
+                    .await;
+                return;
+            }
+        }
+    };
+
+    if let Some(server_host) = parsed["host"].as_str().filter(|host| !host.is_empty())
+        && server_host != entry.target_host
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            service_slug = %service_slug,
+            principal = %principal,
+            server_host = %server_host,
+            local_host = %entry.target_host,
+            "Ignoring mismatched SSH node-key terminal target host hint"
+        );
+    }
+
+    if let Err(error) =
+        validate_node_ssh_target(ssh_config, &entry.target_host, entry.target_port).await
+    {
+        let message = format!("target_not_allowed:{error}");
+        tracing::warn!(
+            session_id = %session_id,
+            service_slug = %service_slug,
+            principal = %principal,
+            host = %entry.target_host,
+            port = entry.target_port,
+            %error,
+            "SSH node-key terminal target rejected by node policy"
+        );
+        let _ = send_web_terminal_closed(&tx, &session_id, Some(message.as_str())).await;
+        return;
+    }
+
+    {
+        let guard = active_terminals.lock().await;
+        if guard.contains_key(&session_id) {
+            let _ = send_web_terminal_closed(&tx, &session_id, Some("duplicate_session_id")).await;
+            return;
+        }
+        if guard.len() >= ssh_config.max_tunnels {
+            let _ =
+                send_web_terminal_closed(&tx, &session_id, Some("too_many_active_terminals")).await;
+            return;
+        }
+    }
+
+    let (control_tx, control_rx) =
+        mpsc::channel::<ssh_node_exec::SshNodeShellControl>(SSH_CONTROL_CHANNEL_SIZE);
+    let (event_tx, mut event_rx) =
+        mpsc::channel::<ssh_node_exec::SshNodeShellEvent>(SSH_CONTROL_CHANNEL_SIZE);
+    let shell_session_id = session_id.clone();
+    let shell_tx = tx.clone();
+    let shell_terminals = active_terminals.clone();
+    let task_handle = tokio::spawn(async move {
+        tokio::spawn(ssh_node_exec::run_shell(
+            entry,
+            term,
+            u32::from(cols),
+            u32::from(rows),
+            control_rx,
+            event_tx,
+        ));
+
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                ssh_node_exec::SshNodeShellEvent::Started => {
+                    let _ = send_ws_message(
+                        &shell_tx,
+                        serde_json::json!({
+                            "type": "web_terminal_started",
+                            "session_id": shell_session_id,
+                        })
+                        .to_string(),
+                    )
+                    .await;
+                }
+                ssh_node_exec::SshNodeShellEvent::Data(bytes) => {
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    if !send_ws_message(
+                        &shell_tx,
+                        serde_json::json!({
+                            "type": "web_terminal_data",
+                            "session_id": shell_session_id,
+                            "data": encoded,
+                        })
+                        .to_string(),
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                }
+                ssh_node_exec::SshNodeShellEvent::Closed(error) => {
+                    let _ = remove_web_terminal_entry(&shell_terminals, &shell_session_id).await;
+                    let error_message = error.as_ref().map(|error| error.message.as_str());
+                    let _ =
+                        send_web_terminal_closed(&shell_tx, &shell_session_id, error_message).await;
+                    break;
+                }
+            }
+        }
+    });
+
+    active_terminals.lock().await.insert(
+        session_id.clone(),
+        ActiveWebTerminal::NodeKey {
+            control_tx,
+            task_handle,
+        },
+    );
+
+    tracing::info!(
+        session_id = %session_id,
+        service_slug = %service_slug,
+        principal = %principal,
+        "node-key web terminal session starting"
     );
 }
 
@@ -2088,7 +2770,10 @@ async fn verify_signed_web_terminal_open(
     };
 
     if !signing::verify_web_terminal_signature(parsed, signing_secret, signature) {
-        tracing::warn!(session_id = %session_id, "web_terminal_open HMAC verification failed");
+        tracing::warn!(
+            session_id = %session_id,
+            "HMAC verification failed for web_terminal_open; this node may be running an older protocol version than the backend. Run 'nyxid node daemon stop' and upgrade the node binary, then 'nyxid node daemon start'."
+        );
         return Err("invalid_hmac_signature");
     }
 
@@ -2123,10 +2808,21 @@ async fn handle_web_terminal_data(
     };
 
     let mut guard = active_terminals.lock().await;
-    if let Some(terminal) = guard.get_mut(session_id)
-        && let Err(error) = terminal.pty_writer.write_all(&bytes).await
-    {
-        tracing::warn!(session_id, %error, "failed to write to PTY");
+    if let Some(terminal) = guard.get_mut(session_id) {
+        match terminal {
+            ActiveWebTerminal::Cert { pty_writer, .. } => {
+                if let Err(error) = pty_writer.write_all(&bytes).await {
+                    tracing::warn!(session_id, %error, "failed to write to PTY");
+                }
+            }
+            ActiveWebTerminal::NodeKey { control_tx, .. } => {
+                if let Err(error) =
+                    control_tx.try_send(ssh_node_exec::SshNodeShellControl::Data(bytes))
+                {
+                    tracing::warn!(session_id, %error, "failed to send node-key shell data");
+                }
+            }
+        }
     }
 }
 
@@ -2154,12 +2850,24 @@ async fn handle_web_terminal_resize(
     };
 
     let guard = active_terminals.lock().await;
-    if let Some(terminal) = guard.get(session_id)
-        && let Err(error) = terminal
-            .pty_writer
-            .resize(pty_process::Size::new(rows, cols))
-    {
-        tracing::warn!(session_id, %error, "failed to resize PTY");
+    if let Some(terminal) = guard.get(session_id) {
+        match terminal {
+            ActiveWebTerminal::Cert { pty_writer, .. } => {
+                if let Err(error) = pty_writer.resize(pty_process::Size::new(rows, cols)) {
+                    tracing::warn!(session_id, %error, "failed to resize PTY");
+                }
+            }
+            ActiveWebTerminal::NodeKey { control_tx, .. } => {
+                if let Err(error) =
+                    control_tx.try_send(ssh_node_exec::SshNodeShellControl::Resize {
+                        cols: u32::from(cols),
+                        rows: u32::from(rows),
+                    })
+                {
+                    tracing::warn!(session_id, %error, "failed to send node-key shell resize");
+                }
+            }
+        }
     }
 }
 
@@ -2173,9 +2881,24 @@ async fn handle_web_terminal_close(
         return;
     };
 
-    if let Some(mut terminal) = remove_web_terminal_entry(active_terminals, session_id).await {
-        let _ = terminal.child.kill().await;
-        terminal.task_handle.abort();
+    if let Some(terminal) = remove_web_terminal_entry(active_terminals, session_id).await {
+        match terminal {
+            ActiveWebTerminal::Cert {
+                mut child,
+                task_handle,
+                ..
+            } => {
+                let _ = child.kill().await;
+                task_handle.abort();
+            }
+            ActiveWebTerminal::NodeKey {
+                control_tx,
+                task_handle,
+            } => {
+                let _ = control_tx.try_send(ssh_node_exec::SshNodeShellControl::Close);
+                task_handle.abort();
+            }
+        }
         let _ = send_web_terminal_closed(tx, session_id, None).await;
         tracing::info!(session_id, "web terminal session closed by server");
     }
@@ -2194,9 +2917,24 @@ async fn drain_active_web_terminals(active_terminals: &ActiveWebTerminalMap) {
         guard.drain().collect::<Vec<_>>()
     };
 
-    for (session_id, mut terminal) in entries {
-        let _ = terminal.child.kill().await;
-        terminal.task_handle.abort();
+    for (session_id, terminal) in entries {
+        match terminal {
+            ActiveWebTerminal::Cert {
+                mut child,
+                task_handle,
+                ..
+            } => {
+                let _ = child.kill().await;
+                task_handle.abort();
+            }
+            ActiveWebTerminal::NodeKey {
+                control_tx,
+                task_handle,
+            } => {
+                let _ = control_tx.try_send(ssh_node_exec::SshNodeShellControl::Close);
+                task_handle.abort();
+            }
+        }
         tracing::debug!(session_id = %session_id, "web terminal drained on disconnect");
     }
 }

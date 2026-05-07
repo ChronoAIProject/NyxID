@@ -74,6 +74,39 @@ export const PLATFORMS = [
 
 export const platformSchema = z.union([z.literal(""), z.enum(PLATFORMS)])
 
+const aiKeyPrefillShape = {
+  slug: z.string().optional(),
+  label: z.string().optional(),
+  via_node: z.string().optional(),
+  org_id: z.string().uuid().optional(),
+  endpoint_url: z.string().optional(),
+  custom: z.boolean().optional(),
+  custom_slug: z.string().optional(),
+  auth_method: z.string().optional(),
+  auth_key_name: z.string().optional(),
+} as const
+
+export const aiKeyPrefillSchema = z.object(aiKeyPrefillShape)
+
+export type ParsedAiKeyPrefill = z.infer<typeof aiKeyPrefillSchema>
+
+export function parseAiKeyPrefill(input: unknown): ParsedAiKeyPrefill {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {}
+
+  const source = input as Record<string, unknown>
+  const output: Partial<Record<keyof typeof aiKeyPrefillShape, unknown>> = {}
+  for (const key of Object.keys(aiKeyPrefillShape) as Array<
+    keyof typeof aiKeyPrefillShape
+  >) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue
+    const parsed = aiKeyPrefillShape[key].safeParse(source[key])
+    if (parsed.success && parsed.data !== undefined) {
+      output[key] = parsed.data
+    }
+  }
+  return output as ParsedAiKeyPrefill
+}
+
 /**
  * Helper used by live-validation inputs: extracts the first error message
  * from a Zod safeParse result, or returns `null` if the value is valid.

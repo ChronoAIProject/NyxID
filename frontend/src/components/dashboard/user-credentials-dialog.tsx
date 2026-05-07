@@ -30,6 +30,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { TwitterOAuthGuidance } from "@/components/shared/twitter-oauth-guidance";
 import { ExternalLink, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
@@ -123,6 +124,8 @@ export function UserCredentialsDialog({
         ) : (
           <>
             <ExistingCredentialsInfo credentials={credentials} />
+
+            <TwitterOAuthGuidance slug={provider.slug} />
 
             {provider.documentation_url && (
               <a

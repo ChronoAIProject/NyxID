@@ -19,6 +19,7 @@ use crate::models::oauth_broker_binding::{
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
+use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_provider_credentials::{
@@ -1286,6 +1287,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     backfill_downstream_service_types(db).await?;
+    migrate_legacy_ssh_auth_mode(db).await?;
     backfill_org_scope_sources(db).await?;
     purge_legacy_channel_message_content(db).await?;
 
@@ -1449,6 +1451,123 @@ async fn backfill_downstream_service_types(db: &Database) -> Result<(), mongodb:
     }
 
     Ok(())
+}
+
+async fn migrate_legacy_ssh_auth_mode(db: &Database) -> Result<(), mongodb::error::Error> {
+    let services = db.collection::<Document>(DOWNSTREAM_SERVICES);
+    let cert = services
+        .update_many(
+            doc! {
+                "ssh_config": { "$exists": true },
+                "ssh_config.ssh_auth_mode": { "$exists": false },
+                "ssh_config.certificate_auth_enabled": true,
+            },
+            doc! { "$set": { "ssh_config.ssh_auth_mode": SshAuthMode::Cert.as_str() } },
+        )
+        .await?;
+    let proxy_only = services
+        .update_many(
+            doc! {
+                "ssh_config": { "$exists": true },
+                "ssh_config.ssh_auth_mode": { "$exists": false },
+            },
+            doc! { "$set": { "ssh_config.ssh_auth_mode": SshAuthMode::ProxyOnly.as_str() } },
+        )
+        .await?;
+
+    let user_services = db.collection::<Document>(USER_SERVICES);
+    let non_ssh_mode = user_services
+        .update_many(
+            doc! {
+                "service_type": { "$ne": "ssh" },
+                "ssh_auth_mode": { "$exists": false },
+            },
+            doc! {
+                "$set": {
+                    "ssh_auth_mode": SshAuthMode::ProxyOnly.as_str(),
+                }
+            },
+        )
+        .await?;
+    let non_ssh_stale = user_services
+        .update_many(
+            doc! {
+                "service_type": { "$ne": "ssh" },
+                "ssh_node_keys_stale": { "$exists": false },
+            },
+            doc! {
+                "$set": {
+                    "ssh_node_keys_stale": false,
+                }
+            },
+        )
+        .await?;
+
+    let mut cursor = user_services
+        .find(doc! {
+            "service_type": "ssh",
+            "$or": [
+                { "ssh_auth_mode": { "$exists": false } },
+                { "ssh_node_keys_stale": { "$exists": false } },
+            ],
+        })
+        .await?;
+    let mut ssh_user_services = 0u64;
+    while let Some(row) = cursor.try_next().await? {
+        let Ok(user_service_id) = row.get_str("_id") else {
+            continue;
+        };
+        let mode = match row.get_str("catalog_service_id") {
+            Ok(catalog_service_id) => services
+                .find_one(doc! { "_id": catalog_service_id })
+                .await?
+                .and_then(|service| legacy_ssh_auth_mode_from_downstream_doc(&service))
+                .unwrap_or(SshAuthMode::ProxyOnly),
+            Err(_) => SshAuthMode::ProxyOnly,
+        };
+        let stale = row.get_bool("ssh_node_keys_stale").unwrap_or(false);
+        let update = user_services
+            .update_one(
+                doc! { "_id": user_service_id },
+                doc! {
+                    "$set": {
+                        "ssh_auth_mode": mode.as_str(),
+                        "ssh_node_keys_stale": stale,
+                    }
+                },
+            )
+            .await?;
+        ssh_user_services += update.modified_count;
+    }
+
+    let modified = cert.modified_count
+        + proxy_only.modified_count
+        + non_ssh_mode.modified_count
+        + non_ssh_stale.modified_count
+        + ssh_user_services;
+    if modified > 0 {
+        tracing::info!(
+            downstream_cert = cert.modified_count,
+            downstream_proxy_only = proxy_only.modified_count,
+            user_services_non_ssh_mode = non_ssh_mode.modified_count,
+            user_services_non_ssh_stale = non_ssh_stale.modified_count,
+            user_services_ssh = ssh_user_services,
+            "Migrated legacy SSH auth-mode fields"
+        );
+    }
+
+    Ok(())
+}
+
+fn legacy_ssh_auth_mode_from_downstream_doc(service: &Document) -> Option<SshAuthMode> {
+    let ssh_config = service.get_document("ssh_config").ok()?;
+    if let Ok(mode) = ssh_config.get_str("ssh_auth_mode") {
+        return mode.parse().ok();
+    }
+    let cert_enabled = ssh_config
+        .get_bool("certificate_auth_enabled")
+        .unwrap_or(false);
+    Some(SshAuthMode::from_certificate_auth_enabled(cert_enabled))
 }
 
 /// Preserve legacy org member/invite behavior by marking rows that predate
@@ -1920,6 +2039,15 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
 
         // Create UserService -- clean up endpoint + api_key on failure
         let inherited_identity = inherited_identity_fields(service.as_ref());
+        let service_type = service
+            .as_ref()
+            .map(|svc| svc.service_type.clone())
+            .unwrap_or_else(|| "http".to_string());
+        let ssh_auth_mode = service
+            .as_ref()
+            .filter(|svc| svc.service_type == "ssh")
+            .and_then(|svc| svc.ssh_config.as_ref().map(|ssh| ssh.ssh_auth_mode))
+            .unwrap_or(SshAuthMode::ProxyOnly);
         let user_service = UserService {
             id: service_id,
             user_id: token.user_id.clone(),
@@ -1931,11 +2059,9 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             catalog_service_id,
             node_id: None,
             node_priority: 0,
-            service_type: if let Some(ref svc) = service {
-                svc.service_type.clone()
-            } else {
-                "http".to_string()
-            },
+            service_type,
+            ssh_auth_mode,
+            ssh_node_keys_stale: false,
             identity_propagation_mode: inherited_identity.identity_propagation_mode,
             identity_include_user_id: inherited_identity.identity_include_user_id,
             identity_include_email: inherited_identity.identity_include_email,
@@ -2139,6 +2265,16 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             node_id: None,
             node_priority: 0,
             service_type: service.service_type.clone(),
+            ssh_auth_mode: if service.service_type == "ssh" {
+                service
+                    .ssh_config
+                    .as_ref()
+                    .map(|ssh| ssh.ssh_auth_mode)
+                    .unwrap_or(SshAuthMode::ProxyOnly)
+            } else {
+                SshAuthMode::ProxyOnly
+            },
+            ssh_node_keys_stale: false,
             identity_propagation_mode: inherited_identity.identity_propagation_mode,
             identity_include_user_id: inherited_identity.identity_include_user_id,
             identity_include_email: inherited_identity.identity_include_email,
@@ -2374,6 +2510,16 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             node_id: Some(binding.node_id.clone()),
             node_priority: binding.priority,
             service_type: service.service_type.clone(),
+            ssh_auth_mode: if service.service_type == "ssh" {
+                service
+                    .ssh_config
+                    .as_ref()
+                    .map(|ssh| ssh.ssh_auth_mode)
+                    .unwrap_or(SshAuthMode::ProxyOnly)
+            } else {
+                SshAuthMode::ProxyOnly
+            },
+            ssh_node_keys_stale: false,
             identity_propagation_mode: inherited_identity.identity_propagation_mode,
             identity_include_user_id: inherited_identity.identity_include_user_id,
             identity_include_email: inherited_identity.identity_include_email,

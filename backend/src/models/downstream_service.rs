@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::models::default_request_header::DefaultRequestHeader;
+use crate::models::ssh_auth_mode::{SshAuthMode, default_ssh_auth_mode};
 use crate::models::ws_frame_injection::WsFrameInjection;
 
 pub const COLLECTION_NAME: &str = "downstream_services";
@@ -113,6 +114,8 @@ pub struct CredentialFieldSpec {
 pub struct SshServiceConfig {
     pub host: String,
     pub port: u16,
+    #[serde(default = "default_ssh_auth_mode")]
+    pub ssh_auth_mode: SshAuthMode,
     #[serde(default)]
     pub certificate_auth_enabled: bool,
     #[serde(default = "default_certificate_ttl_minutes")]
@@ -607,6 +610,7 @@ mod tests {
         let config = SshServiceConfig {
             host: "ssh.internal.example".to_string(),
             port: 22,
+            ssh_auth_mode: SshAuthMode::Cert,
             certificate_auth_enabled: true,
             certificate_ttl_minutes: 30,
             allowed_principals: vec!["ubuntu".to_string()],
@@ -618,6 +622,7 @@ mod tests {
         let restored: SshServiceConfig = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.host, "ssh.internal.example");
         assert_eq!(restored.port, 22);
+        assert_eq!(restored.ssh_auth_mode, SshAuthMode::Cert);
         assert!(restored.certificate_auth_enabled);
         assert_eq!(restored.allowed_principals, vec!["ubuntu".to_string()]);
     }

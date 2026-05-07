@@ -39,18 +39,20 @@ CHECK
 
 > **This is a first-time install.** If you already have NyxID set up locally, run `./scripts/uninstall.sh --yes` from inside `NyxID/` first (see [Uninstall & reinstall](#uninstall--reinstall) below), then come back here.
 
-The block below is wrapped in `bash << 'INSTALL' ... INSTALL` so it runs under bash regardless of your outer shell — no `zsh: command not found: #` errors on macOS. The trailing `cd NyxID` runs in your interactive shell after the bash subshell exits, so you land inside the checkout for later commands (stop, uninstall, CLI install).
+> **If you've run NyxID before:** a stale MongoDB volume can keep the old `MONGO_ROOT_PASSWORD` even after `.env.dev` is regenerated, which shows up as `SCRAM failure: Authentication failed` in `docker logs nyxid-backend`. To intentionally wipe local test data before re-running with a fresh password, run this from the existing `NyxID/` checkout:
+>
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.prod.yml down -v
+> ```
+>
+> This deletes local NyxID accounts, encrypted credentials, and audit logs. It does not change the quickstart automatically because deleting user data must be explicit.
+
+The block below is wrapped in `bash << 'INSTALL' ... INSTALL` so it runs under bash regardless of your outer shell. The trailing `cd NyxID` runs in your interactive shell after the bash subshell exits, so you land inside the checkout for later commands (stop, uninstall, CLI install). The script checks install state, reuses an existing checkout when safe, generates development env files and signing keys, starts Docker, and waits for `/health`.
 
 ```bash
 bash << 'INSTALL'
 set -e
 
-# ── Pre-flight: refuse to run on an existing install ──
-# Checks for install STATE (.env.dev or any nyx-flavored Mongo volume), NOT
-# the NyxID/ source tree — so re-running this block after ./scripts/uninstall.sh
-# works cleanly. The volume grep matches nyxid_mongodb_data (default compose
-# project), nyx_mongodb_data, or any other nyx*_mongodb_data variant from a
-# renamed checkout, without false-positing on unrelated MongoDB projects.
 if [ -f NyxID/.env.dev ] \
   || docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qE 'nyx.*_mongodb_data$'; then
   echo "Existing NyxID install state detected."
@@ -64,12 +66,9 @@ if [ -f NyxID/.env.dev ] \
   exit 0
 fi
 
-# Clone only if the source tree isn't already here (post-uninstall reinstall
-# reuses the existing checkout; uninstall.sh doesn't delete the repo itself).
 [ -d NyxID ] || git clone https://github.com/ChronoAIProject/NyxID.git
 cd NyxID
 
-# ── Generate .env.dev (dev config) and link for Docker ──
 EK=$(openssl rand -hex 32)
 cat > .env.dev << EOF
 MONGO_ROOT_PASSWORD=$(openssl rand -hex 24)
@@ -86,23 +85,17 @@ RUST_LOG=nyxid=info,tower_http=info
 EOF
 ln -sf .env.dev .env.production
 
-# ── Generate signing keys (LibreSSL fallback for macOS) ──
 mkdir -p keys
 openssl genrsa -out keys/private.pem 4096 2>/dev/null
 openssl rsa -in keys/private.pem -RSAPublicKey_out -out keys/public.pem 2>/dev/null \
   || openssl rsa -in keys/private.pem -pubout -out keys/public.pem 2>/dev/null
 
-# ── Pull images and start the stack ──
 echo "Downloading NyxID (this may take a few minutes on first run)..."
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
   --env-file .env.production pull
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
   --env-file .env.production up -d
 
-# ── Wait for the server (up to 90s) ──
-# Track success explicitly so we print EXACTLY ONE of the two outcome
-# messages below, never both. Fixes #282 where timeout + success printed
-# together when /health didn't come up in time.
 echo "Waiting for NyxID to start..."
 ok=0
 n=0
@@ -117,11 +110,11 @@ done
 
 if [ "$ok" -eq 1 ]; then
   echo ""
-  echo "✓ NyxID is running at http://localhost:3000"
+  echo "OK: NyxID is running at http://localhost:3000"
   echo "  Save your encryption key (needed if you reset the database): $EK"
 else
   echo ""
-  echo "✗ Timed out waiting for NyxID to start."
+  echo "ERROR: Timed out waiting for NyxID to start."
   echo "  Check logs:  docker logs nyxid-backend"
   echo "  Reset state: see the 'Uninstall & reinstall' section below"
 fi
@@ -150,11 +143,11 @@ The server stack above is fully usable from the web console — the CLI (Command
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
-source ~/.cargo/env                               # make nyxid available in current shell
-nyxid --version                                   # verify
+source ~/.cargo/env 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
+nyxid --version
 ```
 
-> Already have Rust? You can also install with: `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli`
+> Already have Rust? You can also install with: `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli --locked`
 
 ---
 
@@ -215,6 +208,12 @@ Then re-paste Step 2 — the pre-flight will pass and Step 2 will clone fresh.
 ### Stuck on SCRAM failure?
 
 If `docker logs nyxid-backend` shows `SCRAM failure: Authentication failed`, your MongoDB volume still has the previous `MONGO_ROOT_PASSWORD` baked in from a prior run, and `.env.dev` no longer matches. Run `./scripts/uninstall.sh --yes` to wipe the volume, then re-run [Step 2](#step-2-of-3--install-and-start). See [#280](https://github.com/ChronoAIProject/NyxID/issues/280).
+
+## Done when...
+
+- `curl -sf http://localhost:3001/health` returns 200.
+- `http://localhost:3000` loads in your browser.
+- You can register a user and log in.
 
 ---
 

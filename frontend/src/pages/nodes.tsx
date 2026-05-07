@@ -306,7 +306,6 @@ export function NodesPage() {
                 <TableHead>Name</TableHead>
                 <TableHead>Owner</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead>Bindings</TableHead>
                 <TableHead>Last Heartbeat</TableHead>
                 <TableHead>Created</TableHead>
                 <TableHead className="w-[80px]" />
@@ -343,12 +342,6 @@ export function NodesPage() {
                       status={node.status}
                       isConnected={node.is_connected}
                     />
-                  </TableCell>
-                  <TableCell>
-                    <span className="text-sm text-muted-foreground">
-                      {String(node.binding_count)} service
-                      {node.binding_count !== 1 ? "s" : ""}
-                    </span>
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {formatRelativeTime(node.last_heartbeat_at) ?? "Never"}
@@ -390,8 +383,8 @@ export function NodesPage() {
             <DialogTitle>Delete Node</DialogTitle>
             <DialogDescription>
               Are you sure you want to delete &quot;{deleteTarget?.name ?? ""}
-              &quot;? This will disconnect the node and remove all its service
-              bindings. This action cannot be undone.
+              &quot;? This will disconnect the node and detach any AI Services
+              routed through it. This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

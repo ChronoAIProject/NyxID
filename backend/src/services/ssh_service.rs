@@ -13,11 +13,17 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, SshServiceConfig,
 };
+use crate::models::ssh_auth_mode::SshAuthMode;
 
 #[derive(Debug)]
 pub struct SshSessionManager {
     concurrent_by_user: Arc<DashMap<String, usize>>,
     max_sessions_per_user: usize,
+}
+
+pub struct ResolvedSshAuthContext {
+    pub mode: SshAuthMode,
+    pub service_slug: String,
 }
 
 impl SshSessionManager {
@@ -85,6 +91,7 @@ pub struct SshConfigInput<'a> {
     pub host: &'a str,
     pub port: u16,
     pub certificate_auth_enabled: bool,
+    pub ssh_auth_mode: Option<SshAuthMode>,
     pub certificate_ttl_minutes: u32,
     pub allowed_principals: &'a [String],
 }
@@ -100,6 +107,47 @@ pub async fn get_ssh_service(
         .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))?;
 
     ensure_ssh_service(&service).cloned()
+}
+
+pub async fn resolve_ssh_auth_context(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    service_id: &str,
+    catalog_slug: &str,
+) -> AppResult<ResolvedSshAuthContext> {
+    let effective_owner = crate::services::proxy_service::find_effective_service_owner(
+        db,
+        actor_user_id,
+        None,
+        Some(service_id),
+    )
+    .await?;
+    let owner_user_id = effective_owner.as_deref().unwrap_or(actor_user_id);
+
+    if let Some(user_service) = crate::services::user_service_service::find_by_catalog_service_id(
+        db,
+        owner_user_id,
+        service_id,
+    )
+    .await?
+    {
+        return Ok(ResolvedSshAuthContext {
+            mode: user_service.ssh_auth_mode,
+            service_slug: user_service.slug,
+        });
+    }
+
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": service_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("SSH service not found".to_string()))?;
+    let ssh = ensure_ssh_service(&service)?;
+
+    Ok(ResolvedSshAuthContext {
+        mode: ssh.ssh_auth_mode,
+        service_slug: catalog_slug.to_string(),
+    })
 }
 
 pub fn ensure_ssh_service(service: &DownstreamService) -> AppResult<&SshServiceConfig> {
@@ -120,8 +168,11 @@ pub async fn build_ssh_config(
     input: SshConfigInput<'_>,
 ) -> AppResult<SshServiceConfig> {
     validate_resolved_ssh_target(input.host, input.port).await?;
-    validate_certificate_settings(
-        input.certificate_auth_enabled,
+    let ssh_auth_mode = input.ssh_auth_mode.unwrap_or_else(|| {
+        SshAuthMode::from_certificate_auth_enabled(input.certificate_auth_enabled)
+    });
+    validate_ssh_auth_mode_settings(
+        ssh_auth_mode,
         input.certificate_ttl_minutes,
         input.allowed_principals,
     )?;
@@ -130,14 +181,15 @@ pub async fn build_ssh_config(
         encryption_keys,
         service_id,
         existing,
-        input.certificate_auth_enabled,
+        ssh_auth_mode.certificate_auth_enabled(),
     )
     .await?;
 
     Ok(SshServiceConfig {
         host: input.host.trim().to_string(),
         port: input.port,
-        certificate_auth_enabled: input.certificate_auth_enabled,
+        ssh_auth_mode,
+        certificate_auth_enabled: ssh_auth_mode.certificate_auth_enabled(),
         certificate_ttl_minutes: input.certificate_ttl_minutes,
         allowed_principals: sanitize_allowed_principals(input.allowed_principals),
         ca_private_key_encrypted,
@@ -183,8 +235,21 @@ fn validate_ssh_target_syntax(host: &str, port: u16) -> AppResult<()> {
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn validate_certificate_settings(
     certificate_auth_enabled: bool,
+    certificate_ttl_minutes: u32,
+    allowed_principals: &[String],
+) -> AppResult<()> {
+    validate_ssh_auth_mode_settings(
+        SshAuthMode::from_certificate_auth_enabled(certificate_auth_enabled),
+        certificate_ttl_minutes,
+        allowed_principals,
+    )
+}
+
+pub fn validate_ssh_auth_mode_settings(
+    ssh_auth_mode: SshAuthMode,
     certificate_ttl_minutes: u32,
     allowed_principals: &[String],
 ) -> AppResult<()> {
@@ -194,13 +259,13 @@ pub fn validate_certificate_settings(
         ));
     }
 
-    if !certificate_auth_enabled {
+    if ssh_auth_mode == SshAuthMode::ProxyOnly {
         return Ok(());
     }
 
     if allowed_principals.is_empty() {
         return Err(AppError::ValidationError(
-            "allowed_principals is required when certificate_auth_enabled is true".to_string(),
+            "allowed_principals is required when SSH auth mode is cert or node_key".to_string(),
         ));
     }
 
@@ -397,6 +462,7 @@ mod tests {
     use crate::crypto::aes::EncryptionKeys;
     use crate::crypto::local_key_provider::LocalKeyProvider;
     use crate::models::downstream_service::SshServiceConfig;
+    use crate::models::ssh_auth_mode::SshAuthMode;
     use std::sync::Arc;
 
     #[test]
@@ -448,6 +514,7 @@ mod tests {
         let existing = SshServiceConfig {
             host: "old.example".to_string(),
             port: 22,
+            ssh_auth_mode: SshAuthMode::Cert,
             certificate_auth_enabled: true,
             certificate_ttl_minutes: 30,
             allowed_principals: vec!["ubuntu".to_string()],
@@ -463,6 +530,7 @@ mod tests {
                 host: "ssh.internal.example",
                 port: 2222,
                 certificate_auth_enabled: true,
+                ssh_auth_mode: None,
                 certificate_ttl_minutes: 45,
                 allowed_principals: &[String::from("ubuntu"), String::from(" deploy ")],
             },
@@ -492,6 +560,7 @@ mod tests {
                 host: "ssh.internal.example",
                 port: 22,
                 certificate_auth_enabled: true,
+                ssh_auth_mode: None,
                 certificate_ttl_minutes: 30,
                 allowed_principals: &[String::from("ubuntu")],
             },

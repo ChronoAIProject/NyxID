@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::models::default_request_header::DefaultRequestHeader;
+use crate::models::ssh_auth_mode::{SshAuthMode, default_ssh_auth_mode};
 use crate::models::ws_frame_injection::WsFrameInjection;
 
 pub const COLLECTION_NAME: &str = "user_services";
@@ -34,6 +35,13 @@ pub struct UserService {
     /// "http" (default) | "ssh"
     #[serde(default = "default_service_type")]
     pub service_type: String,
+    /// SSH auth mode for SSH services. Non-SSH services keep the default.
+    #[serde(default = "default_ssh_auth_mode")]
+    pub ssh_auth_mode: SshAuthMode,
+    /// True after a node_key service is converted away from node_key while
+    /// node-side keys may still exist in an operator's local node store.
+    #[serde(default)]
+    pub ssh_node_keys_stale: bool,
 
     // --- Identity propagation config ---
     /// "none" | "headers" | "jwt" | "both"
@@ -131,6 +139,8 @@ mod tests {
             node_id: Some("node-1".to_string()),
             node_priority: 0,
             service_type: "http".to_string(),
+            ssh_auth_mode: SshAuthMode::ProxyOnly,
+            ssh_node_keys_stale: false,
             identity_propagation_mode: "headers".to_string(),
             identity_include_user_id: true,
             identity_include_email: true,
@@ -176,6 +186,8 @@ mod tests {
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
+            ssh_auth_mode: SshAuthMode::ProxyOnly,
+            ssh_node_keys_stale: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,
@@ -197,9 +209,13 @@ mod tests {
         let mut doc = bson::to_document(&svc).expect("serialize");
         doc.remove("node_priority");
         doc.remove("service_type");
+        doc.remove("ssh_auth_mode");
+        doc.remove("ssh_node_keys_stale");
         let restored: UserService = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.node_priority, 0);
         assert_eq!(restored.service_type, "http");
+        assert_eq!(restored.ssh_auth_mode, SshAuthMode::ProxyOnly);
+        assert!(!restored.ssh_node_keys_stale);
     }
 
     #[test]
@@ -216,6 +232,8 @@ mod tests {
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
+            ssh_auth_mode: SshAuthMode::ProxyOnly,
+            ssh_node_keys_stale: false,
             identity_propagation_mode: "both".to_string(),
             identity_include_user_id: true,
             identity_include_email: true,
@@ -269,6 +287,8 @@ mod tests {
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
+            ssh_auth_mode: SshAuthMode::ProxyOnly,
+            ssh_node_keys_stale: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,

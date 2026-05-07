@@ -1,5 +1,4 @@
 import { Link } from "@tanstack/react-router";
-import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
 import { ArrowLeft } from "lucide-react";
 
 // ── Last updated date (update on each revision) ──
@@ -36,10 +35,9 @@ export function PrivacyPage() {
         <div className="flex flex-col items-center gap-4">
           <Link
             to="/"
-            className="flex items-center gap-3 transition-opacity hover:opacity-80"
+            className="flex items-center transition-opacity hover:opacity-80"
           >
-            <PortalMarkLogo size={32} className="shrink-0" />
-            <span className="logo-wordmark text-xl">NyxID</span>
+            <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-8 w-auto" />
           </Link>
           <h1 className="text-2xl font-bold text-foreground">Privacy Policy</h1>
           <p className="text-xs text-text-tertiary">

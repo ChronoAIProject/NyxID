@@ -116,6 +116,12 @@ const HEARTBEAT_DEAD_AFTER_ROTATION: Duration = Duration::from_secs(60);
 /// tight enough that a watchdog-triggered exit fires promptly after the
 /// current timeout window expires.
 const HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+/// When the browser heartbeat dies while a mutating proxy request is still
+/// in flight, wait for that request to resolve before deciding the wizard
+/// was cancelled. The upstream reqwest client has a 60s total timeout, so
+/// this covers one slow in-flight create plus a small scheduling buffer.
+const SOFT_FAILURE_IN_FLIGHT_GRACE: Duration = Duration::from_secs(65);
+const SOFT_FAILURE_IN_FLIGHT_CHECK_INTERVAL: Duration = Duration::from_millis(25);
 
 fn heartbeat_watchdog_dead(
     started_at: Instant,
@@ -137,8 +143,9 @@ fn heartbeat_watchdog_dead(
 /// `body_fields` is the whitelist of permitted top-level JSON keys in the
 /// request body. An empty slice means "body must be empty". Any key not
 /// in the whitelist causes a 400 — a second layer on top of CSP/CSRF so
-/// a compromised wizard page can't smuggle extra fields (e.g. `target_org_id`,
-/// `identity_propagation_mode`) through to `POST /keys`.
+/// a compromised wizard page can't smuggle extra fields (e.g.
+/// `forward_access_token` or `identity_propagation_mode`) through to
+/// `POST /keys`.
 #[derive(Debug, Clone)]
 struct ProxyRoute {
     method: Method,
@@ -183,6 +190,11 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
         FlowKind::AiKey => vec![
             ProxyRoute {
                 method: Method::GET,
+                path_template: "/api/v1/orgs",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::GET,
                 path_template: "/api/v1/catalog",
                 body_fields: &[],
             },
@@ -194,15 +206,22 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
             // Unified key creation. Fields are the intersection of what
             // the wizard UI actually sends (see `buildCreateBody` in
             // wizard.js) — NOT the full `CreateKeyRequest` surface. Keeps
-            // privileged fields like `target_org_id`, `identity_*`,
-            // `forward_access_token`, `inject_delegation_token`, and SSH
-            // flags out of reach of a compromised wizard page.
+            // privileged fields like `identity_*`, `forward_access_token`,
+            // `inject_delegation_token`, and SSH flags out of reach of a
+            // compromised wizard page.
             //
             // `node_id` is whitelisted because the shared React confirm
             // panel forwards the CLI's `via_node` prefill to the backend
             // on `nyxid service add --via-node …`. Without it the
             // wizard would create an unbound service, breaking node-only
             // / self-hosted setups.
+            //
+            // `target_org_id` is whitelisted intentionally for
+            // `nyxid service add --org …` parity with the api-key wizard.
+            // The CLI resolves the raw org slug/name to an org user id
+            // before prefill, and the backend still revalidates the actor
+            // has admin access to that owner via
+            // `org_service::resolve_owner_access`.
             ProxyRoute {
                 method: Method::POST,
                 path_template: "/api/v1/keys",
@@ -216,6 +235,7 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                     "auth_key_name",
                     "openapi_spec_url",
                     "node_id",
+                    "target_org_id",
                 ],
             },
             // Needed to poll placeholder key status during OAuth/device-code.
@@ -399,6 +419,15 @@ struct ServerState {
     /// the browser never got a chance to fire a cleanup request
     /// (e.g. tab closed while POST /keys was still in flight).
     pending_keys: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    /// Snapshot of the most recent successful AiKey create response
+    /// (`POST /api/v1/keys` returning `status: "active"`). Captured by
+    /// the proxy sniff and consumed by the soft-failure branches of the
+    /// outcome select so a tab-close that beats `/api/proxy/complete`
+    /// reports the actual created service instead of a misleading
+    /// "wizard cancelled" (#601). Only populated for `FlowKind::AiKey`;
+    /// other flows still require the explicit ack so display-once
+    /// secrets are not accidentally surfaced.
+    completed_ai_key: Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
     /// JSON-serialized prefill for the flow. Baked into
     /// `window.__WIZARD_BOOTSTRAP__.prefill` so the React bundle can
     /// render the right confirm panel with the right values on mount.
@@ -580,16 +609,8 @@ async fn serve_index(State(state): State<ServerState>) -> Response {
     (StatusCode::OK, headers, html).into_response()
 }
 
-async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
-    // Block path traversal but allow subdirectories (e.g. fonts/x.woff2).
-    if name.split('/').any(|seg| seg == ".." || seg.is_empty()) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let asset = match Assets::get(&name) {
-        Some(a) => a,
-        None => return StatusCode::NOT_FOUND.into_response(),
-    };
-    let ct = if name.ends_with(".css") {
+fn asset_content_type(name: &str) -> &'static str {
+    if name.ends_with(".css") {
         "text/css; charset=utf-8"
     } else if name.ends_with(".js") {
         "application/javascript; charset=utf-8"
@@ -597,16 +618,36 @@ async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> 
         "text/html; charset=utf-8"
     } else if name.ends_with(".svg") {
         "image/svg+xml"
+    } else if name.ends_with(".ico") {
+        "image/x-icon"
     } else if name.ends_with(".woff2") {
         "font/woff2"
     } else if name.ends_with(".woff") {
         "font/woff"
     } else {
         "application/octet-stream"
+    }
+}
+
+fn embedded_asset_response(name: &str) -> Response {
+    // Block path traversal but allow subdirectories (e.g. fonts/x.woff2).
+    if name.split('/').any(|seg| seg == ".." || seg.is_empty()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let asset = match Assets::get(name) {
+        Some(a) => a,
+        None => return StatusCode::NOT_FOUND.into_response(),
     };
     let mut headers = base_security_headers();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(ct).unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(asset_content_type(name)),
+    );
     (StatusCode::OK, headers, asset.data.into_owned()).into_response()
+}
+
+async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> Response {
+    embedded_asset_response(&name)
 }
 
 /// Validate the `Origin` header. When present it must point at *this*
@@ -873,6 +914,56 @@ async fn handle_status(State(state): State<ServerState>, headers: HeaderMap) -> 
     (StatusCode::OK, h, body.to_string()).into_response()
 }
 
+/// Outcome of inspecting a successful proxy response for /api/v1/keys
+/// lifecycle signals. Pure so it can be unit-tested without spinning up
+/// the full proxy.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum KeysResponseSignal {
+    /// `POST /keys` returned a placeholder waiting on OAuth/device-code.
+    /// Caller should track `id` for cleanup if abandoned.
+    PendingPlaceholder { id: String },
+    /// `POST /keys` returned an active service. For AiKey flow only,
+    /// caller should snapshot the full response body as the implicit
+    /// completion ack so a tab-close racing `/api/proxy/complete`
+    /// does not surface as a false "wizard cancelled" outcome (#601).
+    ActiveCreated { id: String },
+    /// `GET /keys/:id` returned a non-pending status. Caller should
+    /// remove `id` from the pending-cleanup tracker.
+    NoLongerPending { id: String },
+    /// Not a keys lifecycle signal we care about.
+    None,
+}
+
+pub(crate) fn classify_keys_response(
+    method: &Method,
+    backend_path: &str,
+    body: &serde_json::Value,
+) -> KeysResponseSignal {
+    let id = body.get("id").and_then(|x| x.as_str());
+    let status = body.get("status").and_then(|x| x.as_str());
+
+    if *method == Method::POST && backend_path == "/api/v1/keys" {
+        match (id, status) {
+            (Some(id), Some("pending_auth")) => {
+                return KeysResponseSignal::PendingPlaceholder { id: id.to_string() };
+            }
+            (Some(id), Some("active")) => {
+                return KeysResponseSignal::ActiveCreated { id: id.to_string() };
+            }
+            _ => {}
+        }
+    } else if *method == Method::GET
+        && backend_path.starts_with("/api/v1/keys/")
+        && !backend_path.contains("/bindings")
+        && let (Some(id), Some(s)) = (id, status)
+        && s != "pending_auth"
+    {
+        return KeysResponseSignal::NoLongerPending { id: id.to_string() };
+    }
+
+    KeysResponseSignal::None
+}
+
 /// Proxy handler. The browser hits `/api/proxy/api/v1/...`; we strip the
 /// `/api/proxy` prefix, check the allowlist, attach the bearer token, and
 /// forward to the NyxID backend. The response body + content-type are
@@ -1085,23 +1176,19 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
         && upstream_ct.starts_with("application/json")
         && let Ok(v) = serde_json::from_slice::<Value>(&body)
     {
-        if method == Method::POST && backend_path == "/api/v1/keys" {
-            if let (Some(id), Some("pending_auth")) = (
-                v.get("id").and_then(|x| x.as_str()),
-                v.get("status").and_then(|x| x.as_str()),
-            ) {
-                state.pending_keys.lock().await.insert(id.to_string());
+        match classify_keys_response(&method, backend_path, &v) {
+            KeysResponseSignal::PendingPlaceholder { id } => {
+                state.pending_keys.lock().await.insert(id);
             }
-        } else if method == Method::GET
-            && backend_path.starts_with("/api/v1/keys/")
-            && !backend_path.contains("/bindings")
-            && let (Some(id), Some(s)) = (
-                v.get("id").and_then(|x| x.as_str()),
-                v.get("status").and_then(|x| x.as_str()),
-            )
-            && s != "pending_auth"
-        {
-            state.pending_keys.lock().await.remove(id);
+            KeysResponseSignal::ActiveCreated { id: _ } => {
+                if matches!(state.flow, FlowKind::AiKey) {
+                    *state.completed_ai_key.lock().await = Some(v.clone());
+                }
+            }
+            KeysResponseSignal::NoLongerPending { id } => {
+                state.pending_keys.lock().await.remove(&id);
+            }
+            KeysResponseSignal::None => {}
         }
     }
 
@@ -1249,6 +1336,85 @@ async fn signal_and_shutdown(state: ServerState, outcome: WizardOutcome) {
     state.shutdown.notify_waiters();
 }
 
+/// Resolve a soft-failure outcome (heartbeat watchdog, overall timeout)
+/// preferring a previously-sniffed AiKey create as the implicit completion
+/// ack (#601). Hard-cancel paths (Ctrl+C, explicit cancel button) skip
+/// this helper because the user's gesture is unambiguous.
+///
+/// Always drains placeholder cleanup before returning.
+async fn resolve_soft_failure_outcome(
+    state: &ServerState,
+    completion_message: &str,
+    fallback_message: Option<&str>,
+    fallback_outcome: WizardOutcome,
+) -> WizardOutcome {
+    resolve_soft_failure_outcome_with_grace(
+        state,
+        completion_message,
+        fallback_message,
+        fallback_outcome,
+        SOFT_FAILURE_IN_FLIGHT_GRACE,
+    )
+    .await
+}
+
+async fn resolve_soft_failure_outcome_with_grace(
+    state: &ServerState,
+    completion_message: &str,
+    fallback_message: Option<&str>,
+    fallback_outcome: WizardOutcome,
+    in_flight_grace: Duration,
+) -> WizardOutcome {
+    if let Some(value) = state.completed_ai_key.lock().await.take() {
+        eprintln!("  {completion_message}");
+        drain_pending_keys(state).await;
+        WizardOutcome::AiKeyCompleted(value)
+    } else {
+        wait_for_in_flight_completion(state, in_flight_grace).await;
+        if let Some(value) = state.completed_ai_key.lock().await.take() {
+            eprintln!("  {completion_message}");
+            drain_pending_keys(state).await;
+            return WizardOutcome::AiKeyCompleted(value);
+        }
+        if let Some(msg) = fallback_message {
+            eprintln!("  {msg}");
+        }
+        drain_pending_keys(state).await;
+        fallback_outcome
+    }
+}
+
+async fn wait_for_in_flight_completion(state: &ServerState, grace: Duration) {
+    if state
+        .in_flight_mutations
+        .load(std::sync::atomic::Ordering::Acquire)
+        == 0
+    {
+        return;
+    }
+
+    let deadline = Instant::now() + grace;
+    loop {
+        if state.completed_ai_key.lock().await.is_some() {
+            return;
+        }
+        if state
+            .in_flight_mutations
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            return;
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        tokio::time::sleep(remaining.min(SOFT_FAILURE_IN_FLIGHT_CHECK_INTERVAL)).await;
+    }
+}
+
 /// Build the query string for the initial browser URL so prefill values
 /// are present on page load. Only non-empty fields are emitted. Per-flow
 /// shapes — ai-key uses slug/label/via_node/endpoint_url; rotation flows
@@ -1272,6 +1438,7 @@ fn prefill_query(prefill: &PrefillData) -> String {
             push_opt(&mut parts, "slug", &p.slug);
             push_opt(&mut parts, "label", &p.label);
             push_opt(&mut parts, "via_node", &p.via_node);
+            push_opt(&mut parts, "org_id", &p.org);
             push_opt(&mut parts, "endpoint_url", &p.endpoint_url);
             // Issue #414 — custom-mode definitional fields. The SPA
             // primarily reads these out of `__WIZARD_BOOTSTRAP__.prefill`
@@ -1343,6 +1510,7 @@ fn prefill_to_json(prefill: &PrefillData) -> serde_json::Value {
             put_opt(&mut obj, "slug", &p.slug);
             put_opt(&mut obj, "label", &p.label);
             put_opt(&mut obj, "via_node", &p.via_node);
+            put_opt(&mut obj, "org_id", &p.org);
             put_opt(&mut obj, "endpoint_url", &p.endpoint_url);
             // Issue #414 — the SPA's `AiKeyConfirm` reads these to
             // skip the catalog grid (`prefill.custom === true`) and
@@ -1442,6 +1610,7 @@ pub async fn run_flow(
         in_flight_mutations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         bound_port: addr.port(),
         pending_keys: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+        completed_ai_key: Arc::new(tokio::sync::Mutex::new(None)),
         prefill: Arc::new(prefill_json),
     };
 
@@ -1449,6 +1618,14 @@ pub async fn run_flow(
         .route("/wizard", get(serve_index))
         .route("/", get(serve_index))
         .route("/assets/{*name}", get(serve_asset))
+        .route(
+            "/nyxid-wordmark.svg",
+            get(|| async { embedded_asset_response("nyxid-wordmark.svg") }),
+        )
+        .route(
+            "/favicon.ico",
+            get(|| async { embedded_asset_response("favicon.ico") }),
+        )
         .route("/api/proxy/complete", post(handle_complete))
         .route("/api/proxy/cancel", post(handle_cancel))
         .route("/api/proxy/cancel-unload", post(handle_cancel_unload))
@@ -1538,15 +1715,24 @@ pub async fn run_flow(
             v.map_err(|_| anyhow!("wizard completion channel closed unexpectedly"))?
         }
         _ = watchdog_rx => {
-            eprintln!("  Browser stopped responding (tab closed?) — cancelling.");
-            drain_pending_keys(&state).await;
-            WizardOutcome::Cancelled
+            resolve_soft_failure_outcome(
+                &state,
+                "Browser stopped responding (tab closed?) — using last successful create as completion.",
+                Some("Browser stopped responding (tab closed?). If a request was still in flight, it may have completed on the server; run `nyxid service list` to check."),
+                WizardOutcome::Cancelled,
+            ).await
         }
         _ = tokio::time::sleep(WIZARD_MAX_DURATION) => {
-            drain_pending_keys(&state).await;
-            WizardOutcome::TimedOut
+            resolve_soft_failure_outcome(
+                &state,
+                "Browser idle past the wizard's max duration — using last successful create as completion.",
+                None,
+                WizardOutcome::TimedOut,
+            ).await
         }
         _ = tokio::signal::ctrl_c() => {
+            // Explicit user gesture: honor the cancel even if a create
+            // succeeded. The user typed Ctrl+C; that is an unambiguous stop.
             drain_pending_keys(&state).await;
             WizardOutcome::Cancelled
         }
@@ -1649,8 +1835,218 @@ mod tests {
             in_flight_mutations: Arc::new(AtomicUsize::new(0)),
             bound_port: 0,
             pending_keys: Arc::new(tokio::sync::Mutex::new(set)),
+            completed_ai_key: Arc::new(tokio::sync::Mutex::new(None)),
             prefill: Arc::new(Value::Null),
         }
+    }
+
+    #[tokio::test]
+    async fn root_brand_assets_are_embedded_and_typed() {
+        let wordmark = embedded_asset_response("nyxid-wordmark.svg");
+        assert_eq!(wordmark.status(), StatusCode::OK);
+        assert_eq!(
+            wordmark
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("image/svg+xml")
+        );
+
+        let favicon = embedded_asset_response("favicon.ico");
+        assert_eq!(favicon.status(), StatusCode::OK);
+        assert_eq!(
+            favicon
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("image/x-icon")
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_pending_placeholder() {
+        let body = json!({ "id": "abc", "status": "pending_auth" });
+
+        assert_eq!(
+            classify_keys_response(&Method::POST, "/api/v1/keys", &body),
+            KeysResponseSignal::PendingPlaceholder {
+                id: "abc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_active_created() {
+        let body = json!({ "id": "abc", "status": "active" });
+
+        assert_eq!(
+            classify_keys_response(&Method::POST, "/api/v1/keys", &body),
+            KeysResponseSignal::ActiveCreated {
+                id: "abc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_get_no_longer_pending() {
+        let body = json!({ "id": "abc", "status": "active" });
+
+        assert_eq!(
+            classify_keys_response(&Method::GET, "/api/v1/keys/abc", &body),
+            KeysResponseSignal::NoLongerPending {
+                id: "abc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_get_pending_returns_none() {
+        let body = json!({ "id": "abc", "status": "pending_auth" });
+
+        assert_eq!(
+            classify_keys_response(&Method::GET, "/api/v1/keys/abc", &body),
+            KeysResponseSignal::None
+        );
+    }
+
+    #[test]
+    fn ai_key_allowlist_permits_org_picker_and_target_org_id() {
+        let routes = allowlist_for(FlowKind::AiKey);
+
+        assert!(
+            routes.iter().any(|route| {
+                route.method == Method::GET
+                    && route.path_template == "/api/v1/orgs"
+                    && route.body_fields.is_empty()
+            }),
+            "ai-key wizard must be able to populate the owner picker",
+        );
+
+        let keys_post = routes
+            .iter()
+            .find(|route| route.method == Method::POST && route.path_template == "/api/v1/keys")
+            .expect("POST /api/v1/keys route");
+        assert!(
+            keys_post.body_fields.contains(&"target_org_id"),
+            "ai-key wizard create route should permit org owner passthrough",
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_ignores_bindings_path() {
+        let body = json!({ "id": "abc", "status": "active" });
+
+        assert_eq!(
+            classify_keys_response(&Method::GET, "/api/v1/keys/abc/bindings", &body),
+            KeysResponseSignal::None
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_ignores_non_keys_paths() {
+        let body = json!({ "id": "abc", "status": "active" });
+
+        assert_eq!(
+            classify_keys_response(&Method::POST, "/api/v1/services", &body),
+            KeysResponseSignal::None
+        );
+    }
+
+    #[test]
+    fn classify_keys_response_missing_fields_returns_none() {
+        assert_eq!(
+            classify_keys_response(&Method::POST, "/api/v1/keys", &json!({})),
+            KeysResponseSignal::None
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_soft_failure_outcome_prefers_completed_ai_key() {
+        let (base_url, _mock) = spawn_mock().await;
+        let state = make_state(base_url, vec![]);
+        let completed = json!({ "slug": "test" });
+        *state.completed_ai_key.lock().await = Some(completed.clone());
+
+        let outcome = resolve_soft_failure_outcome(
+            &state,
+            "completion message",
+            Some("fallback message"),
+            WizardOutcome::Cancelled,
+        )
+        .await;
+
+        match outcome {
+            WizardOutcome::AiKeyCompleted(value) => assert_eq!(value, completed),
+            other => panic!("expected AiKeyCompleted, got {other:?}"),
+        }
+        // Snapshot was consumed.
+        assert!(state.completed_ai_key.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_soft_failure_outcome_waits_for_in_flight_create_completion() {
+        let (base_url, _mock) = spawn_mock().await;
+        let state = make_state(base_url, vec![]);
+        state.in_flight_mutations.fetch_add(1, Ordering::AcqRel);
+
+        let expected = json!({ "slug": "race-won" });
+        let completed_ai_key = state.completed_ai_key.clone();
+        let in_flight_mutations = state.in_flight_mutations.clone();
+        let completed_for_task = expected.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            *completed_ai_key.lock().await = Some(completed_for_task);
+            in_flight_mutations.fetch_sub(1, Ordering::Release);
+        });
+
+        let outcome = resolve_soft_failure_outcome_with_grace(
+            &state,
+            "completion message",
+            Some("fallback message"),
+            WizardOutcome::Cancelled,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        match outcome {
+            WizardOutcome::AiKeyCompleted(value) => assert_eq!(value, expected),
+            other => panic!("expected AiKeyCompleted, got {other:?}"),
+        }
+        assert_eq!(state.in_flight_mutations.load(Ordering::Acquire), 0);
+        assert!(state.completed_ai_key.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_soft_failure_outcome_falls_back_when_no_completion() {
+        let (base_url, _mock) = spawn_mock().await;
+        let state = make_state(base_url, vec![]);
+        // completed_ai_key intentionally left None.
+
+        let outcome = resolve_soft_failure_outcome(
+            &state,
+            "completion message",
+            Some("fallback message"),
+            WizardOutcome::Cancelled,
+        )
+        .await;
+
+        assert!(matches!(outcome, WizardOutcome::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn resolve_soft_failure_outcome_supports_timeout_fallback() {
+        let (base_url, _mock) = spawn_mock().await;
+        let state = make_state(base_url, vec![]);
+
+        let outcome = resolve_soft_failure_outcome(
+            &state,
+            "completion message",
+            None,
+            WizardOutcome::TimedOut,
+        )
+        .await;
+
+        assert!(matches!(outcome, WizardOutcome::TimedOut));
     }
 
     #[test]

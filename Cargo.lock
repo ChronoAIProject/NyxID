@@ -3439,6 +3439,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "rpassword",
+ "russh",
  "rust-embed",
  "serde",
  "serde_json",
@@ -3456,6 +3457,13 @@ dependencies = [
  "urlencoding",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "nyxid-mcp-demo"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

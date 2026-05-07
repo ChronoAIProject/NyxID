@@ -40,7 +40,7 @@ pub struct UserApiKey {
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub user_oauth_client_secret_encrypted: Option<Vec<u8>>,
 
-    /// "active" | "expired" | "revoked" | "refresh_failed" | "pending_auth"
+    /// "active" | "expired" | "revoked" | "failed" | "refresh_failed" | "pending_auth"
     pub status: String,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_used_at: Option<DateTime<Utc>>,

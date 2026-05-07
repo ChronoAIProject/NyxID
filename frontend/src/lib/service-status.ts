@@ -7,7 +7,8 @@
  * - `UserService.is_active` — a user-controlled boolean (Activate / Deactivate
  *   toggle on the service record).
  * - `UserApiKey.status` — the credential lifecycle, one of `"active"`,
- *   `"pending_auth"`, `"expired"`, `"revoked"`, `"refresh_failed"`.
+ *   `"pending_auth"`, `"expired"`, `"revoked"`, `"failed"`,
+ *   `"refresh_failed"`.
  *
  * The Service badge used to display `is_active ? "Active" : "Inactive"` only,
  * which caused a misleading "Active" state after switching routing from

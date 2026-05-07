@@ -45,6 +45,7 @@ pub mod org_role_scopes;
 pub mod orgs;
 pub mod providers;
 pub mod proxy;
+pub mod runtime_config;
 pub mod service_requirements;
 pub mod services;
 pub(crate) mod services_helpers;

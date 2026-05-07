@@ -16,14 +16,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 //     point — regression guard for the existing `service add <slug>`
 //     flow.
 
-const { mockPost } = vi.hoisted(() => ({
+const { mockGet, mockPost, mockUseOrgs } = vi.hoisted(() => ({
+  mockGet: vi.fn(),
   mockPost: vi.fn(),
+  mockUseOrgs: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", () => ({
   api: {
     post: mockPost,
-    get: vi.fn(),
+    get: mockGet,
   },
   ApiError: class ApiError extends Error {
     status: number;
@@ -37,6 +39,31 @@ vi.mock("@/lib/api-client", () => ({
       this.errorCode = response.error_code;
     }
   },
+}));
+
+vi.mock("@/hooks/use-orgs", () => ({
+  useOrgs: mockUseOrgs,
+}));
+
+vi.mock("@/components/shared/org-scope-select", () => ({
+  OrgScopeSelect: ({
+    value,
+    onChange,
+    label,
+  }: {
+    readonly value: string | null;
+    readonly onChange: (value: string | null) => void;
+    readonly label?: string;
+  }) => (
+    <select
+      aria-label={label ?? "Scope"}
+      value={value ?? ""}
+      onChange={(event) => onChange(event.target.value || null)}
+    >
+      <option value="">Personal</option>
+      <option value="0a130a17-2624-4fbb-a69d-8ba51c99952a">ChronoAI</option>
+    </select>
+  ),
 }));
 
 // The wizard's "reserve action" + "rewind on error" helpers do their
@@ -82,6 +109,35 @@ const baseProps = {
   onSuccess: vi.fn(),
   onSlugPicked: vi.fn(),
 };
+
+beforeEach(() => {
+  mockUseOrgs.mockReturnValue({ data: [] });
+});
+
+function getFieldLabel(id: string) {
+  const label = document.querySelector(`label[for="${id}"]`);
+  if (!(label instanceof HTMLElement)) {
+    throw new Error(`Missing label for ${id}`);
+  }
+  return label;
+}
+
+function expectRequiredMarkerFor(id: string) {
+  const marker = getFieldLabel(id).parentElement?.querySelector(
+    'span[aria-hidden="true"]',
+  );
+  if (!(marker instanceof HTMLElement)) {
+    throw new Error(`Missing required marker for ${id}`);
+  }
+  expect(marker).toHaveTextContent("*");
+  expect(marker).toBeVisible();
+}
+
+function expectNoRequiredMarkerFor(id: string) {
+  expect(
+    getFieldLabel(id).parentElement?.querySelector('span[aria-hidden="true"]'),
+  ).toBeNull();
+}
 
 describe("AiKeyConfirm — issue #414 custom-mode entry", () => {
   beforeEach(() => {
@@ -293,4 +349,326 @@ describe("AiKeyConfirm — issue #414 custom-mode entry", () => {
       expect(screen.getByLabelText("Auth method")).toHaveValue(method);
     },
   );
+});
+
+describe("AiKeyConfirm — org-scoped owner picker", () => {
+  beforeEach(() => {
+    mockPost.mockReset();
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it("hides the owner picker when the user has no admin orgs", () => {
+    mockUseOrgs.mockReturnValue({
+      data: [
+        {
+          id: "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+          display_name: "ChronoAI",
+          your_role: "member",
+        },
+      ],
+    });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          custom: true,
+          label: "Home Assistant",
+          endpoint_url: "http://homeassistant.local:8123",
+          auth_method: "bearer",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    expect(screen.queryByLabelText("Owner")).not.toBeInTheDocument();
+  });
+
+  it("includes target_org_id in POST /keys when an org is selected", async () => {
+    const user = userEvent.setup();
+    mockUseOrgs.mockReturnValue({
+      data: [
+        {
+          id: "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+          display_name: "ChronoAI",
+          your_role: "admin",
+        },
+      ],
+    });
+    mockPost.mockResolvedValue({
+      id: "svc-id-abc",
+      slug: "home-assistant-admin",
+      label: "Home Assistant",
+    });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          custom: true,
+          label: "Home Assistant",
+          endpoint_url: "http://homeassistant.local:8123",
+          auth_method: "bearer",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await user.selectOptions(
+      screen.getByLabelText("Owner"),
+      "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+    );
+    await user.type(
+      screen.getByLabelText("API key / credential"),
+      "tok_abc123",
+    );
+    await user.click(screen.getByRole("button", { name: /Connect service/i }));
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith(
+        "/keys",
+        expect.objectContaining({
+          target_org_id: "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+        }),
+      );
+    });
+  });
+
+  it("pre-selects the owner from prefill org_id", () => {
+    mockUseOrgs.mockReturnValue({
+      data: [
+        {
+          id: "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+          display_name: "ChronoAI",
+          your_role: "admin",
+        },
+      ],
+    });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          custom: true,
+          org_id: "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+          label: "Home Assistant",
+          endpoint_url: "http://homeassistant.local:8123",
+          auth_method: "bearer",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    expect(screen.getByLabelText("Owner")).toHaveValue(
+      "0a130a17-2624-4fbb-a69d-8ba51c99952a",
+    );
+  });
+});
+
+describe("AiKeyConfirm — custom-service required markers", () => {
+  beforeEach(() => {
+    mockPost.mockReset();
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it("marks required fields in the custom-service form", () => {
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          custom: true,
+          auth_method: "bearer",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    expectRequiredMarkerFor("pair-custom-label");
+    expectRequiredMarkerFor("pair-custom-endpoint");
+    expectRequiredMarkerFor("pair-custom-auth-method");
+    expectRequiredMarkerFor("pair-custom-credential");
+    expectNoRequiredMarkerFor("pair-custom-slug");
+
+    expect(screen.getByLabelText("Label")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(screen.getByLabelText("Endpoint URL")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(screen.getByLabelText("Auth method")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(screen.getByLabelText("API key / credential")).toHaveAttribute(
+      "aria-required",
+      "true",
+    );
+    expect(getFieldLabel("pair-custom-slug")).not.toHaveTextContent("*");
+  });
+
+  it("removes the credential field when auth method is none", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          custom: true,
+          auth_method: "bearer",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    expect(screen.getByLabelText("API key / credential")).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Auth method"), "none");
+
+    expect(
+      screen.queryByLabelText("API key / credential"),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("AiKeyConfirm — custom-service back reset", () => {
+  beforeEach(() => {
+    mockPost.mockReset();
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it('notifies with "" when Back resets the custom-service slug', async () => {
+    const user = userEvent.setup();
+    const onSlugPicked = vi.fn();
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{ custom: true }}
+        onSlugPicked={onSlugPicked}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await waitFor(() => {
+      expect(onSlugPicked).toHaveBeenCalledWith("__custom__");
+    });
+    onSlugPicked.mockClear();
+
+    await user.click(screen.getByRole("button", { name: /Back/i }));
+
+    await waitFor(() => {
+      expect(onSlugPicked).toHaveBeenLastCalledWith("");
+    });
+    expect(onSlugPicked).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("AiKeyConfirm — catalog services routed via node", () => {
+  const catalogEntry = {
+    slug: "llm-openai",
+    name: "OpenAI",
+    base_url: "https://api.openai.com",
+    auth_method: "bearer",
+    service_type: "rest",
+    requires_credential: true,
+    requires_gateway_url: false,
+  };
+
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockGet.mockResolvedValue(catalogEntry);
+    baseProps.onSuccess = vi.fn();
+    baseProps.onSlugPicked = vi.fn();
+  });
+
+  it("hides credential, shows node badge, and omits credential in POST body", async () => {
+    const user = userEvent.setup();
+    mockPost.mockResolvedValue({
+      id: "svc-id-abc",
+      slug: "llm-openai",
+      label: "Test",
+    });
+
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          slug: "llm-openai",
+          via_node: "node-uuid-12345",
+          label: "Test",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await screen.findByText(/Routed via node/i);
+
+    expect(screen.queryByLabelText(/API key/i)).not.toBeInTheDocument();
+    expect(screen.getByText("node-uuid-12345")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Connect via node/i }));
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith(
+        "/keys",
+        expect.objectContaining({
+          service_slug: "llm-openai",
+          label: "Test",
+          node_id: "node-uuid-12345",
+        }),
+      );
+    });
+
+    const [, body] = mockPost.mock.calls.find(([path]) => path === "/keys") ?? [];
+    expect(body).not.toHaveProperty("credential");
+  });
+
+  it("enables submit without a credential when via_node is set", async () => {
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          slug: "llm-openai",
+          via_node: "node-uuid-12345",
+          label: "Test",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await screen.findByText(/Routed via node/i);
+
+    expect(
+      screen.getByRole("button", { name: /Connect via node/i }),
+    ).not.toBeDisabled();
+  });
+
+  it("keeps submit disabled when label is empty", async () => {
+    const user = userEvent.setup();
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{
+          slug: "llm-openai",
+          via_node: "node-uuid-12345",
+          label: "Test",
+        }}
+      />,
+      { wrapper: createWrapper() },
+    );
+
+    await screen.findByText(/Routed via node/i);
+
+    await user.clear(screen.getByLabelText("Label"));
+
+    expect(
+      screen.getByRole("button", { name: /Connect via node/i }),
+    ).toBeDisabled();
+  });
 });

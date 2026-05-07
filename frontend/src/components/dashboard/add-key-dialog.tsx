@@ -9,13 +9,14 @@ import {
   usePollDeviceCode,
   useSetProviderCredentials,
 } from "@/hooks/use-providers";
-import { ApiError } from "@/lib/api-client";
+import { ApiError, api } from "@/lib/api-client";
 import { hardRedirect } from "@/lib/navigation";
 import { copyToClipboard } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
+import { TwitterOAuthGuidance } from "@/components/shared/twitter-oauth-guidance";
 import {
   Dialog,
   DialogContent,
@@ -1029,14 +1030,28 @@ function parseAdditionalScopes(raw: string): readonly string[] {
   return out;
 }
 
+async function cleanupPendingAuthKey(key: KeyInfo | null) {
+  if (key?.status !== "pending_auth") return;
+  try {
+    await api.delete<void>(
+      `/keys/${encodeURIComponent(key.id)}?only_if_pending=true`,
+    );
+  } catch {
+    // Best effort only. The detail page still exposes Delete Service
+    // for any pending placeholder that survives this cleanup.
+  }
+}
+
 function OAuthStep({
   catalogEntry,
   ensureKey,
+  onKeyCleared,
   onBack,
   targetOrgId,
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
+  readonly onKeyCleared: () => void;
   readonly onBack: () => void;
   /** When set, initiate the OAuth flow under this org's scope. */
   readonly targetOrgId: string | null;
@@ -1048,8 +1063,9 @@ function OAuthStep({
   async function handleConnect() {
     if (!catalogEntry.provider_config_id) return;
     setError(null);
+    let key: KeyInfo | null = null;
     try {
-      const key = await ensureKey();
+      key = await ensureKey();
       const additionalScopes = parseAdditionalScopes(scopeInput);
       const response = await initiateOAuth.mutateAsync({
         providerId: catalogEntry.provider_config_id,
@@ -1059,6 +1075,8 @@ function OAuthStep({
       });
       hardRedirect(response.authorization_url);
     } catch (err) {
+      await cleanupPendingAuthKey(key);
+      onKeyCleared();
       const message =
         err instanceof ApiError ? err.message : "Failed to start OAuth flow";
       setError(message);
@@ -1145,12 +1163,14 @@ type DeviceFlowStep =
 function DeviceCodeStep({
   catalogEntry,
   ensureKey,
+  onKeyCleared,
   onBack,
   onComplete,
   targetOrgId,
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
+  readonly onKeyCleared: () => void;
   readonly onBack: () => void;
   readonly onComplete: (keyId: string) => void;
   /** When set, initiate the device-code flow under this org's scope. */
@@ -1292,8 +1312,9 @@ function DeviceCodeStep({
     }
     setErrorMessage("");
     setFlowStep("requesting");
+    let key: KeyInfo | null = null;
     try {
-      const key = await ensureKey();
+      key = await ensureKey();
       if (!isMountedRef.current) return;
       setCreatedKeyId(key.id);
       // Only forward additional scopes for formats that accept them. OpenAI
@@ -1320,6 +1341,8 @@ function DeviceCodeStep({
         response.interval,
       );
     } catch (error) {
+      await cleanupPendingAuthKey(key);
+      onKeyCleared();
       if (!isMountedRef.current) return;
       if (error instanceof ApiError) {
         setErrorMessage(error.message);
@@ -1621,6 +1644,8 @@ function OAuthCredentialsStep({
           <ExternalLink className="h-3 w-3" />
         </a>
       )}
+
+      <TwitterOAuthGuidance slug={catalogEntry.slug} />
 
       {error && (
         <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
@@ -2095,6 +2120,7 @@ export function AddKeyDialog({
           <OAuthStep
             catalogEntry={selectedEntry}
             ensureKey={ensureAuthKey}
+            onKeyCleared={() => setAuthKey(null)}
             targetOrgId={targetOrgId}
             onBack={() =>
               setStep(
@@ -2113,6 +2139,7 @@ export function AddKeyDialog({
           <DeviceCodeStep
             catalogEntry={selectedEntry}
             ensureKey={ensureAuthKey}
+            onKeyCleared={() => setAuthKey(null)}
             targetOrgId={targetOrgId}
             onBack={() =>
               setStep(

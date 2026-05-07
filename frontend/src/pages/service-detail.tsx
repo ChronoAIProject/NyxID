@@ -1,5 +1,9 @@
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { useService, useDeleteService } from "@/hooks/use-services";
+import {
+  useService,
+  useDeleteService,
+  useTestSshConnection,
+} from "@/hooks/use-services";
 import {
   isOidcService,
   isConnectable,
@@ -7,6 +11,11 @@ import {
   SERVICE_CATEGORY_LABELS,
   SERVICE_TYPE_LABELS,
 } from "@/lib/constants";
+import {
+  SSH_AUTH_MODE_LABELS,
+  getSshAuthModeBadgeVariant,
+  inferSshAuthMode,
+} from "@/lib/ssh-auth-mode";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -54,6 +63,7 @@ export function ServiceDetailPage() {
   const navigate = useNavigate();
   const { data: service, isLoading, error } = useService(serviceId);
   const deleteMutation = useDeleteService();
+  const testSshMutation = useTestSshConnection();
   const { data: tokens } = useMyProviderTokens();
   const { data: appsData } = useDeveloperApps();
 
@@ -65,6 +75,22 @@ export function ServiceDetailPage() {
       void navigate({ to: "/services" });
     } catch {
       toast.error("Failed to delete service");
+    }
+  }
+
+  async function handleTestSshConnection() {
+    if (!service?.ssh_config) return;
+    const principal = service.ssh_config.allowed_principals[0];
+    if (!principal) {
+      toast.error("No SSH principal is configured for this service");
+      return;
+    }
+    try {
+      await testSshMutation.mutateAsync({ serviceId: service.id, principal });
+      toast.success("SSH connection test completed");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "SSH test failed";
+      toast.error(message);
     }
   }
 
@@ -100,6 +126,15 @@ export function ServiceDetailPage() {
 
   const oidc = isOidcService(service);
   const isSshService = service.service_type === "ssh";
+  const sshAuthMode = inferSshAuthMode(
+    service.ssh_config?.ssh_auth_mode,
+    service.ssh_config?.certificate_auth_enabled,
+  );
+  const terminalSupported =
+    isSshService &&
+    service.ssh_config != null &&
+    sshAuthMode !== "proxy_only" &&
+    service.ssh_config.allowed_principals.length > 0;
 
   return (
     <div className="space-y-8">
@@ -112,7 +147,7 @@ export function ServiceDetailPage() {
         description={service.description ?? undefined}
         actions={
           <>
-            {isSshService && service.ssh_config?.certificate_auth_enabled && (
+            {terminalSupported && (
               <Button
                 variant="outline"
                 size="sm"
@@ -257,6 +292,12 @@ export function ServiceDetailPage() {
                   mono
                 />
                 <DetailRow
+                  label="SSH Auth Mode"
+                  value={SSH_AUTH_MODE_LABELS[sshAuthMode] ?? "Proxy Only"}
+                  badge
+                  badgeVariant={getSshAuthModeBadgeVariant(sshAuthMode)}
+                />
+                <DetailRow
                   label="Certificate Auth"
                   value={
                     service.ssh_config.certificate_auth_enabled
@@ -276,19 +317,32 @@ export function ServiceDetailPage() {
                       label="Certificate TTL"
                       value={`${String(service.ssh_config.certificate_ttl_minutes)} minutes`}
                     />
-                    <DetailRow
-                      label="Allowed Principals"
-                      value={service.ssh_config.allowed_principals.join(", ")}
-                      copyable
-                    />
                   </>
                 )}
+                <DetailRow
+                  label="Allowed Principals"
+                  value={service.ssh_config.allowed_principals.join(", ")}
+                  copyable
+                />
                 {service.ssh_config.ca_public_key && (
                   <CopyableField
                     label="SSH CA Public Key"
                     value={service.ssh_config.ca_public_key}
                     size="sm"
                   />
+                )}
+                {(service.ssh_config.ssh_auth_mode ?? "proxy_only") ===
+                  "node_key" && (
+                  <div className="py-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleTestSshConnection()}
+                      isLoading={testSshMutation.isPending}
+                    >
+                      Test connection
+                    </Button>
+                  </div>
                 )}
               </>
             ) : (

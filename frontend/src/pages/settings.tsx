@@ -587,7 +587,7 @@ function buildCursorDeeplink(mcpUrl: string): string {
 }
 
 function buildClaudeCodeCommand(mcpUrl: string): string {
-  return `claude mcp add --transport http nyxid ${mcpUrl}`;
+  return `claude mcp add --transport http --scope user nyxid ${mcpUrl}`;
 }
 
 function buildCursorConfig(mcpUrl: string): string {

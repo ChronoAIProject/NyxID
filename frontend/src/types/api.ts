@@ -224,6 +224,7 @@ export interface ServiceCapabilities {
 export interface SshServiceConfig {
   readonly host: string;
   readonly port: number;
+  readonly ssh_auth_mode?: "cert" | "node_key" | "proxy_only";
   readonly certificate_auth_enabled: boolean;
   readonly certificate_ttl_minutes: number;
   readonly allowed_principals: readonly string[];
@@ -233,6 +234,7 @@ export interface SshServiceConfig {
 export interface SshServiceConfigInput {
   readonly host: string;
   readonly port: number;
+  readonly ssh_auth_mode?: "cert" | "node_key" | "proxy_only";
   readonly certificate_auth_enabled: boolean;
   readonly certificate_ttl_minutes: number;
   readonly allowed_principals: readonly string[];

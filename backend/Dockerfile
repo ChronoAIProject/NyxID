@@ -13,10 +13,12 @@ ENV NYXID_GIT_HASH=${NYXID_GIT_HASH}
 COPY Cargo.toml Cargo.lock ./
 COPY backend/Cargo.toml backend/Cargo.toml
 COPY cli/Cargo.toml cli/Cargo.toml
+COPY mcp-demo/Cargo.toml mcp-demo/Cargo.toml
 
 # Create dummy main.rs files so cargo can resolve and compile dependencies
 RUN mkdir -p backend/src && echo "fn main() {}" > backend/src/main.rs \
-    && mkdir -p cli/src && echo "fn main() {}" > cli/src/main.rs
+    && mkdir -p cli/src && echo "fn main() {}" > cli/src/main.rs \
+    && mkdir -p mcp-demo/src && echo "fn main() {}" > mcp-demo/src/main.rs
 RUN cargo build --release --manifest-path backend/Cargo.toml --features gcp-kms
 
 # Remove the dummy build artifacts (forces recompilation of our code only)

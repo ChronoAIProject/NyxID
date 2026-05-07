@@ -41,6 +41,7 @@ pub mod service_approval_config;
 pub mod service_endpoint;
 pub mod service_provider_requirement;
 pub mod session;
+pub mod ssh_auth_mode;
 pub mod telemetry_erasure_job;
 pub mod user;
 pub mod user_api_key;

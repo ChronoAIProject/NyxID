@@ -738,7 +738,7 @@ Restart Cursor. Authenticate via browser when prompted.
 Run in terminal:
 
 ```bash
-claude mcp add --transport http nyxid http://localhost:3001/mcp
+claude mcp add --transport http --scope user nyxid http://localhost:3001/mcp
 ```
 
 Or edit `~/.claude/settings.json` or project-level `.claude/settings.json`:

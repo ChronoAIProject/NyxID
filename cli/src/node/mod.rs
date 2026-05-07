@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod config;
 pub mod credential_store;
+pub mod credentials;
 pub mod daemon;
 pub mod encryption;
 pub mod error;
@@ -10,5 +11,7 @@ pub mod oauth;
 pub mod proxy_executor;
 pub mod secret_backend;
 pub mod signing;
+pub mod ssh_algos;
+pub mod ssh_node_exec;
 pub mod ws_client;
 pub mod ws_frame_injector;

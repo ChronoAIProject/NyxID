@@ -255,6 +255,7 @@ pub fn service_to_response_with_viewer(
         ssh_config: s.ssh_config.map(|ssh| SshServiceConfigResponse {
             host: ssh.host,
             port: ssh.port,
+            ssh_auth_mode: ssh.ssh_auth_mode,
             certificate_auth_enabled: ssh.certificate_auth_enabled,
             certificate_ttl_minutes: ssh.certificate_ttl_minutes,
             allowed_principals: ssh.allowed_principals,

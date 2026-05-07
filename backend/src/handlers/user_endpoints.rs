@@ -4,13 +4,14 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use mongodb::bson::doc;
+use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
 use crate::mw::auth::AuthUser;
 use crate::services::{
     api_docs_service, openapi_parser, org_service, user_endpoint_service, user_service_service,
@@ -58,6 +59,36 @@ async fn resolve_endpoint_write_owner(
         ));
     }
     Ok(endpoint.user_id)
+}
+
+async fn endpoint_is_only_node_routed(
+    state: &AppState,
+    owner_id: &str,
+    endpoint_id: &str,
+) -> AppResult<bool> {
+    let services = state
+        .db
+        .collection::<mongodb::bson::Document>(USER_SERVICES);
+    let total_count = services
+        .count_documents(doc! { "user_id": owner_id, "endpoint_id": endpoint_id })
+        .await?;
+    if total_count == 0 {
+        return Ok(false);
+    }
+
+    let direct_count = services
+        .count_documents(doc! {
+            "user_id": owner_id,
+            "endpoint_id": endpoint_id,
+            "$or": [
+                { "node_id": { "$exists": false } },
+                { "node_id": bson::Bson::Null },
+                { "node_id": "" },
+            ],
+        })
+        .await?;
+
+    Ok(direct_count == 0)
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -161,6 +192,17 @@ pub async fn update_endpoint(
 ) -> AppResult<Json<EndpointResponse>> {
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_endpoint_write_owner(&state, &actor, &endpoint_id).await?;
+
+    if let Some(url) = body.url.as_deref()
+        && !endpoint_is_only_node_routed(&state, &owner_id, &endpoint_id).await?
+    {
+        crate::services::url_validation::validate_user_endpoint_url(
+            url,
+            state.config.is_production(),
+            "endpoint_url",
+        )
+        .await?;
+    }
 
     let spec_update = match body.openapi_spec_url.as_deref() {
         None => user_endpoint_service::OpenApiSpecUrlUpdate::Leave,

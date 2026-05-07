@@ -10,43 +10,60 @@ The `nyxid` CLI installed and logged in. If you don't have it yet:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
-source ~/.cargo/env
+source ~/.cargo/env 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
 nyxid login --base-url <BASE_URL>
 ```
 
-`<BASE_URL>` is `https://nyx.chrono-ai.fun` for hosted, `http://localhost:3001` for self-host.
+`<BASE_URL>` is `https://nyx-api.chrono-ai.fun` for hosted, `http://localhost:3001` for self-host.
 
 `nyxid login` opens your browser and stores a session locally. The next two commands reuse it.
 
+> **Windows users:** The examples below use bash syntax. In PowerShell, set environment variables with `$env:NAME="value"` and use backticks instead of `\` for line continuations. In CMD, use `set NAME=value` and `^` for line continuations. If you adapt any `curl` example, run `curl.exe` so PowerShell does not invoke its `curl` alias.
+
 ## Connect and verify
 
-Set the **external service credential** in your shell first (this is your OpenAI / Anthropic / GitHub key, not a NyxID key):
+Set the **external service credential** in your shell first. This is your OpenAI / Anthropic / GitHub key, not a NyxID key. Substitute your real provider key:
 
 ```bash
-export OPENAI_API_KEY=sk-...   # or your real provider key
+export OPENAI_API_KEY=sk-...
 ```
 
-Then:
+In PowerShell, the same setup is:
+
+```powershell
+$env:OPENAI_API_KEY="sk-..."
+```
+
+Connect a service from the catalog:
 
 ```bash
-# 1. Connect a service from the catalog.
 nyxid service add llm-openai --credential-env OPENAI_API_KEY
+```
 
-# 2. Verify the proxy works end-to-end. Should return a real OpenAI models response.
-nyxid proxy request llm-openai models
+Copy the service slug returned by the CLI. If `llm-openai` already exists, the created slug may be `llm-openai-2` or another suffixed value. Use that returned slug in the verification call:
+
+```bash
+nyxid proxy request <RETURNED_SERVICE_SLUG> models
+```
+
+PowerShell uses the same `nyxid` commands after the environment variable is set:
+
+```powershell
+nyxid service add llm-openai --credential-env OPENAI_API_KEY
+nyxid proxy request <RETURNED_SERVICE_SLUG> models
 ```
 
 If `proxy request` returns a real JSON response (not an auth error), you're done. The service is connected and the credential is good.
 
 ## Browse the catalog
 
-To see what slugs are available before adding:
+To see what slugs are available before adding, run the commands you need. `catalog list` shows connectable services only; `catalog list --all` also includes system services; `catalog show` prints details and capabilities; `catalog endpoints` prints parsed OpenAPI endpoints.
 
 ```bash
-nyxid catalog list                # connectable services only
-nyxid catalog list --all          # include system services
-nyxid catalog show llm-openai     # details + capabilities
-nyxid catalog endpoints llm-openai   # parsed OpenAPI endpoints
+nyxid catalog list
+nyxid catalog list --all
+nyxid catalog show llm-openai
+nyxid catalog endpoints llm-openai
 ```
 
 ## Custom (non-catalog) services
@@ -65,8 +82,15 @@ For private APIs behind a firewall, see [docs/NODE_PROXY.md](../NODE_PROXY.md) f
 
 ## Rotating credentials
 
+First find the service ID:
+
 ```bash
-nyxid service list                                                # find the service ID
+nyxid service list
+```
+
+Then rotate the credential:
+
+```bash
 nyxid service rotate-credential <id> --credential-env <NEW_VAR>
 ```
 

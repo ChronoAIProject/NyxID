@@ -381,7 +381,33 @@ async fn generic_oauth_callback_impl(
 
     // Handle OAuth provider errors
     if let Some(ref error) = query.error {
-        let msg = query.error_description.as_deref().unwrap_or(error.as_str());
+        let msg = safe_provider_error_message(error, query.error_description.as_deref());
+
+        let mut failed_placeholders = 0_u64;
+        let mut state_lookup_error: Option<String> = None;
+        if let Some(state_param) = query.state.as_deref().filter(|s| !s.is_empty()) {
+            match user_token_service::peek_oauth_state(&state.db, state_param).await {
+                Ok(oauth_state) => {
+                    let owner_id = oauth_state
+                        .target_user_id
+                        .as_deref()
+                        .unwrap_or(&oauth_state.user_id);
+                    match user_api_key_service::fail_pending_placeholders_for_provider(
+                        &state.db,
+                        owner_id,
+                        &oauth_state.provider_config_id,
+                        &msg,
+                    )
+                    .await
+                    {
+                        Ok(count) => failed_placeholders = count,
+                        Err(e) => state_lookup_error = Some(e.to_string()),
+                    }
+                }
+                Err(e) => state_lookup_error = Some(e.to_string()),
+            }
+        }
+
         audit_service::log_async(
             state.db.clone(),
             auth_user.as_ref().map(|u| u.user_id.to_string()),
@@ -389,13 +415,15 @@ async fn generic_oauth_callback_impl(
             Some(serde_json::json!({
                 "error": error,
                 "error_description": &query.error_description,
+                "failed_placeholders": failed_placeholders,
+                "state_lookup_error": state_lookup_error,
             })),
             None,
             None,
             None,
             None,
         );
-        return redirect_callback(frontend_url, "error", Some(msg));
+        return redirect_callback(frontend_url, "error", Some(&msg));
     }
 
     let code = match query.code.as_deref() {
@@ -480,6 +508,27 @@ async fn generic_oauth_callback_impl(
                 sync_provider_credentials_to_unified_keys(&state, &token.user_id, provider_id, true)
                     .await
             {
+                let user_msg = safe_error_message(&error);
+                let failed_placeholders =
+                    match user_api_key_service::fail_pending_placeholders_for_provider(
+                        &state.db,
+                        &token.user_id,
+                        provider_id,
+                        &user_msg,
+                    )
+                    .await
+                    {
+                        Ok(count) => Some(count),
+                        Err(e) => {
+                            tracing::warn!(
+                                user_id = %token.user_id,
+                                provider_id = %provider_id,
+                                error = %e,
+                                "failed to mark OAuth placeholders as failed after sync error"
+                            );
+                            None
+                        }
+                    };
                 audit_service::log_async(
                     state.db.clone(),
                     Some(token.user_id.clone()),
@@ -488,13 +537,13 @@ async fn generic_oauth_callback_impl(
                         "provider_id": provider_id,
                         "error": error.to_string(),
                         "reason": "failed_to_sync_unified_keys",
+                        "failed_placeholders": failed_placeholders,
                     })),
                     None,
                     None,
                     None,
                     None,
                 );
-                let user_msg = safe_error_message(&error);
                 if let Some(ref path) = redirect_path {
                     return redirect_to_path(frontend_url, path, "error", Some(&user_msg));
                 }
@@ -508,6 +557,31 @@ async fn generic_oauth_callback_impl(
             }
         }
         Err(e) => {
+            let owner_id = oauth_state
+                .target_user_id
+                .as_deref()
+                .unwrap_or(&oauth_state.user_id);
+            let user_msg = safe_error_message(&e);
+            let failed_placeholders =
+                match user_api_key_service::fail_pending_placeholders_for_provider(
+                    &state.db,
+                    owner_id,
+                    provider_id,
+                    &user_msg,
+                )
+                .await
+                {
+                    Ok(count) => Some(count),
+                    Err(error) => {
+                        tracing::warn!(
+                            user_id = %owner_id,
+                            provider_id = %provider_id,
+                            error = %error,
+                            "failed to mark OAuth placeholders as failed"
+                        );
+                        None
+                    }
+                };
             audit_service::log_async(
                 state.db.clone(),
                 Some(oauth_state.user_id.clone()),
@@ -516,6 +590,7 @@ async fn generic_oauth_callback_impl(
                     "provider_id": provider_id,
                     "error": e.to_string(),
                     "on_behalf_of": &oauth_state.target_user_id,
+                    "failed_placeholders": failed_placeholders,
                 })),
                 None,
                 None,
@@ -523,7 +598,6 @@ async fn generic_oauth_callback_impl(
                 None,
             );
             // Sanitize error for user-facing redirect -- never leak internal details
-            let user_msg = safe_error_message(&e);
             if let Some(ref path) = redirect_path {
                 redirect_to_path(frontend_url, path, "error", Some(&user_msg))
             } else {
@@ -859,6 +933,11 @@ fn safe_error_message(e: &AppError) -> String {
     }
 }
 
+fn safe_provider_error_message(error: &str, error_description: Option<&str>) -> String {
+    let message = error_description.unwrap_or(error);
+    safe_error_message(&AppError::BadRequest(message.to_string()))
+}
+
 async fn sync_provider_credentials_to_unified_keys(
     state: &AppState,
     user_id: &str,
@@ -913,15 +992,19 @@ fn ensure_callback_user_matches_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
     use crate::models::org_membership::COLLECTION_NAME as ORG_MEMBERSHIPS;
     use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use crate::models::user_provider_token::{
         COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
     };
     use crate::mw::auth::AuthMethod;
     use crate::test_utils::{connect_test_database, test_app_state, test_membership, test_user};
-    use chrono::Utc;
+    use axum::http::header::LOCATION;
+    use axum::response::IntoResponse;
+    use chrono::{Duration, Utc};
     use uuid::Uuid;
 
     fn test_auth_user() -> AuthUser {
@@ -1002,6 +1085,96 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    fn test_oauth_state(state_id: &str, user_id: &str, provider_id: &str) -> OAuthState {
+        let now = Utc::now();
+        OAuthState {
+            id: state_id.to_string(),
+            user_id: user_id.to_string(),
+            provider_config_id: provider_id.to_string(),
+            code_verifier: None,
+            device_code_encrypted: None,
+            user_code_encrypted: None,
+            poll_interval: None,
+            target_user_id: None,
+            credential_user_id: None,
+            redirect_path: None,
+            expires_at: now + Duration::minutes(10),
+            created_at: now,
+        }
+    }
+
+    fn test_pending_oauth_api_key(key_id: &str, user_id: &str, provider_id: &str) -> UserApiKey {
+        let now = Utc::now();
+        UserApiKey {
+            id: key_id.to_string(),
+            user_id: user_id.to_string(),
+            label: "GitHub OAuth".to_string(),
+            credential_type: "oauth2".to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: Some(provider_id.to_string()),
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "pending_auth".to_string(),
+            last_used_at: None,
+            error_message: None,
+            source: Some("user_created".to_string()),
+            source_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn get_api_key(db: &mongodb::Database, key_id: &str) -> UserApiKey {
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(mongodb::bson::doc! { "_id": key_id })
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    fn redirect_location(redirect: axum::response::Redirect) -> String {
+        let response = redirect.into_response();
+        assert!(response.status().is_redirection());
+        response
+            .headers()
+            .get(LOCATION)
+            .expect("redirect location")
+            .to_str()
+            .expect("valid redirect location")
+            .to_string()
+    }
+
+    fn redirect_query_param(location: &str, key: &str) -> Option<String> {
+        url::Url::parse(location)
+            .expect("valid redirect URL")
+            .query_pairs()
+            .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
+    }
+
+    async fn spawn_oauth_token_server() -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "test-access-token",
+                    "refresh_token": "test-refresh-token",
+                    "expires_in": 3600,
+                    "scope": "read:user",
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/token"), handle)
     }
 
     #[test]
@@ -1134,5 +1307,210 @@ mod tests {
         assert_eq!(response.tokens.len(), 1);
         assert_eq!(response.tokens[0].provider_id, provider_id);
         assert_eq!(response.tokens[0].provider_name, "GitHub");
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_callback_denial_marks_placeholder_failed() {
+        let Some(db) =
+            connect_test_database("oauth_callback_denial_marks_placeholder_failed").await
+        else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let state_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(test_oauth_state(&state_id, &user_id, &provider_id))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(test_pending_oauth_api_key(&key_id, &user_id, &provider_id))
+            .await
+            .unwrap();
+
+        let redirect = generic_oauth_callback_impl(
+            state,
+            None,
+            GenericOAuthCallbackQuery {
+                code: None,
+                state: Some(state_id),
+                error: Some("access_denied".to_string()),
+                error_description: None,
+            },
+        )
+        .await;
+
+        let location = redirect_location(redirect);
+        assert!(location.contains("/providers/callback"));
+        assert!(location.contains("status=error"));
+        assert!(location.contains("message=access_denied"));
+        let api_key = get_api_key(&db, &key_id).await;
+        assert_eq!(api_key.status, "failed");
+        assert_eq!(api_key.error_message.as_deref(), Some("access_denied"));
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_callback_sync_failure_marks_placeholder_failed() {
+        let Some(db) =
+            connect_test_database("oauth_callback_sync_failure_marks_placeholder_failed").await
+        else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let state_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let (token_url, token_server) = spawn_oauth_token_server().await;
+
+        let mut provider = test_provider_config(&provider_id);
+        provider.token_url = Some(token_url);
+        provider.client_id_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"test-client-id")
+                .await
+                .unwrap(),
+        );
+        provider.client_secret_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"test-client-secret")
+                .await
+                .unwrap(),
+        );
+
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(provider)
+            .await
+            .unwrap();
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(test_oauth_state(&state_id, &user_id, &provider_id))
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(test_pending_oauth_api_key(&key_id, &user_id, &provider_id))
+            .await
+            .unwrap();
+        // Simulate a production MongoDB write rejection during sync:
+        // token exchange succeeds, then the UserApiKey active-state update fails.
+        db.run_command(mongodb::bson::doc! {
+            "collMod": USER_API_KEYS,
+            "validator": { "status": { "$ne": "active" } },
+            "validationLevel": "strict",
+            "validationAction": "error",
+        })
+        .await
+        .unwrap();
+
+        let redirect = generic_oauth_callback_impl(
+            state,
+            None,
+            GenericOAuthCallbackQuery {
+                code: Some("oauth-code".to_string()),
+                state: Some(state_id),
+                error: None,
+                error_description: None,
+            },
+        )
+        .await;
+        token_server.abort();
+
+        let location = redirect_location(redirect);
+        assert_eq!(
+            redirect_query_param(&location, "status").as_deref(),
+            Some("error")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "message").as_deref(),
+            Some("An internal error occurred")
+        );
+        let api_key = get_api_key(&db, &key_id).await;
+        assert_eq!(api_key.status, "failed");
+        assert_eq!(
+            api_key.error_message.as_deref(),
+            Some("An internal error occurred")
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_callback_denial_without_state_redirects_only() {
+        let Some(db) = connect_test_database("oauth_callback_denial_without_state").await else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(test_pending_oauth_api_key(&key_id, &user_id, &provider_id))
+            .await
+            .unwrap();
+
+        let redirect = generic_oauth_callback_impl(
+            state,
+            None,
+            GenericOAuthCallbackQuery {
+                code: None,
+                state: None,
+                error: Some("access_denied".to_string()),
+                error_description: None,
+            },
+        )
+        .await;
+
+        let location = redirect_location(redirect);
+        assert!(location.contains("status=error"));
+        assert!(location.contains("message=access_denied"));
+        assert_eq!(get_api_key(&db, &key_id).await.status, "pending_auth");
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_callback_denial_with_invalid_state_redirects_only() {
+        let Some(db) = connect_test_database("oauth_callback_denial_invalid_state").await else {
+            eprintln!(
+                "skipping provider token handler integration test: no local MongoDB available"
+            );
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(test_pending_oauth_api_key(&key_id, &user_id, &provider_id))
+            .await
+            .unwrap();
+
+        let redirect = generic_oauth_callback_impl(
+            state,
+            None,
+            GenericOAuthCallbackQuery {
+                code: None,
+                state: Some("bogus-state".to_string()),
+                error: Some("access_denied".to_string()),
+                error_description: None,
+            },
+        )
+        .await;
+
+        let location = redirect_location(redirect);
+        assert!(location.contains("status=error"));
+        assert!(location.contains("message=access_denied"));
+        assert_eq!(get_api_key(&db, &key_id).await.status, "pending_auth");
     }
 }

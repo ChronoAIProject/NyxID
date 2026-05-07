@@ -31,6 +31,9 @@ export const AUTH_TYPES = [
 export type AuthType = (typeof AUTH_TYPES)[number];
 
 export const SERVICE_TYPES = ["http", "ssh"] as const;
+export const SSH_AUTH_MODES = ["cert", "node_key", "proxy_only"] as const;
+export const sshAuthModeSchema = z.enum(SSH_AUTH_MODES);
+export type SshAuthMode = z.infer<typeof sshAuthModeSchema>;
 
 export type ServiceType = (typeof SERVICE_TYPES)[number];
 

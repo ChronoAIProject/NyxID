@@ -123,6 +123,21 @@ pub enum AppError {
     #[error("Email signup is disabled on this instance")]
     EmailSignupDisabled,
 
+    #[error("SSH node key missing: {0}")]
+    SshNodeKeyMissing(String),
+
+    #[error("SSH host key mismatch: {0}")]
+    SshHostKeyMismatch(String),
+
+    #[error("SSH node exec channel closed: {0}")]
+    SshNodeExecChannelClosed(String),
+
+    #[error("SSH principal ambiguous: {0}")]
+    SshPrincipalAmbiguous(String),
+
+    #[error("SSH auth mode unsupported for operation: {0}")]
+    SshAuthModeUnsupportedForOperation(String),
+
     #[error("Consent required")]
     ConsentRequired { consent_url: String },
 
@@ -262,6 +277,12 @@ impl AppError {
             Self::SocialAuthDeactivated => StatusCode::FORBIDDEN,
             Self::SocialAuthRegistrationClosed => StatusCode::FORBIDDEN,
             Self::EmailSignupDisabled => StatusCode::FORBIDDEN,
+            Self::SshNodeKeyMissing(_) => StatusCode::NOT_FOUND,
+            Self::SshHostKeyMismatch(_) => StatusCode::BAD_GATEWAY,
+            Self::SshNodeExecChannelClosed(_) => StatusCode::BAD_GATEWAY,
+            Self::SshPrincipalAmbiguous(_) | Self::SshAuthModeUnsupportedForOperation(_) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::ConsentRequired { .. } => StatusCode::FORBIDDEN,
             Self::UnsupportedGrantType(_) => StatusCode::BAD_REQUEST,
             Self::ApprovalRequired { .. } => StatusCode::FORBIDDEN,
@@ -314,6 +335,11 @@ impl AppError {
             Self::DatabaseError(_) => 1007,
             Self::ValidationError(_) => 1008,
             Self::EmailSignupDisabled => 1009,
+            Self::SshNodeKeyMissing(_) => 1011,
+            Self::SshHostKeyMismatch(_) => 1012,
+            Self::SshNodeExecChannelClosed(_) => 1013,
+            Self::SshPrincipalAmbiguous(_) => 1014,
+            Self::SshAuthModeUnsupportedForOperation(_) => 1015,
             Self::AuthenticationFailed(_) => 2000,
             Self::TokenExpired => 2001,
             Self::MfaRequired { .. } => 2002,
@@ -416,6 +442,13 @@ impl AppError {
             Self::DatabaseError(_) => "database_error",
             Self::ValidationError(_) => "validation_error",
             Self::EmailSignupDisabled => "email_signup_disabled",
+            Self::SshNodeKeyMissing(_) => "ssh_node_key_missing",
+            Self::SshHostKeyMismatch(_) => "ssh_host_key_mismatch",
+            Self::SshNodeExecChannelClosed(_) => "ssh_node_exec_channel_closed",
+            Self::SshPrincipalAmbiguous(_) => "ssh_principal_ambiguous",
+            Self::SshAuthModeUnsupportedForOperation(_) => {
+                "ssh_auth_mode_unsupported_for_operation"
+            }
             Self::AuthenticationFailed(_) => "authentication_failed",
             Self::TokenExpired => "token_expired",
             Self::MfaRequired { .. } => "mfa_required",

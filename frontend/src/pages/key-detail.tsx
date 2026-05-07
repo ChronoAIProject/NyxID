@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useNavigate, useSearch } from "@tanstack/react-router";
+import {
+  Link,
+  useParams,
+  useNavigate,
+  useSearch,
+} from "@tanstack/react-router";
 import {
   useKey,
   useDeleteKey,
@@ -64,6 +69,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import type { SshServiceConfig } from "@/types/api";
+import type { CatalogEntry } from "@/types/keys";
 
 function statusVariant(
   status: string,
@@ -74,6 +80,7 @@ function statusVariant(
     case "expired":
       return "secondary";
     case "revoked":
+    case "failed":
     case "refresh_failed":
       return "destructive";
     default:
@@ -497,7 +504,7 @@ function ServiceSection({
   readonly authKeyName: string;
   readonly isActive: boolean;
   /** API key status ("active" | "pending_auth" | "expired" | "revoked" |
-   *  "refresh_failed"). When the service has no credential (e.g. auto-connected
+   *  "failed" | "refresh_failed"). When the service has no credential (e.g. auto-connected
    *  downstreams) this is ignored. */
   readonly credentialStatus: string;
   /** Whether this service has an associated credential. Services without a
@@ -887,34 +894,171 @@ function SshConnectionSection({
   );
 }
 
+function endpointPathEndsWithV1(endpointUrl: string): boolean {
+  try {
+    const url = new URL(endpointUrl);
+    return url.pathname.replace(/\/+$/, "").endsWith("/v1");
+  } catch {
+    const path = endpointUrl.split(/[?#]/, 1)[0] ?? endpointUrl;
+    return /\/v1\/?$/.test(path);
+  }
+}
+
+function chatCompletionsPath(endpointUrl: string): string {
+  return endpointPathEndsWithV1(endpointUrl)
+    ? "/chat/completions"
+    : "/v1/chat/completions";
+}
+
+function serviceText(parts: readonly (string | null | undefined)[]): string {
+  return parts.filter(Boolean).join(" ").toLowerCase();
+}
+
+function isBotOrWebhookService(text: string): boolean {
+  return (
+    ["telegram", "lark", "feishu", "discord"].some((term) =>
+      text.includes(term),
+    ) || /\b(bot|webhook)\b/.test(text)
+  );
+}
+
+function isLlmService(text: string): boolean {
+  return (
+    /\bllm\b/.test(text) ||
+    text.includes("llm-") ||
+    ["openai", "deepseek", "anthropic", "gemini", "google"].some((term) =>
+      text.includes(term),
+    )
+  );
+}
+
+function genericEndpointPathFor(metadataText: string): string | null {
+  if (metadataText.includes("telegram")) {
+    return "/getMe";
+  }
+  if (metadataText.includes("discord")) {
+    return "/users/@me";
+  }
+  if (metadataText.includes("lark") || metadataText.includes("feishu")) {
+    return "/open-apis/bot/v3/info";
+  }
+  return null;
+}
+
+function exampleModelForSlug(slugText: string): {
+  readonly model: string;
+  readonly needsProviderModelNote: boolean;
+} {
+  if (slugText.includes("openai")) {
+    return { model: "gpt-4o", needsProviderModelNote: false };
+  }
+  if (slugText.includes("deepseek")) {
+    return { model: "deepseek-chat", needsProviderModelNote: false };
+  }
+  if (slugText.includes("anthropic")) {
+    return { model: "claude-sonnet-4-5", needsProviderModelNote: false };
+  }
+  if (slugText.includes("gemini") || slugText.includes("google")) {
+    return { model: "gemini-2.0-flash", needsProviderModelNote: false };
+  }
+  return { model: "gpt-4o", needsProviderModelNote: true };
+}
+
+function buildCurlExample({
+  method,
+  url,
+  authHeader,
+  body,
+}: {
+  readonly method: "GET" | "POST";
+  readonly url: string;
+  readonly authHeader: string;
+  readonly body: string | null;
+}): string {
+  const lines = [`curl ${method === "GET" ? "-X GET " : ""}${url} \\`];
+  lines.push(`  -w "\\nHTTP=%{http_code}\\n" \\`);
+  lines.push(`  -H "${authHeader}"`);
+
+  if (body) {
+    lines[lines.length - 1] = `${lines[lines.length - 1]} \\`;
+    lines.push(`  -H "Content-Type: application/json" \\`);
+    lines.push(`  -d '${body}'`);
+  }
+
+  return lines.join("\n");
+}
+
 function ApiUsageSection({
   slug,
   authMethod,
+  endpointUrl,
+  catalogServiceSlug,
+  label,
+  catalogEntry,
 }: {
   readonly slug: string;
   readonly authMethod: string;
+  readonly endpointUrl: string;
+  readonly catalogServiceSlug: string | null;
+  readonly label: string;
+  readonly catalogEntry: CatalogEntry | undefined;
 }) {
   const proxyUrl = `${window.location.origin}/api/v1/proxy/s/${slug}`;
+  const catalogSlug = catalogServiceSlug ?? catalogEntry?.slug ?? slug;
+  const slugText = serviceText([slug, catalogSlug]);
+  const metadataText = serviceText([
+    slug,
+    catalogSlug,
+    label,
+    catalogEntry?.name,
+    catalogEntry?.description,
+    catalogEntry?.provider_type,
+    catalogEntry?.service_type,
+  ]);
+  const showGenericEndpointExample = isBotOrWebhookService(metadataText);
+  const llmDetected = isLlmService(metadataText);
+  const llmExamplePath = chatCompletionsPath(endpointUrl);
+  const genericExamplePath = showGenericEndpointExample
+    ? genericEndpointPathFor(metadataText)
+    : null;
+  const examplePath = showGenericEndpointExample
+    ? genericExamplePath
+    : llmExamplePath;
+  const exampleUrl = examplePath ? `${proxyUrl}${examplePath}` : null;
+  const modelExample = llmDetected
+    ? exampleModelForSlug(slugText)
+    : { model: "gpt-4o", needsProviderModelNote: false };
+  const requestBody =
+    showGenericEndpointExample || !exampleUrl
+      ? null
+      : JSON.stringify({
+          model: modelExample.model,
+          messages: [{ role: "user", content: "hello" }],
+        });
+  const method = requestBody ? "POST" : "GET";
 
   const authNote =
     authMethod === "none"
       ? "This service requires no upstream credentials, but you still need to authenticate with NyxID."
       : "NyxID injects your stored credentials automatically when proxying.";
 
-  // Examples use `/models` as the verification path: it's a GET, requires no
-  // body, and works for OpenAI-compatible LLM services (OpenAI, Anthropic,
-  // DeepSeek, Mistral, Cohere, etc.) whose endpoint URLs already include the
-  // version prefix (`/v1`, `/v2`). For non-LLM services (GitHub, Discord,
-  // Telegram bot), substitute the path you want to call.
-  const curlExample = [
-    `curl ${proxyUrl}/models \\`,
-    `  -H "Authorization: Bearer <NYXID_ACCESS_TOKEN>"`,
-  ].join("\n");
+  const bearerTokenExample = exampleUrl
+    ? buildCurlExample({
+        method,
+        url: exampleUrl,
+        authHeader: "Authorization: Bearer <NYXID_ACCESS_TOKEN>",
+        body: requestBody,
+      })
+    : null;
 
-  const apiKeyExample = [
-    `curl ${proxyUrl}/models \\`,
-    `  -H "X-API-Key: nyx_..."`,
-  ].join("\n");
+  const apiKeyExample = exampleUrl
+    ? buildCurlExample({
+        method,
+        url: exampleUrl,
+        authHeader: "X-API-Key: nyx_...",
+        body: requestBody,
+      })
+    : null;
 
   function handleCopyUrl() {
     void copyToClipboard(proxyUrl).then(() => {
@@ -922,8 +1066,8 @@ function ApiUsageSection({
     });
   }
 
-  function handleCopyCurl() {
-    void copyToClipboard(apiKeyExample).then(() => {
+  function handleCopyExample(example: string) {
+    void copyToClipboard(example).then(() => {
       toast.success("Example copied");
     });
   }
@@ -958,11 +1102,28 @@ function ApiUsageSection({
             </Button>
           </div>
           <p className="mt-1.5 text-[11px] text-muted-foreground">
-            Append the downstream API path after this URL (e.g.{" "}
-            <code className="rounded bg-background px-1">/models</code> for
-            OpenAI-compatible LLMs, or whatever path the service exposes —
-            NyxID forwards it onto the configured endpoint URL). {authNote}
+            Append the downstream API path after this URL
+            {examplePath ? (
+              <>
+                {" "}
+                (e.g.{" "}
+                <code className="rounded bg-background px-1">
+                  {examplePath}
+                </code>
+                )
+              </>
+            ) : null}
+            . {authNote}
           </p>
+          {showGenericEndpointExample && (
+            <p className="mt-1.5 text-[11px] text-muted-foreground">
+              Run{" "}
+              <code className="rounded bg-background px-1">
+                nyxid catalog endpoints {catalogSlug}
+              </code>{" "}
+              to discover available endpoints for this service.
+            </p>
+          )}
         </div>
 
         <div>
@@ -970,16 +1131,22 @@ function ApiUsageSection({
             Authentication
           </p>
           <div className="space-y-2 text-xs text-muted-foreground">
-            <p>
-              Authenticate with NyxID using one of these methods:
-            </p>
+            <p>Authenticate with NyxID using one of these methods:</p>
             <ul className="list-disc list-inside space-y-1 pl-1">
               <li>
                 <span className="font-medium text-foreground">API Key:</span>{" "}
                 <code className="rounded bg-background px-1">
                   X-API-Key: nyx_...
                 </code>{" "}
-                header (create one in API Keys tab)
+                header (create one in the{" "}
+                <Link
+                  to="/keys"
+                  search={{ tab: "nyxid" }}
+                  className="font-medium text-primary underline-offset-4 hover:underline"
+                >
+                  Agent Keys
+                </Link>{" "}
+                tab on AI Services)
               </li>
               <li>
                 <span className="font-medium text-foreground">
@@ -993,33 +1160,61 @@ function ApiUsageSection({
           </div>
         </div>
 
-        <div>
-          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
-            Example (with API key)
-          </p>
-          <div className="relative">
-            <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-xs leading-relaxed">
-              {apiKeyExample}
-            </pre>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="absolute right-2 top-2 h-7 w-7"
-              onClick={handleCopyCurl}
-            >
-              <Copy className="h-3.5 w-3.5" />
-            </Button>
+        {apiKeyExample && (
+          <div>
+            <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+              Example (with API key)
+            </p>
+            {modelExample.needsProviderModelNote && requestBody && (
+              <p className="mb-1.5 text-[11px] text-muted-foreground">
+                Replace{" "}
+                <code className="rounded bg-background px-1">gpt-4o</code>{" "}
+                with your provider&apos;s model.
+              </p>
+            )}
+            <div className="relative">
+              <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-xs leading-relaxed">
+                {apiKeyExample}
+              </pre>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="absolute right-2 top-2 h-7 w-7"
+                onClick={() => handleCopyExample(apiKeyExample)}
+              >
+                <Copy className="h-3.5 w-3.5" />
+              </Button>
+            </div>
           </div>
-        </div>
+        )}
 
-        <div>
-          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
-            Example (with Bearer token)
-          </p>
-          <pre className="overflow-x-auto rounded-lg bg-muted p-3 font-mono text-xs leading-relaxed">
-            {curlExample}
-          </pre>
-        </div>
+        {bearerTokenExample && (
+          <details className="rounded-lg border border-border bg-muted/20 p-3">
+            <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
+              Advanced: Bearer token example
+            </summary>
+            <div className="mt-3 space-y-2">
+              <p className="text-[11px] text-muted-foreground">
+                Bearer auth is intended for self-hosted deployments or
+                environments where you already have a NyxID access token. For
+                most users, prefer the API Key example above.
+              </p>
+              <div className="relative">
+                <pre className="overflow-x-auto rounded-lg bg-muted p-3 pr-10 font-mono text-xs leading-relaxed">
+                  {bearerTokenExample}
+                </pre>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="absolute right-2 top-2 h-7 w-7"
+                  onClick={() => handleCopyExample(bearerTokenExample)}
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          </details>
+        )}
       </CardContent>
     </Card>
   );
@@ -1801,6 +1996,10 @@ export function KeyDetailPage() {
             <ApiUsageSection
               slug={keyInfo.slug}
               authMethod={keyInfo.auth_method}
+              endpointUrl={keyInfo.endpoint_url}
+              catalogServiceSlug={keyInfo.catalog_service_slug}
+              label={keyInfo.label}
+              catalogEntry={catalogEntry}
             />
           )}
         </div>
@@ -1810,6 +2009,10 @@ export function KeyDetailPage() {
         <ApiUsageSection
           slug={keyInfo.slug}
           authMethod={keyInfo.auth_method}
+          endpointUrl={keyInfo.endpoint_url}
+          catalogServiceSlug={keyInfo.catalog_service_slug}
+          label={keyInfo.label}
+          catalogEntry={catalogEntry}
         />
       )}
 

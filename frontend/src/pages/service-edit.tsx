@@ -2,14 +2,24 @@ import { useEffect } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useService, useUpdateService } from "@/hooks/use-services";
+import {
+  useService,
+  useUpdateService,
+  useUpdateSshAuthMode,
+} from "@/hooks/use-services";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import {
   updateServiceSchema,
   type UpdateServiceFormData,
   VISIBILITY_OPTIONS,
   type WsFrameInjection,
+  type SshAuthMode,
 } from "@/schemas/services";
+import {
+  SSH_AUTH_MODE_LABELS,
+  getSshAuthModeChangeWarning,
+  inferSshAuthMode,
+} from "@/lib/ssh-auth-mode";
 import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
 import { WsFrameInjectionsEditor } from "@/components/shared/ws-frame-injections-editor";
@@ -55,6 +65,7 @@ export function ServiceEditPage() {
   const navigate = useNavigate();
   const { data: service, isLoading, error } = useService(serviceId);
   const updateMutation = useUpdateService();
+  const updateSshAuthModeMutation = useUpdateSshAuthMode();
   const user = useAuthStore((s) => s.user);
   const { data: appsData } = useDeveloperApps();
   const developerApps = appsData?.clients?.filter((c) => c.is_active) ?? [];
@@ -264,6 +275,32 @@ export function ServiceEditPage() {
       } else {
         toast.error("Failed to update service");
       }
+    }
+  }
+
+  async function handleSshAuthModeChange(mode: SshAuthMode) {
+    if (!service?.your_user_service_id) {
+      toast.error("Create or select a user service binding before changing SSH auth mode");
+      return;
+    }
+    const currentMode = inferSshAuthMode(
+      service.ssh_config?.ssh_auth_mode,
+      service.ssh_config?.certificate_auth_enabled,
+    );
+    const warning = getSshAuthModeChangeWarning(currentMode, mode);
+    if (warning !== null && !window.confirm(warning)) {
+      return;
+    }
+    try {
+      await updateSshAuthModeMutation.mutateAsync({
+        userServiceId: service.your_user_service_id,
+        mode,
+      });
+      toast.success("SSH auth mode updated");
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to update SSH auth mode";
+      toast.error(message);
     }
   }
 
@@ -484,6 +521,35 @@ export function ServiceEditPage() {
                       </FormItem>
                     )}
                   />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="edit-ssh-auth-mode">SSH auth mode</Label>
+                  <Select
+                    value={
+                      service.ssh_config?.ssh_auth_mode ??
+                      (service.ssh_config?.certificate_auth_enabled
+                        ? "cert"
+                        : "proxy_only")
+                    }
+                    onValueChange={(value) =>
+                      void handleSshAuthModeChange(value as SshAuthMode)
+                    }
+                    disabled={updateSshAuthModeMutation.isPending}
+                  >
+                    <SelectTrigger id="edit-ssh-auth-mode">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Object.entries(SSH_AUTH_MODE_LABELS).map(
+                        ([value, label]) => (
+                          <SelectItem key={value} value={value}>
+                            {label}
+                          </SelectItem>
+                        ),
+                      )}
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div className="flex items-center justify-between rounded-[10px] border border-border p-3">

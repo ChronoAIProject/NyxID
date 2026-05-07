@@ -28,6 +28,9 @@ function isPublicPath(path: string): boolean {
     path === "/login" ||
     path === "/register" ||
     path === "/privacy" ||
+    path === "/blog" ||
+    path.startsWith("/blog/") ||
+    path.startsWith("/preview/") ||
     path.startsWith("/error") ||
     path.startsWith("/oauth-consent") ||
     path === "/cli-auth" ||

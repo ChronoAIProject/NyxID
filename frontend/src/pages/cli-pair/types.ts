@@ -139,6 +139,7 @@ export interface AiKeyPrefill {
   readonly slug?: string;
   readonly label?: string;
   readonly via_node?: string;
+  readonly org_id?: string;
   readonly endpoint_url?: string;
   /** `true` when `--custom` was passed at the CLI. The SPA skips
    *  Step 1 (catalog grid) and renders `CustomServiceForm` on first

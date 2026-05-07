@@ -5,12 +5,15 @@ use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::org_membership::OrgRole;
+use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
 use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
 use crate::models::user_service::{COLLECTION_NAME, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
-use crate::services::{agent_binding_service, node_service, org_service, ws_frame_injector};
+use crate::services::{
+    agent_binding_service, audit_service, node_service, org_service, ws_frame_injector,
+};
 
 /// Valid auth methods for user services.
 ///
@@ -167,6 +170,17 @@ fn validate_auth_method(method: &str) -> AppResult<()> {
         )));
     }
     Ok(())
+}
+
+pub(crate) fn auth_method_requires_key_name(auth_method: &str) -> bool {
+    matches!(auth_method, "header" | "query" | "path" | "body")
+}
+
+pub(crate) fn auth_key_name_required_message(auth_method: &str) -> String {
+    format!(
+        "auth_key_name is required when auth_method is '{auth_method}' \
+         (e.g. 'X-API-Key' for header, 'key' for query, 'app_secret' for body)"
+    )
 }
 
 /// List all active user services for a user.
@@ -427,6 +441,7 @@ pub async fn create_user_service(
     node_id: Option<&str>,
     node_priority: i32,
     service_type: &str,
+    ssh_auth_mode: SshAuthMode,
     source: Option<&str>,
     source_id: Option<&str>,
     source_app_id: Option<&str>,
@@ -453,13 +468,10 @@ pub async fn create_user_service(
         ));
     }
 
-    // `body` auth must specify which JSON field to inject into.
-    if auth_method == "body" && auth_key_name.is_empty() {
-        return Err(AppError::ValidationError(
-            "auth_key_name is required when auth_method is 'body' \
-             (e.g. 'app_secret' for custom body-auth services)"
-                .to_string(),
-        ));
+    if auth_method_requires_key_name(auth_method) && auth_key_name.trim().is_empty() {
+        return Err(AppError::ValidationError(auth_key_name_required_message(
+            auth_method,
+        )));
     }
 
     // `body` auth credential injection happens inside the backend proxy's
@@ -545,6 +557,8 @@ pub async fn create_user_service(
         node_id: node_id.map(|s| s.to_string()),
         node_priority,
         service_type: service_type.to_string(),
+        ssh_auth_mode,
+        ssh_node_keys_stale: false,
         identity_propagation_mode: identity.identity_propagation_mode,
         identity_include_user_id: identity.identity_include_user_id,
         identity_include_email: identity.identity_include_email,
@@ -624,18 +638,19 @@ pub async fn update_user_service(
         }
     }
 
-    // Cross-field validation for `body` auth method. We check the effective
-    // post-update state: incoming values override current values.
+    // Cross-field validation for credential injection methods. We check the
+    // effective post-update state: incoming values override current values.
     let effective_auth_method = auth_method.unwrap_or(&current.auth_method);
-    if effective_auth_method == "body" {
+    if auth_method_requires_key_name(effective_auth_method) {
         let effective_auth_key_name = auth_key_name.unwrap_or(&current.auth_key_name);
-        if effective_auth_key_name.is_empty() {
-            return Err(AppError::ValidationError(
-                "auth_key_name is required when auth_method is 'body' \
-                 (e.g. 'app_secret' for custom body-auth services)"
-                    .to_string(),
-            ));
+        if effective_auth_key_name.trim().is_empty() {
+            return Err(AppError::ValidationError(auth_key_name_required_message(
+                effective_auth_method,
+            )));
         }
+    }
+
+    if effective_auth_method == "body" {
         // Normalize legacy `current.node_id == Some("")` to `None`.
         // Matches the normalization in `validate_update_inputs` (fifteenth-
         // round Codex P1) and in the `PUT /keys` handler so the
@@ -862,42 +877,20 @@ pub async fn validate_update_inputs(
         None => current.node_id.as_deref().filter(|n| !n.is_empty()),
     };
 
-    if effective_auth_method == "body" {
-        if effective_auth_key_name.is_empty() {
-            return Err(AppError::ValidationError(
-                "auth_key_name is required when auth_method is 'body' \
-                 (e.g. 'app_secret' for custom body-auth services)"
-                    .to_string(),
-            ));
-        }
-        if effective_node_id.is_some() {
-            return Err(AppError::ValidationError(
-                "auth_method 'body' is not supported for node-routed services. \
-                 Credential body injection only works for direct (non-node) routing."
-                    .to_string(),
-            ));
-        }
+    if auth_method_requires_key_name(effective_auth_method)
+        && effective_auth_key_name.trim().is_empty()
+    {
+        return Err(AppError::ValidationError(auth_key_name_required_message(
+            effective_auth_method,
+        )));
     }
 
-    // header / query / path all inject the credential under a caller-
-    // supplied key name; an empty key would produce an unauthenticated
-    // request (blank header, `?=<secret>` query, `/<secret>/` path).
-    // Services originally created with `auth_method: "none"` store an
-    // empty `auth_key_name`, so a PUT that upgrades them without also
-    // sending `auth_key_name` would slip through pre-existing
-    // validation. Reject here so direct routing and node pushes can
-    // both assume a non-empty injection key downstream
-    // (thirty-second-round Codex P2). bearer/basic are intentionally
-    // excluded because the handler synthesizes an `Authorization`
-    // default for them.
-    if matches!(effective_auth_method, "header" | "query" | "path")
-        && effective_auth_key_name.is_empty()
-    {
-        return Err(AppError::ValidationError(format!(
-            "auth_key_name is required when auth_method is '{effective_auth_method}'. \
-             Supply a non-empty key name (e.g. 'X-API-Key' for header, \
-             'api_key' for query, 'bot' for path)."
-        )));
+    if effective_auth_method == "body" && effective_node_id.is_some() {
+        return Err(AppError::ValidationError(
+            "auth_method 'body' is not supported for node-routed services. \
+             Credential body injection only works for direct (non-node) routing."
+                .to_string(),
+        ));
     }
 
     if effective_auth_method == "token_exchange" {
@@ -1301,6 +1294,111 @@ pub async fn link_api_key(
     Ok(())
 }
 
+pub(crate) fn ssh_node_keys_stale_after_transition(
+    current_stale: bool,
+    from: SshAuthMode,
+    to: SshAuthMode,
+) -> bool {
+    current_stale || (from == SshAuthMode::NodeKey && to != SshAuthMode::NodeKey)
+}
+
+/// Update only the SSH auth mode on a user service. All v1 transitions are
+/// accepted; switching away from NodeKey marks node-side keys stale so
+/// `nyxid node ssh-credentials prune --stale` can clean orphaned entries.
+pub async fn update_ssh_auth_mode(
+    db: &mongodb::Database,
+    user_id: &str,
+    actor_user_id: &str,
+    service_id: &str,
+    mode: SshAuthMode,
+) -> AppResult<UserService> {
+    let current = get_user_service(db, user_id, service_id).await?;
+    if current.service_type != "ssh" {
+        return Err(AppError::ValidationError(
+            "SSH auth mode can only be changed for SSH services".to_string(),
+        ));
+    }
+
+    validate_ssh_auth_mode_transition(db, &current, mode).await?;
+
+    let from = current.ssh_auth_mode;
+    let ssh_node_keys_stale =
+        ssh_node_keys_stale_after_transition(current.ssh_node_keys_stale, from, mode);
+    let now = Utc::now();
+
+    db.collection::<UserService>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": service_id, "user_id": user_id },
+            doc! {
+                "$set": {
+                    "ssh_auth_mode": mode.as_str(),
+                    "ssh_node_keys_stale": ssh_node_keys_stale,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }
+            },
+        )
+        .await?;
+
+    if from != mode {
+        audit_service::log_async(
+            db.clone(),
+            Some(actor_user_id.to_string()),
+            "service.ssh_auth_mode_changed".to_string(),
+            Some(serde_json::json!({
+                "service_id": service_id,
+                "owner_user_id": user_id,
+                "from": from.as_str(),
+                "to": mode.as_str(),
+                "actor": actor_user_id,
+            })),
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    get_user_service(db, user_id, service_id).await
+}
+
+async fn validate_ssh_auth_mode_transition(
+    db: &mongodb::Database,
+    current: &UserService,
+    mode: SshAuthMode,
+) -> AppResult<()> {
+    if mode == SshAuthMode::ProxyOnly {
+        return Ok(());
+    }
+
+    let Some(ref catalog_service_id) = current.catalog_service_id else {
+        return Err(AppError::ValidationError(
+            "SSH auth mode cert or node_key requires a catalog-backed SSH service".to_string(),
+        ));
+    };
+    let catalog = db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .find_one(doc! { "_id": catalog_service_id })
+        .await?
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "Catalog service for SSH auth mode no longer exists".to_string(),
+            )
+        })?;
+    let ssh_config = catalog.ssh_config.as_ref().ok_or_else(|| {
+        AppError::ValidationError(
+            "Catalog service for SSH auth mode is missing ssh_config".to_string(),
+        )
+    })?;
+
+    crate::services::ssh_service::validate_ssh_auth_mode_settings(
+        mode,
+        ssh_config.certificate_ttl_minutes,
+        &ssh_config.allowed_principals,
+    )
+}
+
 /// Deactivate a user service (soft delete).
 ///
 /// `actor_user_id` is the human/API key making the request -- forwarded to
@@ -1442,10 +1540,14 @@ pub async fn backfill_stale_catalog_auth_snapshots(db: &mongodb::Database) -> Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, SshServiceConfig,
+    };
     use crate::models::ws_frame_injection::{
         WsFrameDirection, WsFrameInjection, WsFrameKind, WsFrameTrigger,
     };
     use crate::test_utils::{connect_test_database, test_user_service};
+    use mongodb::bson::doc;
 
     fn sample_identity_config() -> IdentityConfig {
         IdentityConfig {
@@ -1457,6 +1559,70 @@ mod tests {
             forward_access_token: false,
             inject_delegation_token: true,
             delegation_token_scope: "llm:proxy".to_string(),
+        }
+    }
+
+    fn test_downstream_ssh_service(
+        service_id: &str,
+        slug: &str,
+        allowed_principals: Vec<String>,
+    ) -> DownstreamService {
+        let now = Utc::now();
+        DownstreamService {
+            id: service_id.to_string(),
+            name: slug.to_string(),
+            slug: slug.to_string(),
+            description: None,
+            base_url: "ssh://10.0.0.1:22".to_string(),
+            service_type: "ssh".to_string(),
+            visibility: "private".to_string(),
+            auth_method: "none".to_string(),
+            auth_key_name: String::new(),
+            credential_encrypted: Vec::new(),
+            auth_type: Some("ssh".to_string()),
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
+            ssh_config: Some(SshServiceConfig {
+                host: "10.0.0.1".to_string(),
+                port: 22,
+                ssh_auth_mode: SshAuthMode::ProxyOnly,
+                certificate_auth_enabled: false,
+                certificate_ttl_minutes: 30,
+                allowed_principals,
+                ca_private_key_encrypted: None,
+                ca_public_key: None,
+            }),
+            oauth_client_id: None,
+            service_category: "connection".to_string(),
+            requires_user_credential: false,
+            is_active: true,
+            created_by: "test".to_string(),
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
+            provider_config_id: None,
+            homepage_url: None,
+            repository_url: None,
+            issues_url: None,
+            capabilities: None,
+            auth_notes: None,
+            known_limitations: None,
+            required_permissions: None,
+            examples_url: None,
+            recommended_skills: None,
+            custom_user_agent: None,
+            default_request_headers: None,
+            ws_frame_injections: Vec::new(),
+            developer_app_ids: None,
+            token_exchange_config: None,
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -1503,6 +1669,104 @@ mod tests {
 
         let normalized = normalize_identity_config(&config).expect("scopes should validate");
         assert_eq!(normalized.delegation_token_scope, "proxy:* llm:status");
+    }
+
+    #[test]
+    fn ssh_auth_mode_state_machine_marks_orphans_only_when_leaving_node_key() {
+        let modes = [
+            SshAuthMode::Cert,
+            SshAuthMode::NodeKey,
+            SshAuthMode::ProxyOnly,
+        ];
+
+        for from in modes {
+            for to in modes {
+                let expected = from == SshAuthMode::NodeKey && to != SshAuthMode::NodeKey;
+                assert_eq!(
+                    ssh_node_keys_stale_after_transition(false, from, to),
+                    expected,
+                    "unexpected stale transition from {from} to {to}",
+                );
+                assert!(
+                    ssh_node_keys_stale_after_transition(true, from, to),
+                    "already-stale services must stay stale from {from} to {to}",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn update_ssh_auth_mode_revalidates_catalog_principals() {
+        let Some(db) = connect_test_database("user_service_ssh_auth_mode_validation").await else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(test_downstream_ssh_service(
+                &catalog_id,
+                "router-empty-principals",
+                Vec::new(),
+            ))
+            .await
+            .unwrap();
+
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut service = test_user_service(
+            &service_id,
+            &user_id,
+            "router-empty-principals",
+            "endpoint-1",
+            Some(&catalog_id),
+            Some("node-1"),
+        );
+        service.service_type = "ssh".to_string();
+        service.ssh_auth_mode = SshAuthMode::ProxyOnly;
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&service)
+            .await
+            .unwrap();
+
+        let err = update_ssh_auth_mode(&db, &user_id, &user_id, &service_id, SshAuthMode::NodeKey)
+            .await
+            .expect_err("node_key should require catalog principals");
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message.contains("allowed_principals is required")
+        ));
+        let unchanged = get_user_service(&db, &user_id, &service_id).await.unwrap();
+        assert_eq!(unchanged.ssh_auth_mode, SshAuthMode::ProxyOnly);
+
+        let proxy_service_id = uuid::Uuid::new_v4().to_string();
+        let mut proxy_service = test_user_service(
+            &proxy_service_id,
+            &user_id,
+            "router-proxy-only",
+            "endpoint-1",
+            Some(&catalog_id),
+            Some("node-1"),
+        );
+        proxy_service.service_type = "ssh".to_string();
+        proxy_service.ssh_auth_mode = SshAuthMode::NodeKey;
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&proxy_service)
+            .await
+            .unwrap();
+
+        let updated = update_ssh_auth_mode(
+            &db,
+            &user_id,
+            &user_id,
+            &proxy_service_id,
+            SshAuthMode::ProxyOnly,
+        )
+        .await
+        .expect("proxy_only should not require catalog principals");
+        assert_eq!(updated.ssh_auth_mode, SshAuthMode::ProxyOnly);
+        assert!(updated.ssh_node_keys_stale);
     }
 
     #[test]
@@ -1560,6 +1824,155 @@ mod tests {
             consume_trigger: true,
             direction: WsFrameDirection::Downstream,
         }
+    }
+
+    async fn assert_create_user_service_rejects_empty_auth_key_name(method: &str) {
+        let Some(db) = connect_test_database(&format!("user_service_empty_{method}")).await else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let err = create_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            &format!("svc-{method}"),
+            "endpoint-1",
+            Some("api-key-1"),
+            method,
+            "",
+            None,
+            None,
+            0,
+            "http",
+            SshAuthMode::ProxyOnly,
+            None,
+            None,
+            None,
+            &IdentityConfig::none(),
+            None,
+        )
+        .await
+        .expect_err("empty auth_key_name should be rejected");
+
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message.contains(&format!("auth_method is '{method}'"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_user_service_rejects_header_with_empty_auth_key_name() {
+        assert_create_user_service_rejects_empty_auth_key_name("header").await;
+    }
+
+    #[tokio::test]
+    async fn create_user_service_rejects_query_with_empty_auth_key_name() {
+        assert_create_user_service_rejects_empty_auth_key_name("query").await;
+    }
+
+    #[tokio::test]
+    async fn create_user_service_rejects_path_with_empty_auth_key_name() {
+        assert_create_user_service_rejects_empty_auth_key_name("path").await;
+    }
+
+    #[tokio::test]
+    async fn create_user_service_allows_bearer_with_empty_auth_key_name() {
+        let Some(db) = connect_test_database("user_service_bearer_empty_auth_key_name").await
+        else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let api_key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .insert_one(doc! { "_id": &endpoint_id, "user_id": &user_id })
+            .await
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .insert_one(doc! { "_id": &api_key_id, "user_id": &user_id })
+            .await
+            .unwrap();
+
+        let service = create_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            "bearer-empty-key-name",
+            &endpoint_id,
+            Some(&api_key_id),
+            "bearer",
+            "",
+            None,
+            None,
+            0,
+            "http",
+            SshAuthMode::ProxyOnly,
+            None,
+            None,
+            None,
+            &IdentityConfig::none(),
+            None,
+        )
+        .await
+        .expect("bearer auth should not require auth_key_name");
+
+        assert_eq!(service.auth_method, "bearer");
+        assert_eq!(service.auth_key_name, "");
+    }
+
+    #[tokio::test]
+    async fn update_user_service_rejects_switch_to_header_without_auth_key_name() {
+        let Some(db) =
+            connect_test_database("user_service_update_header_empty_auth_key_name").await
+        else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut service = test_user_service(
+            &service_id,
+            &user_id,
+            "header-update",
+            "endpoint-1",
+            None,
+            None,
+        );
+        service.api_key_id = Some("api-key-1".to_string());
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&service)
+            .await
+            .unwrap();
+
+        let err = update_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            Some("header"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("switching to header without auth_key_name should fail");
+
+        assert!(matches!(
+            err,
+            AppError::ValidationError(message)
+                if message.contains("auth_method is 'header'")
+        ));
     }
 
     #[tokio::test]

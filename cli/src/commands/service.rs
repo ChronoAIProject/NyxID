@@ -101,6 +101,7 @@ struct AddSshBody<'a> {
     host: &'a str,
     port: u16,
     cert_auth: bool,
+    ssh_auth_mode: &'a str,
     principals: &'a str,
     ttl: u32,
     via_node: &'a str,
@@ -114,6 +115,10 @@ fn build_add_ssh_body(input: AddSshBody<'_>) -> serde_json::Map<String, Value> {
     body.insert("ssh_port".into(), serde_json::json!(input.port));
     body.insert("ssh_certificate_auth".into(), Value::Bool(input.cert_auth));
     body.insert(
+        "ssh_auth_mode".into(),
+        Value::String(input.ssh_auth_mode.to_string()),
+    );
+    body.insert(
         "ssh_principals".into(),
         Value::String(input.principals.to_string()),
     );
@@ -126,6 +131,60 @@ fn build_add_ssh_body(input: AddSshBody<'_>) -> serde_json::Map<String, Value> {
         body.insert("target_org_id".into(), Value::String(org_id.to_string()));
     }
     body
+}
+
+async fn resolve_user_service_for_ssh_mode(
+    api: &mut ApiClient,
+    id_or_slug: &str,
+) -> Result<(String, String, Option<String>, Option<String>, Option<u16>)> {
+    let direct = api.get_value(&format!("/keys/{id_or_slug}")).await.ok();
+    let service = match direct {
+        Some(value) => value,
+        None => {
+            let resp: Value = api.get("/keys").await?;
+            resp.get("keys")
+                .and_then(|v| v.as_array())
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("id").and_then(|v| v.as_str()) == Some(id_or_slug)
+                            || item.get("_id").and_then(|v| v.as_str()) == Some(id_or_slug)
+                            || item.get("slug").and_then(|v| v.as_str()) == Some(id_or_slug)
+                            || item.get("service_slug").and_then(|v| v.as_str()) == Some(id_or_slug)
+                    })
+                })
+                .cloned()
+                .with_context(|| format!("Could not find SSH service '{id_or_slug}'"))?
+        }
+    };
+
+    let id = service
+        .get("id")
+        .or_else(|| service.get("_id"))
+        .and_then(|v| v.as_str())
+        .with_context(|| format!("Service '{id_or_slug}' response did not include an id"))?
+        .to_string();
+    let slug = service
+        .get("slug")
+        .or_else(|| service.get("service_slug"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(id_or_slug)
+        .to_string();
+    let principal_hint = service
+        .get("ssh_allowed_principals")
+        .and_then(|v| v.as_array())
+        .and_then(|items| items.first())
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let host = service
+        .get("ssh_host")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let port = service
+        .get("ssh_port")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok());
+
+    Ok((id, slug, principal_hint, host, port))
 }
 
 fn home_assistant_ws_frame_rules() -> Value {
@@ -185,12 +244,12 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // Wizard dispatch (docs/CLI_WIZARD_V2.md §3.1): route to
             // the browser flow when the invocation isn't "scripted-
             // complete". Flags compatible with prefill (slug, label,
-            // via-node, endpoint-url, plus `--custom` definitional
-            // fields per issue #414) just seed the form; flags that
-            // declare a specific scripted flow (--credential,
-            // --credential-env, --oauth, --device-code, --output
-            // json) fall through to the existing non-interactive path
-            // so scripted behavior for existing users is unchanged.
+            // via-node, endpoint-url, `--org`, plus `--custom`
+            // definitional fields per issue #414) just seed the form.
+            // Flags that declare a specific scripted flow (--credential,
+            // --credential-env, --oauth, --device-code, --output json)
+            // fall through to the existing non-interactive path so
+            // scripted behavior for existing users is unchanged.
             //
             // Issue #414 — `--custom` and its companion flags
             // (`--auth-method`, `--auth-key-name`, `--slug` in the
@@ -202,6 +261,11 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // entry — that's the existing scripted-override use case
             // and stays scripted.
             //
+            // `--org` used to be treated as an advanced scripted-only
+            // flag. It now behaves like the api-key wizard: the CLI
+            // resolves the slug/name to a canonical org owner id before
+            // dispatch and the browser pre-selects that owner.
+            //
             // Headless contexts (SSH sessions, no local display on
             // Linux, AI-agent bash tool) NO LONGER fall through to the
             // stdin-prompt path by default — `run_ai_key_wizard` picks
@@ -209,6 +273,19 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             // URL the user opens on another device). Set
             // `NYXID_NO_WIZARD=1` to restore the pre-wizard stdin
             // prompt path for CI jobs or scripts that rely on it.
+            let mut api = if org.is_some() {
+                Some(ApiClient::from_auth(&auth)?)
+            } else {
+                None
+            };
+            let org = match org {
+                Some(raw) => Some(
+                    resolve_org_id(api.as_mut().expect("api initialized for org"), &raw)
+                        .await
+                        .with_context(|| format!("Could not resolve org '{raw}'"))?,
+                ),
+                None => None,
+            };
             let interactive_output = matches!(auth.output, OutputFormat::Table);
             let explicit_scripted = is_explicit_scripted(
                 credential.is_some(),
@@ -220,7 +297,6 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 auth_method.is_some(),
                 auth_key_name.is_some(),
                 !scopes.is_empty(),
-                org.is_some(),
                 openapi_spec_url.is_some(),
                 ws_frame_preset.is_some(),
                 ws_frame_clear,
@@ -238,6 +314,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     slug: slug.clone(),
                     label: label.clone(),
                     via_node: via_node.clone(),
+                    org: org.clone(),
                     endpoint_url: endpoint_url.clone(),
                     // Issue #414 — definitional fields for custom mode.
                     // When `--custom` is set, the SPA skips the catalog
@@ -253,7 +330,10 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 return crate::wizard::run_ai_key_wizard(&auth, prefill, no_wait).await;
             }
 
-            let mut api = ApiClient::from_auth(&auth)?;
+            let mut api = match api {
+                Some(api) => api,
+                None => ApiClient::from_auth(&auth)?,
+            };
 
             // Resolve `--via-node <ID_OR_NAME>` to a node ID up-front so that
             // node names shown by `nyxid node list` and in the docs (e.g.
@@ -266,15 +346,6 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 ),
                 None => None,
             };
-            let org = match org {
-                Some(raw) => Some(
-                    resolve_org_id(&mut api, &raw)
-                        .await
-                        .with_context(|| format!("Could not resolve org '{raw}'"))?,
-                ),
-                None => None,
-            };
-
             // Normalize --scope inputs: split each entry on comma/whitespace so
             // users can write `--scope a,b --scope "c d"` or `--scope a --scope b`.
             let additional_scopes: Vec<String> = scopes
@@ -559,6 +630,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             host,
             port,
             cert_auth,
+            node_key,
             principals,
             ttl,
             via_node,
@@ -593,6 +665,13 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 host: &host,
                 port,
                 cert_auth,
+                ssh_auth_mode: if node_key {
+                    "node_key"
+                } else if cert_auth {
+                    "cert"
+                } else {
+                    "proxy_only"
+                },
                 principals: principals_str,
                 ttl,
                 via_node: &via_node,
@@ -624,7 +703,15 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     if let Some(ref org_id) = org {
                         eprintln!("Org:        {org_id}");
                     }
-                    if cert_auth {
+                    if node_key {
+                        eprintln!();
+                        eprintln!("SSH node-key setup:");
+                        eprintln!(
+                            "  nyxid node ssh-credentials add --service {slug} --principal {} \\",
+                            principal_list.first().unwrap_or(&"ubuntu")
+                        );
+                        eprintln!("    --key-file ~/.ssh/id_ed25519 --host {host} --port {port}");
+                    } else if cert_auth {
                         eprintln!();
                         eprintln!("SSH Setup Instructions:");
                         eprintln!("  1. Download the CA public key:");
@@ -644,6 +731,60 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                         eprintln!("     scp /tmp/nyxid_ca.pub {host}:/etc/ssh/nyxid_ca.pub");
                         eprintln!();
                         eprintln!("  4. Restart sshd on the target server");
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        ServiceCommands::ConvertSsh {
+            slug,
+            to_node_key,
+            to_cert,
+            to_proxy_only,
+            auth,
+        } => {
+            let mut api = ApiClient::from_auth(&auth)?;
+            let mode = match (to_node_key, to_cert, to_proxy_only) {
+                (true, false, false) => "node_key",
+                (false, true, false) => "cert",
+                (false, false, true) => "proxy_only",
+                _ => bail!("Specify exactly one of --to-node-key, --to-cert, or --to-proxy-only"),
+            };
+            let (service_id, service_slug, principal_hint, host, port) =
+                resolve_user_service_for_ssh_mode(&mut api, &slug).await?;
+            let body = serde_json::json!({ "mode": mode });
+            let result: Value = api
+                .patch(&format!("/user-services/{service_id}/ssh-auth-mode"), &body)
+                .await?;
+
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => {
+                    eprintln!("SSH auth mode updated.");
+                    eprintln!("Service: {service_slug}");
+                    eprintln!("Mode:    {mode}");
+                    match mode {
+                        "node_key" => {
+                            eprintln!();
+                            eprintln!("Next step on the node:");
+                            eprintln!(
+                                "  nyxid node ssh-credentials add --service {service_slug} --principal {} \\",
+                                principal_hint.as_deref().unwrap_or("<principal>")
+                            );
+                            eprintln!(
+                                "    --key-file ~/.ssh/id_ed25519 --host {} --port {}",
+                                host.as_deref().unwrap_or("<host>"),
+                                port.unwrap_or(22)
+                            );
+                        }
+                        "cert" | "proxy_only" => {
+                            eprintln!();
+                            eprintln!("Node-local SSH keys for this service are now stale.");
+                            eprintln!("Prune them on the node with:");
+                            eprintln!("  nyxid node ssh-credentials prune --stale");
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1122,6 +1263,26 @@ async fn run_oauth_add(
 
 // ---- Device code add flow (I22) ----
 
+fn parse_device_code_deadline(initiate: &Value) -> std::time::Instant {
+    use chrono::DateTime;
+
+    if let Some(s) = initiate["expires_at"].as_str()
+        && let Ok(at) = DateTime::parse_from_rfc3339(s)
+    {
+        let secs = (at.timestamp() - chrono::Utc::now().timestamp()).max(0) as u64;
+        return std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    }
+
+    if let Some(secs) = initiate["expires_in"]
+        .as_u64()
+        .or_else(|| initiate["expires_in"].as_str().and_then(|s| s.parse().ok()))
+    {
+        return std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    }
+
+    std::time::Instant::now() + std::time::Duration::from_secs(15 * 60)
+}
+
 async fn run_device_code_add(
     api: &mut ApiClient,
     slug: Option<String>,
@@ -1208,6 +1369,7 @@ async fn run_device_code_add(
         .as_u64()
         .or_else(|| initiate["interval"].as_str().and_then(|s| s.parse().ok()))
         .unwrap_or(5);
+    let deadline = parse_device_code_deadline(&initiate);
 
     eprintln!("Device Code Authorization");
     eprintln!();
@@ -1220,13 +1382,15 @@ async fn run_device_code_add(
 
     // Poll for completion
     let poll_body = serde_json::json!({ "state": state });
+    let poll_path = format!("/providers/{provider_id}/connect/device-code/poll");
+    let mut consecutive_poll_errors = 0_u8;
 
-    loop {
+    while std::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
 
-        let poll_path = format!("/providers/{provider_id}/connect/device-code/poll");
         match api.post::<Value, _>(&poll_path, &poll_body).await {
             Ok(result) => {
+                consecutive_poll_errors = 0;
                 let status = result["status"].as_str().unwrap_or("");
                 if status == "complete"
                     || status == "authorized"
@@ -1263,12 +1427,22 @@ async fn run_device_code_add(
                 std::io::stderr().flush()?;
             }
             Err(_) => {
-                // Treat errors during polling as "still pending"
+                consecutive_poll_errors += 1;
                 eprint!(".");
                 std::io::stderr().flush()?;
+                if consecutive_poll_errors >= 30 {
+                    eprintln!();
+                    bail!("device code polling failed repeatedly — check your network and re-run");
+                }
             }
         }
     }
+
+    eprintln!();
+    bail!(
+        "Device code authorization timed out (the code may have expired or the request was denied).\n\
+         Re-run the command to start a new authorization."
+    );
 }
 
 async fn wait_for_authorized_key(api: &mut ApiClient, key_id: &str) -> Result<Value> {
@@ -1449,7 +1623,6 @@ fn is_explicit_scripted(
     has_auth_method: bool,
     has_auth_key_name: bool,
     has_scopes: bool,
-    has_org: bool,
     has_openapi_spec_url: bool,
     has_ws_frame_preset: bool,
     ws_frame_clear: bool,
@@ -1462,7 +1635,6 @@ fn is_explicit_scripted(
         || (has_auth_key_name && !custom)
         || (has_custom_slug && !custom)
         || has_scopes
-        || has_org
         || has_openapi_spec_url
         || has_ws_frame_preset
         || ws_frame_clear
@@ -1617,6 +1789,31 @@ mod tests {
         assert!(!requires_credential_prompt("none", true));
     }
 
+    #[test]
+    fn parse_device_code_deadline_uses_expires_at() {
+        let future = chrono::Utc::now() + chrono::Duration::seconds(600);
+        let v = serde_json::json!({ "expires_at": future.to_rfc3339() });
+        let deadline = parse_device_code_deadline(&v);
+        let secs = deadline.duration_since(std::time::Instant::now()).as_secs();
+        assert!((550..=650).contains(&secs), "got {secs}s");
+    }
+
+    #[test]
+    fn parse_device_code_deadline_uses_expires_in() {
+        let v = serde_json::json!({ "expires_in": 600 });
+        let deadline = parse_device_code_deadline(&v);
+        let secs = deadline.duration_since(std::time::Instant::now()).as_secs();
+        assert!((550..=650).contains(&secs), "got {secs}s");
+    }
+
+    #[test]
+    fn parse_device_code_deadline_falls_back_to_default() {
+        let v = serde_json::json!({});
+        let deadline = parse_device_code_deadline(&v);
+        let secs = deadline.duration_since(std::time::Instant::now()).as_secs();
+        assert!((850..=900).contains(&secs), "got {secs}s");
+    }
+
     // ── Issue #414: explicit_scripted dispatch nuance ─────────────────
 
     /// Test helper: build a clean "no flags" baseline so each test
@@ -1643,7 +1840,6 @@ mod tests {
             has_auth_method,
             has_auth_key_name,
             false, // has_scopes
-            false, // has_org
             false, // has_openapi_spec_url
             false, // has_ws_frame_preset
             false, // ws_frame_clear
@@ -1745,25 +1941,34 @@ mod tests {
     }
 
     #[test]
+    fn org_scope_alone_routes_to_wizard() {
+        // `--org` is resolved before this heuristic and then carried
+        // as wizard prefill. It no longer forces the legacy scripted
+        // terminal path.
+        assert!(!scripted(
+            false, false, false, false, false, false, false, false
+        ));
+    }
+
+    #[test]
     fn issue_414_advanced_flags_keep_scripted() {
-        // --scope / --org / --openapi-spec-url / --ws-frame-preset /
+        // --scope / --openapi-spec-url / --ws-frame-preset /
         // --ws-frame-clear are advanced flags we don't want to expose
         // in the wizard form. They keep their existing scripted
         // semantics.
-        for (scopes, org, spec_url, ws_preset, ws_clear) in [
-            (true, false, false, false, false),
-            (false, true, false, false, false),
-            (false, false, true, false, false),
-            (false, false, false, true, false),
-            (false, false, false, false, true),
+        for (scopes, spec_url, ws_preset, ws_clear) in [
+            (true, false, false, false),
+            (false, true, false, false),
+            (false, false, true, false),
+            (false, false, false, true),
         ] {
             assert!(
                 is_explicit_scripted(
-                    false, false, false, false, false, false, false, false, scopes, org, spec_url,
+                    false, false, false, false, false, false, false, false, scopes, spec_url,
                     ws_preset, ws_clear,
                 ),
-                "expected scripted with scopes={scopes} org={org} \
-                 spec_url={spec_url} ws_preset={ws_preset} ws_clear={ws_clear}",
+                "expected scripted with scopes={scopes} spec_url={spec_url} \
+                 ws_preset={ws_preset} ws_clear={ws_clear}",
             );
         }
     }
@@ -1894,6 +2099,7 @@ mod tests {
             host: "bastion.internal",
             port: 2222,
             cert_auth: true,
+            ssh_auth_mode: "cert",
             principals: "ubuntu,admin",
             ttl: 45,
             via_node: "node-123",
@@ -1907,6 +2113,7 @@ mod tests {
                 "ssh_host": "bastion.internal",
                 "ssh_port": 2222,
                 "ssh_certificate_auth": true,
+                "ssh_auth_mode": "cert",
                 "ssh_principals": "ubuntu,admin",
                 "ssh_certificate_ttl_minutes": 45,
                 "node_id": "node-123",
@@ -1922,6 +2129,7 @@ mod tests {
             host: "bastion.internal",
             port: 22,
             cert_auth: false,
+            ssh_auth_mode: "proxy_only",
             principals: "",
             ttl: 30,
             via_node: "node-123",
@@ -1935,6 +2143,7 @@ mod tests {
                 "ssh_host": "bastion.internal",
                 "ssh_port": 22,
                 "ssh_certificate_auth": false,
+                "ssh_auth_mode": "proxy_only",
                 "ssh_principals": "",
                 "ssh_certificate_ttl_minutes": 30,
                 "node_id": "node-123",

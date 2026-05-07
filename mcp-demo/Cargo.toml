@@ -1,0 +1,19 @@
+[package]
+name = "nyxid-mcp-demo"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nyxid-mcp-demo"
+path = "src/main.rs"
+
+# Deliberately tiny: this binary exists only so directory listings
+# (e.g. Glama) can introspect a static `tools/list` over stdio without
+# pulling in the full NyxID backend's compile graph (which times out
+# in constrained CI runners). Just serde_json + std — no tokio, no
+# axum, no mongodb, no rustls.
+[dependencies]
+serde_json = { workspace = true }

@@ -762,6 +762,9 @@ pub fn prefill_ai_key(p: &WizardPrefill) -> Value {
     if let Some(v) = &p.via_node {
         obj.insert("via_node".into(), Value::String(v.clone()));
     }
+    if let Some(v) = &p.org {
+        obj.insert("org_id".into(), Value::String(v.clone()));
+    }
     if let Some(v) = &p.endpoint_url {
         obj.insert("endpoint_url".into(), Value::String(v.clone()));
     }
@@ -821,6 +824,7 @@ mod tests {
         assert_eq!(obj.get("slug").and_then(|x| x.as_str()), Some("llm-openai"));
         assert!(!obj.contains_key("label"));
         assert!(!obj.contains_key("via_node"));
+        assert!(!obj.contains_key("org_id"));
         assert!(!obj.contains_key("endpoint_url"));
         // Issue #414: custom-mode fields default to absent. The
         // existing catalog flow's pairing records stay byte-identical
@@ -874,6 +878,24 @@ mod tests {
             obj.get("endpoint_url").and_then(|x| x.as_str()),
             Some("http://homeassistant.local:8123")
         );
+    }
+
+    #[test]
+    fn prefill_ai_key_emits_org_id_when_set() {
+        let with_org = WizardPrefill {
+            org: Some("0a130a17-2624-4fbb-a69d-8ba51c99952a".into()),
+            ..WizardPrefill::default()
+        };
+        let v = prefill_ai_key(&with_org);
+        let obj = v.as_object().expect("object");
+        assert_eq!(
+            obj.get("org_id").and_then(|x| x.as_str()),
+            Some("0a130a17-2624-4fbb-a69d-8ba51c99952a")
+        );
+
+        let without_org = prefill_ai_key(&WizardPrefill::default());
+        let obj = without_org.as_object().expect("object");
+        assert!(!obj.contains_key("org_id"));
     }
 
     #[test]

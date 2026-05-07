@@ -135,7 +135,7 @@ Running `nyxid service add <slug>` with no scripted flags on an interactive TTY 
 **Safety posture:** everything is local -- the browser never talks to the NyxID backend directly. The wizard's narrow allowlist of endpoints is proxied through the local server with the user's bearer token attached server-side, so the access token never hits the browser. A 10-second heartbeat watchdog cancels the CLI if the browser tab is closed without clicking Done; a 30-minute ceiling catches walked-away tabs.
 
 **Prefill args** (safe to combine with the wizard -- they just seed the form):
-the positional catalog slug (e.g. `llm-openai`), `--label`, `--via-node`, `--endpoint-url`. Passing `--slug` bypasses the wizard and runs the scripted terminal flow instead (see the fallback triggers below).
+the positional catalog slug (e.g. `llm-openai`), `--label`, `--via-node`, `--endpoint-url`, `--org <ID|SLUG|NAME>` (resolved to org user UUID before being threaded into the wizard prefill so the owner picker opens with the org pre-selected). Passing `--slug` bypasses the wizard and runs the scripted terminal flow instead (see the fallback triggers below).
 
 ### Wizard transport selection: two predicates, two transports
 
@@ -221,7 +221,7 @@ Terminal (scripted stdin-prompt) mode is selected when **any** of the following 
 
 - `--terminal` (alias `--no-wizard`) is passed on the command line -- **per-invocation override**, useful for a one-off scripted call on a GUI machine.
 - `NYXID_NO_WIZARD=1` is set in the environment -- **sticky** across all invocations. Right choice for CI runners, Dockerfiles, and systemd units that want the pre-wizard behavior.
-- A **scripted flag** is present (tells the CLI the caller already decided the flow): `--oauth`, `--device-code`, `--credential-env`, `--credential`, `--custom`, `--slug`, `--auth-method`, `--auth-key-name`, `--scope`, `--org`, `--openapi-spec-url`, or `--output json` (unless combined with `--no-wait`, which always uses remote pairing).
+- A **scripted flag** is present (tells the CLI the caller already decided the flow): `--oauth`, `--device-code`, `--credential-env`, `--credential`, `--custom`, `--slug`, `--auth-method`, `--auth-key-name`, `--scope`, `--openapi-spec-url`, or `--output json` (unless combined with `--no-wait`, which always uses remote pairing). Note: `--org` is **not** in this list -- it is a wizard prefill, so `nyxid service add --org chronoai` opens the wizard with the org pre-selected as owner.
 - stdin is a TTY **and** stdout is piped / redirected -- the user is clearly scripting output (`nyxid api-key create > key.txt`, `| jq`), so the CLI respects that and uses the stdin-prompt path.
 
 Note: fully-headless environments (agents, SSH without display, CI containers) NO LONGER fall through to stdin-prompt mode. They route through remote pairing (Mode B) or the local wizard (Mode A via `open`/`xdg-open`/`start`) depending on whether a local browser can actually launch — see the transport-selection table above. Set `NYXID_NO_WIZARD=1` to opt out if a caller genuinely wants the stdin-prompt behavior on a headless box (rare — usually means all args are supplied via flags).

@@ -6,13 +6,16 @@ This path involves more moving parts than the [Web UI](web-ui.md) or [CLI](cli.m
 
 ## Step 1 — Wire MCP
 
-Pick your client. `<BASE_URL>` is `https://nyx.chrono-ai.fun` for hosted, `http://localhost:3001` for self-host.
+Pick your client. `<BASE_URL>` is `https://nyx-api.chrono-ai.fun` for hosted, `http://localhost:3001` for self-host.
+This is the API origin where `/mcp` lives, distinct from the web console at `https://nyx.chrono-ai.fun`.
 
 ### Claude Code
 
 ```bash
-claude mcp add --transport http nyxid <BASE_URL>/mcp
+claude mcp add --transport http --scope user nyxid <BASE_URL>/mcp
 ```
+
+`--scope user` stores the MCP config at user scope so auth does not depend on the current directory.
 
 ### Codex
 

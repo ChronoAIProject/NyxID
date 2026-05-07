@@ -25,7 +25,6 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
-import { PortalMarkLogo } from "@/components/shared/portal-mark-logo";
 
 /* ── Navigation Config ── */
 const NAV_ITEMS = [
@@ -146,9 +145,12 @@ export function Sidebar({
       {/* ── Navigation ── */}
       <div className="flex flex-1 flex-col gap-6">
         {/* Logo */}
-        <div className="flex items-center gap-3 mb-6">
-          <PortalMarkLogo size={36} className="shrink-0" />
-          <span className="logo-wordmark text-[22px]">NyxID</span>
+        <div className="mb-6 flex items-center">
+          <img
+            src="/nyxid-wordmark.svg"
+            alt="NyxID"
+            className="h-9 w-auto"
+          />
         </div>
 
         {/* Main Nav */}

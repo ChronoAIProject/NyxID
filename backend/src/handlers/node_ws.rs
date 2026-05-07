@@ -16,8 +16,9 @@ use crate::services::{
         NodeCapabilitiesMsg, NodeOutboundMessage, NodeProxyResponse, NodeSshExecResult,
         NodeWsManager, WsFrameInjectedInbound, WsProxyBinaryInbound, WsProxyClosedInbound,
         WsProxyErrorInbound, WsProxyOpenedInbound, WsProxyResponseChunkMsg, WsProxyResponseEndMsg,
-        WsProxyResponseStartMsg, WsProxyTextInbound, WsSshExecResultMsg, WsSshTunnelClosedMsg,
-        WsSshTunnelDataMsg, WsSshTunnelOpenedMsg, WsWebTerminalClosedMsg, WsWebTerminalDataMsg,
+        WsProxyResponseStartMsg, WsProxyTextInbound, WsSshExecResultMsg, WsSshNodeExecCloseMsg,
+        WsSshNodeExecDataMsg, WsSshNodeExecErrorMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg,
+        WsSshTunnelOpenedMsg, WsWebTerminalClosedMsg, WsWebTerminalDataMsg,
         WsWebTerminalStartedMsg,
     },
 };
@@ -99,6 +100,12 @@ enum NodeMessage {
     WebTerminalClosed(WsWebTerminalClosedMsg),
     #[serde(rename = "ssh_exec_result")]
     SshExecResult(WsSshExecResultMsg),
+    #[serde(rename = "ssh_node_exec_data")]
+    SshNodeExecData(WsSshNodeExecDataMsg),
+    #[serde(rename = "ssh_node_exec_close")]
+    SshNodeExecClose(WsSshNodeExecCloseMsg),
+    #[serde(rename = "ssh_node_exec_error")]
+    SshNodeExecError(WsSshNodeExecErrorMsg),
     // Placed before CredentialUpdateAck for serde ordering stability. Actual
     // capability type is shared with `node_ws_manager`.
     #[serde(rename = "credential_update_ack")]
@@ -728,7 +735,48 @@ async fn handle_node_connection(state: AppState, socket: WebSocket, _guard: Pend
                         duration_ms: result.duration_ms,
                         timed_out: result.timed_out,
                         error: result.error,
+                        error_code: result.error_code,
                     },
+                );
+            }
+            NodeMessage::SshNodeExecData(data) => {
+                if let Some(bytes) = decode_base64_payload(
+                    data.data.as_deref(),
+                    "ssh_node_exec_data",
+                    &data.request_id,
+                ) {
+                    ws_manager.deliver_ssh_node_exec_data(
+                        &node_id_reader,
+                        &data.request_id,
+                        data.stream.as_deref(),
+                        bytes,
+                    );
+                } else {
+                    ws_manager.deliver_ssh_node_exec_error(
+                        &node_id_reader,
+                        data.request_id,
+                        "invalid_base64_payload".to_string(),
+                        Some(1013),
+                        0,
+                    );
+                }
+            }
+            NodeMessage::SshNodeExecClose(closed) => {
+                ws_manager.deliver_ssh_node_exec_close(
+                    &node_id_reader,
+                    closed.request_id,
+                    closed.exit_code,
+                    closed.duration_ms,
+                    closed.timed_out,
+                );
+            }
+            NodeMessage::SshNodeExecError(error) => {
+                ws_manager.deliver_ssh_node_exec_error(
+                    &node_id_reader,
+                    error.request_id,
+                    error.error,
+                    error.error_code,
+                    error.duration_ms,
                 );
             }
             NodeMessage::CredentialUpdateAck {

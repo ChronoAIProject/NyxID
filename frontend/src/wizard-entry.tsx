@@ -1,3 +1,5 @@
+/* eslint-disable react-refresh/only-export-components -- standalone entry exports a pure helper for focused tests. */
+
 /**
  * Standalone entry for the CLI's locally-served wizard (Mode A).
  *
@@ -66,6 +68,7 @@ import {
 } from "@/components/cli-wizard/client"
 import { DisconnectBanner } from "@/components/cli-wizard/disconnect-banner"
 import { Button } from "@/components/ui/button"
+import { parseAiKeyPrefill } from "@/schemas/cli-wizard"
 
 declare global {
   interface Window {
@@ -104,6 +107,14 @@ const queryClient = new QueryClient({
     queries: { retry: 1, staleTime: 30_000 },
   },
 })
+
+export function shouldShowDisconnectBanner(
+  phase: ModeAPhase["phase"],
+  disconnected: boolean,
+): boolean {
+  if (!disconnected) return false
+  return phase !== "done" && phase !== "cancelled"
+}
 
 function WizardApp() {
   const [stage, setStage] = useState<ModeAPhase>({ phase: "claimed" })
@@ -167,7 +178,7 @@ function WizardApp() {
 
   return (
     <WizardShell context="local" step={step}>
-      {disconnected ? (
+      {shouldShowDisconnectBanner(stage.phase, disconnected) ? (
         <DisconnectBanner state="disconnected" context="local" />
       ) : null}
       {stage.phase === "claimed" ? (
@@ -182,8 +193,8 @@ function WizardApp() {
             setStage({ phase: "cancelled" })
             void postWizardCancel()
           }}
-          onSlugPicked={() => {
-            setSlugPicked(true)
+          onSlugPicked={(slug) => {
+            setSlugPicked(Boolean(slug))
           }}
         />
       ) : stage.phase === "secret" ? (
@@ -255,7 +266,7 @@ function toWizardPhase(phase: ModeAPhase["phase"]): WizardPhase {
   return "done"
 }
 
-function ConfirmDispatcher({
+export function ConfirmDispatcher({
   flow,
   prefill,
   onSuccess,
@@ -323,7 +334,7 @@ function ConfirmDispatcher({
       return (
         <div className="flex flex-col gap-4">
           <AiKeyConfirm
-            prefill={prefill as AiKeyPrefill}
+            prefill={parseAiKeyPrefill(prefill) as AiKeyPrefill}
             pairingId={pairingId}
             onSuccess={onSuccess}
             onSlugPicked={onSlugPicked}

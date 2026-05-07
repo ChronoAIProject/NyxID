@@ -23,17 +23,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, api } from "@/lib/api-client";
 import { Copy, ExternalLink, Loader2 } from "lucide-react";
+import { TwitterOAuthGuidance } from "@/components/shared/twitter-oauth-guidance";
 import type { AiKeyPairingSuccess } from "./ai-key-confirm-panel";
 import {
   reservePairingAction,
   rewindPairingAction,
 } from "@/pages/cli-pair/reserve-action";
+import { pollOAuthKeyUntilActive } from "./auth-flow-polling";
 
 interface FlowProps {
   readonly providerId: string;
   readonly slug: string;
   readonly label: string;
   readonly nodeId?: string;
+  readonly targetOrgId?: string | null;
   /**
    * User's `--endpoint-url` override from the CLI prefill (e.g.
    * self-hosted OpenClaw instance URL). Plumbed into the
@@ -131,12 +134,14 @@ async function createPlaceholderKey(
   createSentRef: { current: boolean },
   nodeId?: string,
   endpointUrl?: string,
+  targetOrgId?: string | null,
 ): Promise<PlaceholderKeyResponse> {
   const body: Record<string, unknown> = {
     service_slug: slug,
     label,
   };
   if (nodeId) body.node_id = nodeId;
+  if (targetOrgId) body.target_org_id = targetOrgId;
   // Preserve the user's `--endpoint-url` override. Without this,
   // OAuth/device-code pairings for self-hosted providers (e.g.
   // OpenClaw) would bind the final service to the catalog default
@@ -500,6 +505,7 @@ export function OAuthFlow({
   slug,
   label,
   nodeId,
+  targetOrgId,
   endpointUrl,
   pairingId,
   credentialMode,
@@ -813,6 +819,7 @@ export function OAuthFlow({
             placeholderCreateSentRef,
             nodeId,
             endpointUrl,
+            targetOrgId,
           );
           placeholderCreateInFlightRef.current = createPromise;
           try {
@@ -893,27 +900,25 @@ export function OAuthFlow({
   }, [phase]);
 
   async function pollUntilActive(keyId: string) {
-    const deadline = Date.now() + 5 * 60 * 1000;
-    while (Date.now() < deadline) {
-      if (cancelledRef.current) return;
-      await sleep(2000);
-      if (cancelledRef.current) return;
-      try {
-        const key = await api.get<ActiveKeyResponse>(
-          `/keys/${encodeURIComponent(keyId)}`,
+    await pollOAuthKeyUntilActive({
+      keyId,
+      getKey: (id) =>
+        api.get<ActiveKeyResponse>(`/keys/${encodeURIComponent(id)}`),
+      completeWithKey,
+      isCancelled: () => cancelledRef.current,
+      onTerminalFailure: () => {
+        setPhase("error");
+        setError(
+          "Authorization didn't complete (it may have been canceled or denied on the provider page). Cancel and re-run to try again.",
         );
-        if (key.status === "active") {
-          await completeWithKey(keyId);
-          return;
-        }
-      } catch {
-        // Transient; keep polling.
-      }
-    }
-    if (!cancelledRef.current) {
-      setPhase("error");
-      setError("OAuth didn't complete within 5 minutes. Try again.");
-    }
+      },
+      onTimeout: () => {
+        setPhase("error");
+        setError(
+          "We didn't see authorization complete within 5 minutes. If you canceled on the provider page or it's taking longer than expected, cancel and re-run.",
+        );
+      },
+    });
   }
 
   async function completeWithKey(keyId: string) {
@@ -956,6 +961,8 @@ export function OAuthFlow({
             </a>
           ) : null}
         </div>
+
+        <TwitterOAuthGuidance slug={slug} />
 
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">
@@ -1061,6 +1068,7 @@ export function DeviceCodeFlow({
   slug,
   label,
   nodeId,
+  targetOrgId,
   endpointUrl,
   pairingId,
   onSuccess,
@@ -1245,6 +1253,7 @@ export function DeviceCodeFlow({
           placeholderCreateSentRef,
           nodeId,
           endpointUrl,
+          targetOrgId,
         );
         placeholderCreateInFlightRef.current = createPromise;
         let placeholder: PlaceholderKeyResponse;

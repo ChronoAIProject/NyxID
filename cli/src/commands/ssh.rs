@@ -134,6 +134,14 @@ pub async fn run(cli: SshCli) -> Result<()> {
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
             let resolved_id = resolve_ssh_service_id(&mut api, &service_id).await?;
+            let service_slug = resolve_user_service_slug(&mut api, &service_id)
+                .await
+                .unwrap_or_else(|_| service_id.clone());
+            let principal = resolve_exec_principal(
+                auth.profile.as_deref(),
+                &service_slug,
+                principal.as_deref(),
+            )?;
             run_exec(&auth, &resolved_id, &principal, &command).await
         }
         crate::cli::SshCommand::Terminal {
@@ -213,6 +221,68 @@ async fn run_exec(
         }
     }
     Ok(())
+}
+
+async fn resolve_user_service_slug(api: &mut ApiClient, id_or_slug: &str) -> Result<String> {
+    if let Ok(svc) = api.get_value(&format!("/keys/{id_or_slug}")).await
+        && let Some(slug) = svc
+            .get("slug")
+            .or_else(|| svc.get("service_slug"))
+            .and_then(|v| v.as_str())
+    {
+        return Ok(slug.to_string());
+    }
+
+    let resp = api.get_value("/keys").await?;
+    resp.get("keys")
+        .and_then(|v| v.as_array())
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                let matches = item.get("id").and_then(|v| v.as_str()) == Some(id_or_slug)
+                    || item.get("_id").and_then(|v| v.as_str()) == Some(id_or_slug)
+                    || item.get("slug").and_then(|v| v.as_str()) == Some(id_or_slug)
+                    || item.get("service_slug").and_then(|v| v.as_str()) == Some(id_or_slug);
+                matches.then(|| {
+                    item.get("slug")
+                        .or_else(|| item.get("service_slug"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })?
+            })
+        })
+        .with_context(|| format!("Could not resolve service slug for '{id_or_slug}'"))
+}
+
+fn resolve_exec_principal(
+    profile: Option<&str>,
+    service_slug: &str,
+    explicit: Option<&str>,
+) -> Result<String> {
+    if let Some(principal) = explicit {
+        let principal = principal.trim();
+        if principal.is_empty() {
+            bail!("--principal must not be empty");
+        }
+        return Ok(principal.to_string());
+    }
+
+    let config_dir = crate::node::config::resolve_config_dir_with_profile(None, profile)
+        .map_err(anyhow::Error::from)?;
+    let config_file = config_dir.join("config.toml");
+    let node_config = crate::node::config::NodeConfig::load(&config_file)
+        .map_err(|_| anyhow::anyhow!("No --principal specified and no local node profile was found for service '{service_slug}'. Pass --principal explicitly when running ssh exec from a host that is not the credential node."))?;
+    let principals =
+        crate::node::credentials::ssh_keys::principals_for_service(&node_config, service_slug);
+    match principals.as_slice() {
+        [] => bail!(
+            "SSH node key missing for service '{service_slug}' (1011 SshNodeKeyMissing). Run `nyxid node ssh-credentials add --service {service_slug} --principal <principal> ...`."
+        ),
+        [principal] => Ok(principal.clone()),
+        many => bail!(
+            "SSH principal ambiguous for service '{service_slug}' (1014 SshPrincipalAmbiguous). Available principals: {}. Pass --principal <principal>.",
+            many.join(", ")
+        ),
+    }
 }
 
 // ---- SSH terminal (I28) ----

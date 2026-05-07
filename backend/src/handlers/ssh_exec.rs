@@ -8,8 +8,11 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, node_routing_service, node_service, ssh_service};
+use crate::services::{
+    audit_service, node_metrics_service, node_routing_service, node_service, ssh_service,
+};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 use super::services_helpers::fetch_service;
@@ -105,11 +108,17 @@ pub async fn ssh_exec(
         .map(|s| s.slug)
         .unwrap_or_else(|| service_id.clone());
     let user_id = auth_user.user_id.to_string();
-
-    // -- Validate: certificate auth must be enabled --
-    if !ssh_svc.certificate_auth_enabled {
-        return Err(AppError::BadRequest(
-            "SSH command execution requires certificate auth to be enabled".to_string(),
+    let auth_context =
+        ssh_service::resolve_ssh_auth_context(&state.db, &user_id, &service_id, &service_slug)
+            .await?;
+    if auth_context.mode == SshAuthMode::ProxyOnly {
+        return Err(AppError::SshAuthModeUnsupportedForOperation(
+            "ssh exec is not supported for proxy-only SSH services".to_string(),
+        ));
+    }
+    if auth_context.mode == SshAuthMode::Cert && !ssh_svc.certificate_auth_enabled {
+        return Err(AppError::SshAuthModeUnsupportedForOperation(
+            "ssh exec requires certificate auth for cert-mode SSH services".to_string(),
         ));
     }
 
@@ -168,15 +177,21 @@ pub async fn ssh_exec(
         )
     })?;
 
-    // -- Generate ephemeral SSH credentials (key + cert as strings, no files) --
-    let ephemeral = super::ssh_web_terminal::generate_ephemeral_credentials(
-        &state,
-        &ssh_svc,
-        &service_id,
-        &user_id,
-        &principal,
-    )
-    .await?;
+    // -- Generate ephemeral SSH credentials for cert mode only (key + cert as strings, no files) --
+    let ephemeral = if auth_context.mode == SshAuthMode::Cert {
+        Some(
+            super::ssh_web_terminal::generate_ephemeral_credentials(
+                &state,
+                &ssh_svc,
+                &service_id,
+                &user_id,
+                &principal,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     // -- Execute via node agent with failover --
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
@@ -185,6 +200,7 @@ pub async fn ssh_exec(
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let mut last_error = None;
+    let mut last_error_message = None;
 
     for node_id in &all_node_ids {
         let signing_secret = if state.config.node_hmac_signing_enabled {
@@ -203,7 +219,7 @@ pub async fn ssh_exec(
                         error = %error,
                         "SSH exec node signing secret resolution failed"
                     );
-                    last_error = Some(format!("Signing secret error: {error}"));
+                    last_error_message = Some(format!("Signing secret error: {error}"));
                     continue;
                 }
             }
@@ -211,25 +227,61 @@ pub async fn ssh_exec(
             None
         };
 
-        match state
-            .node_ws_manager
-            .exec_ssh_command(
-                node_id,
-                crate::services::node_ws_manager::NodeSshExecRequest {
-                    request_id: request_id.clone(),
-                    host: ssh_svc.host.clone(),
-                    port: ssh_svc.port,
-                    principal: principal.clone(),
-                    private_key_pem: ephemeral.private_key_pem.clone(),
-                    certificate_openssh: ephemeral.certificate_openssh.clone(),
-                    command: command.clone(),
-                    timeout_secs,
-                },
-                signing_secret.as_ref().map(|s| s.as_slice()),
-            )
-            .await
-        {
+        let exec_result = match auth_context.mode {
+            SshAuthMode::Cert => {
+                let ephemeral = ephemeral.as_ref().ok_or_else(|| {
+                    AppError::Internal("Missing generated SSH certificate".to_string())
+                })?;
+                state
+                    .node_ws_manager
+                    .exec_ssh_command(
+                        node_id,
+                        crate::services::node_ws_manager::NodeSshExecRequest {
+                            request_id: request_id.clone(),
+                            host: ssh_svc.host.clone(),
+                            port: ssh_svc.port,
+                            principal: principal.clone(),
+                            private_key_pem: ephemeral.private_key_pem.clone(),
+                            certificate_openssh: ephemeral.certificate_openssh.clone(),
+                            command: command.clone(),
+                            timeout_secs,
+                        },
+                        signing_secret.as_ref().map(|s| s.as_slice()),
+                    )
+                    .await
+            }
+            SshAuthMode::NodeKey => {
+                state
+                    .node_ws_manager
+                    .exec_ssh_node_key_command(
+                        node_id,
+                        crate::services::node_ws_manager::NodeSshNodeKeyExecRequest {
+                            request_id: request_id.clone(),
+                            service_slug: auth_context.service_slug.clone(),
+                            principal: principal.clone(),
+                            command: command.clone(),
+                            timeout_secs,
+                            target_host: Some(ssh_svc.host.clone()),
+                            target_port: Some(ssh_svc.port),
+                            host_key_sha256: None,
+                        },
+                        signing_secret.as_ref().map(|s| s.as_slice()),
+                    )
+                    .await
+            }
+            SshAuthMode::ProxyOnly => unreachable!("proxy-only returned before node dispatch"),
+        };
+
+        match exec_result {
             Ok(result) => {
+                if auth_context.mode == SshAuthMode::NodeKey {
+                    record_node_ssh_metric_success(
+                        state.db.clone(),
+                        (*node_id).to_string(),
+                        result.duration_ms,
+                    );
+                }
+
                 // Keep session guard alive until command completes.
                 let _ = &session_guard;
                 drop(session_guard);
@@ -280,13 +332,42 @@ pub async fn ssh_exec(
                 return Ok(Json(response));
             }
             Err(error) => {
+                if auth_context.mode == SshAuthMode::NodeKey {
+                    let error_message = error.to_string();
+                    record_node_ssh_metric_error(
+                        state.db.clone(),
+                        (*node_id).to_string(),
+                        error_message.clone(),
+                    );
+                    if let AppError::SshHostKeyMismatch(message) = &error {
+                        audit_service::log_async(
+                            state.db.clone(),
+                            Some(user_id.clone()),
+                            "ssh_host_key_mismatch".to_string(),
+                            Some(serde_json::json!({
+                                "service_id": service_id,
+                                "principal": principal,
+                                "error": message,
+                                "routed_via": "node",
+                                "node_id": node_id,
+                            })),
+                            ip_address.clone(),
+                            user_agent.clone(),
+                            None,
+                            None,
+                        );
+                    }
+                    last_error_message = Some(error_message);
+                } else {
+                    last_error_message = Some(error.to_string());
+                }
                 tracing::warn!(
                     service_id = %service_id,
                     node_id = %node_id,
                     error = %error,
                     "SSH exec via node failed, trying next"
                 );
-                last_error = Some(error.to_string());
+                last_error = Some(error);
             }
         }
     }
@@ -295,9 +376,13 @@ pub async fn ssh_exec(
     let _ = &session_guard;
     drop(session_guard);
 
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+
     Err(AppError::Internal(format!(
         "SSH exec failed on all nodes: {}",
-        last_error.unwrap_or_else(|| "no nodes available".to_string()),
+        last_error_message.unwrap_or_else(|| "no nodes available".to_string()),
     )))
 }
 
@@ -337,6 +422,34 @@ pub(crate) fn truncate_output(bytes: &[u8]) -> String {
         bytes
     };
     String::from_utf8_lossy(truncated).into_owned()
+}
+
+fn record_node_ssh_metric_success(db: mongodb::Database, node_id: String, duration_ms: u64) {
+    tokio::spawn(async move {
+        if let Err(error) =
+            node_metrics_service::record_success(db, node_id.clone(), duration_ms).await
+        {
+            tracing::warn!(
+                node_id = %node_id,
+                error = %error,
+                "Failed to record SSH node-key success metric"
+            );
+        }
+    });
+}
+
+fn record_node_ssh_metric_error(db: mongodb::Database, node_id: String, error_message: String) {
+    tokio::spawn(async move {
+        if let Err(error) =
+            node_metrics_service::record_error(db, node_id.clone(), error_message).await
+        {
+            tracing::warn!(
+                node_id = %node_id,
+                error = %error,
+                "Failed to record SSH node-key error metric"
+            );
+        }
+    });
 }
 
 /// Truncate command for audit logging (avoid storing giant payloads).

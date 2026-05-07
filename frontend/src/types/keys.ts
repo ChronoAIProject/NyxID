@@ -47,6 +47,7 @@ export interface KeyInfo {
   readonly ssh_host: string | null;
   readonly ssh_port: number | null;
   readonly ssh_ca_public_key: string | null;
+  readonly ssh_auth_mode?: "cert" | "node_key" | "proxy_only";
   readonly ssh_allowed_principals: readonly string[] | null;
   readonly ssh_certificate_ttl_minutes: number | null;
   /**
@@ -125,6 +126,7 @@ export interface CatalogEntry {
   readonly ssh_host: string | null;
   readonly ssh_port: number | null;
   readonly ssh_ca_public_key: string | null;
+  readonly ssh_auth_mode?: "cert" | "node_key" | "proxy_only";
   readonly ssh_allowed_principals: readonly string[] | null;
   readonly ssh_certificate_ttl_minutes: number | null;
   readonly authorization_url: string | null;
@@ -178,6 +180,7 @@ export interface UserServiceInfo {
   readonly node_priority: number;
   readonly is_active: boolean;
   readonly ws_frame_injections: readonly WsFrameInjection[];
+  readonly ssh_auth_mode?: "cert" | "node_key" | "proxy_only";
   readonly created_at: string;
   readonly updated_at: string;
 }

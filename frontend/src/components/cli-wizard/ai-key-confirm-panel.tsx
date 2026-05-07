@@ -15,8 +15,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { OrgScopeSelect } from "@/components/shared/org-scope-select";
+import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
-import { ExternalLink } from "lucide-react";
+import { Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
 import { DeviceCodeFlow, OAuthFlow } from "./auth-flows";
 import {
@@ -111,11 +113,11 @@ interface AiKeyConfirmProps {
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
   /**
-   * Fired when the catalog-grid → credential-form transition happens
-   * (slug picked, either from prefill or by clicking a catalog card).
-   * Parent uses it to bump the "Step X of 3" counter in the shell
-   * header from 1 (pick a service) to 2 (enter credential). Purely
-   * cosmetic — the pairing state machine doesn't care.
+   * Fired on selected-slug transitions. A non-empty slug means the user
+   * has entered credential-form territory; an empty string means the slug
+   * was reset and the catalog grid is visible again. Parent uses this to
+   * keep the shell's "Step X of 3" header in sync. Purely cosmetic — the
+   * pairing state machine doesn't care.
    */
   readonly onSlugPicked?: (slug: string) => void;
 }
@@ -177,14 +179,17 @@ export function AiKeyConfirm({
     ? "__custom__"
     : (prefill.slug ?? "");
   const [slug, setSlug] = useState(initialSlug);
+  const [targetOrgId, setTargetOrgId] = useState<string | null>(
+    prefill.org_id ?? null,
+  );
   const trimmedSlug = slug.trim();
 
-  // Signal up whenever we transition into credential-form territory
-  // (non-empty slug). Fires once on mount if the CLI prefilled the
-  // slug, and once more when the user clicks a catalog card.
-  const lastNotifiedSlug = useRef<string | null>(null);
+  // Signal up whenever the selected slug changes. Fires once on mount
+  // if the CLI prefilled the slug, once more when the user clicks a
+  // catalog card, and with "" when the user returns to the catalog grid.
+  const lastNotifiedSlug = useRef<string | null>(trimmedSlug ? null : "");
   useEffect(() => {
-    if (trimmedSlug && lastNotifiedSlug.current !== trimmedSlug) {
+    if (lastNotifiedSlug.current !== trimmedSlug) {
       lastNotifiedSlug.current = trimmedSlug;
       onSlugPicked?.(trimmedSlug);
     }
@@ -239,6 +244,8 @@ export function AiKeyConfirm({
         <p className="text-sm text-muted-foreground">{subtitle}</p>
       </div>
 
+      <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
+
       {onCatalogStep ? (
         <CatalogGrid onSelect={setSlug} />
       ) : onCustomStep ? (
@@ -250,6 +257,7 @@ export function AiKeyConfirm({
         // (cli/src/wizard/assets/wizard.js:~325-400).
         <CustomServiceForm
           prefill={prefill}
+          targetOrgId={targetOrgId}
           pairingId={pairingId}
           onSuccess={onSuccess}
           onBack={() => {
@@ -271,10 +279,40 @@ export function AiKeyConfirm({
         <CatalogConfirmForm
           entry={entry}
           prefill={prefill}
+          targetOrgId={targetOrgId}
           pairingId={pairingId}
           onSuccess={onSuccess}
         />
       ) : null}
+    </div>
+  );
+}
+
+function OwnerPicker({
+  value,
+  onChange,
+}: {
+  readonly value: string | null;
+  readonly onChange: (orgId: string | null) => void;
+}) {
+  const { data: orgs } = useOrgs();
+  const hasAdminOrg = (orgs ?? []).some((o) => o.your_role === "admin");
+  if (!hasAdminOrg) return null;
+  return (
+    <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+          <Building2 className="h-3.5 w-3.5" />
+          Owner
+        </div>
+        <div className="w-[220px]">
+          <OrgScopeSelect value={value} onChange={onChange} label="Owner" />
+        </div>
+      </div>
+      <p className="mt-1 text-[11px] text-muted-foreground">
+        Org-owned services are shared with every admin of that organization
+        and can be proxied by its members.
+      </p>
     </div>
   );
 }
@@ -349,13 +387,19 @@ function authMethodNeedsKeyName(method: CustomAuthMethod): boolean {
 
 interface CustomServiceFormProps {
   readonly prefill: AiKeyPrefill;
+  readonly targetOrgId: string | null;
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
   readonly onBack: () => void;
 }
 
+function RequiredMarker() {
+  return <span aria-hidden="true" className="text-destructive ml-0.5">*</span>;
+}
+
 function CustomServiceForm({
   prefill,
+  targetOrgId,
   pairingId,
   onSuccess,
   onBack,
@@ -396,6 +440,14 @@ function CustomServiceForm({
     !trimmedLabel ||
     !trimmedEndpoint ||
     (needsCredential && !trimmedCredential);
+  const credentialLabel =
+    authMethod === "bot_bearer"
+      ? "Bot token"
+      : authMethod === "basic"
+        ? "user:pass"
+        : authMethod === "body"
+          ? `${authKeyName.trim() || defaultAuthKeyName(authMethod)} value`
+          : "API key / credential";
 
   async function submit() {
     setLoading(true);
@@ -422,6 +474,7 @@ function CustomServiceForm({
       // pushes the credential to that node over the existing WS
       // channel. Falls through to direct routing when not set.
       if (viaNode) body.node_id = viaNode;
+      if (targetOrgId) body.target_org_id = targetOrgId;
 
       await reservePairingAction(pairingId);
       const res = await withRewindOnError(pairingId, () =>
@@ -446,7 +499,10 @@ function CustomServiceForm({
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="pair-custom-label">Label</Label>
+          <div className="flex items-center">
+            <Label htmlFor="pair-custom-label">Label</Label>
+            <RequiredMarker />
+          </div>
           <Input
             id="pair-custom-label"
             value={label}
@@ -455,6 +511,7 @@ function CustomServiceForm({
             }}
             placeholder="e.g. My Self-hosted OpenAI Proxy"
             autoFocus
+            aria-required="true"
           />
           <p className="text-xs text-muted-foreground">
             Shown everywhere in the CLI and web UI.
@@ -462,7 +519,10 @@ function CustomServiceForm({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="pair-custom-endpoint">Endpoint URL</Label>
+          <div className="flex items-center">
+            <Label htmlFor="pair-custom-endpoint">Endpoint URL</Label>
+            <RequiredMarker />
+          </div>
           <Input
             id="pair-custom-endpoint"
             value={endpointUrl}
@@ -470,6 +530,7 @@ function CustomServiceForm({
               setEndpointUrl(e.target.value);
             }}
             placeholder="https://api.example.com"
+            aria-required="true"
           />
           <p className="text-xs text-muted-foreground">
             The base URL NyxID proxies requests to.
@@ -477,7 +538,10 @@ function CustomServiceForm({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="pair-custom-auth-method">Auth method</Label>
+          <div className="flex items-center">
+            <Label htmlFor="pair-custom-auth-method">Auth method</Label>
+            <RequiredMarker />
+          </div>
           <select
             id="pair-custom-auth-method"
             value={authMethod}
@@ -501,6 +565,7 @@ function CustomServiceForm({
               }
             }}
             className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-required="true"
           >
             <option value="bearer">bearer (Authorization: Bearer …)</option>
             <option value="bot_bearer">bot_bearer (Authorization: Bot …)</option>
@@ -518,15 +583,10 @@ function CustomServiceForm({
 
         {needsCredential ? (
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="pair-custom-credential">
-              {authMethod === "bot_bearer"
-                ? "Bot token"
-                : authMethod === "basic"
-                  ? "user:pass"
-                  : authMethod === "body"
-                    ? `${authKeyName.trim() || defaultAuthKeyName(authMethod)} value`
-                    : "API key / credential"}
-            </Label>
+            <div className="flex items-center">
+              <Label htmlFor="pair-custom-credential">{credentialLabel}</Label>
+              <RequiredMarker />
+            </div>
             <Input
               id="pair-custom-credential"
               type="password"
@@ -538,6 +598,7 @@ function CustomServiceForm({
                 authMethod === "basic" ? "user:pass" : "sk-..."
               }
               autoFocus={Boolean(prefill.custom)}
+              aria-required="true"
             />
             <p className="text-xs text-muted-foreground">
               Pasted once, encrypted at rest.
@@ -621,6 +682,7 @@ function CustomServiceForm({
 interface CatalogConfirmFormProps {
   readonly entry: CatalogEntryShape;
   readonly prefill: AiKeyPrefill;
+  readonly targetOrgId: string | null;
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
 }
@@ -628,6 +690,7 @@ interface CatalogConfirmFormProps {
 function CatalogConfirmForm({
   entry,
   prefill,
+  targetOrgId,
   pairingId,
   onSuccess,
 }: CatalogConfirmFormProps) {
@@ -642,6 +705,7 @@ function CatalogConfirmForm({
   const [tokenFields, setTokenFields] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const viaNode = prefill.via_node?.trim() ?? "";
   // Set once the user clicks "Continue" for an OAuth / device-code
   // flow; drops the confirm UI and mounts the sub-flow panel. Reset
   // to `null` if the sub-flow reports cancel so the user can edit
@@ -656,7 +720,7 @@ function CatalogConfirmForm({
         service_slug: entry.slug,
         label,
       };
-      if (shape === "token-exchange") {
+      if (shape === "token-exchange" && !viaNode) {
         // Multi-field credential: validate required-ness and JSON-
         // encode. Mirror wizard.js submit path at wizard.js:723-734.
         const fields = entry.token_exchange_credential_fields ?? [];
@@ -671,7 +735,7 @@ function CatalogConfirmForm({
           creds[f.name] = val;
         }
         body.credential = JSON.stringify(creds);
-      } else if (shape === "api-key" && entry.requires_credential) {
+      } else if (shape === "api-key" && entry.requires_credential && !viaNode) {
         body.credential = credential;
       }
       // `no-auth` / `oauth` / `device-code` skip credential entirely;
@@ -680,8 +744,11 @@ function CatalogConfirmForm({
       if (entry.requires_gateway_url || endpointUrl) {
         body.endpoint_url = endpointUrl;
       }
-      if (prefill.via_node) {
-        body.node_id = prefill.via_node;
+      if (viaNode) {
+        body.node_id = viaNode;
+      }
+      if (targetOrgId) {
+        body.target_org_id = targetOrgId;
       }
 
       // Reserve the destructive action server-side before creating
@@ -822,6 +889,7 @@ function CatalogConfirmForm({
         slug={entry.slug}
         label={label}
         nodeId={prefill.via_node}
+        targetOrgId={targetOrgId}
         endpointUrl={effectiveEndpointUrl}
         pairingId={pairingId}
         credentialMode={entry.credential_mode}
@@ -840,6 +908,7 @@ function CatalogConfirmForm({
         slug={entry.slug}
         label={label}
         nodeId={prefill.via_node}
+        targetOrgId={targetOrgId}
         endpointUrl={effectiveEndpointUrl}
         pairingId={pairingId}
         onSuccess={onSuccess}
@@ -853,6 +922,7 @@ function CatalogConfirmForm({
   const needsCredentialInput = shape === "api-key" && entry.requires_credential;
   const submitLabel = (() => {
     if (loading) return "Creating...";
+    if (viaNode) return "Connect via node";
     if (shape === "oauth") return "Continue with provider sign-in";
     if (shape === "device-code") return "Get device code";
     if (shape === "no-auth") return "Connect";
@@ -869,9 +939,9 @@ function CatalogConfirmForm({
   const submitDisabled =
     loading ||
     !label.trim() ||
-    (needsCredentialInput && !credential.trim()) ||
+    (needsCredentialInput && !viaNode && !credential.trim()) ||
     (entry.requires_gateway_url && !endpointUrl.trim()) ||
-    !tokenExchangeComplete;
+    (!viaNode && !tokenExchangeComplete);
 
   function handleSubmit() {
     if (shape === "oauth" || shape === "device-code") {
@@ -931,7 +1001,7 @@ function CatalogConfirmForm({
           </Field>
         ) : null}
 
-        {needsCredentialInput ? (
+        {needsCredentialInput && !viaNode ? (
           <Field label="API key" htmlFor="pair-aikey-credential">
             <Input
               id="pair-aikey-credential"
@@ -957,7 +1027,7 @@ function CatalogConfirmForm({
           </Field>
         ) : null}
 
-        {shape === "token-exchange"
+        {shape === "token-exchange" && !viaNode
           ? (entry.token_exchange_credential_fields ?? []).map((f) => (
               <Field
                 key={f.name}
@@ -978,6 +1048,19 @@ function CatalogConfirmForm({
               </Field>
             ))
           : null}
+
+        {viaNode ? (
+          <div className="rounded-[10px] border border-border bg-muted/40 px-3 py-2">
+            <p className="text-xs font-medium text-foreground">Routed via node</p>
+            <code className="font-mono text-[11px] text-muted-foreground">
+              {viaNode}
+            </code>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Credential will be configured on the node agent. NyxID
+              never sees or stores it.
+            </p>
+          </div>
+        ) : null}
 
         {shape === "no-auth" ? (
           <p className="text-xs text-muted-foreground">

@@ -22,6 +22,9 @@ pub struct NodeConfig {
     /// Map of service_slug -> credential config
     #[serde(default)]
     pub credentials: BTreeMap<String, CredentialConfig>,
+    /// Per-principal SSH private keys for node-key SSH auth.
+    #[serde(default)]
+    pub ssh_keys: Vec<SshKeyConfig>,
 }
 
 fn default_storage_backend() -> String {
@@ -137,6 +140,45 @@ pub struct CredentialConfig {
     /// Alternate OAuth client ID parameter name (e.g. "client_key" for TikTok)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_client_id_param_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshKeyConfig {
+    pub service_slug: String,
+    pub principal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_pem_encrypted: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase_encrypted: Option<String>,
+    pub target_host: String,
+    #[serde(default = "default_ssh_port")]
+    pub target_port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub algorithms: Option<SshAlgorithmPreferences>,
+    #[serde(default = "default_created_at")]
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SshAlgorithmPreferences {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kex: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cipher: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<Vec<String>>,
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+fn default_created_at() -> String {
+    chrono::Utc::now().to_rfc3339()
 }
 
 impl CredentialConfig {
@@ -262,6 +304,7 @@ impl NodeConfig {
             ssh: SshConfig::default(),
             storage_backend,
             credentials: BTreeMap::new(),
+            ssh_keys: Vec::new(),
         }
     }
 

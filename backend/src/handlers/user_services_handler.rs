@@ -11,6 +11,7 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::org_membership::OrgRole;
+use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::AuthUser;
@@ -101,6 +102,8 @@ pub struct UserServiceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     pub node_priority: i32,
+    pub ssh_auth_mode: SshAuthMode,
+    pub ssh_node_keys_stale: bool,
     pub is_active: bool,
     pub identity_propagation_mode: String,
     pub identity_include_user_id: bool,
@@ -191,6 +194,11 @@ impl From<CredentialSource> for CredentialSourceResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UserServiceListResponse {
     pub services: Vec<UserServiceResponse>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct PatchSshAuthModeRequest {
+    pub mode: SshAuthMode,
 }
 
 #[utoipa::path(
@@ -367,6 +375,43 @@ pub async fn update_user_service(
 }
 
 #[utoipa::path(
+    patch,
+    path = "/api/v1/user-services/{service_id}/ssh-auth-mode",
+    params(
+        ("service_id" = String, Path, description = "User service ID")
+    ),
+    request_body = PatchSshAuthModeRequest,
+    responses(
+        (status = 200, description = "Updated SSH auth mode", body = UserServiceResponse),
+        (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "User Services"
+)]
+/// PATCH /api/v1/user-services/{service_id}/ssh-auth-mode
+pub async fn patch_user_service_ssh_auth_mode(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(service_id): Path<String>,
+    Json(body): Json<PatchSshAuthModeRequest>,
+) -> AppResult<Json<UserServiceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let user_id_str = resolve_service_write_owner(&state, &actor, &service_id).await?;
+
+    let svc = user_service_service::update_ssh_auth_mode(
+        &state.db,
+        &user_id_str,
+        &actor,
+        &service_id,
+        body.mode,
+    )
+    .await?;
+
+    Ok(Json(user_service_response(svc)))
+}
+
+#[utoipa::path(
     delete,
     path = "/api/v1/user-services/{service_id}",
     params(
@@ -446,6 +491,8 @@ fn user_service_with_source_response(item: UserServiceWithSource) -> UserService
         catalog_service_id: svc.catalog_service_id,
         node_id: svc.node_id,
         node_priority: svc.node_priority,
+        ssh_auth_mode: svc.ssh_auth_mode,
+        ssh_node_keys_stale: svc.ssh_node_keys_stale,
         is_active: svc.is_active,
         identity_propagation_mode: svc.identity_propagation_mode,
         identity_include_user_id: svc.identity_include_user_id,

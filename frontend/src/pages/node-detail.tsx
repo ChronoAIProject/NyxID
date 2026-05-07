@@ -3,27 +3,17 @@ import { useParams, useNavigate } from "@tanstack/react-router";
 import {
   useNode,
   useNodeAdmins,
-  useNodeBindings,
   useNodePendingCredentials,
   useDeleteNode,
   useRotateNodeToken,
   useTransferNode,
   usePushNodeCredential,
   useCancelNodePendingCredential,
-  useCreateBinding,
-  useUpdateBinding,
-  useDeleteBinding,
 } from "@/hooks/use-nodes";
 import { useKeys } from "@/hooks/use-keys";
-import { useServices } from "@/hooks/use-services";
 import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
 import { pushNodeCredentialSchema } from "@/schemas/nodes";
-import {
-  buildNodeCredentialCommand,
-  getNodeCredentialPromptHint,
-  isSshService,
-} from "@/lib/node-credentials";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
 import { CopyableField } from "@/components/shared/copyable-field";
@@ -45,13 +35,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   Table,
   TableBody,
   TableCell,
@@ -61,15 +44,10 @@ import {
 } from "@/components/ui/table";
 import {
   Activity,
-  ArrowDown,
   ArrowRightLeft,
-  ArrowUp,
   HardDrive,
   KeyRound,
-  Link2,
-  Plus,
   Send,
-  Terminal,
   Trash2,
   Users,
 } from "lucide-react";
@@ -153,9 +131,6 @@ export function NodeDetailPage() {
 
   const { data: node, isLoading, error } = useNode(nodeId);
   const { data: admins, isLoading: adminsLoading } = useNodeAdmins(nodeId);
-  const { data: bindings, isLoading: bindingsLoading } =
-    useNodeBindings(nodeId);
-  const { data: services } = useServices();
   const { data: keys } = useKeys();
   const currentUserId = useAuthStore((state) => state.user?.id ?? null);
 
@@ -165,9 +140,6 @@ export function NodeDetailPage() {
   const pushCredentialMutation = usePushNodeCredential(nodeId);
   const cancelPendingCredentialMutation =
     useCancelNodePendingCredential(nodeId);
-  const createBindingMutation = useCreateBinding();
-  const updateBindingMutation = useUpdateBinding();
-  const deleteBindingMutation = useDeleteBinding();
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showRotateDialog, setShowRotateDialog] = useState(false);
@@ -178,13 +150,6 @@ export function NodeDetailPage() {
     readonly auth_token: string;
     readonly signing_secret: string;
   } | null>(null);
-  const [showBindDialog, setShowBindDialog] = useState(false);
-  const [selectedServiceId, setSelectedServiceId] = useState("");
-  const [unbindTarget, setUnbindTarget] = useState<{
-    readonly id: string;
-    readonly name: string;
-  } | null>(null);
-  const [setupCommandSlug, setSetupCommandSlug] = useState<string | null>(null);
   const [credentialSlug, setCredentialSlug] = useState("");
   const [credentialInjectionMethod, setCredentialInjectionMethod] =
     useState<NodePendingCredentialInjectionMethod>("header");
@@ -192,19 +157,12 @@ export function NodeDetailPage() {
   const [credentialTargetUrl, setCredentialTargetUrl] = useState("");
   const [credentialLabel, setCredentialLabel] = useState("");
 
-  const servicesBySlug = new Map((services ?? []).map((s) => [s.slug, s]));
-  const setupService =
-    setupCommandSlug !== null
-      ? servicesBySlug.get(setupCommandSlug)
-      : undefined;
-  const setupCommandHint = getNodeCredentialPromptHint(setupService);
   const canManage = canManageNode(node, currentUserId, admins);
   const { data: pendingCredentials, isLoading: pendingCredentialsLoading } =
     useNodePendingCredentials(nodeId, canManage);
   const transferTargetOwnerId = transferOwnerId ?? currentUserId ?? "";
   const transferIsNoop =
     Boolean(node) && node?.owner.id === transferTargetOwnerId;
-  const transferBindingCount = bindings?.length ?? node?.binding_count ?? 0;
   const transferServiceDetachCount =
     node && transferTargetOwnerId
       ? (keys ?? []).filter(
@@ -213,12 +171,6 @@ export function NodeDetailPage() {
             keyOwnerId(key, currentUserId) !== transferTargetOwnerId,
         ).length
       : 0;
-
-  // Filter out services that already have bindings
-  const boundServiceIds = new Set((bindings ?? []).map((b) => b.service_id));
-  const availableServices = canManage
-    ? (services ?? []).filter((s) => s.is_active && !boundServiceIds.has(s.id))
-    : [];
 
   async function handleDelete() {
     try {
@@ -267,61 +219,6 @@ export function NodeDetailPage() {
     } catch (err) {
       toast.error(
         err instanceof ApiError ? err.message : "Failed to transfer node",
-      );
-    }
-  }
-
-  async function handleCreateBinding() {
-    if (!selectedServiceId) return;
-    try {
-      const boundService = (services ?? []).find(
-        (s) => s.id === selectedServiceId,
-      );
-      const result = await createBindingMutation.mutateAsync({
-        nodeId,
-        serviceId: selectedServiceId,
-      });
-      toast.success(`Bound to ${result.service_name}`);
-      setShowBindDialog(false);
-      setSelectedServiceId("");
-      if (boundService) {
-        setSetupCommandSlug(boundService.slug);
-      }
-    } catch (err) {
-      toast.error(
-        err instanceof ApiError ? err.message : "Failed to create binding",
-      );
-    }
-  }
-
-  async function handleDeleteBinding() {
-    if (!unbindTarget) return;
-    try {
-      await deleteBindingMutation.mutateAsync({
-        nodeId,
-        bindingId: unbindTarget.id,
-      });
-      toast.success(`Unbound from ${unbindTarget.name}`);
-    } catch (err) {
-      toast.error(
-        err instanceof ApiError ? err.message : "Failed to remove binding",
-      );
-    } finally {
-      setUnbindTarget(null);
-    }
-  }
-
-  async function handlePriorityChange(bindingId: string, newPriority: number) {
-    try {
-      await updateBindingMutation.mutateAsync({
-        nodeId,
-        bindingId,
-        priority: newPriority,
-      });
-      toast.success("Priority updated");
-    } catch (err) {
-      toast.error(
-        err instanceof ApiError ? err.message : "Failed to update priority",
       );
     }
   }
@@ -402,8 +299,8 @@ export function NodeDetailPage() {
         title={node.name}
         description={
           canManage
-            ? "Manage node settings and service bindings."
-            : "View node status and service bindings."
+            ? "Manage node settings and credentials."
+            : "View node status and metrics."
         }
         actions={
           canManage ? (
@@ -574,161 +471,6 @@ export function NodeDetailPage() {
           )}
         </DetailSection>
       )}
-
-      {/* Service Bindings */}
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-lg font-medium">Service Bindings</h3>
-            <p className="text-sm text-muted-foreground">
-              Services routed through this node for credential injection.
-            </p>
-          </div>
-          {canManage && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowBindDialog(true)}
-              disabled={availableServices.length === 0}
-            >
-              <Plus className="mr-2 h-4 w-4" />
-              Bind Service
-            </Button>
-          )}
-        </div>
-
-        {bindingsLoading ? (
-          <div className="space-y-2">
-            {Array.from({ length: 2 }).map((_, i) => (
-              <Skeleton
-                key={`bind-skel-${String(i)}`}
-                className="h-12 w-full"
-              />
-            ))}
-          </div>
-        ) : !bindings || bindings.length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-xl border border-border py-8 text-center">
-            <Link2 className="mb-3 h-8 w-8 text-muted-foreground/50" />
-            <p className="text-sm text-muted-foreground">
-              {canManage
-                ? "No services bound to this node. Bind a service to route proxy requests through it."
-                : "No services are currently bound to this node."}
-            </p>
-          </div>
-        ) : (
-          <div className="rounded-xl border border-border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Service</TableHead>
-                  <TableHead>Slug</TableHead>
-                  <TableHead>Priority</TableHead>
-                  <TableHead>Bound</TableHead>
-                  {canManage && <TableHead className="w-[100px]" />}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {bindings.map((binding) => (
-                  <TableRow key={binding.id}>
-                    <TableCell className="font-medium">
-                      <div className="flex items-center gap-2">
-                        {binding.service_name}
-                        {binding.service_slug === "llm-openclaw" && (
-                          <Badge variant="outline" className="text-[10px]">
-                            Gateway
-                          </Badge>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <code className="text-xs text-muted-foreground">
-                        {binding.service_slug}
-                      </code>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-1">
-                        <span className="text-sm tabular-nums">
-                          {String(binding.priority)}
-                        </span>
-                        {canManage && (
-                          <div className="flex flex-col">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-5 w-5 text-muted-foreground"
-                              onClick={() =>
-                                void handlePriorityChange(
-                                  binding.id,
-                                  binding.priority - 1,
-                                )
-                              }
-                            >
-                              <ArrowUp className="h-3 w-3" />
-                              <span className="sr-only">Increase priority</span>
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-5 w-5 text-muted-foreground"
-                              onClick={() =>
-                                void handlePriorityChange(
-                                  binding.id,
-                                  binding.priority + 1,
-                                )
-                              }
-                            >
-                              <ArrowDown className="h-3 w-3" />
-                              <span className="sr-only">Decrease priority</span>
-                            </Button>
-                          </div>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {formatRelativeTime(binding.created_at)}
-                    </TableCell>
-                    {canManage && (
-                      <TableCell>
-                        <div className="flex items-center gap-1">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                            onClick={() =>
-                              setSetupCommandSlug(binding.service_slug)
-                            }
-                          >
-                            <Terminal className="h-4 w-4" />
-                            <span className="sr-only">
-                              Setup command for {binding.service_name}
-                            </span>
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                            onClick={() =>
-                              setUnbindTarget({
-                                id: binding.id,
-                                name: binding.service_name,
-                              })
-                            }
-                          >
-                            <Trash2 className="h-4 w-4" />
-                            <span className="sr-only">
-                              Unbind {binding.service_name}
-                            </span>
-                          </Button>
-                        </div>
-                      </TableCell>
-                    )}
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-      </div>
 
       {canManage && (
         <div className="space-y-4">
@@ -952,7 +694,6 @@ export function NodeDetailPage() {
             <div className="rounded-md border border-border bg-muted/40 p-3 text-sm">
               <p className="font-medium text-foreground">Transfer preview</p>
               <ul className="mt-2 space-y-1 text-muted-foreground">
-                <li>{String(transferBindingCount)} bindings will be deactivated.</li>
                 <li>
                   {String(transferServiceDetachCount)} AI Services will lose
                   their node routing.
@@ -972,8 +713,8 @@ export function NodeDetailPage() {
                 }
               />
               <span>
-                I understand that existing bindings will be deactivated and
-                cross-owner services will stop routing through this node.
+                I understand that cross-owner AI Services will stop routing
+                through this node.
               </span>
             </label>
           </div>
@@ -1008,8 +749,8 @@ export function NodeDetailPage() {
             <DialogTitle>Delete Node</DialogTitle>
             <DialogDescription>
               Are you sure you want to delete &quot;{node.name}&quot;? This will
-              disconnect the node and remove all service bindings. This action
-              cannot be undone.
+              disconnect the node and detach any AI Services routed through it.
+              This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -1108,185 +849,6 @@ export function NodeDetailPage() {
               </DialogFooter>
             </>
           )}
-        </DialogContent>
-      </Dialog>
-
-      {/* Bind Service Dialog */}
-      <Dialog
-        open={showBindDialog}
-        onOpenChange={(open) => {
-          if (!open) {
-            setShowBindDialog(false);
-            setSelectedServiceId("");
-          }
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Bind Service</DialogTitle>
-            <DialogDescription>
-              Select a service to route through this node. Proxy requests for
-              the bound service will be forwarded to this node for credential
-              injection.
-            </DialogDescription>
-          </DialogHeader>
-          <Select
-            value={selectedServiceId}
-            onValueChange={setSelectedServiceId}
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="Select a service..." />
-            </SelectTrigger>
-            <SelectContent>
-              {availableServices.map((service) => (
-                <SelectItem key={service.id} value={service.id}>
-                  {service.name} ({service.slug})
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setShowBindDialog(false);
-                setSelectedServiceId("");
-              }}
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={() => void handleCreateBinding()}
-              disabled={!selectedServiceId}
-              isLoading={createBindingMutation.isPending}
-            >
-              Bind
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Unbind Confirmation */}
-      <Dialog
-        open={unbindTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) setUnbindTarget(null);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Remove Binding</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to unbind &quot;{unbindTarget?.name ?? ""}
-              &quot; from this node? Proxy requests for this service will fall
-              back to NyxID-stored credentials.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setUnbindTarget(null)}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => void handleDeleteBinding()}
-              isLoading={deleteBindingMutation.isPending}
-            >
-              Unbind
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Credential Setup Command Dialog */}
-      <Dialog
-        open={setupCommandSlug !== null}
-        onOpenChange={(open) => {
-          if (!open) setSetupCommandSlug(null);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {isSshService(setupService)
-                ? "SSH Service Bound"
-                : "Node Credential Setup"}
-            </DialogTitle>
-            <DialogDescription>
-              {isSshService(setupService)
-                ? `SSH service "${setupCommandSlug ?? ""}" is now bound to this node. The node agent will tunnel SSH connections to the target -- no credential setup needed.`
-                : `Run this command on your node to configure the credential for "${setupCommandSlug ?? ""}". You will be prompted to enter the secret value securely.`}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            {isSshService(setupService) ? (
-              <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
-                <p>
-                  <span className="font-medium text-foreground">Service:</span>{" "}
-                  {setupService?.name}
-                </p>
-                <p>
-                  <span className="font-medium text-foreground">Target:</span>{" "}
-                  {setupService?.ssh_config
-                    ? `${setupService.ssh_config.host}:${String(setupService.ssh_config.port)}`
-                    : "Not configured"}
-                </p>
-                <p className="pt-1">
-                  The node agent opens a raw TCP connection to the SSH target on
-                  its local network. SSH authentication (password or
-                  certificate) happens end-to-end between the client and target.
-                </p>
-              </div>
-            ) : (
-              <>
-                {buildNodeCredentialCommand(
-                  setupCommandSlug ?? "",
-                  setupService,
-                ) && (
-                  <CopyableField
-                    label="Setup Command"
-                    value={
-                      buildNodeCredentialCommand(
-                        setupCommandSlug ?? "",
-                        setupService,
-                      ) ?? ""
-                    }
-                  />
-                )}
-                {setupCommandHint && (
-                  <p className="text-xs text-muted-foreground">
-                    {setupCommandHint}
-                  </p>
-                )}
-                {setupService && (
-                  <div className="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-1">
-                    <p>
-                      <span className="font-medium text-foreground">
-                        Service:
-                      </span>{" "}
-                      {setupService.name}
-                    </p>
-                    <p>
-                      <span className="font-medium text-foreground">
-                        Auth method:
-                      </span>{" "}
-                      {setupService.auth_method} ({setupService.auth_key_name})
-                    </p>
-                    {setupService.auth_type && (
-                      <p>
-                        <span className="font-medium text-foreground">
-                          Auth type:
-                        </span>{" "}
-                        {setupService.auth_type}
-                      </p>
-                    )}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-          <DialogFooter>
-            <Button onClick={() => setSetupCommandSlug(null)}>Done</Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

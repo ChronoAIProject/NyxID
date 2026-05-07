@@ -42,6 +42,7 @@ function statusVariant(
     case "expired":
       return "secondary";
     case "revoked":
+    case "failed":
     case "refresh_failed":
       return "destructive";
     default:

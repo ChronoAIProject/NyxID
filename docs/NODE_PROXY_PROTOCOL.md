@@ -409,6 +409,99 @@ Sent by the node when the TCP connection closes or fails to open:
 
 `error` is optional and is present when the node could not establish or keep the TCP stream open.
 
+### ssh_exec
+
+Sent by NyxID when an SSH service uses `ssh_auth_mode: "cert"` and the node should execute a command using the short-lived private key and OpenSSH user certificate carried in the frame:
+
+```json
+{
+  "type": "ssh_exec",
+  "request_id": "<uuid>",
+  "host": "ssh.internal.example",
+  "port": 22,
+  "principal": "ubuntu",
+  "auth_mode": "cert",
+  "private_key_pem": "<pem_private_key>",
+  "certificate_openssh": "<openssh_user_certificate>",
+  "command": "uptime",
+  "timeout_secs": 30,
+  "timestamp": "2026-03-12T10:30:00.000Z",
+  "nonce": "<uuid>",
+  "hmac": "<hex_encoded_hmac_sha256>"
+}
+```
+
+For signed frames, the HMAC covers `timestamp`, `nonce`, and the cert exec request envelope: `request_id\nhost\nport\nprincipal\nauth_mode\nsha256(command)\nsha256(certificate_openssh)`. `auth_mode` is the literal string `cert`.
+
+Breaking change: this v2 HMAC envelope widens the previous cert exec signature, which covered only `request_id`, `host`, `port`, and `principal` after `timestamp` and `nonce`. Nodes built for the previous envelope reject frames from backends that send this v2 envelope and must be upgraded.
+
+### ssh_node_exec_open
+
+Sent by NyxID when an SSH service uses `ssh_auth_mode: "node_key"` and the node should authenticate with a node-local private key keyed by `(service_slug, principal)`:
+
+```json
+{
+  "type": "ssh_node_exec_open",
+  "request_id": "<uuid>",
+  "service_slug": "routeros",
+  "principal": "nyxid-ro",
+  "auth_mode": "node_key",
+  "command": "/system/resource/print",
+  "timeout_secs": 30,
+  "target_host": "10.0.0.1",
+  "target_port": 22,
+  "host_key_sha256": "SHA256:...",
+  "timestamp": "2026-03-12T10:30:00.000Z",
+  "nonce": "<uuid>",
+  "hmac": "<hex_encoded_hmac_sha256>"
+}
+```
+
+`principal` is required. The node MUST look up the exact `(service_slug, principal)` pair in its local SSH credential store. `target_host`, `target_port`, and `host_key_sha256` are hints from the backend; the node-local credential entry remains authoritative for the actual connection target and host-key pin.
+
+For signed frames, the HMAC covers `timestamp`, `nonce`, and the node-key request envelope: `request_id\nservice_slug\nprincipal\nauth_mode\nsha256(command)`. `auth_mode` is the literal string `node_key`.
+
+### ssh_node_exec_data / ssh_node_exec_close / ssh_node_exec_error
+
+Node-key command output is streamed back to NyxID:
+
+```json
+{ "type": "ssh_node_exec_data", "request_id": "<uuid>", "stream": "stdout", "data": "<base64>" }
+{ "type": "ssh_node_exec_close", "request_id": "<uuid>", "exit_code": 0, "duration_ms": 42, "timed_out": false }
+{ "type": "ssh_node_exec_error", "request_id": "<uuid>", "error": "SSH host key mismatch", "error_code": 1012, "duration_ms": 0 }
+```
+
+The node also emits a compatibility `ssh_exec_result` for older backend receivers.
+
+### web_terminal_open for node-key
+
+The browser terminal reuses the web terminal frame for cert and node-key sessions. For node-key sessions, NyxID sends `auth_mode: "node_key"`, omits private key material, and includes `service_slug` so the node can load the local key:
+
+```json
+{
+  "type": "web_terminal_open",
+  "session_id": "<uuid>",
+  "service_id": "<service_uuid>",
+  "service_slug": "routeros",
+  "auth_mode": "node_key",
+  "host": "10.0.0.1",
+  "port": 22,
+  "principal": "nyxid-ro",
+  "cols": 80,
+  "rows": 24,
+  "term": "xterm-256color",
+  "timestamp": "2026-03-12T10:30:00.000Z",
+  "nonce": "<uuid>",
+  "hmac": "<hex_encoded_hmac_sha256>"
+}
+```
+
+For signed frames, the HMAC covers `timestamp`, `nonce`, and the web terminal request envelope: `session_id\nhost\nport\nprincipal\nauth_mode\nservice_slug\nsha256(auth_material)`. For cert terminals, `auth_material` is `certificate_openssh`. For node-key terminals, the frame carries no private key, certificate, or host key pin, so `auth_material` is the empty string.
+
+Breaking change: this v2 HMAC envelope widens the previous web terminal signature, which covered only `session_id`, `host`, `port`, and `principal` after `timestamp` and `nonce`. Nodes built for the previous envelope reject frames from backends that send this v2 envelope and must be upgraded.
+
+Data, resize, and close frames remain `web_terminal_data`, `web_terminal_resize`, and `web_terminal_closed`.
+
 ---
 
 ## HMAC Request Signing
@@ -486,6 +579,9 @@ Requests that fail replay checks are rejected with HTTP 403 and the error messag
 | `ssh_tunnel_opened` | SSH target TCP connection established | `session_id` |
 | `ssh_tunnel_data` | SSH payload bytes flowing back to NyxID | `session_id`, `data` (base64) |
 | `ssh_tunnel_closed` | SSH tunnel closed or failed | `session_id`, `error` (optional) |
+| `ssh_node_exec_data` | Node-key SSH command output chunk | `request_id`, `stream`, `data` (base64) |
+| `ssh_node_exec_close` | Node-key SSH command completed | `request_id`, `exit_code`, `duration_ms`, `timed_out` |
+| `ssh_node_exec_error` | Node-key SSH command failed before completion | `request_id`, `error`, `error_code`, `duration_ms` |
 | `proxy_error` | If a proxied request fails | `request_id`, `error`, `status` (optional, default 502) |
 | `status_update` | Voluntary health/capability update | `agent_version` (optional), `services_ready` (optional) |
 
@@ -503,6 +599,12 @@ Requests that fail replay checks are rejected with HTTP 403 and the error messag
 | `ssh_tunnel_open` | Open a downstream SSH TCP connection on the node | `session_id`, `service_id`, `host`, `port`, `timestamp`, `nonce`, `signature` (when HMAC enabled) |
 | `ssh_tunnel_data` | SSH payload bytes flowing from NyxID to the node | `session_id`, `data` (base64) |
 | `ssh_tunnel_close` | Close an active SSH tunnel on the node | `session_id` |
+| `ssh_exec` | Execute a command with a short-lived SSH certificate | `request_id`, `host`, `port`, `principal`, `auth_mode`, `private_key_pem`, `certificate_openssh`, `command`, `timeout_secs`, `timestamp`, `nonce`, `hmac` (when HMAC enabled) |
+| `ssh_node_exec_open` | Execute a command with a node-local SSH private key | `request_id`, `service_slug`, `principal`, `auth_mode`, `command`, `timeout_secs`, `timestamp`, `nonce`, `hmac` (when HMAC enabled) |
+| `web_terminal_open` | Open a cert or node-key browser SSH terminal | `session_id`, `service_id`, `service_slug`, `auth_mode`, `host`, `port`, `principal`, `private_key_pem`/`certificate_openssh` (cert only), `cols`, `rows`, `term`, `timestamp`, `nonce`, `hmac` (when HMAC enabled) |
+| `web_terminal_data` | Terminal payload bytes flowing from NyxID to the node | `session_id`, `data` (base64) |
+| `web_terminal_resize` | Resize an active browser terminal | `session_id`, `cols`, `rows` |
+| `web_terminal_close` | Close an active browser terminal | `session_id` |
 | `error` | Server-side error | `message` |
 
 ---

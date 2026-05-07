@@ -50,6 +50,7 @@ import {
   AiKeyConfirm,
   type AiKeyPairingSuccess,
 } from "@/components/cli-wizard/ai-key-confirm-panel";
+import { parseAiKeyPrefill } from "@/schemas/cli-wizard";
 
 type ActionResult =
   | AiKeyPairingSuccess
@@ -706,7 +707,7 @@ function ConfirmPanel({
     case "ai-key":
       return (
         <AiKeyConfirm
-          prefill={prefill as unknown as AiKeyPrefill}
+          prefill={parseAiKeyPrefill(prefill) as AiKeyPrefill}
           pairingId={claim.id}
           onSuccess={onActionComplete}
         />

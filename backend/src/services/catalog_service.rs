@@ -667,6 +667,8 @@ mod tests {
             node_id: None,
             node_priority: 0,
             service_type: "http".to_string(),
+            ssh_auth_mode: crate::models::ssh_auth_mode::SshAuthMode::ProxyOnly,
+            ssh_node_keys_stale: false,
             identity_propagation_mode: "none".to_string(),
             identity_include_user_id: false,
             identity_include_email: false,

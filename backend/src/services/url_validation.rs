@@ -80,6 +80,67 @@ pub async fn validate_public_http_url(url: &str, field_name: &str) -> AppResult<
     Ok(())
 }
 
+/// Validate a user-supplied endpoint URL for a custom (non-catalog) service.
+///
+/// Always:
+///   - Must parse as http(s).
+///   - Must not contain query (`?...`) or fragment (`#...`) components.
+///     A base URL like `https://api.example.com/v1` is allowed (the proxy
+///     treats the path as a prefix); query and fragment are not.
+///   - Must not contain userinfo (`user:pass@`).
+///   - Must be <= 2048 chars (matches `validate_public_http_url`).
+///
+/// When `hosted_mode` is true, this also rejects loopback, private,
+/// link-local, CGNAT, unspecified, broadcast, and cloud-metadata targets via
+/// DNS resolution. Self-hosted/development deployments skip that DNS/IP-class
+/// guard so they can target local services while still enforcing the URL
+/// shape above.
+pub async fn validate_user_endpoint_url(
+    url: &str,
+    hosted_mode: bool,
+    field_name: &str,
+) -> AppResult<()> {
+    if url.len() > 2048 {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must not exceed 2048 characters"
+        )));
+    }
+
+    let parsed = url::Url::parse(url)
+        .map_err(|_| AppError::ValidationError(format!("{field_name} must be a valid URL")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must use http or https"
+        )));
+    }
+    if parsed.host_str().is_none() {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must include a hostname"
+        )));
+    }
+    if parsed.query().is_some() {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must not contain a query string"
+        )));
+    }
+    if parsed.fragment().is_some() {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must not contain a fragment"
+        )));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(AppError::ValidationError(format!(
+            "{field_name} must not contain userinfo (user:pass@)"
+        )));
+    }
+
+    if hosted_mode {
+        validate_public_http_url(url, field_name).await?;
+    }
+
+    Ok(())
+}
+
 /// Validate that a URL has a valid scheme and hostname.
 ///
 /// Cloud metadata endpoints (169.254.169.254, metadata.google.internal)
@@ -195,7 +256,7 @@ fn is_rfc6598_cgnat(ipv4: std::net::Ipv4Addr) -> bool {
 mod tests {
     use super::{
         reject_url_userinfo, validate_base_url, validate_optional_spec_url,
-        validate_public_http_url,
+        validate_public_http_url, validate_user_endpoint_url,
     };
 
     #[test]
@@ -276,6 +337,76 @@ mod tests {
         );
         assert!(
             validate_public_http_url("http://10.0.0.5:3000", "target_url")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_user_endpoint_url_rejects_query_and_fragment() {
+        assert!(
+            validate_user_endpoint_url("https://api.example.com?x=1", false, "endpoint_url")
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_user_endpoint_url("https://api.example.com#frag", false, "endpoint_url")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_user_endpoint_url_allows_path() {
+        // Base path `/v1` is a legitimate prefix.
+        assert!(
+            validate_user_endpoint_url("https://api.example.com/v1", false, "endpoint_url")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_user_endpoint_url_rejects_loopback_in_hosted_mode() {
+        assert!(
+            validate_user_endpoint_url("http://localhost:9999", true, "endpoint_url")
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_user_endpoint_url("http://127.0.0.1:9999", true, "endpoint_url")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_user_endpoint_url_allows_loopback_in_self_hosted_mode() {
+        assert!(
+            validate_user_endpoint_url("http://localhost:9999", false, "endpoint_url")
+                .await
+                .is_ok()
+        );
+        assert!(
+            validate_user_endpoint_url("http://127.0.0.1:9999", false, "endpoint_url")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_user_endpoint_url_rejects_userinfo() {
+        assert!(
+            validate_user_endpoint_url("https://user:pass@api.example.com", false, "endpoint_url",)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_user_endpoint_url_rejects_invalid_scheme() {
+        assert!(
+            validate_user_endpoint_url("ftp://example.com", false, "endpoint_url")
                 .await
                 .is_err()
         );

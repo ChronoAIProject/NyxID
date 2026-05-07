@@ -9,6 +9,7 @@ import type {
   UpdateServicePayload,
   UserServiceConnection,
 } from "@/types/api";
+import type { SshAuthMode } from "@/schemas/services";
 
 export function useServices() {
   return useQuery({
@@ -78,6 +79,50 @@ export function useDeleteService() {
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["services"] });
+    },
+  });
+}
+
+export function useUpdateSshAuthMode() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      userServiceId,
+      mode,
+    }: {
+      readonly userServiceId: string;
+      readonly mode: SshAuthMode;
+    }): Promise<void> => {
+      return api.patch<void>(`/user-services/${userServiceId}/ssh-auth-mode`, {
+        mode,
+      });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["services"] });
+      void queryClient.invalidateQueries({ queryKey: ["keys"] });
+      void queryClient.invalidateQueries({ queryKey: ["user-services"] });
+    },
+  });
+}
+
+export function useTestSshConnection() {
+  return useMutation({
+    mutationFn: async ({
+      serviceId,
+      principal,
+    }: {
+      readonly serviceId: string;
+      readonly principal: string;
+    }): Promise<{ readonly exit_code: number; readonly stderr?: string }> => {
+      return api.post<{ readonly exit_code: number; readonly stderr?: string }>(
+        `/ssh/${serviceId}/exec`,
+        {
+          principal,
+          command: "true",
+          timeout_secs: 10,
+        },
+      );
     },
   });
 }

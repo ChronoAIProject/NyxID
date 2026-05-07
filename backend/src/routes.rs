@@ -599,6 +599,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
             get(handlers::user_services_handler::list_user_services),
         )
         .route(
+            "/{service_id}/ssh-auth-mode",
+            patch(handlers::user_services_handler::patch_user_service_ssh_auth_mode),
+        )
+        .route(
             "/{service_id}",
             put(handlers::user_services_handler::update_user_service)
                 .delete(handlers::user_services_handler::delete_user_service),
@@ -769,6 +773,12 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
     // LLM gateway routes get a moderate limit (10 MB for LLM payloads).
     let llm_routes = llm_routes.layer(RequestBodyLimitLayer::new(10 * 1024 * 1024));
 
+    // Public API routes that expose non-sensitive runtime metadata.
+    let api_v1_public = Router::new().route(
+        "/runtime-config",
+        get(handlers::runtime_config::get_runtime_config),
+    );
+
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
@@ -853,7 +863,8 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens));
 
-    let api_v1 = api_v1_delegated
+    let api_v1 = api_v1_public
+        .merge(api_v1_delegated)
         .merge(api_v1_shared)
         .merge(api_v1_human_only);
 

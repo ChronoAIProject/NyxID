@@ -17,6 +17,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
@@ -89,6 +90,14 @@ pub async fn issue_ssh_certificate(
         .map(|s| s.slug)
         .unwrap_or_else(|| service_id.clone());
     let user_id = auth_user.user_id.to_string();
+    let auth_context =
+        ssh_service::resolve_ssh_auth_context(&state.db, &user_id, &service_id, &service_slug)
+            .await?;
+    if auth_context.mode != SshAuthMode::Cert {
+        return Err(AppError::SshAuthModeUnsupportedForOperation(
+            "SSH certificate issuance is only supported for cert-mode SSH services".to_string(),
+        ));
+    }
     let user = state
         .db
         .collection::<User>(USERS)
@@ -175,7 +184,6 @@ pub async fn ssh_tunnel_ws(
 ) -> AppResult<Response> {
     authorize_ssh_access(&state, &auth_user, &service_id).await?;
     let ssh_service = ssh_service::get_ssh_service(&state.db, &service_id).await?;
-    validate_runtime_ssh_target(&service_id, &ssh_service).await?;
     // Resolve the downstream service so telemetry
     // (`ssh.tunnel_opened` / `_closed`) emits the slug, not the UUID.
     // Best-effort: SSH tunnel establishment is user-facing; a transient
@@ -185,6 +193,20 @@ pub async fn ssh_tunnel_ws(
         .ok()
         .map(|s| s.slug)
         .unwrap_or_else(|| service_id.clone());
+    let auth_context = ssh_service::resolve_ssh_auth_context(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        &service_id,
+        &service_slug,
+    )
+    .await?;
+    if auth_context.mode == SshAuthMode::NodeKey {
+        return Err(AppError::SshAuthModeUnsupportedForOperation(
+            "ssh proxy is not supported for node-key SSH services; use ssh exec or terminal"
+                .to_string(),
+        ));
+    }
+    validate_runtime_ssh_target(&service_id, &ssh_service).await?;
     let session_guard = state
         .ssh_session_manager
         .try_acquire(&auth_user.user_id.to_string())?;
@@ -1178,6 +1200,7 @@ mod tests {
         validate_runtime_ssh_target,
     };
     use crate::models::downstream_service::SshServiceConfig;
+    use crate::models::ssh_auth_mode::SshAuthMode;
 
     #[test]
     fn accepts_valid_ssh_banner_after_preamble() {
@@ -1233,6 +1256,7 @@ mod tests {
             &SshServiceConfig {
                 host: "192.168.1.50".to_string(),
                 port: 22,
+                ssh_auth_mode: SshAuthMode::ProxyOnly,
                 certificate_auth_enabled: false,
                 certificate_ttl_minutes: 30,
                 allowed_principals: Vec::new(),
@@ -1251,6 +1275,7 @@ mod tests {
             &SshServiceConfig {
                 host: "metadata.google.internal".to_string(),
                 port: 22,
+                ssh_auth_mode: SshAuthMode::ProxyOnly,
                 certificate_auth_enabled: false,
                 certificate_ttl_minutes: 30,
                 allowed_principals: Vec::new(),

@@ -97,12 +97,12 @@ pub fn build_node_route(node_ids: Vec<String>) -> Option<NodeRoute> {
 
 async fn load_viable_bindings(
     db: &mongodb::Database,
-    user_id: &str,
+    owner_user_id: &str,
     service_id: Option<&str>,
     ws_manager: &NodeWsManager,
 ) -> AppResult<Vec<NodeServiceBinding>> {
     let mut filter = doc! {
-        "user_id": user_id,
+        "user_id": owner_user_id,
         "is_active": true,
     };
     if let Some(service_id) = service_id {
@@ -169,13 +169,41 @@ pub async fn resolve_node_route(
     service_id: &str,
     ws_manager: &NodeWsManager,
 ) -> AppResult<Option<NodeRoute>> {
-    let primary_node_id = resolve_from_user_service(db, user_id, service_id, ws_manager).await?;
-    let viable_bindings = load_viable_bindings(db, user_id, Some(service_id), ws_manager).await?;
+    let owner_user_id = effective_service_owner_id(db, user_id, service_id).await?;
+    resolve_node_route_for_owner(db, &owner_user_id, service_id, ws_manager).await
+}
+
+async fn resolve_node_route_for_owner(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    service_id: &str,
+    ws_manager: &NodeWsManager,
+) -> AppResult<Option<NodeRoute>> {
+    let primary_node_id =
+        resolve_from_user_service(db, owner_user_id, service_id, ws_manager).await?;
+    let viable_bindings =
+        load_viable_bindings(db, owner_user_id, Some(service_id), ws_manager).await?;
 
     Ok(build_node_route(collect_ordered_node_ids(
         primary_node_id,
         viable_bindings,
     )))
+}
+
+async fn effective_service_owner_id(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    service_id: &str,
+) -> AppResult<String> {
+    let effective_owner = crate::services::proxy_service::find_effective_service_owner(
+        db,
+        actor_user_id,
+        None,
+        Some(service_id),
+    )
+    .await?;
+
+    Ok(effective_owner.unwrap_or_else(|| actor_user_id.to_string()))
 }
 
 /// Resolve a node route from UserService.node_id for a given catalog service.
@@ -184,14 +212,14 @@ pub async fn resolve_node_route(
 /// matching the given service_id and a viable node_id set.
 async fn resolve_from_user_service(
     db: &mongodb::Database,
-    user_id: &str,
+    owner_user_id: &str,
     service_id: &str,
     ws_manager: &NodeWsManager,
 ) -> AppResult<Option<String>> {
     let user_service: Option<UserService> = db
         .collection::<UserService>(USER_SERVICES)
         .find_one(doc! {
-            "user_id": user_id,
+            "user_id": owner_user_id,
             "catalog_service_id": service_id,
             "is_active": true,
         })
@@ -217,9 +245,12 @@ pub async fn has_routable_node_bindings(
     service_id: &str,
     ws_manager: &NodeWsManager,
 ) -> AppResult<bool> {
-    Ok(resolve_node_route(db, user_id, service_id, ws_manager)
-        .await?
-        .is_some())
+    let owner_user_id = effective_service_owner_id(db, user_id, service_id).await?;
+    Ok(
+        resolve_node_route_for_owner(db, &owner_user_id, service_id, ws_manager)
+            .await?
+            .is_some(),
+    )
 }
 
 /// Check whether the user's `UserService` for this catalog service explicitly
@@ -233,10 +264,11 @@ pub async fn user_service_has_explicit_node(
     user_id: &str,
     service_id: &str,
 ) -> AppResult<bool> {
+    let owner_user_id = effective_service_owner_id(db, user_id, service_id).await?;
     let user_service: Option<UserService> = db
         .collection::<UserService>(USER_SERVICES)
         .find_one(doc! {
-            "user_id": user_id,
+            "user_id": owner_user_id,
             "catalog_service_id": service_id,
             "is_active": true,
         })
@@ -254,9 +286,10 @@ pub async fn list_viable_binding_node_ids(
     service_id: &str,
     ws_manager: &NodeWsManager,
 ) -> AppResult<Vec<String>> {
+    let owner_user_id = effective_service_owner_id(db, user_id, service_id).await?;
     Ok(collect_ordered_node_ids(
         None,
-        load_viable_bindings(db, user_id, Some(service_id), ws_manager).await?,
+        load_viable_bindings(db, &owner_user_id, Some(service_id), ws_manager).await?,
     ))
 }
 
@@ -400,8 +433,19 @@ where
 mod tests {
     use chrono::Utc;
 
-    use super::{build_node_route, collect_ordered_node_ids};
-    use crate::models::node_service_binding::NodeServiceBinding;
+    use super::{
+        build_node_route, collect_ordered_node_ids, has_routable_node_bindings,
+        list_viable_binding_node_ids, resolve_node_route, user_service_has_explicit_node,
+    };
+    use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+    use crate::models::node_service_binding::{
+        COLLECTION_NAME as NODE_SERVICE_BINDINGS, NodeServiceBinding,
+    };
+    use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
+    use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
+    use crate::services::node_ws_manager::NodeWsManager;
+    use crate::test_utils::{connect_test_database, test_membership, test_user, test_user_service};
 
     fn binding(node_id: &str) -> NodeServiceBinding {
         NodeServiceBinding {
@@ -414,6 +458,102 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    fn node(node_id: &str, owner_id: &str) -> Node {
+        Node {
+            id: node_id.to_string(),
+            user_id: owner_id.to_string(),
+            name: format!("test-node-{node_id}"),
+            status: NodeStatus::Online,
+            auth_token_hash: "auth-token-hash".to_string(),
+            signing_secret_encrypted: None,
+            signing_secret_hash: "signing-secret-hash".to_string(),
+            last_heartbeat_at: None,
+            connected_at: Some(Utc::now()),
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn connected_ws_manager(node_id: &str) -> NodeWsManager {
+        let manager = NodeWsManager::new(30, 100);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        manager.register_connection(node_id, tx);
+        manager
+    }
+
+    async fn insert_actor_org_membership(
+        db: &mongodb::Database,
+        actor_id: &str,
+        org_id: &str,
+        role: OrgRole,
+    ) {
+        db.collection(USERS)
+            .insert_one(test_user(actor_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection(USERS)
+            .insert_one(test_user(org_id, UserType::Org))
+            .await
+            .unwrap();
+        db.collection(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(org_id, actor_id, role, None))
+            .await
+            .unwrap();
+    }
+
+    async fn insert_user_service(
+        db: &mongodb::Database,
+        service_id: &str,
+        owner_id: &str,
+        slug: &str,
+        catalog_service_id: &str,
+        node_id: Option<&str>,
+    ) {
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        db.collection(USER_SERVICES)
+            .insert_one(test_user_service(
+                service_id,
+                owner_id,
+                slug,
+                &endpoint_id,
+                Some(catalog_service_id),
+                node_id,
+            ))
+            .await
+            .unwrap();
+    }
+
+    async fn insert_node(db: &mongodb::Database, node_id: &str, owner_id: &str) {
+        db.collection(NODES)
+            .insert_one(node(node_id, owner_id))
+            .await
+            .unwrap();
+    }
+
+    async fn insert_node_binding(
+        db: &mongodb::Database,
+        node_id: &str,
+        owner_id: &str,
+        catalog_service_id: &str,
+    ) {
+        db.collection(NODE_SERVICE_BINDINGS)
+            .insert_one(NodeServiceBinding {
+                id: uuid::Uuid::new_v4().to_string(),
+                node_id: node_id.to_string(),
+                user_id: owner_id.to_string(),
+                service_id: catalog_service_id.to_string(),
+                is_active: true,
+                priority: 0,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -457,5 +597,252 @@ mod tests {
     #[test]
     fn build_node_route_returns_none_for_empty_candidates() {
         assert!(build_node_route(vec![]).is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_node_route_walks_to_org_owner_for_admin_membership() {
+        let Some(db) = connect_test_database("node_route_org_admin").await else {
+            eprintln!("skipping node routing integration test: no local MongoDB available");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = "catalog-ssh-admin";
+        let node_id = "node-org-admin";
+        insert_actor_org_membership(&db, &actor_id, &org_id, OrgRole::Admin).await;
+        insert_user_service(
+            &db,
+            &service_id,
+            &org_id,
+            "routeros",
+            catalog_service_id,
+            Some(node_id),
+        )
+        .await;
+        insert_node(&db, node_id, &org_id).await;
+        let ws_manager = connected_ws_manager(node_id);
+
+        let route = resolve_node_route(&db, &actor_id, catalog_service_id, &ws_manager)
+            .await
+            .unwrap()
+            .expect("admin should route through org-owned node");
+
+        assert_eq!(route.node_id, node_id);
+        assert!(route.fallback_node_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_node_route_walks_to_org_owner_for_member_membership() {
+        let Some(db) = connect_test_database("node_route_org_member").await else {
+            eprintln!("skipping node routing integration test: no local MongoDB available");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = "catalog-ssh-member";
+        let node_id = "node-org-member";
+        insert_actor_org_membership(&db, &actor_id, &org_id, OrgRole::Member).await;
+        insert_user_service(
+            &db,
+            &service_id,
+            &org_id,
+            "routeros",
+            catalog_service_id,
+            Some(node_id),
+        )
+        .await;
+        insert_node(&db, node_id, &org_id).await;
+        let ws_manager = connected_ws_manager(node_id);
+
+        let route = resolve_node_route(&db, &actor_id, catalog_service_id, &ws_manager)
+            .await
+            .unwrap()
+            .expect("member should route through org-owned node");
+
+        assert_eq!(route.node_id, node_id);
+    }
+
+    #[tokio::test]
+    async fn resolve_node_route_returns_none_for_viewer_membership() {
+        let Some(db) = connect_test_database("node_route_org_viewer").await else {
+            eprintln!("skipping node routing integration test: no local MongoDB available");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = "catalog-ssh-viewer";
+        let node_id = "node-org-viewer";
+        insert_actor_org_membership(&db, &actor_id, &org_id, OrgRole::Viewer).await;
+        insert_user_service(
+            &db,
+            &service_id,
+            &org_id,
+            "routeros",
+            catalog_service_id,
+            Some(node_id),
+        )
+        .await;
+        insert_node(&db, node_id, &org_id).await;
+        let ws_manager = connected_ws_manager(node_id);
+
+        let route = resolve_node_route(&db, &actor_id, catalog_service_id, &ws_manager)
+            .await
+            .unwrap();
+
+        assert!(route.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_node_route_prefers_personal_service_over_org_service() {
+        let Some(db) = connect_test_database("node_route_personal_first").await else {
+            eprintln!("skipping node routing integration test: no local MongoDB available");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let personal_service_id = uuid::Uuid::new_v4().to_string();
+        let org_service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = "catalog-ssh-precedence";
+        let personal_node_id = "node-personal";
+        let org_node_id = "node-org-precedence";
+        insert_actor_org_membership(&db, &actor_id, &org_id, OrgRole::Admin).await;
+        insert_user_service(
+            &db,
+            &personal_service_id,
+            &actor_id,
+            "routeros",
+            catalog_service_id,
+            Some(personal_node_id),
+        )
+        .await;
+        insert_user_service(
+            &db,
+            &org_service_id,
+            &org_id,
+            "routeros",
+            catalog_service_id,
+            Some(org_node_id),
+        )
+        .await;
+        insert_node(&db, personal_node_id, &actor_id).await;
+        insert_node(&db, org_node_id, &org_id).await;
+        let ws_manager = connected_ws_manager(personal_node_id);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        ws_manager.register_connection(org_node_id, tx);
+
+        let route = resolve_node_route(&db, &actor_id, catalog_service_id, &ws_manager)
+            .await
+            .unwrap()
+            .expect("personal service should route");
+
+        assert_eq!(route.node_id, personal_node_id);
+    }
+
+    #[tokio::test]
+    async fn routable_and_explicit_node_checks_walk_org_owner() {
+        let Some(db) = connect_test_database("node_route_has_explicit_org").await else {
+            eprintln!("skipping node routing integration test: no local MongoDB available");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = "catalog-ssh-has-explicit";
+        let node_id = "node-org-explicit";
+        insert_actor_org_membership(&db, &actor_id, &org_id, OrgRole::Member).await;
+        insert_user_service(
+            &db,
+            &service_id,
+            &org_id,
+            "routeros",
+            catalog_service_id,
+            Some(node_id),
+        )
+        .await;
+        insert_node(&db, node_id, &org_id).await;
+        let ws_manager = connected_ws_manager(node_id);
+
+        assert!(
+            has_routable_node_bindings(&db, &actor_id, catalog_service_id, &ws_manager)
+                .await
+                .unwrap()
+        );
+        assert!(
+            user_service_has_explicit_node(&db, &actor_id, catalog_service_id)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn routable_and_explicit_node_checks_return_false_for_viewer() {
+        let Some(db) = connect_test_database("node_route_has_explicit_viewer").await else {
+            eprintln!("skipping node routing integration test: no local MongoDB available");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = "catalog-ssh-has-explicit-viewer";
+        let node_id = "node-org-explicit-viewer";
+        insert_actor_org_membership(&db, &actor_id, &org_id, OrgRole::Viewer).await;
+        insert_user_service(
+            &db,
+            &service_id,
+            &org_id,
+            "routeros",
+            catalog_service_id,
+            Some(node_id),
+        )
+        .await;
+        insert_node(&db, node_id, &org_id).await;
+        let ws_manager = connected_ws_manager(node_id);
+
+        assert!(
+            !has_routable_node_bindings(&db, &actor_id, catalog_service_id, &ws_manager)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !user_service_has_explicit_node(&db, &actor_id, catalog_service_id)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_viable_binding_node_ids_walks_org_owner() {
+        let Some(db) = connect_test_database("node_route_list_bindings_org").await else {
+            eprintln!("skipping node routing integration test: no local MongoDB available");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = "catalog-ssh-bindings";
+        let node_id = "node-org-binding";
+        insert_actor_org_membership(&db, &actor_id, &org_id, OrgRole::Member).await;
+        insert_user_service(
+            &db,
+            &service_id,
+            &org_id,
+            "routeros",
+            catalog_service_id,
+            None,
+        )
+        .await;
+        insert_node(&db, node_id, &org_id).await;
+        insert_node_binding(&db, node_id, &org_id, catalog_service_id).await;
+        let ws_manager = connected_ws_manager(node_id);
+
+        let node_ids =
+            list_viable_binding_node_ids(&db, &actor_id, catalog_service_id, &ws_manager)
+                .await
+                .unwrap();
+
+        assert_eq!(node_ids, vec![node_id.to_string()]);
     }
 }

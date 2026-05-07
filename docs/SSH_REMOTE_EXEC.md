@@ -2,7 +2,7 @@
 
 NyxID can execute commands on remote SSH services programmatically, via REST API or MCP tools. AI agents (Claude, GPT, or any MCP-compatible client) can use this capability to control remote machines through NyxID's authenticated proxy -- no direct SSH access or key distribution required.
 
-Command execution uses the same SSH certificate infrastructure as tunneling. NyxID authenticates the caller, signs a short-lived certificate, opens a connection to the target, runs the command, and returns structured output.
+Command execution supports certificate-backed SSH services and node-key SSH services. In certificate mode, NyxID authenticates the caller, signs a short-lived certificate, opens a node-routed connection to the target, runs the command, and returns structured output. In node-key mode, the node agent authenticates with a node-local private key keyed by `(service_slug, principal)`; the private key never leaves the node.
 
 ---
 
@@ -19,7 +19,7 @@ POST /api/v1/ssh/{service_id}/exec
 - **Bearer token**: `Authorization: Bearer <access_token>`
 - **Cookie session**: Automatically attached when calling from the NyxID frontend or CLI
 
-The caller must have access to the SSH service. The service must have `certificate_auth_enabled: true` in its `ssh_config`.
+The caller must have access to the SSH service. The service must have `ssh_auth_mode: "cert"` or `ssh_auth_mode: "node_key"`. `proxy_only` services do not support remote exec.
 
 ### Request Body
 
@@ -68,6 +68,11 @@ The caller must have access to the SSH service. The service must have `certifica
 | 403 | 2002 | Requested principal not in `allowed_principals` |
 | 404 | 3001 | Service not found |
 | 404 | 3002 | Service is not an SSH service or certificate auth is not enabled |
+| 404 | 1011 | Node-key credential is missing for `(service_slug, principal)` |
+| 400 | 1014 | Multiple node-local principals are registered and none was selected |
+| 400 | 1015 | SSH auth mode does not support exec |
+| 502 | 1012 | Pinned SSH host key mismatch |
+| 502 | 1013 | Node-side SSH auth, network, KEX, or channel error |
 | 408 | 7000 | Command execution timed out (also returned in body with `timed_out: true`) |
 | 502 | 8001 | Node is offline (for node-routed targets) |
 | 504 | 8002 | Node proxy timeout (for node-routed targets) |
@@ -173,7 +178,7 @@ Blocked commands are logged as `ssh_command_blocked` events before rejection.
 
 ### Certificate-Based Authentication
 
-Command execution uses the same short-lived SSH certificate infrastructure as tunneling. No passwords are stored or transmitted. The certificate is issued for the requested principal and is valid only for the duration of the execution.
+Certificate-mode command execution uses the same short-lived SSH certificate infrastructure as tunneling. Node-key mode uses only node-local encrypted private keys and does not send private key material or passphrases to NyxID.
 
 ### Access Control
 
@@ -191,9 +196,9 @@ All SSH command execution runs on the node agent, not the NyxID server. The NyxI
 ### How It Works
 
 1. Caller sends `POST /api/v1/ssh/{service_id}/exec` (or MCP `nyx__ssh_exec`)
-2. NyxID generates ephemeral SSH credentials (key + certificate)
-3. NyxID sends an `ssh_exec` message to the node agent via the existing WebSocket connection, including the credentials and command
-4. The node agent writes the credentials to temporary files, spawns `ssh` locally, captures stdout/stderr, and returns the result
+2. For `cert`, NyxID generates ephemeral SSH credentials (key + certificate). For `node_key`, NyxID sends only the service slug, principal, command, and signed routing metadata.
+3. NyxID sends `ssh_exec` for certificate mode or `ssh_node_exec_open` for node-key mode over the existing node WebSocket connection.
+4. The node agent executes the command locally: certificate mode writes temporary OpenSSH credential files and spawns `ssh`; node-key mode loads the encrypted local key and runs the command through `russh`.
 5. NyxID forwards the result to the caller
 6. If no node agent is bound to the service, the request is rejected with a clear error
 
@@ -201,7 +206,8 @@ All SSH command execution runs on the node agent, not the NyxID server. The NyxI
 
 - A node agent **must** be deployed on a machine that can reach the SSH target
 - The node must be registered with NyxID and bound to the SSH service
-- The node agent must have `ssh` (OpenSSH client) installed
+- The node agent must have `ssh` (OpenSSH client) installed for certificate-mode exec
+- Node-key exec requires a local entry created with `nyxid node ssh-credentials add --service <slug> --principal <principal> ...`
 - The SSH target must be in the node's `ssh.allowed_targets` list (for private/loopback addresses)
 
 See [SSH_TUNNELING.md](SSH_TUNNELING.md) section 6 for full node agent setup instructions.
