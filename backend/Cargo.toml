@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 axum = { workspace = true }
 tower = "0.5.3"
-tower-http = { version = "0.6.8", features = ["cors", "trace", "request-id", "limit"] }
+tower-http = { version = "0.6.10", features = ["cors", "trace", "request-id", "limit"] }
 tokio = { workspace = true }
 mongodb = { workspace = true }
 bson = { workspace = true }
@@ -25,7 +25,7 @@ argon2 = "0.5.3"
 aes-gcm = "0.10.3"
 aes = "0.8.4"
 cbc = "0.1.2"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 siphasher = "1"
 rand = "0.8.5"
 hex = "0.4.3"
@@ -36,7 +36,7 @@ totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
 validator = { version = "0.20", features = ["derive"] }
 governor = "0.10"
 reqwest = { version = "0.12.28", features = ["json", "stream", "rustls-tls", "http2"], default-features = false }
-utoipa = { version = "5.4", features = ["axum_extras", "uuid", "chrono"] }
+utoipa = { version = "5.5", features = ["axum_extras", "uuid", "chrono"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 bytes = "1.11"
 anyhow = "1.0.101"
@@ -45,7 +45,7 @@ dotenvy = "0.15.7"
 clap = { version = "4.6", features = ["derive"] }
 dirs = "6"
 open = "5"
-rpassword = "7.5.1"
+rpassword = "7.5.2"
 subtle = "2"
 url = "2.5"
 urlencoding = "2.1"
@@ -70,7 +70,7 @@ russh = "0.58.0"
 tempfile = "3.27.0"
 pty-process = { version = "0.5.3", features = ["async"] }
 nix = { version = "0.31.2", features = ["term"] }
-libc = "0.2.184"
+libc = "0.2.186"
 
 [features]
 default = []

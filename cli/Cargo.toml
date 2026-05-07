@@ -25,7 +25,7 @@ clap = { version = "4.6", features = ["derive", "env"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 dirs = "6"
 open = "5"
-rpassword = "7.5.1"
+rpassword = "7.5.2"
 urlencoding = "2.1"
 rand = "0.8"
 hex = "0.4"
@@ -39,7 +39,7 @@ russh = "0.58.0"
 # Node agent dependencies
 toml = "1.0"
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.12"
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive"] }
