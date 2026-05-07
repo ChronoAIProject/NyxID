@@ -209,7 +209,7 @@ Then re-paste Step 2 — the pre-flight will pass and Step 2 will clone fresh.
 
 ### Stuck on SCRAM failure?
 
-If `docker logs nyxid-backend` shows `SCRAM failure: Authentication failed`, your MongoDB volume still has the previous `MONGO_ROOT_PASSWORD` baked in from a prior run, and `.env.dev` no longer matches. Run `./scripts/uninstall.sh --yes` to wipe the volume, then re-run [Step 2](#step-2-of-3--install-and-start). See [#280](https://github.com/ChronoAIProject/NyxID/issues/280).
+If `docker logs nyxid-backend` shows `SCRAM failure: Authentication failed`, your MongoDB volume still has the previous `MONGO_ROOT_PASSWORD` baked in from a prior run, and `.env.dev` no longer matches. Run `./scripts/uninstall.sh --yes` to wipe the volume, then re-run [Step 2](#step-2-of-3--install-and-start).
 
 ## Done when...
 
