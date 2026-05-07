@@ -1,4 +1,4 @@
-# NyxID Self-Host Quickstart (Bash)
+# NyxID Self-Host Quickstart
 
 Step-by-step manual setup for running NyxID on your own machine, plus troubleshooting, uninstall/reinstall, and post-install AI-agent wiring.
 
