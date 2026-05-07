@@ -32,7 +32,11 @@ If you don't have an account yet, register at [nyx.chrono-ai.fun/register](https
 
    ![Configure Service — credential entry](img/04-credential-entry.png)
 
-6. Click `Create Service`. You land on the new service's detail page. Keep this tab open.
+6. Click `Create Service`. NyxID opens the new service's detail page automatically.
+
+   Keep this service detail tab open. You will come back here later to copy the `API Usage` curl example.
+
+   Before that curl can work, you need to create a NyxID Agent Key. The `nyx_...` shown in the example is only a placeholder.
 
 ### 3. Create a NyxID Agent Key
 
@@ -49,7 +53,9 @@ The example curl on the service detail page authenticates to NyxID with `X-API-K
 
 ### 4. Run the verification curl
 
-1. Switch back to the service detail tab. Scroll to the `API Usage` section.
+1. Return to the service detail tab. Scroll to the `API Usage` section.
+
+   If you lost that tab, go to `AI Services` → `External Services`, find the service you just created, and click its service card to reopen the service detail page.
 
    ![API Usage section on service detail page](img/05-service-detail.png)
 
