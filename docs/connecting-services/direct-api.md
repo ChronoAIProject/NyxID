@@ -16,7 +16,7 @@ The recommended auth method for unattended automation is `X-API-Key`. Generate o
 
 `<BASE_URL>` in the steps below is `https://nyx-api.chrono-ai.fun` for hosted, `http://localhost:3001` for self-host.
 
-> **Windows users:** Run every command on this page from a WSL Ubuntu shell — see [Windows setup](../../README.md#windows-setup) in the main README. Native PowerShell and CMD are not supported.
+> **Windows users:** Run every command on this page from a Unix-compatible shell — WSL Ubuntu (recommended) or Git Bash both work. See [Windows setup](../../README.md#windows-setup) in the main README.
 
 ## Connect and verify
 

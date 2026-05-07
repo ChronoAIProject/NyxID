@@ -142,7 +142,7 @@ Install WSL (Windows Subsystem for Linux) once, then run every command in the re
 2. Install [Docker Desktop](https://docs.docker.com/desktop/install/windows-install/), then enable WSL integration: **Settings → Resources → WSL Integration → toggle on for your distro**.
 3. Launch Ubuntu (or your installed distro). Clone and work **inside the WSL filesystem** (e.g. `~/NyxID`) — avoid `/mnt/c/...` for I/O speed and to skip permission warnings during key generation.
 
-After that, the bash quickstart, `docker`, `nyxid`, and `curl` examples in this README run unchanged. NyxID does not support native PowerShell or CMD.
+After that, the bash quickstart, `docker`, `nyxid`, and `curl` examples in this README run unchanged.
 
 > **Can't use WSL?** If your Windows version doesn't support WSL2 (Windows 10 before version 2004) or your IT policy blocks it, [Git Bash](https://gitforwindows.org/) also runs the bash quickstart commands. Docker Desktop is still required.
 
