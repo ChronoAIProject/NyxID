@@ -155,13 +155,10 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste the prom
 
 #### Manual Setup
 
-Prefer to run each step yourself, or need the full troubleshooting guide? The complete manual flow lives in **[docs/QUICKSTART_BASH.md](docs/QUICKSTART_BASH.md)** (or **[docs/QUICKSTART_POWERSHELL.md](docs/QUICKSTART_POWERSHELL.md)** for native Windows PowerShell):
+Prefer to run each step yourself, or need the full troubleshooting guide? Pick the quickstart matching your shell — both cover preflight, paste-block install, registration, optional CLI install, uninstall & reinstall, orphan-volume recovery, and SCRAM-failure troubleshooting:
 
-- System preflight check — [Step 1](docs/QUICKSTART_BASH.md#step-1-of-3--check-your-system)
-- One paste-block install — [Step 2](docs/QUICKSTART_BASH.md#step-2-of-3--install-and-start)
-- Register your account — [Step 3](docs/QUICKSTART_BASH.md#step-3-of-3--register-and-connect)
-- Optional [CLI install](docs/QUICKSTART_BASH.md#optional-install-the-nyxid-cli)
-- [Uninstall & reinstall](docs/QUICKSTART_BASH.md#uninstall--reinstall), [orphan volume recovery](docs/QUICKSTART_BASH.md#recovering-an-orphan-volume), and [SCRAM failure](docs/QUICKSTART_BASH.md#stuck-on-scram-failure) troubleshooting
+- **Bash** — [docs/QUICKSTART_BASH.md](docs/QUICKSTART_BASH.md) (macOS, Linux, WSL, or Git Bash on Windows)
+- **PowerShell** — [docs/QUICKSTART_POWERSHELL.md](docs/QUICKSTART_POWERSHELL.md) (native Windows, PowerShell 7+ and OpenSSL)
 
 Once NyxID is running and you've registered at `http://localhost:3000`:
 
