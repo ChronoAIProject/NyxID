@@ -144,6 +144,8 @@ Install WSL (Windows Subsystem for Linux) once, then run every command in the re
 
 After that, the bash quickstart, `docker`, `nyxid`, and `curl` examples in this README run unchanged. NyxID does not support native PowerShell or CMD.
 
+> **Can't use WSL?** If your Windows version doesn't support WSL2 (Windows 10 before version 2004) or your IT policy blocks it, [Git Bash](https://gitforwindows.org/) also runs the bash quickstart commands. Docker Desktop is still required.
+
 #### AI-Assisted (Recommended)
 
 If you have Claude Code, Cursor, or any AI coding assistant open, paste the prompt below into it and it will drive the entire self-host flow for you — preflight, clone, env generation, Docker stack, health check, optional CLI install, login, first credential, and MCP config.
