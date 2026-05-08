@@ -108,7 +108,7 @@ Other tools solve parts of this — NyxID combines credential injection, NAT tra
 
 ## Getting Started
 
-NyxID is used in two phases — install once, then pick a workflow. The install gives you a NyxID instance and an Agent Key; the workflow shows what to build with them. If you drive NyxID from an AI coding agent, an optional step in the middle installs the Nyx skill so the agent can drive the CLI for you.
+NyxID is used in two phases — install once, then pick a workflow. The install gives you a NyxID instance and an Agent Key; the workflow shows what to build with them. An optional middle step installs the `nyxid` CLI for terminal or AI-agent use.
 
 ### 1. Install NyxID
 
@@ -173,17 +173,30 @@ Once NyxID is running and you've registered at `http://localhost:3000`, continue
 
 For production deployment (TLS, custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-### 2. (Optional) Install the Nyx skill
+### 2. (Optional) Install the `nyxid` CLI
 
-If you drive NyxID from Claude Code, Cursor, OpenClaw, or another AI coding agent, hand it this single line:
+The `nyxid` CLI lets you drive NyxID from your terminal — adding services, proxying requests, managing nodes. AI coding agents can also drive the CLI on your behalf.
+
+**Path A — Let an AI coding agent do it for you**
+
+If you use Claude Code, Cursor, OpenClaw, or another AI coding agent, hand it this single line:
 
 ```
 Install nyx skills from https://github.com/ChronoAIProject/NyxID/blob/main/skills/INSTALL.md
 ```
 
-The agent reads [`skills/INSTALL.md`](skills/INSTALL.md) and follows it end-to-end: installs the prebuilt `nyxid` CLI, copies the skill files into its own skill directory, and prompts you to run `nyxid login` against your NyxID instance.
+The agent reads [`skills/INSTALL.md`](skills/INSTALL.md) and follows it end-to-end: installs the prebuilt CLI, copies the Nyx skill files into the agent's skill directory (so the agent knows how to use the CLI), and prompts you to run `nyxid login` against your NyxID instance.
 
-The skill teaches the agent how to use the `nyxid` CLI. Without it, the CLI still works — you just drive it manually.
+**Path B — Install manually**
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
+nyxid login --base-url https://nyx-api.chrono-ai.fun   # or your self-hosted URL
+```
+
+The installer downloads a Sigstore-attested prebuilt binary, links `~/.local/bin/nyxid`, and adds it to your shell `PATH`. Verify with `nyxid doctor`.
+
+Path B installs only the CLI. The skill is a teach-the-agent layer that's only useful in Path A — without it, you drive the CLI yourself.
 
 ### 3. Pick a workflow
 
