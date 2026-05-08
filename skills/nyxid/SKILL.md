@@ -119,21 +119,35 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 |---|---|
 | "list my services", "what's connected", "discover services", "add a service", "connect OpenAI / GitHub / Lark / etc.", "OAuth scopes", browser-wizard / pairing-code questions, "where do I get the API key" | `references/services.md` |
 | "call the API", "proxy request", "send a message via Telegram/Discord/Slack" (single call), curl examples, raw HTTP integration, WebSocket auth-frame injection, Home Assistant connection | `references/proxy.md` |
-| "list / rename / delete a service", attaching an OpenAPI spec to a custom endpoint, default headers, "create / rotate / delete an API key", agent key bindings, callback URLs, scope/rate-limit edits | `references/managing.md` |
+| "list / rename / delete a service", attaching an OpenAPI spec to a custom endpoint, default headers, "create / rotate / delete an API key", agent key bindings, callback URLs, rate-limit edits, `nyxid endpoint` (UserEndpoint URLs), `nyxid external-key` (UserApiKey credentials) | `references/managing.md` |
 | Anything mentioning "org", "organization", "shared credentials", "family / company key", invites, role scopes, primary-org tiebreaker, org-level approval policies, `--via-service`, CLI profiles | `references/organizations.md` |
-| "set up a node", "credentials on my own machine", org-owned/shared nodes, node daemon (install/start/stop/logs), node credentials add/setup/list, SSH node-key credentials, SSH exec / terminal / cert-issue, SSH ProxyCommand | `references/nodes.md` |
+| "set up a node", "credentials on my own machine", org-owned/shared nodes, node daemon (install/start/stop/logs), `nyxid node docker` containerized agents, node credentials add/setup/list, SSH node-key credentials, SSH exec / terminal / cert-issue, SSH ProxyCommand | `references/nodes.md` |
 | "approve / deny", "set up notifications", Telegram link, push notifications, approval grants, per-service approval configs | `references/notifications.md` |
-| "channel bot", "register a bot", conversation routing, `/channel-relay/reply`, callback / reply tokens, ADR-013 passthrough semantics, device events / HTTP Event Gateway, `/channel-events/{id}` | `references/channels.md` |
+| "channel bot", "register a bot", conversation routing (`channel-bot route`), `/channel-relay/reply`, callback / reply tokens, ADR-013 passthrough semantics, device events / HTTP Event Gateway, `/channel-events/{id}` | `references/channels.md` |
 | OpenClaw setup, `llm-openclaw` transport selection, `x-openclaw-scopes` default header | `references/openclaw.md` |
-| `nyxid whoami / status / profile / mfa / session`, `nyxid admin invite-code`, `nyxid mcp config`, error codes (1001/1002/7000/7001/8003, downstream 403 / WAF / User-Agent override) | `references/admin.md` |
+| `nyxid whoami / status / profile / mfa / session / doctor / info / repo / telemetry`, `nyxid admin invite-code`, `nyxid mcp config`, error codes (1001/1002/7000/7001/8003, downstream 403 / WAF / User-Agent override) | `references/admin.md` |
 | "list / revoke broker authorizations", "what apps hold credentials for me", `/settings/authorizations`, `nyxid oauth bindings`, OAuth `binding_id` / token vault, distinction from "Authorized Apps" (consents) | `references/oauth-broker.md` |
+| `nyxid service-account` (machine identities for `client_credentials`), `nyxid developer-app` (OIDC clients for downstream apps), choosing between agent key vs SA vs OAuth client | `references/accounts.md` |
 
 Prefer the canonical reference over guessing. If a topic spans two files (e.g. "create an org-shared API key with rate limits"), load both `organizations.md` and `managing.md`.
 
 ## Working Rules
 
+### Capture user intent before acting
+
+- **List before you create.** When the user mentions a service, key, node, bot, or org, run the matching `list` (or `show`) first and look for an existing match before reaching for `create` / `add` / `register`. Most user requests are about something they already have.
+- **Match the verb the user used.** "Edit / change / update / rename / rotate / restrict / re-scope / re-route / re-bind / fix" → `update` / `rotate` / `bind` / `convert-ssh` / `rotate-credential` on the existing record. "Add / set up / create / connect / a new / another / a second" → `create` / `add` / `register`. When in doubt ask one short clarifying question rather than guessing — creating duplicates is harder to undo than asking.
+- **`api-key` vs `external-key` are different things — disambiguate before acting:**
+  - `nyxid api-key …` manages **NyxID's own** `nyxid_ag_…` agent keys (what an AI agent presents to NyxID on the way IN). Used for agent identity, scopes, bindings, callback URLs.
+  - `nyxid external-key …` (and `nyxid service rotate-credential …`) manages **third-party downstream credentials** stored inside NyxID (the OpenAI / Anthropic / GitHub key NyxID injects on the way OUT).
+  - When the user says "my OpenAI API key" / "my GitHub token" they almost always mean an external/downstream credential — don't run `nyxid api-key create` for that. When the user says "my agent key" / "my NyxID key" / "my Claude Code key" they mean the NyxID agent key.
 - Always discover services before assuming a slug exists.
-- Use `--output json` for machine-readable responses.
+
+### CLI invocation defaults
+
+- **Default to the browser wizard for one-time-secret commands.** Ten commands open a wizard: `service add`, `api-key create / rotate`, `node register-token / rotate-token`, `service-account create / rotate-secret`, `developer-app create / rotate-secret`, `mfa setup`. Run them with **no scripted flags** so the CLI auto-picks the right transport: local browser when one is reachable (incl. non-TTY GUI agent subprocesses via `open::that`), automatic remote-pairing fallback otherwise. Don't proactively add `--terminal`, `--credential-env`, `--output json`, `--oauth`, or `--device-code` "to be safe" — each of those triggers the scripted path and skips the wizard.
+- **Headless / streaming agent? Use `--no-wait --output json` instead.** That returns a machine-readable `{ pair_url, resume_cmd, … }` payload immediately so the agent can surface the pair URL to the user, exit, and pick up the result later with `nyxid pairing resume <PAIRING_ID>`. Required for runtimes that can't hold a long-running subprocess open.
+- **`--output json` everywhere else** — every read command (`list`, `show`, `discover`, `status`) and the non-wizard write commands (`update`, `bind`, `delete --yes`, `convert-ssh`, etc.). The wizard-capable creates are the only exception: there `--output json` alone bypasses the wizard, so use it only when you've already supplied every required arg via flags AND the user explicitly wants stdout output.
 - Prefer slug-based proxy URLs over UUID-based ones.
 - Use exact downstream API paths. Do not guess undocumented endpoints.
 - Keep request bodies minimal and service-correct.

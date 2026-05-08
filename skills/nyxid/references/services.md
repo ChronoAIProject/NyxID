@@ -1,5 +1,24 @@
 # Services: discover, add, and connect credentials
 
+## Quick reference for AI agents (deterministic flow)
+
+When the user asks to add / connect / set up a service, follow this exact decision tree. Long-form rationale is later in the file; this block is the canonical path so the agent doesn't have to derive it.
+
+1. **`nyxid service list --output json`** — does the user already have this service? If yes, treat the request as an edit (see `managing.md` "Capturing user intent: edit vs. create"). Do NOT proceed to `service add`.
+2. **`nyxid catalog list --output json`** (or `nyxid catalog show <slug> --output json`) — is the service in the catalog?
+   - **In catalog → use the catalog slug.** Run `nyxid service add <slug>` (bare wizard form, no flags). The CLI auto-picks the right transport (local browser when available, remote pairing on headless boxes).
+   - **Not in catalog → use `--custom`.** Run `nyxid service add --custom` and let the wizard prompt for endpoint URL, auth method, and credential.
+3. **Pick auth-flow flag based on what the catalog says (`auth_type` field on `catalog show`):**
+   - `oauth` → add `--oauth`
+   - `device-code` → add `--device-code`
+   - `api-key` / paste-key → no flag needed; the wizard's paste-key form handles it
+4. **Headless agent (no TTY, no browser, can't hold subprocess open)?** Append `--no-wait --output json`, surface the printed `pair_url` to the user, then run `nyxid pairing resume <pairing_id>` after they confirm. **Don't add `--output json` without `--no-wait`** — that bypasses the wizard and dumps the secret to stdout.
+5. **Don't add `--terminal`, `--credential-env`, `--credential`** unless the user has *already handed the agent the credential bytes in this conversation*. These flags skip the wizard, which means the secret bypasses the browser tab and lands in tool transcripts. The bare wizard form is the default for a reason.
+6. **Org-shared service?** Add `--org <ID|SLUG|NAME>`. The wizard pre-selects the org as the owner.
+7. **Node-routed service?** Use `nyxid node credentials setup --service <slug>` (catalog services) or `nyxid service add --custom --via-node <node>` (custom). See `nodes.md` for the canonical path.
+
+If any step is genuinely ambiguous, ask the user one clarifying question — duplicates are harder to undo than a one-line clarification.
+
 ## Table of contents
 
 - [Discover Services](#discover-services)
@@ -38,15 +57,22 @@ If the target service is missing, help the user add it:
 nyxid catalog list --output json                          # browse available services
 nyxid catalog list --all --output json                    # include system services without auth
 nyxid catalog show <slug> --output json                   # full metadata: links, capabilities, auth notes
-nyxid catalog endpoints <slug>                            # list API endpoints from OpenAPI spec
-nyxid service add <slug> --oauth                          # OAuth flow (opens browser -- easiest)
-nyxid service add <slug> --device-code                    # device code flow (enter code on website)
-nyxid service add <slug>                                  # API key (CLI prompts securely)
-nyxid service add --custom                                # add custom endpoint (CLI prompts for details)
+nyxid catalog endpoints <slug> --output json              # list API endpoints from OpenAPI spec
+
+# Adding a service — DEFAULT to the bare wizard form. The CLI auto-picks the
+# right transport (local browser when reachable, remote pairing otherwise).
+nyxid service add <slug>                                  # API key wizard (paste-key form)
+nyxid service add <slug> --oauth                          # OAuth flow (opens upstream consent page)
+nyxid service add <slug> --device-code                    # device code flow (enter code on provider's site)
+nyxid service add --custom                                # custom endpoint (wizard prompts for URL, auth, etc.)
+
+# Headless agent that can't block on the wizard? Use --no-wait --output json
+# to get back a machine-readable pairing handoff and resume later:
+nyxid service add <slug> --oauth --no-wait --output json  # → {pairing_id, pair_url, resume_cmd, …}
+nyxid pairing resume <pairing_id>                          # pick up the result once the user finishes
 ```
 
-> For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
-> For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
+> For API key services, just run `nyxid service add <slug>` without flags. The CLI auto-detects whether to open a local wizard or print a remote-pairing URL — never ask the user to paste secrets into chat. The `--credential-env <VAR>` flag is the scripted escape hatch for CI / automation; don't use it on user-facing flows because it skips the wizard.
 
 ## Slug rules for `service add`
 
@@ -60,7 +86,7 @@ nyxid service add --custom                                # add custom endpoint 
 Some OAuth providers (Lark, Google, GitHub, Atlassian, ...) expose many scopes but NyxID's catalog only configures a sensible default set. When a user needs a capability that isn't covered -- for example Lark's contact/attendance APIs -- add extra scopes on top of the defaults with `--scope`:
 
 ```bash
-# Single scope
+# Single scope (wizard pre-fills the rest of the form)
 nyxid service add api-lark --oauth --scope contact:contact.base:readonly
 
 # Multiple scopes (repeat the flag or comma-separate)
@@ -73,6 +99,9 @@ nyxid service add api-lark --oauth \
 
 # Works the same way for device-code services
 nyxid service add llm-openai --device-code --scope "custom-scope-1,custom-scope-2"
+
+# Headless variant for any of the above:
+nyxid service add api-lark --oauth --scope contact:contact.base:readonly --no-wait --output json
 ```
 
 The extra scopes are merged (deduped) on top of the provider's `default_scopes` and forwarded in the authorization URL (or device code request). The upstream provider decides whether to grant them -- if the user's app/client doesn't have a scope enabled on the provider side, the authorization flow will still fail there.
@@ -242,12 +271,18 @@ nyxid service add llm-openai --credential-env OPENAI_KEY --output json
 nyxid service add llm-openai --no-wait --output json
 ```
 
-**Guidance for AI agents using this skill:** prefer scripted flags (`--credential-env`, `--output json`) when the agent already has the credential in hand — this stays fully non-interactive and never touches a browser. When the agent doesn't have the credential (e.g. the user needs to log into an OAuth provider), pass `--no-wait --output json` to print a machine-readable pairing URL the agent can surface to the user, then `nyxid pairing resume <id>` once the user confirms they've completed the browser flow. Agents should NOT rely on `--terminal` without supplying all required args — the scripted path will hang on the first stdin prompt.
+**Guidance for AI agents using this skill:** the bare wizard form is the right default — it auto-picks local browser vs remote pairing, never asks the agent to handle raw secrets, and works on both interactive and headless boxes. Reach for the alternatives only in these specific cases:
+
+- **`--no-wait --output json` (recommended for headless agents).** When the agent can't hold a long-running subprocess open, this returns a machine-readable pairing handoff (`{ pairing_id, pair_url, resume_cmd, … }`) so the agent can surface the pair URL to the user, exit, and pick up the result later with `nyxid pairing resume <pairing_id>`.
+- **Scripted flags (`--credential-env`, `--output json` without `--no-wait`).** Only when the user has *explicitly handed the agent the credential bytes already* (e.g. they pasted an OpenAI key into chat and asked the agent to set it up). This skips the wizard, so the secret bypasses the browser tab — appropriate when the agent already holds it, inappropriate as a default.
+- **Don't rely on `--terminal`** without supplying all required args — the scripted path will hang on the first stdin prompt.
 
 ### Step 1: Check the catalog
 
 ```bash
-nyxid catalog show <slug> --output json
+nyxid catalog list --output json                          # list all available services
+nyxid catalog show <slug> --output json                   # full metadata for one service
+nyxid catalog endpoints <slug> --output json              # OpenAPI endpoints (when published)
 ```
 
 The response includes `auth_type` which tells you what the service needs. Use this to guide the user.
@@ -257,21 +292,24 @@ The response includes `auth_type` which tells you what the service needs. Use th
 - **OAuth** (`--oauth`): Best for non-technical users. Opens a browser -- the user signs in with their existing account. No API key needed. Use this for Google, GitHub, Twitter, and any service that supports OAuth.
   ```bash
   nyxid service add api-github --oauth
+  # Headless variant: nyxid service add api-github --oauth --no-wait --output json
   ```
 
 - **Device code** (`--device-code`): Good when the user can't open a browser from the terminal. Shows a short code to enter on the provider's website. Works well for services like OpenAI Codex.
   ```bash
   nyxid service add llm-openai --device-code
+  # Headless variant: nyxid service add llm-openai --device-code --no-wait --output json
   ```
 
 - **API key**: The user needs to get an API key from the provider's website. Guide them:
   1. Check the common portals table below for the provider's developer portal URL
   2. If the provider is not listed, search the web for "<provider name> API key" to find the right page, then tell the user exactly where to go
   3. Walk them through creating a key on the provider's site
-  4. Tell them to run the command **without** `--credential-env` -- the CLI will securely prompt for the key (input is hidden, never shown on screen):
+  4. Tell them to run the command **without** `--credential-env` -- the wizard handles credential entry in the browser (or via remote pairing on headless boxes), never asks the agent to paste secrets:
      ```bash
      nyxid service add llm-openai
-     # CLI prompts: "Enter API key/credential:" (input hidden)
+     # Wizard opens the paste-key form; on a headless agent without a TTY,
+     # falls through to the remote-pairing URL automatically.
      ```
   Never ask the user to paste secrets into chat. The CLI's secure prompt keeps the key out of shell history and conversation logs.
 

@@ -160,19 +160,19 @@ NyxID is a **pure passthrough gateway** (ADR-013): it never stores message bodie
 
 ```bash
 # Telegram
-nyxid channel-bot register --platform telegram --label "My Support Bot" --token-env TELEGRAM_BOT_TOKEN
+nyxid channel-bot register --platform telegram --label "My Support Bot" --token-env TELEGRAM_BOT_TOKEN --output json
 
 # Discord (requires public key for signature verification)
-nyxid channel-bot register --platform discord --label "My Discord Bot" --token-env DISCORD_BOT_TOKEN --public-key "ed25519_public_key_hex"
+nyxid channel-bot register --platform discord --label "My Discord Bot" --token-env DISCORD_BOT_TOKEN --public-key "ed25519_public_key_hex" --output json
 
 # Lark (requires app credentials + verification token; optional encrypt key)
-nyxid channel-bot register --platform lark --label "My Lark Bot" --token-env LARK_BOT_TOKEN --app-id "cli_xxx" --app-secret-env LARK_APP_SECRET --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx"
+nyxid channel-bot register --platform lark --label "My Lark Bot" --token-env LARK_BOT_TOKEN --app-id "cli_xxx" --app-secret-env LARK_APP_SECRET --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx" --output json
 
 # Feishu (same flags as Lark)
-nyxid channel-bot register --platform feishu --label "My Feishu Bot" --token-env FEISHU_BOT_TOKEN --app-id "cli_xxx" --app-secret-env FEISHU_APP_SECRET --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx"
+nyxid channel-bot register --platform feishu --label "My Feishu Bot" --token-env FEISHU_BOT_TOKEN --app-id "cli_xxx" --app-secret-env FEISHU_APP_SECRET --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx" --output json
 
 # Slack (pass the xoxb- bot user token and the app's signing secret)
-nyxid channel-bot register --platform slack --label "My Slack Bot" --token-env SLACK_BOT_TOKEN --app-secret-env SLACK_SIGNING_SECRET
+nyxid channel-bot register --platform slack --label "My Slack Bot" --token-env SLACK_BOT_TOKEN --app-secret-env SLACK_SIGNING_SECRET --output json
 ```
 
 For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. Telegram/Discord/Slack bots auto-activate on first successful webhook delivery. Lark/Feishu bots promote from `pending_webhook` to `active` only after inbound webhook verification passes, which requires the bot's Verification Token to be set correctly. Encrypt Key is optional, but if it is enabled in the Lark/Feishu console it must also be set on the bot. The CLI falls back to `NYXID_LARK_VERIFICATION_TOKEN` and `NYXID_LARK_ENCRYPT_KEY` when `--verification-token` or `--encrypt-key` are omitted. For Slack, paste the URL into the app's **Event Subscriptions** page — Slack's `url_verification` handshake is answered automatically.
@@ -182,8 +182,8 @@ For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, c
 ### Manage bots
 
 ```bash
-nyxid channel-bot list                          # list registered bots
-nyxid channel-bot show <ID>                     # bot details + conversation count
+nyxid channel-bot list --output json            # list registered bots
+nyxid channel-bot show <ID> --output json       # bot details + conversation count
 nyxid channel-bot update <ID> --label "New Label" --verification-token "vtoken_xxx" --encrypt-key "encrypt_key_xxx" --app-id "cli_xxx" --app-secret "secret_xxx"
 nyxid channel-bot verify <ID>                   # re-verify token and webhook
 nyxid channel-bot delete <ID> --yes             # deregister bot
@@ -206,25 +206,29 @@ If the bot is also missing required scopes (a common parallel symptom), surface 
 Each conversation route maps a platform chat to an AI agent (via API key with `callback_url`):
 
 ```bash
-# Set up an API key with a callback URL first
+# Set up an API key with a callback URL first. `api-key create` is wizard-capable;
+# the bare form opens the scope-picker / DisplayOnce wizard. Add --no-wait --output json
+# only when the calling agent can't block on the wizard subprocess.
 nyxid api-key create --name "my-agent" --platform claude-code --callback-url "https://my-agent.example.com/webhook"
 
-# Route all messages from a bot to this agent (default/catch-all)
-nyxid channel-bot route create --bot <BOT_ID> --agent <API_KEY_ID_OR_NAME>
+# Route all messages from a bot to this agent (default/catch-all).
+# `--agent-key-id` accepts an API key UUID; pass the value from
+# `nyxid api-key list --output json`.
+nyxid channel-bot route create --bot-id <BOT_ID> --agent-key-id <API_KEY_ID> --default-agent
 
 # Route a specific DM or group chat to a specific agent
-nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<chat_id>" --agent <API_KEY_ID_OR_NAME>
+nyxid channel-bot route create --bot-id <BOT_ID> --conversation-id "<chat_id>" --agent-key-id <API_KEY_ID>
 
 # Route a specific group chat with conversation type hint
-nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --conversation-type group --agent <API_KEY_ID_OR_NAME>
+nyxid channel-bot route create --bot-id <BOT_ID> --conversation-id "<group_chat_id>" --conversation-type group --agent-key-id <API_KEY_ID>
 
 # Per-user routing in a group (different agents for different users)
-nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id>" --agent <AGENT_A>
-nyxid channel-bot route create --bot <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id_2>" --agent <AGENT_B>
+nyxid channel-bot route create --bot-id <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id>" --agent-key-id <AGENT_A_KEY_ID>
+nyxid channel-bot route create --bot-id <BOT_ID> --conversation-id "<group_chat_id>" --sender-id "<user_id_2>" --agent-key-id <AGENT_B_KEY_ID>
 
 # List and manage routes
-nyxid channel-bot route list --bot-id <BOT_ID>
-nyxid channel-bot route update <ROUTE_ID> --agent <NEW_KEY>
+nyxid channel-bot route list --bot-id <BOT_ID> --output json
+nyxid channel-bot route update <ROUTE_ID> --agent-key-id <NEW_KEY_ID>
 nyxid channel-bot route delete <ROUTE_ID> --yes
 ```
 
@@ -325,7 +329,9 @@ Device channels are **first-class** and **not backed by a bot** — no Telegram/
 Before pushing events, create a device channel (once) and bind it to an agent API key with a `callback_url`:
 
 ```bash
-# Create the agent key first if you don't have one
+# Create the agent key first if you don't have one. `api-key create` is
+# wizard-capable; the bare form opens the scope-picker wizard. Add
+# --no-wait --output json only on agents that can't hold the subprocess open.
 nyxid api-key create --name "household-agent" --platform custom \
   --callback-url "https://my-agent.example.com/webhook"
 
@@ -333,10 +339,11 @@ nyxid api-key create --name "household-agent" --platform custom \
 nyxid channel-event channel create \
   --conversation-id household-camera \
   --agent-key-id <API_KEY_ID> \
-  --conversation-type camera     # optional; defaults to "device"
+  --conversation-type camera \
+  --output json     # `--conversation-type` is optional; defaults to "device"
 
 # List device channels
-nyxid channel-event channel list
+nyxid channel-event channel list --output json
 
 # Delete a device channel (takes the NyxID-assigned _id, not the logical name)
 nyxid channel-event channel delete <CONVERSATION_ROW_ID> --yes

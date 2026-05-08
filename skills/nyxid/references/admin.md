@@ -6,6 +6,7 @@
 - [Admin Operations](#admin-operations)
   - [Invite Codes](#invite-codes)
 - [MCP Configuration](#mcp-configuration)
+- [Repo, Info, Telemetry](#repo-info-telemetry)
 - [Approval and Errors](#approval-and-errors)
 
 ## Account Management
@@ -13,9 +14,17 @@
 ```bash
 nyxid whoami --output json                             # current user info
 nyxid status --output json                             # full account overview
+nyxid info                                             # CLI version + project links
+nyxid doctor                                           # run local install + auth health checks
+nyxid doctor --json                                    # machine-readable doctor output
 nyxid profile update --name "New Name"                 # update display name
-nyxid mfa setup                                        # enable MFA (shows QR code)
-nyxid mfa verify --code 123456                         # verify MFA setup
+nyxid profile consents --output json                   # list OAuth consents (web UI: /settings/consents)
+nyxid profile revoke-consent <CLIENT_ID> --yes         # revoke an OAuth consent
+nyxid profile delete --yes                             # delete the account (irreversible)
+nyxid mfa setup                                        # enable MFA (idempotent: re-running before verify rotates the secret)
+nyxid mfa setup --terminal                             # scripted enrollment (skip browser wizard)
+nyxid mfa verify --code 123456                         # complete enrollment from the scripted path
+nyxid mfa status --output json                         # show current MFA enrollment state
 nyxid session list --output json                       # list active sessions
 ```
 
@@ -51,7 +60,24 @@ Notes for admins helping new users:
 nyxid mcp config --tool cursor                         # generate MCP config for Cursor
 nyxid mcp config --tool claude-code                    # generate MCP config for Claude Code
 nyxid mcp config --tool vscode                         # generate MCP config for VS Code
+nyxid mcp config --tool generic                        # default: generic MCP shape (any compatible tool)
 ```
+
+## Repo, Info, Telemetry
+
+```bash
+# Project links
+nyxid repo                                             # print the NyxID GitHub repo URL
+nyxid repo --open                                      # also open it in the default browser
+nyxid info                                             # CLI version, build commit, project links
+
+# Telemetry consent (~/.nyxid/config.toml)
+nyxid telemetry status                                 # show resolved consent state and source
+nyxid telemetry enable                                 # opt in (persists {enabled=true, asked=true})
+nyxid telemetry disable                                # opt out (clears the local anon UUID so a re-enable starts fresh)
+```
+
+`nyxid telemetry` is the canonical editor for the persisted consent flag. Set `NYXID_TELEMETRY=0` in the environment for a per-invocation opt-out without touching the persisted state. See `docs/TELEMETRY.md` §3 for the precedence ladder.
 
 ## Approval and Errors
 

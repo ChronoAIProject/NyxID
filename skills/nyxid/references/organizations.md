@@ -30,14 +30,15 @@ Wherever a command takes `--org <ID|SLUG|NAME>`, you can pass the org UUID, slug
 ## Creating and managing an org
 
 ```bash
-# Create an org. You become the first admin.
-nyxid org create --display-name "Chrono AI"
+# Create an org. You become the first admin. (`org create` is not a
+# wizard-capable command — `--output json` here just controls stdout shape.)
+nyxid org create --display-name "Chrono AI" --output json
 
 # List all orgs you belong to. Output includes the org slug.
-nyxid org list
+nyxid org list --output json
 
 # Show details (member count, your role, slug)
-nyxid org show <ORG_ID>
+nyxid org show <ORG_ID> --output json
 
 # Update metadata (admin only). Pass --avatar-url "" to clear.
 # Slugs are auto-generated on create and can be edited later.
@@ -55,8 +56,10 @@ nyxid org delete <ORG_ID> --yes
 
 An org admin creates a shared service by passing `--org <ID|SLUG|NAME>` to `nyxid service add`. The resulting `UserService`, `UserEndpoint`, and `UserApiKey` rows are written with `user_id = <org_user_id>`, so every member of the org immediately sees the service in their `nyxid service list` (tagged with `credential_source.type = "org"`) and can proxy through it using their own NyxID account.
 
+All `service add` examples below default to the wizard form. Append `--no-wait --output json` (and resume with `nyxid pairing resume <pairing_id>`) when the calling agent can't hold the wizard subprocess open.
+
 ```bash
-# Shared OpenAI key for the whole org (API key credential)
+# Shared OpenAI key for the whole org (API key credential — wizard prompts for the secret)
 nyxid service add llm-openai --org chrono-ai
 
 # OAuth flow targeted at the org. The browser opens under YOUR login, you
@@ -67,7 +70,7 @@ nyxid service add api-google --oauth --org chrono-ai
 # Device-code flow targeted at the org
 nyxid service add llm-anthropic --device-code --org chrono-ai
 
-# Custom endpoint targeted at the org
+# Custom endpoint targeted at the org (wizard prompts for credential)
 nyxid service add --custom --org chrono-ai \
   --label "Shared Home Assistant" \
   --endpoint-url https://ha.home.local:8123 \
@@ -119,14 +122,14 @@ nyxid provider disconnect <PROVIDER_ID> --org <ID|SLUG|NAME>
 
 ```bash
 # Issue a one-time invite (admin only). Default role is member, default TTL 24h.
-nyxid org invite create <ORG_ID> --role member
-nyxid org invite create <ORG_ID> --role viewer --ttl-hours 168
+nyxid org invite create <ORG_ID> --role member --output json
+nyxid org invite create <ORG_ID> --role viewer --ttl-hours 168 --output json
 
 # Restrict the invitee to specific UserService IDs (comma-separated, implies override)
-nyxid org invite create <ORG_ID> --role member --allowed-service-ids "<svc1>,<svc2>"
+nyxid org invite create <ORG_ID> --role member --allowed-service-ids "<svc1>,<svc2>" --output json
 
 # Force inherit mode (ignores any --allowed-service-ids you also pass)
-nyxid org invite create <ORG_ID> --role member --scope-source inherit
+nyxid org invite create <ORG_ID> --role member --scope-source inherit --output json
 
 # The output includes a join link AND a bare nonce. Share whichever is convenient:
 #   Join link: https://<frontend>/orgs/join/ORGINV-...
@@ -137,7 +140,7 @@ nyxid org join ORGINV-ABCDEF12345678
 nyxid org join "https://nyx.example.com/orgs/join/ORGINV-..."   # full URL also works
 
 # List or cancel pending invites
-nyxid org invite list <ORG_ID>
+nyxid org invite list <ORG_ID> --output json
 nyxid org invite cancel <ORG_ID> <INVITE_ID> --yes
 ```
 
@@ -152,7 +155,7 @@ nyxid org member add <ORG_ID> --user-id <USER_ID> --role member
 ```bash
 # List members of an org (any member can read). Shows each member's role,
 # scope mode (inherit/override), and effective allowed services.
-nyxid org member list <ORG_ID>
+nyxid org member list <ORG_ID> --output json
 
 # Change a member's role (admin only)
 nyxid org member update <ORG_ID> <MEMBER_USER_ID> --role admin
@@ -182,7 +185,7 @@ member.
 
 ```bash
 # Show defaults for admin / member / viewer (admin only)
-nyxid org role-scope list <ORG_ID>
+nyxid org role-scope list <ORG_ID> --output json
 
 # Restrict the `member` role to two specific services
 nyxid org role-scope set <ORG_ID> --role member \
