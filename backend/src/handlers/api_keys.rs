@@ -261,6 +261,18 @@ pub struct ApiKeyUsageQuery {
 }
 
 #[derive(Debug, Deserialize, ToSchema, Default)]
+pub struct ApiKeyUsageListQuery {
+    #[serde(default = "default_usage_days")]
+    pub days: u32,
+    /// When set, return aggregate usage for keys owned by the given org
+    /// instead of the caller's personal scope. The caller must be an admin
+    /// of that org. Mirrors the gating on `ApiKeyListQuery::org_id` so the
+    /// Usage Dashboard can fan out the same way the Agent Keys table does
+    /// (see ChronoAIProject/NyxID#542).
+    pub org_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Default)]
 pub struct ApiKeyListQuery {
     /// When set, list keys owned by the given org instead of the caller's
     /// personal scope. The caller must be an admin of that org.
@@ -298,6 +310,11 @@ pub struct ApiKeyUsageResponse {
     pub last_used_at: Option<String>,
     pub top_services: Vec<ApiKeyServiceUsage>,
     pub daily_buckets: Vec<ApiKeyUsageBucket>,
+    /// Provenance: Personal vs Org. Lets the dashboard render the same
+    /// owner badge the Agent Keys table renders, so org admins see whose
+    /// keys each card belongs to (ChronoAIProject/NyxID#542). Mirrors
+    /// `ApiKeyResponse::credential_source`.
+    pub credential_source: crate::handlers::user_services_handler::CredentialSourceResponse,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -321,8 +338,7 @@ async fn enrich_api_keys_batch(
     actor_user_id: &str,
     keys: &[ApiKey],
 ) -> AppResult<Vec<ApiKeyResponse>> {
-    use crate::handlers::user_services_handler::{CredentialSourceResponse, OrgRoleResponse};
-    use crate::services::user_service_service::CredentialSource;
+    use crate::handlers::user_services_handler::CredentialSourceResponse;
 
     // Compute credential_source per key. Most batches contain keys from a
     // single owner (personal OR a single org), so cache by owner id to
@@ -336,64 +352,8 @@ async fn enrich_api_keys_batch(
 
     let mut source_cache: HashMap<String, CredentialSourceResponse> = HashMap::new();
     for owner in &unique_owners {
-        if owner == actor_user_id {
-            source_cache.insert(owner.clone(), CredentialSourceResponse::Personal);
-            continue;
-        }
-        // Not the actor -- either an org they belong to, or (shouldn't
-        // reach here under the handler gating) something inaccessible. We
-        // don't fail here because the handler already authorized access;
-        // this is just metadata for the response.
-        let access = org_service::resolve_owner_access(&state.db, actor_user_id, owner).await?;
-        let source_enum: CredentialSource = match access {
-            org_service::OwnerAccess::Direct => CredentialSource::Personal,
-            org_service::OwnerAccess::AsOrgAdmin { org_user_id, .. } => {
-                let org = state
-                    .db
-                    .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
-                    .find_one(doc! { "_id": &org_user_id })
-                    .await?;
-                let (org_name, org_avatar_url) = org
-                    .map(|u| (u.display_name, u.avatar_url))
-                    .unwrap_or((None, None));
-                let org_name = org_name.unwrap_or_else(|| "Unnamed Org".to_string());
-                CredentialSource::Org {
-                    org_user_id,
-                    org_name,
-                    org_avatar_url,
-                    role: crate::models::org_membership::OrgRole::Admin,
-                    allowed: true,
-                }
-            }
-            org_service::OwnerAccess::AsOrgMember {
-                org_user_id, role, ..
-            } => {
-                let org = state
-                    .db
-                    .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
-                    .find_one(doc! { "_id": &org_user_id })
-                    .await?;
-                let (org_name, org_avatar_url) = org
-                    .map(|u| (u.display_name, u.avatar_url))
-                    .unwrap_or((None, None));
-                let org_name = org_name.unwrap_or_else(|| "Unnamed Org".to_string());
-                let allowed = role.can_proxy();
-                CredentialSource::Org {
-                    org_user_id,
-                    org_name,
-                    org_avatar_url,
-                    role,
-                    allowed,
-                }
-            }
-            org_service::OwnerAccess::Forbidden => {
-                // Shouldn't happen -- handler already gated access.
-                CredentialSource::Personal
-            }
-        };
-        // Suppress unused lint by using OrgRoleResponse type import above.
-        let _ = OrgRoleResponse::Admin;
-        source_cache.insert(owner.clone(), source_enum.into());
+        let source = resolve_credential_source(state, actor_user_id, owner).await?;
+        source_cache.insert(owner.clone(), source);
     }
 
     let key_ids: Vec<&str> = keys.iter().map(|k| k.id.as_str()).collect();
@@ -751,9 +711,79 @@ fn usage_date_range(today: NaiveDate, days: u32) -> Vec<String> {
         .collect()
 }
 
+/// Resolve the wire-format `CredentialSourceResponse` for a single owner
+/// from the perspective of the actor. The actor's own owner_id resolves to
+/// `Personal`; an org owner resolves to `Org { name, avatar, role }` after
+/// looking up display_name + avatar_url from the users collection.
+///
+/// Mirrors the resolution loop inside `enrich_api_keys_batch` but for a
+/// single owner. The handler is expected to have already authorized the
+/// access; if `resolve_owner_access` returns `Forbidden`, this function
+/// falls back to `Personal` rather than error so the response shape stays
+/// stable (the keys list will be empty anyway in that case).
+async fn resolve_credential_source(
+    state: &AppState,
+    actor_user_id: &str,
+    owner_user_id: &str,
+) -> AppResult<crate::handlers::user_services_handler::CredentialSourceResponse> {
+    use crate::handlers::user_services_handler::CredentialSourceResponse;
+    use crate::services::user_service_service::CredentialSource;
+
+    if owner_user_id == actor_user_id {
+        return Ok(CredentialSourceResponse::Personal);
+    }
+
+    let access = org_service::resolve_owner_access(&state.db, actor_user_id, owner_user_id).await?;
+    let source: CredentialSource = match access {
+        org_service::OwnerAccess::Direct => CredentialSource::Personal,
+        org_service::OwnerAccess::AsOrgAdmin { org_user_id, .. } => {
+            let org = state
+                .db
+                .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+                .find_one(doc! { "_id": &org_user_id })
+                .await?;
+            let (org_name, org_avatar_url) = org
+                .map(|u| (u.display_name, u.avatar_url))
+                .unwrap_or((None, None));
+            let org_name = org_name.unwrap_or_else(|| "Unnamed Org".to_string());
+            CredentialSource::Org {
+                org_user_id,
+                org_name,
+                org_avatar_url,
+                role: crate::models::org_membership::OrgRole::Admin,
+                allowed: true,
+            }
+        }
+        org_service::OwnerAccess::AsOrgMember {
+            org_user_id, role, ..
+        } => {
+            let org = state
+                .db
+                .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+                .find_one(doc! { "_id": &org_user_id })
+                .await?;
+            let (org_name, org_avatar_url) = org
+                .map(|u| (u.display_name, u.avatar_url))
+                .unwrap_or((None, None));
+            let org_name = org_name.unwrap_or_else(|| "Unnamed Org".to_string());
+            let allowed = role.can_proxy();
+            CredentialSource::Org {
+                org_user_id,
+                org_name,
+                org_avatar_url,
+                role,
+                allowed,
+            }
+        }
+        org_service::OwnerAccess::Forbidden => CredentialSource::Personal,
+    };
+    Ok(source.into())
+}
+
 async fn build_api_key_usage(
     state: &AppState,
-    user_id: &str,
+    actor_user_id: &str,
+    owner_user_id: &str,
     keys: &[ApiKey],
     days: u32,
 ) -> AppResult<Vec<ApiKeyUsageResponse>> {
@@ -772,13 +802,14 @@ async fn build_api_key_usage(
     let since_bson = BsonDateTime::from_millis(since.timestamp_millis());
     let key_ids: Vec<&str> = keys.iter().map(|key| key.id.as_str()).collect();
 
-    let service_info_map = load_user_service_info_map(state, user_id).await?;
+    let service_info_map = load_user_service_info_map(state, owner_user_id).await?;
+    let credential_source = resolve_credential_source(state, actor_user_id, owner_user_id).await?;
 
     let entries: Vec<AuditLog> = state
         .db
         .collection::<AuditLog>(AUDIT_LOG)
         .find(doc! {
-            "user_id": user_id,
+            "user_id": owner_user_id,
             "api_key_id": { "$in": &key_ids },
             "event_type": {
                 "$in": [
@@ -901,6 +932,7 @@ async fn build_api_key_usage(
                 last_used_at: accumulator.last_used_at.map(|dt| dt.to_rfc3339()),
                 top_services,
                 daily_buckets,
+                credential_source: credential_source.clone(),
             }
         })
         .collect();
@@ -982,24 +1014,44 @@ pub async fn get_key(
     get,
     path = "/api/v1/api-keys/usage",
     params(
-        ("days" = Option<u32>, Query, description = "Number of trailing days to aggregate (1-30)")
+        ("days" = Option<u32>, Query, description = "Number of trailing days to aggregate (1-30)"),
+        ("org_id" = Option<String>, Query, description = "Org owner scope. When set, returns usage for org-owned keys; caller must be admin of that org.")
     ),
     responses(
         (status = 200, description = "Usage summary for the user's API keys", body = ApiKeyUsageListResponse),
-        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse)
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Caller is not an admin of the requested org", body = crate::errors::ErrorResponse)
     ),
     tag = "API Keys"
 )]
 /// GET /api/v1/api-keys/usage
+///
+/// Defaults to aggregating usage for the caller's personal API keys. Pass
+/// `?org_id=X` to aggregate usage for keys owned by an org (the caller must
+/// be an admin of that org). The frontend Usage Dashboard fans out one
+/// request per scope (personal + each admined org) and merges by
+/// `api_key_id`, mirroring the Agent Keys table on the same page
+/// (ChronoAIProject/NyxID#542).
 pub async fn list_key_usage(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Query(query): Query<ApiKeyUsageQuery>,
+    Query(query): Query<ApiKeyUsageListQuery>,
 ) -> AppResult<Json<ApiKeyUsageListResponse>> {
-    let user_id_str = auth_user.user_id.to_string();
+    let actor = auth_user.user_id.to_string();
+    let owner_id = if let Some(target_org_id) = query.org_id.as_deref() {
+        let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "admin access to the target org is required to list its API key usage".to_string(),
+            ));
+        }
+        target_org_id.to_string()
+    } else {
+        actor.clone()
+    };
     let days = query.days.clamp(1, 30);
-    let keys = key_service::list_api_keys(&state.db, &user_id_str).await?;
-    let usage = build_api_key_usage(&state, &user_id_str, &keys, days).await?;
+    let keys = key_service::list_api_keys(&state.db, &owner_id).await?;
+    let usage = build_api_key_usage(&state, &actor, &owner_id, &keys, days).await?;
     let since = (Utc::now() - chrono::Duration::days(i64::from(days))).to_rfc3339();
 
     Ok(Json(ApiKeyUsageListResponse { usage, since, days }))
@@ -1027,10 +1079,10 @@ pub async fn get_key_usage(
     Query(query): Query<ApiKeyUsageQuery>,
 ) -> AppResult<Json<ApiKeyUsageResponse>> {
     let actor = auth_user.user_id.to_string();
-    let user_id_str = resolve_api_key_read_owner(&state, &actor, &key_id).await?;
+    let owner_id = resolve_api_key_read_owner(&state, &actor, &key_id).await?;
     let days = query.days.clamp(1, 30);
-    let key = key_service::get_api_key(&state.db, &user_id_str, &key_id).await?;
-    let mut usage = build_api_key_usage(&state, &user_id_str, &[key], days).await?;
+    let key = key_service::get_api_key(&state.db, &owner_id, &key_id).await?;
+    let mut usage = build_api_key_usage(&state, &actor, &owner_id, &[key], days).await?;
     let response = usage
         .pop()
         .ok_or_else(|| AppError::NotFound("API key usage not found".to_string()))?;
@@ -1406,6 +1458,221 @@ mod tests {
     fn platform_absent_means_no_change() {
         let req: UpdateApiKeyRequest = serde_json::from_str(r#"{"name": "k"}"#).unwrap();
         assert!(req.platform.is_none());
+    }
+
+    // Regression tests for ChronoAIProject/NyxID#542: the Usage Dashboard
+    // omitted shared org-owned agent keys because `list_key_usage` ignored
+    // the `org_id` query param. These tests pin the four scopes the
+    // frontend now fans out across (personal, admin-of-org, member-of-org,
+    // non-member-of-org) so the gate stays in lock-step with `list_keys`.
+    mod list_key_usage_org_scope {
+        use super::super::*;
+        use crate::handlers::user_services_handler::CredentialSourceResponse;
+        use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+        use crate::models::org_membership::{
+            COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+        };
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::test_utils::{
+            connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+        };
+        use axum::Json;
+        use axum::extract::{Query, State};
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        fn fixture_api_key(id: &str, owner_user_id: &str, name: &str) -> ApiKey {
+            ApiKey {
+                id: id.to_string(),
+                user_id: owner_user_id.to_string(),
+                name: name.to_string(),
+                key_prefix: "nyxid_ag_test".to_string(),
+                key_hash: "0123456789abcdef".to_string(),
+                scopes: String::new(),
+                callback_url: None,
+                description: None,
+                is_active: true,
+                created_at: Utc::now(),
+                last_used_at: None,
+                expires_at: None,
+                allow_all_services: true,
+                allow_all_nodes: true,
+                allowed_service_ids: Vec::new(),
+                allowed_node_ids: Vec::new(),
+                rate_limit_per_second: None,
+                rate_limit_burst: None,
+                platform: None,
+            }
+        }
+
+        async fn seed_actor_and_org_with_keys(
+            db: &mongodb::Database,
+        ) -> (String, String, String, String) {
+            let actor_id = Uuid::new_v4().to_string();
+            let org_id = Uuid::new_v4().to_string();
+            let personal_key_id = Uuid::new_v4().to_string();
+            let org_key_id = Uuid::new_v4().to_string();
+
+            db.collection::<User>(USERS)
+                .insert_one(test_user(&actor_id, UserType::Person))
+                .await
+                .expect("insert actor");
+            db.collection::<User>(USERS)
+                .insert_one(test_user(&org_id, UserType::Org))
+                .await
+                .expect("insert org");
+            db.collection::<ApiKey>(API_KEYS)
+                .insert_many([
+                    fixture_api_key(&personal_key_id, &actor_id, "personal-agent"),
+                    fixture_api_key(&org_key_id, &org_id, "shared-org-agent"),
+                ])
+                .await
+                .expect("insert api keys");
+
+            (actor_id, org_id, personal_key_id, org_key_id)
+        }
+
+        #[tokio::test]
+        async fn no_org_id_returns_only_personal_keys_with_personal_source() {
+            let Some(db) = connect_test_database("usage_personal_scope").await else {
+                eprintln!("Skipping MongoDB-backed test; no test database available");
+                return;
+            };
+
+            let (actor_id, _org_id, personal_key_id, org_key_id) =
+                seed_actor_and_org_with_keys(&db).await;
+            let state = test_app_state(db);
+            let auth = test_auth_user(&actor_id);
+
+            let Json(resp) = list_key_usage(
+                State(state),
+                auth,
+                Query(ApiKeyUsageListQuery {
+                    days: 7,
+                    org_id: None,
+                }),
+            )
+            .await
+            .expect("list usage");
+
+            let ids: Vec<String> = resp.usage.iter().map(|u| u.api_key_id.clone()).collect();
+            assert!(ids.contains(&personal_key_id), "personal key visible");
+            assert!(
+                !ids.contains(&org_key_id),
+                "org key excluded from personal scope"
+            );
+            assert!(
+                resp.usage
+                    .iter()
+                    .all(|u| matches!(u.credential_source, CredentialSourceResponse::Personal)),
+                "personal scope tags every key as Personal"
+            );
+        }
+
+        #[tokio::test]
+        async fn org_id_as_admin_returns_org_keys_tagged_org() {
+            let Some(db) = connect_test_database("usage_org_admin").await else {
+                eprintln!("Skipping MongoDB-backed test; no test database available");
+                return;
+            };
+
+            let (actor_id, org_id, personal_key_id, org_key_id) =
+                seed_actor_and_org_with_keys(&db).await;
+            db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+                .insert_one(test_membership(&org_id, &actor_id, OrgRole::Admin, None))
+                .await
+                .expect("insert admin membership");
+
+            let state = test_app_state(db);
+            let auth = test_auth_user(&actor_id);
+
+            let Json(resp) = list_key_usage(
+                State(state),
+                auth,
+                Query(ApiKeyUsageListQuery {
+                    days: 7,
+                    org_id: Some(org_id.clone()),
+                }),
+            )
+            .await
+            .expect("list usage as admin");
+
+            let ids: Vec<String> = resp.usage.iter().map(|u| u.api_key_id.clone()).collect();
+            assert!(ids.contains(&org_key_id), "org key visible under org scope");
+            assert!(
+                !ids.contains(&personal_key_id),
+                "personal key excluded from org scope"
+            );
+            for entry in &resp.usage {
+                match &entry.credential_source {
+                    CredentialSourceResponse::Org {
+                        org_id: tag_org_id, ..
+                    } => {
+                        assert_eq!(tag_org_id, &org_id);
+                    }
+                    CredentialSourceResponse::Personal => {
+                        panic!("org-scoped usage must not tag entries as Personal");
+                    }
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn org_id_as_member_is_forbidden() {
+            let Some(db) = connect_test_database("usage_org_member").await else {
+                eprintln!("Skipping MongoDB-backed test; no test database available");
+                return;
+            };
+
+            let (actor_id, org_id, _, _) = seed_actor_and_org_with_keys(&db).await;
+            db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+                .insert_one(test_membership(&org_id, &actor_id, OrgRole::Member, None))
+                .await
+                .expect("insert member membership");
+
+            let state = test_app_state(db);
+            let auth = test_auth_user(&actor_id);
+
+            let err = list_key_usage(
+                State(state),
+                auth,
+                Query(ApiKeyUsageListQuery {
+                    days: 7,
+                    org_id: Some(org_id),
+                }),
+            )
+            .await
+            .expect_err("members are not admins");
+            assert!(
+                matches!(err, AppError::OrgRoleInsufficient(_)),
+                "members must hit the same gate as list_keys"
+            );
+        }
+
+        #[tokio::test]
+        async fn org_id_as_non_member_is_forbidden() {
+            let Some(db) = connect_test_database("usage_org_nonmember").await else {
+                eprintln!("Skipping MongoDB-backed test; no test database available");
+                return;
+            };
+
+            let (actor_id, org_id, _, _) = seed_actor_and_org_with_keys(&db).await;
+            // Deliberately do NOT insert a membership.
+            let state = test_app_state(db);
+            let auth = test_auth_user(&actor_id);
+
+            let err = list_key_usage(
+                State(state),
+                auth,
+                Query(ApiKeyUsageListQuery {
+                    days: 7,
+                    org_id: Some(org_id),
+                }),
+            )
+            .await
+            .expect_err("non-members must not list org usage");
+            assert!(matches!(err, AppError::OrgRoleInsufficient(_)));
+        }
     }
 
     #[test]
