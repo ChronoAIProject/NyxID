@@ -6,11 +6,36 @@ This file is the canonical install entry point for any Nyx skill. It is intentio
 
 ---
 
+## Agent safety requirements
+
+Before running anything, observe these constraints:
+
+- **Do not run `nyxid login`.** The user picks the NyxID instance and enters credentials themselves.
+- **Do not ask the user for NyxID credentials, API keys, tokens, or invite codes.** The CLI handles credential entry interactively when the user runs it.
+- **Do not print secrets, environment variables, or credential files** at any point during install.
+- **Do not use `sudo`** unless the user explicitly asks for a system-wide install. The default install is fully user-scoped under `~/.local/`.
+- In security-sensitive environments, show the user the install command before executing it, or pin to a release tag instead of `main`.
+
+---
+
+## Prerequisites
+
+The commands below assume a Unix-like shell with:
+
+- `bash`
+- `curl`
+- `git` — only if you use the sparse-checkout fetch in Step 2
+- `cargo` — only if the installer falls back to a source build (rare; most platforms have a prebuilt release)
+
+Windows is supported via WSL only.
+
+---
+
 ## Skills available
 
 | Skill | Purpose | Source |
 |---|---|---|
-| `nyxid` | Credential broker for downstream APIs (OpenAI, Anthropic, GitHub, Slack, internal APIs, SSH, MCP tools). The skill is a thin wrapper over the `nyxid` CLI. | [`skills/nyxid/`](nyxid/) |
+| `nyxid` | Credential broker for downstream APIs (OpenAI, Anthropic, GitHub, Slack, internal APIs, SSH, MCP tools). The skill is a thin wrapper over the `nyxid` CLI. | [`nyxid/`](nyxid/) |
 
 There is one skill today. This manifest will list more as they ship.
 
@@ -28,7 +53,19 @@ Every Nyx skill calls the `nyxid` CLI under the hood, so install it first.
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
 ```
 
-This downloads a Sigstore-attested prebuilt binary, installs it under `~/.local/share/nyxid/versions/<version>/`, links `~/.local/bin/nyxid` to it, and ensures `~/.local/bin` is on the user's shell `PATH`. It falls back to a Cargo source build only on platforms with no published binary. After install, verify with `nyxid doctor`.
+This downloads a prebuilt binary and verifies its Sigstore attestation before installing it under `~/.local/share/nyxid/versions/<version>/`, then links `~/.local/bin/nyxid` to the active version. It falls back to a Cargo source build only on platforms with no published binary.
+
+The installer adds `~/.local/bin` to the user's shell `PATH` by editing their shell rc file, but that change only takes effect on next shell load. If `nyxid` is not found in the current session, export it:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+After install, verify:
+
+```bash
+nyxid doctor
+```
 
 ### Step 2 — Place the skill files in your agent's skill directory
 
@@ -47,15 +84,27 @@ Copy the entire `skills/nyxid/` directory into wherever your runtime loads skill
 - **OpenClaw / clawdbot:** managed through the platform's skill registry — the `metadata.openclaw` / `metadata.clawdbot` block in `SKILL.md` is consumed automatically on registration
 - **Cursor / Codex / other runtimes:** consult your runtime's skills or instructions documentation
 
-Sparse-checkout fetch (preferred — pulls only what you need):
+Sparse-checkout fetch (preferred — pulls only the skill files):
 
 ```bash
 git clone --filter=blob:none --sparse https://github.com/ChronoAIProject/NyxID /tmp/nyx-skills
 git -C /tmp/nyx-skills sparse-checkout set skills/nyxid
-# then copy /tmp/nyx-skills/skills/nyxid/ into your skill directory
 ```
 
-Or fetch each file with `curl` from `https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/<path>` if your runtime prefers that.
+Then copy into the runtime's skill directory. For **Claude Code**:
+
+```bash
+mkdir -p ~/.claude/skills
+cp -R /tmp/nyx-skills/skills/nyxid ~/.claude/skills/
+```
+
+Clean up the temporary checkout:
+
+```bash
+rm -rf /tmp/nyx-skills
+```
+
+If your runtime prefers per-file fetches, pull each file from `https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/<path>` instead.
 
 After copying, reload or re-index your agent if it caches its skill list.
 
@@ -93,13 +142,15 @@ The skill itself describes the full surface — load `SKILL.md` for the canonica
 
 ## Updating
 
-The CLI and any installed skills update from one command:
+The CLI and any Nyx-managed skills update from one command:
 
 ```bash
 nyxid update              # update CLI and skills
 nyxid update --check      # report installed vs latest, install nothing
 nyxid update --skills-only
 ```
+
+Skills you copied manually into a runtime's skill directory (e.g. `~/.claude/skills/nyxid/`) are not tracked by the CLI and will not auto-update — re-run Step 2 to refresh them.
 
 ---
 
