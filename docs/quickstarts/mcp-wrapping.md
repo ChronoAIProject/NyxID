@@ -1,45 +1,37 @@
-# Wrap any REST API as MCP tools
+# Wrap a REST API as MCP Tools
 
-**TL;DR** — Drop a REST API's OpenAPI spec URL into NyxID, point Claude Code (or Cursor or any MCP client) at NyxID's `/mcp` endpoint, and every endpoint in that spec becomes a typed MCP tool — with parameter schemas, descriptions, and credential injection wired in.
+Expose a REST API to MCP clients (Claude Code, Cursor, VS Code, Codex) as a set of typed tools — one tool per OpenAPI operation — without writing an MCP server. NyxID parses the OpenAPI spec, surfaces each operation through its `/mcp` endpoint, and injects the upstream credential at proxy time.
 
 ```
-GitHub OpenAPI spec ──► NyxID ──(/mcp)──► Claude Code sees:
-                                            • create_issue(repo, title, body)
-                                            • list_pull_requests(repo, state)
-                                            • search_code(query, language)
-                                            ... (every operation in the spec)
+OpenAPI spec ──► NyxID ──(/mcp)──► Claude Code sees:
+                                     • create_issue(repo, title, body)
+                                     • list_pull_requests(repo, state)
+                                     • search_code(query, language)
+                                     ... one tool per OpenAPI operation
 ```
 
-You don't write a single MCP server. You don't define a tool schema. You don't paste an API key into Claude Code. Adding a new API to your agent's toolbox is one CLI call.
+The MCP client never holds the upstream API key. Adding a new API to an agent's toolbox is one CLI command.
 
-> This walkthrough assumes you've done [Step 0 of the n8n quickstart](n8n.md#step-0--get-nyxid-running-and-create-an-agent-key) — i.e., NyxID is reachable and your `nyxid` CLI is logged in. If not, see [docs/SETUP.md](../SETUP.md) first.
+## Prerequisites
 
----
+- A NyxID account and a logged-in `nyxid` CLI on your laptop. Follow [Step 0 of the n8n quickstart](n8n.md#step-0--get-nyxid-running-and-create-an-agent-key) if not already done.
+- An OpenAPI 3.0 or 3.1 specification (URL- or file-hosted). Swagger 2.0 specs need to be converted first; [`swagger2openapi`](https://github.com/Mermade/oas-kit) handles the conversion.
+- An MCP-capable client (Claude Code, Cursor, VS Code with an MCP plugin, or Codex).
 
-## The problem
-
-I want my AI agent to use my project management API. It has 60-some endpoints. Three options I didn't take:
-
-- **Hand-write an MCP server.** ~60 tool definitions, parameter schemas, error mapping, plus the auth code. Hours of glue, nothing about it is interesting.
-- **Stuff API docs into the agent's system prompt.** It hallucinates endpoints, misformats payloads, leaks the API key into the chat transcript when it gets stuck.
-- **Use a code-execution tool and let the agent write `curl`.** Same key-leak problem, plus you've handed the agent shell.
-
-What I wanted: take the OpenAPI spec the API team already publishes, and let *NyxID* turn it into MCP tools. Credential lives in NyxID; agent never sees it.
-
----
-
-## Setup
+## Procedure
 
 ### 1. Add the service to NyxID with its OpenAPI spec URL
 
-If the API is in NyxID's catalog (e.g., `llm-openai`, `api-github`), the spec URL is already set:
+For an API in NyxID's catalog (for example `api-github`, `llm-openai`), the catalog entry already declares the spec URL — `nyxid service add` resolves it automatically:
 
 ```bash
 GH_TOKEN="$(cat ~/.gh_token)" \
-  nyxid service add api-github --credential-env GH_TOKEN --label "GitHub"
+  nyxid service add api-github \
+  --credential-env GH_TOKEN \
+  --label "GitHub"
 ```
 
-If not, add a custom service and pass `--openapi-spec-url`. With `--custom` the slug comes from `--slug`, not the positional argument:
+For an API not in the catalog, register a custom service and pass `--openapi-spec-url`:
 
 ```bash
 INTERNAL_API_KEY="$(cat ~/.internal_api_key)" \
@@ -53,95 +45,92 @@ INTERNAL_API_KEY="$(cat ~/.internal_api_key)" \
   --credential-env INTERNAL_API_KEY
 ```
 
-NyxID fetches the spec (DNS-pinned, 5MB cap, 60s cache) and parses operations. If you update the spec later, NyxID re-fetches on the next call past the cache TTL.
+NyxID fetches the spec the first time it is needed: DNS-pinned, capped at 5 MB, cached for 60 seconds. Updates to the spec are picked up on the next request after the cache expires.
 
 ### 2. Verify the spec parses
+
+List the operations NyxID extracted from the spec:
 
 ```bash
 nyxid catalog endpoints my-internal-api
 ```
 
-Output is a table of `METHOD PATH` with a one-line description per operation. If you see an empty table, the spec didn't parse — common causes are 404 on the spec URL, the URL serving HTML (a docs page) instead of JSON/YAML, or a spec that's so large NyxID's 5MB ceiling refused it.
+The output is a table of `METHOD PATH` rows with one-line descriptions pulled from the spec's `summary` / `description` fields. An empty table indicates the spec failed to parse — see [Troubleshooting](#troubleshooting).
 
-### 3. Wire Claude Code to NyxID's MCP endpoint
+### 3. Wire your MCP client to NyxID
+
+Generate the MCP configuration snippet for your client:
 
 ```bash
 nyxid mcp config --tool claude-code
 ```
 
-The output prints the exact `claude mcp add` command for your NyxID base URL, e.g.:
+The CLI prints the exact `claude mcp add` command pre-filled with your NyxID base URL, for example:
 
 ```bash
 claude mcp add --transport http --scope user nyxid http://localhost:3001/mcp
 ```
 
-Run it. The first time you launch `claude`, it opens a browser tab to authenticate against NyxID (OAuth). After that, Claude Code holds an MCP session token; you don't paste keys.
+Run it. On the next `claude` launch, the client opens a browser tab to authenticate against NyxID via OAuth. Authentication ties the MCP session to your NyxID user account; subsequent tool calls authenticate via the MCP session token, so you do not paste keys.
 
 For other clients:
 
-| Client | Command |
-|---|---|
-| Claude Code | `nyxid mcp config --tool claude-code` |
-| Cursor | `nyxid mcp config --tool cursor` (writes `.cursor/mcp.json`) |
-| VS Code | `nyxid mcp config --tool vscode` |
-| Codex | `nyxid mcp config --tool codex` |
-| Anything else (raw URL) | `nyxid mcp config --tool generic` |
-
-### 4. Use it from the agent
-
-In Claude Code, type `/mcp` to confirm `nyxid` is connected and listed. Then ask plainly:
-
-> "Open a GitHub issue on `myorg/myrepo` titled 'Investigate flaky test in CI' and assign me."
-
-Claude Code finds `create_issue` in the NyxID-provided tool list, fills in the parameters, and calls it. Behind the scenes, the call goes:
-
-```
-Claude Code ──(MCP tool call)──► NyxID /mcp
-                                     │
-                                     ├─ Maps tool → POST /repos/{owner}/{repo}/issues
-                                     ├─ Injects Authorization: Bearer ghp_...
-                                     └─ Forwards to api.github.com
-```
-
-Issue gets opened. Claude Code never saw the GitHub PAT.
-
----
-
-## Why parsing the OpenAPI spec is the differentiator
-
-Most of what an MCP server does is paperwork: tool name, description, parameter schema, response shape. OpenAPI specs already encode all of that. NyxID skips the paperwork by reading the spec your API team already published.
-
-| | Hand-written MCP server | NyxID + OpenAPI spec |
+| Client | Command | Output |
 |---|---|---|
-| Tools added | One per `@tool`-decorated function you write | Every operation in the spec, automatically |
-| Tool descriptions | You write them | Pulled from the spec's `summary`/`description` |
-| Parameter schemas | You define `pydantic`/`zod` models | Pulled from `parameters` and `requestBody.content.schema` |
-| Error mapping | You handle non-2xx and shape errors | NyxID's proxy returns the status + body unchanged |
-| Auth | You paste the key into the MCP server's env | Injected by NyxID at proxy time |
-| Adding a new API | A new MCP server | One `nyxid service add` |
+| Claude Code | `nyxid mcp config --tool claude-code` | `claude mcp add` command + `.claude/settings.json` snippet |
+| Cursor | `nyxid mcp config --tool cursor` | `.cursor/mcp.json` snippet |
+| VS Code | `nyxid mcp config --tool vscode` | `.vscode/mcp.json` snippet |
+| Codex | `nyxid mcp config --tool codex` | `codex mcp add` command + `~/.codex/config.toml` snippet |
+| Other (raw URL) | `nyxid mcp config --tool generic` | NyxID MCP URL only |
 
-For services where the API team **doesn't** publish a spec, the catalog still gives you the credential-injection benefit — the agent just sees a lower-level proxy tool (`call_proxy(slug, method, path, body)`) instead of typed per-operation tools.
+### 4. Use the tools from the agent
 
----
+In Claude Code, run `/mcp` to confirm `nyxid` is connected. The tool list now includes one entry per OpenAPI operation, named after the `operationId`.
 
-## Gotchas
+A typical interaction:
 
-**Specs can be huge.** NyxID caps at 5 MB. AWS-sized specs (Stripe, AWS) won't fit. Workarounds: host a trimmed spec covering just the operations you want, and point `--openapi-spec-url` at it.
+> "Open a GitHub issue on `myorg/myrepo` titled 'Investigate flaky test in CI'."
 
-**OpenAPI 3.0 / 3.1 supported; Swagger 2.0 sometimes works.** If parsing fails, run the spec through [`swagger2openapi`](https://github.com/Mermade/oas-kit) first.
+The agent finds `create_issue` in the tool list, fills the parameters, and invokes it. The call flows:
 
-**Tool names come from `operationId`.** Specs without `operationId` get auto-generated names from method + path; they work but read as `post_repos__owner___repo__issues`. If you control the spec, give every operation a clean `operationId` — your agent's tool list reads like a Python module.
+```
+Claude Code ──(MCP tool call)──►  NyxID /mcp
+                                      │
+                                      ├─ Resolves tool to POST /repos/{owner}/{repo}/issues
+                                      ├─ Injects Authorization: Bearer ghp_…
+                                      └─ Forwards to api.github.com
+```
 
-**Cache TTL is 60 seconds for the parsed spec.** During API development, change the spec URL query string or restart NyxID to force a re-fetch.
+The issue is created. Claude Code never sees the GitHub token.
 
-**MCP authentication is OAuth/browser by default.** That ties the MCP session to a NyxID user. If you want per-agent isolation (different scoped Agent Keys for different MCP sessions), see the [Claude Code per-agent quickstart](claude-code.md) for the underlying pattern; the MCP transport supports custom headers via the client's config file.
+## Verification
 
-**Endpoint discovery and credential injection are independent.** A service with an OpenAPI spec URL but no credential will surface tools that fail at call time with a 401. A service with a credential but no spec URL will work via the lower-level proxy tools but won't show typed per-operation tools. You usually want both.
+```bash
+nyxid catalog endpoints <slug>
+```
 
----
+confirms the spec parsed (Step 2). To confirm credential injection works end-to-end, invoke any tool from the MCP client that requires authentication. A successful response (e.g. an issue created on GitHub) verifies that NyxID parsed the spec, exposed the operation as a tool, accepted the MCP call, and injected the upstream credential.
 
-## Next
+## Troubleshooting
 
-- **Per-agent isolation when multiple agents share the MCP endpoint:** [Claude Code per-agent keys](claude-code.md)
-- **Wrap a private localhost API as MCP tools:** combine this with the [Node Proxy quickstart](node-proxy.md) — the OpenAPI spec works the same whether the upstream is public or behind a node
-- **Reference for MCP delegation, identity headers, and token exchange:** [docs/MCP_DELEGATION_FLOW.md](../MCP_DELEGATION_FLOW.md)
+| Symptom | Cause | Fix |
+|---|---|---|
+| `nyxid catalog endpoints` returns an empty table | Spec URL returns 404, returns HTML instead of JSON/YAML, or exceeds NyxID's 5 MB cap | Confirm the spec URL serves machine-readable OpenAPI (test with `curl -fsS <spec-url>`); if too large, host a trimmed spec covering only the operations you need |
+| Tool list in Claude Code only shows `nyx__…` meta-tools, no operation tools | The connected service has no `openapi_spec_url`, or the spec failed to parse | Set the spec URL via `nyxid service update <ID> --openapi-spec-url <URL>`; rerun Step 2 to confirm parsing succeeds |
+| Tool names look like `post_repos__owner___repo__issues` | The spec lacks `operationId` on those operations; NyxID auto-generates names from method + path | Add `operationId` to each operation in the spec for cleaner tool names |
+| Spec changes are not picked up | Parsed-spec cache TTL is 60 s | Wait 60 s, change the spec URL query string, or restart NyxID |
+| Tool call returns `401` from the upstream | Service has a spec URL but no credential | Add a credential via `nyxid service rotate-credential <ID>` (or set one through the web console) |
+| Swagger 2.0 spec fails to parse | NyxID supports OpenAPI 3.0 / 3.1 only | Convert with [`swagger2openapi`](https://github.com/Mermade/oas-kit) and reference the converted file |
+
+## Operational notes
+
+- **MCP authentication.** The default `nyxid mcp config` flow ties the MCP session to a NyxID **user** via OAuth. For per-agent isolation across multiple MCP sessions on the same machine, use scoped Agent Keys — see the [Claude Code & Codex per-agent quickstart](claude-code.md) for the underlying pattern. The MCP transport supports custom headers via the client's config file.
+- **Endpoint discovery and credential injection are independent.** A service with a spec URL but no credential surfaces tools that fail at call time with `401`. A service with a credential but no spec URL works through the generic proxy tool but does not surface typed per-operation tools. Both are usually wanted.
+- **Wrapping a private localhost API as MCP tools.** Combine this guide with the [Node Proxy quickstart](node-proxy.md) — the OpenAPI spec parses identically whether the upstream is public or behind a node.
+- **What spec parsing replaces.** OpenAPI specs encode tool names (`operationId`), descriptions (`summary` / `description`), parameter schemas (`parameters`, `requestBody.content.schema`), and error mappings. NyxID extracts these directly, so a hand-written MCP server with `@tool`-style decorators is unnecessary for any API that publishes a spec. For services without a published spec, the credential-injection benefit still applies — the agent receives a generic `call_proxy(slug, method, path, body)` tool instead of typed per-operation tools.
+
+## Reference
+
+- **MCP delegation, identity headers, token exchange**: [docs/MCP_DELEGATION_FLOW.md](../MCP_DELEGATION_FLOW.md)
+- **Per-agent isolation**: [Claude Code & Codex per-agent quickstart](claude-code.md)
+- **Other quickstarts**: [n8n](n8n.md) · [Node Proxy](node-proxy.md)

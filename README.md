@@ -171,20 +171,20 @@ For production deployment (TLS, custom domain, email verification), see [docs/DE
 
 ## Quickstart
 
-NyxID is up. Now pick a workflow — each one is a complete recipe to a real, working integration. They demonstrate different parts of NyxID; you can do them in any order.
+After Setup, pick the use case that matches what you want to do. Each quickstart is a step-by-step procedure that ends with a working integration; the four are independent and can be completed in any order.
 
-| Workflow | What you'll build | NyxID feature it shows |
+| Quickstart | Outcome | NyxID capability |
 |---|---|---|
-| **[n8n: 1 credential, 4 APIs](docs/quickstarts/n8n.md)** | Daily AI digest workflow with Gemini, TwitterAPI.io, Google Sheets (OAuth), and Telegram all proxied through one Header Auth credential | Per-service credential injection across 4 auth styles |
-| **[Claude Code & Codex per-agent keys](docs/quickstarts/claude-code.md)** | Two coding agents on one machine, each scoped to its own credential, with per-agent attribution in the audit log | Agent isolation + scoped Agent Keys |
-| **[Reach localhost from a cloud agent](docs/quickstarts/node-proxy.md)** | Expose a home-server API to a remote agent without VPN, port forwarding, or Cloudflare Tunnel | Credential node / outbound-only NAT traversal |
-| **[Wrap any REST API as MCP tools](docs/quickstarts/mcp-wrapping.md)** | Drop an OpenAPI spec URL, get typed MCP tools in Claude Code / Cursor / Codex without writing a single tool definition | OpenAPI → MCP auto-wrap |
+| [**n8n: One Credential for Every Upstream API**](docs/quickstarts/n8n.md) | An n8n workflow uses one Header Auth credential to call multiple upstream APIs (header auth, OAuth, path-based auth) through NyxID. | Per-service credential injection |
+| [**Per-Agent Keys for Claude Code and Codex**](docs/quickstarts/claude-code.md) | Two coding agents on one machine, each scoped to a distinct service and credential, attributed independently in the audit log. | Agent isolation, scoped Agent Keys |
+| [**Reach a Localhost API from a Cloud-Hosted Agent**](docs/quickstarts/node-proxy.md) | A private-host API is reachable from a cloud agent without VPN, port forwarding, or a tunneling service. | Credential Node, outbound-only NAT traversal |
+| [**Wrap a REST API as MCP Tools**](docs/quickstarts/mcp-wrapping.md) | An OpenAPI spec is exposed as typed MCP tools to Claude Code / Cursor / VS Code / Codex with no MCP server code. | OpenAPI → MCP auto-wrap |
 
-> **Just want `HTTP/1.1 200` from your first proxied call?** Use the [Connecting AI Services hub](docs/connecting-services/) below — it's the mechanical reference, one walkthrough per interface (Web UI / CLI / AI-driven / Direct API).
+> For a per-interface reference walkthrough that ends with `HTTP/1.1 200` from your first proxied call (Web UI · CLI · AI-driven · Direct API), see the [Connecting AI Services hub](docs/connecting-services/).
 
-## Connecting AI Services (path reference)
+## Connecting AI Services (interface reference)
 
-The [Quickstart](#quickstart) menu above is the use-case-shaped front door. For the mechanical "how do I get `HTTP/1.1 200` from a proxied call" reference — one walkthrough per interface (Web UI / CLI / AI-driven / Direct API) — see **[docs/connecting-services/](docs/connecting-services/)**. The hub distinguishes external service credentials from NyxID Agent Keys and is the right starting point if you just want a verified proxy call rather than a complete workflow.
+The [Quickstart](#quickstart) section above is organized by use case. For an interface-oriented reference that ends with a verified proxy call (`HTTP/1.1 200`) using your preferred entry point — Web UI, CLI, AI-driven (MCP), or Direct API — see **[docs/connecting-services/](docs/connecting-services/)**. The hub distinguishes external service credentials from NyxID Agent Keys and links to one walkthrough per interface.
 
 ## Resources
 

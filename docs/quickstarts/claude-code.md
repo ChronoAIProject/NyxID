@@ -1,38 +1,27 @@
-# Claude Code & Codex: per-agent keys, per-agent credentials
+# Per-Agent Keys for Claude Code and Codex
 
-**TL;DR** — One scoped NyxID key per agent. One credential override per agent per service. The result: blast-radius-bound keys, per-agent usage attribution in the audit log, and the freedom to run my "personal" Claude Code session against a cheap OpenAI account while my "work" Codex session uses the team's premium one — same NyxID, same machine, no env-var dance.
+Configure two coding agents on one machine — for example, a personal Claude Code session and a work Codex session — so each agent has its own NyxID Agent Key, its own scope, and (optionally) routes to a distinct upstream credential. The result is per-agent attribution in the audit log, blast-radius isolation if a key leaks, and the ability to send each agent's traffic to a different downstream account.
 
 ```
-Claude Code (personal)  ── nyx_personal_... ──┐
-                                              │
-                                              ├── NyxID ──┬── OpenAI cheap ($50/mo)
-                                              │           │     (used by personal)
-Codex (work)            ── nyx_work_...     ──┘           │
-                                                          └── OpenAI premium ($500/mo)
-                                                                (used by work)
+Claude Code (personal) ── nyx_… ──┐
+                                  │
+                                  ├── NyxID ──┬── OpenAI Personal account
+                                  │           │     (used by claude-coding-personal)
+Codex (work)           ── nyx_… ──┘           │
+                                              └── OpenAI Premium account
+                                                  (used by codex-work)
 ```
 
-The mechanism is **agent-service bindings**: a `(api_key, service) → credential_override` row that says "when *this* agent calls *this* service, inject *this* credential instead of the default." See [docs/AGENT_ISOLATION.md](../AGENT_ISOLATION.md) for the full data model.
+## Prerequisites
 
-> This walkthrough assumes you've already done [Step 0 of the n8n quickstart](n8n.md#step-0--get-nyxid-running-and-create-an-agent-key) — i.e., you have NyxID running and a logged-in `nyxid` CLI. If not, see [docs/SETUP.md](../SETUP.md) first.
+- A NyxID account and a logged-in `nyxid` CLI on your laptop. Follow [Step 0 of the n8n quickstart](n8n.md#step-0--get-nyxid-running-and-create-an-agent-key) if not already done.
+- Two OpenAI API keys you want to keep separate (e.g. a personal account and a team account). Save each in a local file (`~/.openai_personal`, `~/.openai_premium`) with `chmod 600`.
 
----
+## Procedure
 
-## The problem
+### 1. Register OpenAI twice — one entry per credential tier
 
-I run multiple coding agents. They share my NyxID, and historically they shared a single OpenAI key. That created three problems:
-
-1. **No usage attribution.** The OpenAI bill said `$420 this month`. Was that Claude Code refactoring my Rust monorepo, or Codex grinding through some side project? No idea.
-2. **No blast-radius bound.** A leaked key meant *all* my agents and *all* my services were exposed.
-3. **Couldn't route different agents to different downstream accounts.** I wanted my personal projects on the cheap OpenAI tier and my work projects on the team's premium account. With one key, you get one tier.
-
----
-
-## Setup
-
-### 1. Add OpenAI to NyxID twice — one per credential tier
-
-Each service entry stores one default credential. To route different agents to different OpenAI accounts, register OpenAI twice with custom slugs:
+Each NyxID service stores a single default credential. To route different agents to different OpenAI accounts, register OpenAI twice with distinct slugs:
 
 ```bash
 OPENAI_PERSONAL="$(cat ~/.openai_personal)" \
@@ -48,7 +37,7 @@ OPENAI_PREMIUM="$(cat ~/.openai_premium)" \
   --credential-env OPENAI_PREMIUM
 ```
 
-Two `UserService` rows, both backed by the same upstream (OpenAI), each with its own credential.
+This creates two `UserService` rows — both pointing at OpenAI's API, each with its own credential.
 
 ### 2. Create one Agent Key per agent
 
@@ -57,132 +46,109 @@ nyxid api-key create --name "claude-coding-personal" --platform claude-code --sc
 nyxid api-key create --name "codex-work"             --platform codex       --scopes "proxy"
 ```
 
-Save the `nyx_...` value each call prints — shown once. The `--platform` tag flows through to the audit log so every request is attributable to the right agent (Codex vs Claude Code).
+Save the `nyx_…` value each command prints — shown once. The `--platform` tag is recorded with every proxied request so the audit log distinguishes the agents.
 
-### 3. Restrict each key to its service (recommended)
+> By default both keys allow access to all of your services. Step 3 restricts each key to a single service.
 
-By default a fresh Agent Key can call any of your services. To bound the blast radius — so a leaked `claude-coding-personal` key can't drain your premium OpenAI credit — scope each key to exactly the service it should reach.
+### 3. Restrict each key to one service
 
-`nyxid api-key create` doesn't take a scope-down flag (it always creates an unscoped key); you scope it after the fact. The fastest path is the web console:
+`nyxid api-key create` does not accept a scope-down flag. Apply scoping after creation, either through the web console (recommended) or via `nyxid api-key update`.
 
-1. **AI Services → Agent Keys → `claude-coding-personal` → Service Scope**
-2. Uncheck **Allow all services**.
-3. Pick **OpenAI Personal** from the list. Save.
-4. Repeat for `codex-work`, picking **OpenAI Premium**.
+**Web console:**
 
-If you'd rather stay in the terminal, the equivalent CLI dance needs both the service IDs and the API key IDs (the update endpoint addresses keys by UUID, not name):
+1. Open **AI Services → Agent Keys → `claude-coding-personal`**.
+2. In the **Service Scope** card, uncheck **Allow all services**.
+3. Select **OpenAI Personal**. Save.
+4. Repeat for `codex-work`, selecting **OpenAI Premium**.
+
+**CLI (UUID-based):** the `update` endpoint addresses both services and keys by UUID, so look up both first.
 
 ```bash
-# 1. Grab the two service IDs.
+# 1. Service IDs
 nyxid service list
-# Copy the IDs of llm-openai-personal and llm-openai-premium.
-PERSONAL_SVC=11111111-aaaa-...
-PREMIUM_SVC=22222222-bbbb-...
+PERSONAL_SVC=11111111-aaaa-…   # llm-openai-personal
+PREMIUM_SVC=22222222-bbbb-…    # llm-openai-premium
 
-# 2. Grab the two API key IDs.
+# 2. Agent Key IDs
 nyxid api-key list
-# Copy the IDs of claude-coding-personal and codex-work.
-PERSONAL_KEY=44444444-eeee-...
-WORK_KEY=55555555-ffff-...
+PERSONAL_KEY=44444444-eeee-…   # claude-coding-personal
+WORK_KEY=55555555-ffff-…       # codex-work
 
-# 3. Apply the scoping. Both flags are required — see the gotcha below.
+# 3. Apply scoping. Both flags are required.
 nyxid api-key update "$PERSONAL_KEY" --allowed-services "$PERSONAL_SVC" --allow-all-services false
 nyxid api-key update "$WORK_KEY"     --allowed-services "$PREMIUM_SVC"  --allow-all-services false
 ```
 
-What you got:
+After scoping, each key can only call its bound service. Per-key rate limits and burst caps are configured on the same key detail page (**Rate Limits** card) or via `PUT /api/v1/api-keys/{id}` with `rate_limit_per_second` and `rate_limit_burst` in the body.
 
-| | `claude-coding-personal` | `codex-work` |
-|---|---|---|
-| Scope | `proxy` only — no `write`, no `admin` | `proxy` only |
-| Allowed services | `llm-openai-personal` only | `llm-openai-premium` only |
-| Platform tag | `claude-code` (for the audit log) | `codex` |
+### 4. Wire each agent to its key
 
-Per-key rate limits and burst caps are set in the same key detail page (**Rate Limits** card), or via `PUT /api/v1/api-keys/{id}` with `rate_limit_per_second` / `rate_limit_burst` in the body.
-
-### 4. Wire each agent to its own key
-
-**Claude Code** (uses the Anthropic API; route through NyxID's Anthropic provider proxy):
+**Claude Code** uses the Anthropic API; route it through NyxID's Anthropic provider proxy:
 
 ```bash
-# In your personal project's terminal, before launching `claude`:
+# In the personal project directory, before launching `claude`:
 export ANTHROPIC_BASE_URL="http://localhost:3001/api/v1/llm/anthropic"
-export ANTHROPIC_API_KEY="nyx_..."   # the claude-coding-personal key
+export ANTHROPIC_API_KEY="nyx_…"   # claude-coding-personal
 ```
 
-For OpenAI-compatible tools used inside Claude Code (e.g., a sub-agent that calls OpenAI), set:
+For OpenAI-compatible tools invoked from inside Claude Code, also export:
 
 ```bash
 export OPENAI_BASE_URL="http://localhost:3001/api/v1/llm/gateway/v1"
-export OPENAI_API_KEY="nyx_..."      # same claude-coding-personal key
+export OPENAI_API_KEY="nyx_…"      # claude-coding-personal (same key)
 ```
 
-**Codex** (OpenAI's CLI, uses OpenAI API natively):
+**Codex** (OpenAI's CLI, OpenAI API natively):
 
 ```bash
-# In your work project's terminal, before launching `codex`:
+# In the work project directory, before launching `codex`:
 export OPENAI_BASE_URL="http://localhost:3001/api/v1/llm/gateway/v1"
-export OPENAI_API_KEY="nyx_..."      # the codex-work key
+export OPENAI_API_KEY="nyx_…"      # codex-work
 ```
 
-Codex never sees the real `sk-...` premium key. NyxID does the swap on every request.
+Replace `localhost:3001` with your NyxID host for hosted deployments.
 
-> Set the request path on the model name. The OpenAI-compatible gateway routes by model: `gpt-*` → OpenAI Personal/Premium (depending on which Agent Key you used), `claude-*` → Anthropic, `gemini-*` → Google AI. So a single `OPENAI_BASE_URL` works across providers — see [docs/MCP_DELEGATION_FLOW.md#openai-compatible-gateway](../MCP_DELEGATION_FLOW.md#openai-compatible-gateway).
+The OpenAI-compatible gateway routes by model name (`gpt-*` → OpenAI, `claude-*` → Anthropic, `gemini-*` → Google AI). One `OPENAI_BASE_URL` therefore covers multiple providers; see [docs/MCP_DELEGATION_FLOW.md#openai-compatible-gateway](../MCP_DELEGATION_FLOW.md#openai-compatible-gateway).
 
-> **Project-level keys via `.envrc` / direnv:** put the `export` lines in each project's `.envrc` so the right key is active automatically when you `cd` in. Don't commit them — `.gitignore` the file.
+For project-scoped environment variables, use `direnv` and put the `export` lines in each project's `.envrc`. Add `.envrc` to `.gitignore` so the keys are not committed.
 
----
+## Verification
 
-## Verify per-agent attribution
+Send a request from each terminal:
 
-Make a request from each terminal, then open the web console: **AI Services → Agent Keys → \[your key\] → Usage**. Each key has its own request log and can be filtered to a single service. Same view in the admin audit log: **Admin → Audit Log**, filter by API key.
-
-Every proxy and LLM-gateway response also returns an `X-NyxID-Agent-Id` header carrying the API key id. If you instrument spans with it, your observability stack gets per-agent breakdowns for free.
-
-```
-$ curl -i -X POST "$OPENAI_BASE_URL/chat/completions" \
-    -H "Authorization: Bearer $OPENAI_API_KEY" \
-    -H "Content-Type: application/json" \
-    -d '{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}'
-HTTP/1.1 200 OK
-X-NyxID-Agent-Id: 1f4a8c8e-...
-...
+```bash
+curl -i -X POST "$OPENAI_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}'
 ```
 
-Same service, two different agents, two different injected credentials, two distinct attribution rows. The bill stops being a mystery.
+A successful response includes:
 
----
+- `HTTP/1.1 200 OK`
+- `X-NyxID-Agent-Id: <key-uuid>` — the Agent Key that authenticated the request
+- An OpenAI chat completions JSON body
 
-## Before vs After
+Open **AI Services → Agent Keys → \[your key\] → Usage** in the web console: each key shows its own request log, scoped to its allowed services. The admin audit log under **Admin → Audit Log** offers the same data with filtering by API key.
 
-| | Before | After |
+## Troubleshooting
+
+| Symptom | Cause | Fix |
 |---|---|---|
-| OpenAI keys held by agents | 1 (raw `sk-...` shared by every CLI) | 0 — agents only see `nyx_...` |
-| Per-agent attribution | None — one bill, no breakdown | Audit log + `X-NyxID-Agent-Id` header |
-| Per-agent rate limits | One global bucket | Per-key token bucket (configurable in the web console) |
-| Different credentials per agent | Impossible without env-var juggling | Different service slug per credential, scoped to the right Agent Key |
-| Leaked key blast radius | Full OpenAI account, all services | One service slug, proxy-scope only |
-| Rotating one credential | Update every CLI/script | `nyxid external-key rotate <id>` — done |
+| `403` from `/api/v1/proxy/...` or `/api/v1/llm/...` | Agent Key is missing the `proxy` scope | Edit the key in **Agent Keys → \[key\] → Scopes** and add `proxy` |
+| `403 forbidden` after scoping | Key's `allowed_service_ids` does not include the service the agent is calling | Add the service to the key's scope, or set **Allow all services** if scoping is not required |
+| Allowed-services list is stored but ignored (key still hits any service) | `allow_all_services` was left at the default `true` | On `nyxid api-key update`, pass both `--allowed-services <ids>` and `--allow-all-services false`. The web console handles this in one save |
+| `X-NyxID-Agent-Id` header missing on the response | The request authenticated via session token (browser flow), not an Agent Key | Use `Authorization: Bearer nyx_…` or `X-API-Key: nyx_…`, not session-derived auth |
+| Audit log doesn't separate the two agents | `--platform` was not set on the keys | `nyxid api-key update <key-id> --platform claude-code` (or `--platform codex`); supported labels: `claude-code`, `codex`, `cursor`, `openclaw`, `generic` |
 
----
+## Operational notes
 
-## Gotchas
+- **Two services vs. credential overrides.** This guide uses two `UserService` rows (one slug per credential) because the CLI creates them in one step. To bind two agents to the **same** slug with **different** credentials, use `agent_service_bindings` instead — the override mechanism documented in [docs/AGENT_ISOLATION.md](../AGENT_ISOLATION.md). External credentials are managed in **AI Services → External Services**; per-agent bindings live under **AI Services → Agent Keys → \[key\] → Bindings**.
+- **Rotating one credential.** Run `nyxid external-key rotate <id>` (or replace via the web console) — every agent bound to that credential picks up the new value on the next request, no agent restart required.
 
-**The `proxy` scope is required for `/api/v1/proxy/...` and `/api/v1/llm/...`** Without it the proxy returns 403. Don't add `write` or `admin` unless your agent needs to manage NyxID resources too — it almost never does.
+## Reference
 
-**Both `--allowed-services` and `--allow-all-services false` are required to scope a key.** If you set the allowed-list but leave `allow_all_services` at its default (`true`), the list is stored but ignored — the key still hits everything. Always pass both, on `nyxid api-key update` or in the web console.
-
-**The agent's `--platform` tag is cosmetic but useful.** It shows up in the audit log and the API key list, and downstream observability can split by it. Use the convention `claude-code | codex | cursor | openclaw | generic`.
-
-**`X-NyxID-Agent-Id` is only set on API-key auth.** Session-token auth (browser flows) doesn't populate it. The whole per-agent attribution story depends on agents using API keys, not user sessions.
-
-**Two services, one credential pool — vs. credential overrides.** This guide uses two `UserService` rows (one per slug) because the CLI lets you create them in one step. If you want two agents hitting the *same* slug with *different* credentials, the underlying mechanism is `agent_service_bindings` (one slug, one default credential, plus an override row per agent). Manage external credentials in **AI Services → External Services** and bindings in **AI Services → Agent Keys → \[key\] → Bindings** in the web console. Full data model: [docs/AGENT_ISOLATION.md](../AGENT_ISOLATION.md).
-
----
-
-## Next
-
-- **One credential, four APIs in n8n:** [n8n quickstart](n8n.md)
-- **Reach localhost APIs from a cloud-hosted agent:** [Node Proxy quickstart](node-proxy.md)
-- **Wrap any REST API as MCP tools your agent can use:** [MCP wrapping quickstart](mcp-wrapping.md)
-- **Full data model and edge cases:** [docs/AGENT_ISOLATION.md](../AGENT_ISOLATION.md)
+- **Per-agent data model and edge cases**: [docs/AGENT_ISOLATION.md](../AGENT_ISOLATION.md)
+- **One credential, four APIs in n8n**: [n8n quickstart](n8n.md)
+- **Reach localhost APIs from a cloud-hosted agent**: [Node Proxy quickstart](node-proxy.md)
+- **Wrap any REST API as MCP tools**: [MCP wrapping quickstart](mcp-wrapping.md)
