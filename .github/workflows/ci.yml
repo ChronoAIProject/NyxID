@@ -199,7 +199,7 @@ jobs:
 
       - name: Publish test summary
         if: always()
-        uses: test-summary/action@v2
+        uses: test-summary/action@v2.4
         with:
           paths: target/nextest/ci/junit.xml
           show: all
@@ -230,7 +230,7 @@ jobs:
 
       - name: Publish test summary
         if: always()
-        uses: test-summary/action@v2
+        uses: test-summary/action@v2.4
         with:
           paths: target/nextest/ci/junit.xml
           show: all

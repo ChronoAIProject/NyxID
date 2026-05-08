@@ -23,10 +23,22 @@ const CALLBACK_TIMEOUT_SECS: u64 = 120;
 /// the server already verified it when issuing the token. Returns `None`
 /// for malformed tokens or tokens without a string `sub` claim.
 pub fn jwt_sub_from_token(token: &str) -> Option<String> {
+    jwt_claim_string_from_token(token, "sub")
+}
+
+pub fn jwt_claim_string_from_token(token: &str, claim: &str) -> Option<String> {
     let payload_b64 = token.split('.').nth(1)?;
     let decoded = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
     let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    json.get("sub")?.as_str().map(|s| s.to_string())
+    json.get(claim)?.as_str().map(|s| s.to_string())
+}
+
+pub fn jwt_exp_from_token(token: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let payload_b64 = token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let exp = json.get("exp")?.as_i64()?;
+    chrono::DateTime::from_timestamp(exp, 0)
 }
 
 // ---- Profile validation ----

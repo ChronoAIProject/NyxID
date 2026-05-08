@@ -92,6 +92,11 @@ export interface ApiKeyUsage {
   readonly reported_cost: number | null;
   readonly top_services: readonly ApiKeyUsageService[];
   readonly daily_buckets: readonly ApiKeyUsageBucket[];
+  /**
+   * Provenance: Personal vs Org. Optional for backward compatibility with
+   * backends that pre-date NyxID#542; treat as Personal when absent.
+   */
+  readonly credential_source?: import("@/schemas/orgs").CredentialSource;
 }
 
 export interface ApiKeyUsageListResponse {

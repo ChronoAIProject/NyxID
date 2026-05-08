@@ -10,6 +10,9 @@ repository.workspace = true
 name = "nyxid-mcp-demo"
 path = "src/main.rs"
 
+[package.metadata.dist]
+dist = false
+
 # Deliberately tiny: this binary exists only so directory listings
 # (e.g. Glama) can introspect a static `tools/list` over stdio without
 # pulling in the full NyxID backend's compile graph (which times out

@@ -31,6 +31,8 @@ pub enum Commands {
     Whoami(AuthArgs),
     /// Show account overview (services, keys, nodes)
     Status(AuthArgs),
+    /// Run local CLI health checks
+    Doctor(DoctorArgs),
     /// Manage user profile
     Profile {
         #[command(subcommand)]
@@ -310,10 +312,35 @@ impl BaseUrlArgs {
 }
 
 #[derive(Args, Clone)]
+pub struct DoctorArgs {
+    /// Emit machine-readable JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Clone)]
 pub struct UpdateArgs {
     /// Only update installed skills, skip CLI binary update
     #[arg(long)]
     pub skills_only: bool,
+    /// Install a specific release version, e.g. 0.4.0
+    #[arg(long)]
+    pub version: Option<String>,
+    /// Print installed and latest versions without installing anything
+    #[arg(long)]
+    pub check: bool,
+    /// Retarget the active nyxid symlink to the previous retained version
+    #[arg(long, conflicts_with_all = ["version", "check", "from_source", "list_versions", "skills_only"])]
+    pub rollback: bool,
+    /// Print installed prebuilt versions without downloading anything
+    #[arg(long, conflicts_with_all = ["version", "check", "from_source", "rollback", "skills_only"])]
+    pub list_versions: bool,
+    /// Compile and install from source with cargo install
+    #[arg(long)]
+    pub from_source: bool,
+    /// Continue after release attestation verification fails
+    #[arg(long)]
+    pub insecure_skip_verify: bool,
     /// NyxID base URL for skill content (uses saved URL by default)
     #[arg(long, env = "NYXID_URL")]
     pub base_url: Option<String>,

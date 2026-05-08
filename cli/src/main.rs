@@ -9,6 +9,7 @@ mod skill_self_heal;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod update_check;
 mod wizard;
 
 use anyhow::Result;
@@ -76,6 +77,7 @@ async fn main() {
     // user's command runs. Failures here never block the command.
     skill_self_heal::maybe_self_heal(&cli.command).await;
 
+    let update_notice = update_check::start_update_notice(&cli.command);
     let result = run(cli).await;
 
     if let Some(client) = tele_client.as_mut() {
@@ -90,6 +92,10 @@ async fn main() {
                 arch: std::env::consts::ARCH,
             })
             .await;
+    }
+
+    if result.is_ok() {
+        update_check::maybe_print_update_notice(update_notice).await;
     }
 
     if let Err(e) = result {
@@ -120,6 +126,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::ResetPassword(_) => ("auth", "reset_password"),
         Commands::Whoami(_) => ("user", "whoami"),
         Commands::Status(_) => ("user", "status"),
+        Commands::Doctor(_) => ("cli", "doctor"),
         Commands::Profile { .. } => ("user", "profile"),
         Commands::Mfa { .. } => ("user", "mfa"),
         Commands::Session { .. } => ("user", "session"),
@@ -174,6 +181,7 @@ async fn run(cli: Cli) -> Result<()> {
             let mut api = api::ApiClient::from_auth(&auth)?;
             commands::status::run(&mut api, auth.output).await
         }
+        Commands::Doctor(args) => commands::doctor::run(args).await,
 
         // C5, I1-I3: Profile
         Commands::Profile { command } => commands::profile::run(command).await,

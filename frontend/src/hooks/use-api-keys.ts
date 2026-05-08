@@ -121,6 +121,63 @@ export function useApiKeysUsage(days = 7) {
   });
 }
 
+/**
+ * Aggregate personal + every admined-org usage list into a single array.
+ *
+ * Mirrors `useAllAdminedApiKeys` exactly: fires one usage query per scope
+ * (personal + each org the caller admins) in parallel, then merges by
+ * `api_key_id`. The Usage Dashboard renders as soon as the personal scope
+ * resolves; org-scope cards fill in progressively. Individual org-scope
+ * errors are swallowed so a single failed org does not blank the whole
+ * dashboard, matching the table's failure mode.
+ *
+ * Backend support for the org_id query param was added in
+ * ChronoAIProject/NyxID#542.
+ */
+export function useAllAdminedApiKeysUsage(days = 7) {
+  const personal = useApiKeysUsage(days);
+  const { data: orgs } = useOrgs();
+
+  const adminOrgIds = useMemo(
+    () => (orgs ?? []).filter((o) => o.your_role === "admin").map((o) => o.id),
+    [orgs],
+  );
+
+  const orgQueries = useQueries({
+    queries: adminOrgIds.map((orgId) => ({
+      queryKey: ["api-keys", "usage", days, orgId] as const,
+      queryFn: async (): Promise<readonly ApiKeyUsage[]> => {
+        const res = await api.get<ApiKeyUsageListResponse>(
+          `/api-keys/usage?days=${String(days)}&org_id=${encodeURIComponent(orgId)}`,
+        );
+        return res.usage;
+      },
+    })),
+  });
+
+  const orgUsage = useMemo(() => {
+    const out: ApiKeyUsage[] = [];
+    for (const q of orgQueries) {
+      if (q.data) out.push(...q.data);
+    }
+    return out;
+  }, [orgQueries]);
+
+  const merged = useMemo(() => {
+    const byId = new Map<string, ApiKeyUsage>();
+    for (const u of personal.data ?? []) byId.set(u.api_key_id, u);
+    for (const u of orgUsage) if (!byId.has(u.api_key_id)) byId.set(u.api_key_id, u);
+    return Array.from(byId.values());
+  }, [personal.data, orgUsage]);
+
+  return {
+    data: merged,
+    isLoading: personal.isLoading,
+    isFetching: personal.isFetching || orgQueries.some((q) => q.isFetching),
+    error: personal.error,
+  } as const;
+}
+
 export function useApiKeyUsage(keyId: string, days = 7) {
   return useQuery({
     queryKey: ["api-keys", keyId, "usage", days],

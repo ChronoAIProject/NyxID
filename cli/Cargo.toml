@@ -10,6 +10,9 @@ repository.workspace = true
 name = "nyxid"
 path = "src/main.rs"
 
+[package.metadata.dist]
+dist = true
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -53,6 +56,13 @@ pty-process = { version = "0.5.3", features = ["async"] }
 libc = "0.2"
 nix = { version = "0.31.2", features = ["term", "process", "signal"] }
 tempfile = "3"
+const-oid = { version = "0.9", features = ["db"] }
+pki-types = { package = "rustls-pki-types", version = "1.11" }
+self-replace = "1.5"
+self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls", "compression-flate2", "archive-tar", "archive-zip"] }
+sigstore = { version = "0.13", default-features = false, features = ["bundle", "cosign", "sigstore-trust-root", "rustls-tls"] }
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
+x509-cert = "0.2"
 
 # Wizard v2 (CLI-served local browser UI). See docs/CLI_WIZARD_V2.md
 axum = { workspace = true }

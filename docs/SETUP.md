@@ -14,9 +14,9 @@ Once NyxID is running, head to a [Quickstart](quickstarts/) — n8n, per-agent k
 
 - **A bash shell** — required. macOS Terminal, any Linux shell, or [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows. Steps 1 and 2 use bash heredocs (`<< 'CHECK'`, `<< 'INSTALL'`) and POSIX tools (`openssl`, `xargs`, `grep -E`).
 - [Docker](https://docs.docker.com/get-docker/) — required for the server stack (backend, frontend, MongoDB). ~2 GB disk for images on first pull.
-- [Rust / Cargo](https://www.rust-lang.org/tools/install) — **optional**, only needed if you install the `nyxid` CLI (see [Install the `nyxid` CLI](#optional-install-the-nyxid-cli) below). The installer will set this up automatically if missing. Budget ~1.5 GB disk (~300 MB for the toolchain plus ~1 GB for the build cache) and 3–10 minutes for the first compile.
+- [Rust / Cargo](https://www.rust-lang.org/tools/install) — **optional fallback only** for unsupported CLI platforms. The normal CLI installer downloads a prebuilt binary and does not need Rust.
 
-Total disk footprint: ~2 GB for the server only, ~3.5 GB if you also install the CLI from source.
+Total disk footprint: ~2 GB for the server, plus a small prebuilt CLI binary if you install it. Source fallback builds can still use ~1.5 GB and take several minutes.
 
 ---
 
@@ -93,6 +93,8 @@ mkdir -p keys
 openssl genrsa -out keys/private.pem 4096 2>/dev/null
 openssl rsa -in keys/private.pem -RSAPublicKey_out -out keys/public.pem 2>/dev/null \
   || openssl rsa -in keys/private.pem -pubout -out keys/public.pem 2>/dev/null
+chmod 755 keys
+chmod 644 keys/private.pem keys/public.pem
 
 echo "Downloading NyxID (this may take a few minutes on first run)..."
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
@@ -143,15 +145,23 @@ To stop NyxID: `docker compose -f docker-compose.yml -f docker-compose.prod.yml 
 
 The server stack above is fully usable from the web console — the CLI (Command Line Interface) is only needed if you want to script credential setup, manage credential nodes, or drive NyxID from your terminal. Skip this section if you'd rather stay in the browser.
 
-> **Heads-up:** the installer builds from source via Cargo. It will install Rust automatically if you don't already have it (~300 MB) and then compile the CLI (~1 GB build cache, 3–10 minutes on first run). Make sure you have ~1.5 GB free.
+The installer downloads an attested prebuilt release binary in seconds, installs it into a versioned layout under `~/.local/share/nyxid/versions`, and links `~/.local/bin/nyxid` to the active version. It does not require Rust or a Node toolchain.
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
-source ~/.cargo/env 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
-nyxid --version
+export PATH="$HOME/.local/bin:$PATH"             # make nyxid available in current shell
+nyxid --version                                   # verify
+nyxid doctor                                      # inspect install, auth, release, and update-check state
 ```
 
-> Already have Rust? You can also install with: `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli --locked`
+For rollback and local install inspection:
+
+```bash
+nyxid update --list-versions
+nyxid update --rollback
+```
+
+> **Power user / unsupported platform fallback:** the installer falls back to `cargo install --git https://github.com/ChronoAIProject/NyxID.git nyxid-cli --locked` only when no prebuilt binary exists for your OS and CPU architecture. You can also run the Cargo command manually if you are developing the CLI or need an unsupported target, but it requires Rust and a source build.
 
 ---
 
@@ -212,6 +222,18 @@ Then re-paste Step 2 — the pre-flight will pass and Step 2 will clone fresh.
 ### Stuck on SCRAM failure?
 
 If `docker logs nyxid-backend` shows `SCRAM failure: Authentication failed`, your MongoDB volume still has the previous `MONGO_ROOT_PASSWORD` baked in from a prior run, and `.env.dev` no longer matches. Run `./scripts/uninstall.sh --yes` to wipe the volume, then re-run [Step 2](#step-2-of-3--install-and-start).
+
+### Stuck on `Permission denied (os error 13)`?
+
+If `docker logs nyxid-backend` shows `Permission denied (os error 13)` while reading `/app/keys/*.pem`, the bind-mounted JWT key files aren't readable by the non-root `nyxid` user inside the backend container — common on Windows WSL2 because the host UID and container UID don't match. Fix in place without re-running Step 2:
+
+```bash
+chmod 755 keys
+chmod 644 keys/private.pem keys/public.pem
+docker compose -f docker-compose.yml -f docker-compose.prod.yml restart backend
+```
+
+The Step 2 block now sets these permissions automatically; this note is for checkouts created before that fix.
 
 ## Done when...
 

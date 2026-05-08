@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 # SECURITY MANIFEST:
-# Environment variables accessed: HOME, SHELL, PATH, CARGO_HOME
-# External endpoints called: sh.rustup.rs (Rust installer), github.com (cargo install)
+# Environment variables accessed: HOME, SHELL, PATH, CARGO_HOME, XDG_CONFIG_HOME,
+#   XDG_DATA_HOME, NYXID_INSTALL_ROOT, NYXID_ACTIVE_SYMLINK
+# External endpoints called: github.com (prebuilt installer), sh.rustup.rs
+#   (fallback Rust installer), github.com (fallback cargo install)
 # Local files read: shell RC files (~/.zshrc, ~/.bashrc, etc.)
-# Local files written: shell RC files (appends cargo PATH if missing), ~/.local/bin/nyxid (symlink)
+# Local files written: shell RC files (adds ~/.local/bin if missing),
+#   ~/.local/bin/nyxid, ~/.local/share/nyxid/versions/<version>/nyxid
 #
-# NyxID CLI installer -- handles Rust toolchain, CLI binary, and PATH setup.
-# Designed for non-technical users who may not have ~/.cargo/bin in PATH.
+# NyxID CLI installer -- prefers the prebuilt cargo-dist binary installer and
+# only falls back to cargo install when the host platform has no release asset.
 set -euo pipefail
 
 REPO="https://github.com/ChronoAIProject/NyxID"
+INSTALLER_URL="https://github.com/ChronoAIProject/NyxID/releases/latest/download/nyxid-cli-installer.sh"
+LOCAL_BIN="$HOME/.local/bin"
+ACTIVE_NYXID="${NYXID_ACTIVE_SYMLINK:-$LOCAL_BIN/nyxid}"
+VERSIONS_ROOT="${NYXID_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/nyxid/versions}"
 CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
 CARGO_BIN="$CARGO_HOME_DIR/bin"
 CARGO_ENV="$CARGO_HOME_DIR/env"
@@ -18,11 +25,13 @@ CARGO_ENV="$CARGO_HOME_DIR/env"
 # Helpers
 # ---------------------------------------------------------------------------
 
-info()  { printf '  %s\n' "$*" >&2; }
-warn()  { printf '  [warn] %s\n' "$*" >&2; }
-fail()  { printf '  [error] %s\n' "$*" >&2; exit 1; }
+info() { printf '  %s\n' "$*" >&2; }
+warn() { printf '  [warn] %s\n' "$*" >&2; }
+fail() {
+  printf '  [error] %s\n' "$*" >&2
+  exit 1
+}
 
-# Detect the user's shell RC file.
 detect_shell_rc() {
   local shell_name
   shell_name="$(basename "${SHELL:-/bin/sh}")"
@@ -32,8 +41,6 @@ detect_shell_rc() {
       echo "$HOME/.zshrc"
       ;;
     bash)
-      # macOS bash sessions are commonly login shells; Linux terminals usually
-      # source .bashrc for new interactive sessions.
       if [ "$(uname)" = "Darwin" ]; then
         echo "$HOME/.bash_profile"
       else
@@ -49,107 +56,167 @@ detect_shell_rc() {
   esac
 }
 
-# Check if a file already references cargo PATH setup.
-cargo_in_rc() {
+path_in_rc() {
   local rc_file="$1"
   [ -f "$rc_file" ] || return 1
 
-  grep -Fq "$CARGO_BIN" "$rc_file" 2>/dev/null && return 0
-  grep -Fq "$CARGO_ENV" "$rc_file" 2>/dev/null && return 0
-  grep -Eq '(\$HOME|\$\{HOME\}|~)/\.cargo/(bin|env)|\.cargo/(bin|env)|fish_add_path' "$rc_file" 2>/dev/null
+  grep -Fq "$LOCAL_BIN" "$rc_file" 2>/dev/null && return 0
+  grep -Eq '(\$HOME|\$\{HOME\}|~)/\.local/bin|fish_add_path.*\.local/bin' "$rc_file" 2>/dev/null
+}
+
+ensure_local_bin_path() {
+  local rc_file shell_name
+  rc_file="$(detect_shell_rc)"
+  shell_name="$(basename "${SHELL:-/bin/sh}")"
+
+  if path_in_rc "$rc_file"; then
+    info "PATH already configured in $rc_file"
+    return
+  fi
+
+  info "Adding $LOCAL_BIN to PATH in $rc_file..."
+  mkdir -p "$(dirname "$rc_file")"
+  {
+    echo ""
+    echo "# NyxID CLI"
+    if [ "$shell_name" = "fish" ]; then
+      printf 'fish_add_path "%s"\n' "$LOCAL_BIN"
+    else
+      printf 'export PATH="%s:$PATH"\n' "$LOCAL_BIN"
+    fi
+  } >> "$rc_file"
+
+  info "Done -- $rc_file updated."
+  info "Open a new terminal or run: source $rc_file"
+}
+
+prebuilt_target_supported() {
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "$os:$arch" in
+    Linux:x86_64 | Linux:amd64 | Linux:aarch64 | Linux:arm64)
+      return 0
+      ;;
+    Darwin:x86_64 | Darwin:arm64 | Darwin:aarch64)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+install_prebuilt() {
+  mkdir -p "$LOCAL_BIN"
+  info "Installing NyxID CLI prebuilt binary..."
+
+  if curl --proto '=https' --tlsv1.2 -fsSL "$INSTALLER_URL" | sh; then
+    if [ -x "$ACTIVE_NYXID" ]; then
+      migrate_prebuilt_to_versioned_layout
+      info "NyxID CLI installed at $ACTIVE_NYXID"
+      return 0
+    fi
+
+    warn "prebuilt installer completed but $ACTIVE_NYXID was not found"
+  else
+    warn "prebuilt installer failed"
+  fi
+
+  return 1
+}
+
+detect_nyxid_version() {
+  "$ACTIVE_NYXID" --version 2>/dev/null \
+    | grep -Eo 'v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?' \
+    | head -n 1
+}
+
+migrate_prebuilt_to_versioned_layout() {
+  local raw_version version version_dir versioned_bin active_dir tmp_link
+  raw_version="$(detect_nyxid_version || true)"
+  if [ -z "$raw_version" ]; then
+    fail "could not determine nyxid version from $ACTIVE_NYXID --version"
+  fi
+
+  case "$raw_version" in
+    v*) version="$raw_version" ;;
+    *) version="v$raw_version" ;;
+  esac
+
+  version_dir="$VERSIONS_ROOT/$version"
+  versioned_bin="$version_dir/nyxid"
+  active_dir="$(dirname "$ACTIVE_NYXID")"
+  tmp_link="$active_dir/nyxid.tmp.$$"
+
+  mkdir -p "$version_dir" "$active_dir"
+  install -m 755 "$ACTIVE_NYXID" "$versioned_bin"
+
+  rm -f "$tmp_link"
+  ln -s "$versioned_bin" "$tmp_link"
+  mv -f "$tmp_link" "$ACTIVE_NYXID"
+
+  info "Versioned install: $versioned_bin"
+}
+
+install_from_source() {
+  info "Falling back to source install. This requires Rust and may take several minutes."
+
+  if command -v cargo &>/dev/null; then
+    info "Rust toolchain already installed ($(cargo --version))"
+  else
+    info "Rust toolchain not found -- installing via rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    info "Rust installed successfully."
+  fi
+
+  if [ -f "$CARGO_ENV" ]; then
+    # shellcheck disable=SC1090
+    . "$CARGO_ENV"
+  else
+    export PATH="$CARGO_BIN:$PATH"
+  fi
+
+  if ! command -v cargo &>/dev/null; then
+    fail "cargo still not found after setup. Please add $CARGO_BIN to your PATH manually."
+  fi
+
+  cargo install --git "$REPO" nyxid-cli --force --locked
+
+  if [ ! -x "$CARGO_BIN/nyxid" ]; then
+    fail "cargo install completed but $CARGO_BIN/nyxid was not found"
+  fi
+
+  mkdir -p "$LOCAL_BIN"
+  install -m 755 "$CARGO_BIN/nyxid" "$LOCAL_BIN/nyxid"
+  info "NyxID CLI installed at $LOCAL_BIN/nyxid"
 }
 
 # ---------------------------------------------------------------------------
-# Step 1: Ensure Rust / Cargo is available
+# Install
 # ---------------------------------------------------------------------------
 
-if command -v cargo &>/dev/null; then
-  info "Rust toolchain already installed ($(cargo --version))"
+if prebuilt_target_supported; then
+  if ! install_prebuilt; then
+    warn "No usable prebuilt binary was available for this host; using source fallback."
+    install_from_source
+  fi
 else
-  info "Rust toolchain not found -- installing via rustup..."
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-  info "Rust installed successfully."
+  warn "No prebuilt NyxID CLI binary is published for $(uname -s)/$(uname -m)."
+  install_from_source
 fi
 
-# Source cargo env for the current session (needed even if cargo was found,
-# because PATH might not include ~/.cargo/bin in this shell)
-if [ -f "$CARGO_ENV" ]; then
-  # shellcheck disable=SC1090
-  . "$CARGO_ENV"
+ensure_local_bin_path
+
+# ---------------------------------------------------------------------------
+# Verify
+# ---------------------------------------------------------------------------
+
+if [ -x "$LOCAL_BIN/nyxid" ]; then
+  info "Verified: $("$LOCAL_BIN/nyxid" --version 2>/dev/null || echo 'nyxid is available')"
 else
-  export PATH="$CARGO_BIN:$PATH"
-fi
-
-# Verify cargo is now reachable
-if ! command -v cargo &>/dev/null; then
-  fail "cargo still not found after setup. Please add $CARGO_BIN to your PATH manually."
-fi
-
-# ---------------------------------------------------------------------------
-# Step 2: Install the NyxID CLI
-# ---------------------------------------------------------------------------
-
-info "Installing NyxID CLI..."
-# --force ensures we always rebuild from the latest source, even if the
-# version string in Cargo.toml hasn't changed (git commits may add features
-# like WebSocket proxy support without a version bump).
-cargo install --git "$REPO" nyxid-cli --locked --force
-info "NyxID CLI installed at $CARGO_BIN/nyxid"
-
-# ---------------------------------------------------------------------------
-# Step 3: Symlink into ~/.local/bin (required by OpenClaw and XDG-aware tools)
-# ---------------------------------------------------------------------------
-
-LOCAL_BIN="$HOME/.local/bin"
-
-if [ -x "$CARGO_BIN/nyxid" ]; then
-  mkdir -p "$LOCAL_BIN"
-  ln -sf "$CARGO_BIN/nyxid" "$LOCAL_BIN/nyxid"
-  info "Symlinked $LOCAL_BIN/nyxid -> $CARGO_BIN/nyxid"
-else
-  warn "nyxid binary not found in $CARGO_BIN -- skipping ~/.local/bin symlink"
-fi
-
-# ---------------------------------------------------------------------------
-# Step 4: Ensure cargo bin is in PATH for future shell sessions
-# ---------------------------------------------------------------------------
-
-RC_FILE="$(detect_shell_rc)"
-SHELL_NAME="$(basename "${SHELL:-/bin/sh}")"
-
-if cargo_in_rc "$RC_FILE"; then
-  info "PATH already configured in $RC_FILE"
-else
-  info "Adding cargo to PATH in $RC_FILE..."
-  mkdir -p "$(dirname "$RC_FILE")"
-
-  {
-    echo ""
-    echo "# Cargo (Rust package manager) -- added by NyxID installer"
-    if [ "$SHELL_NAME" = "fish" ]; then
-      printf 'fish_add_path "%s"\n' "$CARGO_BIN"
-    elif [ -f "$CARGO_ENV" ]; then
-      printf '. "%s"\n' "$CARGO_ENV"
-    else
-      printf 'export PATH="%s:$PATH"\n' "$CARGO_BIN"
-    fi
-  } >> "$RC_FILE"
-
-  info "Done -- $RC_FILE updated."
-  info "Open a new terminal or run: source $RC_FILE"
-fi
-
-# ---------------------------------------------------------------------------
-# Step 5: Verify
-# ---------------------------------------------------------------------------
-
-if command -v nyxid &>/dev/null; then
-  info "Verified: $(nyxid --version 2>/dev/null || echo 'nyxid is available')"
-elif [ -x "$CARGO_BIN/nyxid" ]; then
-  info "Installed at $CARGO_BIN/nyxid (will be in PATH after opening a new terminal)"
-else
-  warn "nyxid binary not found -- installation may have failed"
-  exit 1
+  fail "nyxid binary not found -- installation may have failed"
 fi
 
 info ""

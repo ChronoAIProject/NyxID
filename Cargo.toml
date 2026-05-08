@@ -20,6 +20,36 @@ chrono = { version = "0.4.43", features = ["serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 
+[workspace.metadata.dist]
+cargo-dist-version = "0.30.0"
+allow-dirty = ["ci"]
+ci = "github"
+installers = ["shell", "powershell"]
+unix-archive = ".tar.gz"
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+packages = ["nyxid-cli"]
+install-path = "~/.local/bin"
+hosting = "github"
+install-updater = false
+
+[workspace.metadata.dist.github-custom-runners]
+aarch64-apple-darwin = "macos-latest"
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+x86_64-apple-darwin = "macos-latest"
+x86_64-unknown-linux-gnu = "ubuntu-24.04"
+x86_64-pc-windows-msvc = "windows-latest"
+global = "ubuntu-24.04"
+
+[workspace.metadata.dist.dependencies.apt]
+libdbus-1-dev = "*"
+pkg-config = "*"
+
 # Pure-Rust RSA keygen and big-int math are catastrophically slow when compiled
 # without optimizations (a single 4096-bit keypair can take 30-120s in `cargo
 # test`'s default debug profile). Compile just these crates with full opts so
@@ -36,3 +66,10 @@ opt-level = 3
 
 [profile.test.package.num-bigint-dig]
 opt-level = 3
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+strip = true
+codegen-units = 1

@@ -76,3 +76,6 @@ libc = "0.2.184"
 default = []
 aws-kms = ["aws-config", "aws-sdk-kms"]
 gcp-kms = ["google-cloud-kms"]
+
+[package.metadata.dist]
+dist = false

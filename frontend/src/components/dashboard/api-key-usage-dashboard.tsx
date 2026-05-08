@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useApiKeysUsage } from "@/hooks/use-api-keys";
+import { useAllAdminedApiKeysUsage } from "@/hooks/use-api-keys";
 import { formatRelativeTime } from "@/lib/utils";
 import { formatBucketLabel } from "@/lib/usage-bucket";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -13,6 +13,28 @@ import {
 } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Activity } from "lucide-react";
+import { OrgAvatar } from "@/components/orgs/org-avatar";
+import type { CredentialSource } from "@/schemas/orgs";
+
+function OwnerBadge({ source }: { readonly source?: CredentialSource }) {
+  if (source?.type === "org") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <OrgAvatar
+          avatarUrl={source.avatar_url ?? null}
+          displayName={source.org_name}
+          className="h-4 w-4 text-[0.5rem]"
+        />
+        <span className="truncate font-medium text-foreground">
+          {source.org_name}
+        </span>
+      </span>
+    );
+  }
+  return (
+    <span className="text-[11px] text-muted-foreground">Personal</span>
+  );
+}
 
 function UsageBars({
   buckets,
@@ -70,7 +92,7 @@ function UsageBars({
 }
 
 export function ApiKeyUsageDashboard() {
-  const { data, isLoading, error } = useApiKeysUsage(7);
+  const { data, isLoading, error } = useAllAdminedApiKeysUsage(7);
 
   return (
     <Card>
@@ -105,10 +127,11 @@ export function ApiKeyUsageDashboard() {
                 <Card className="h-full transition-colors hover:border-primary/30 hover:bg-accent/30">
                   <CardContent className="space-y-4 p-5">
                     <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
+                      <div className="min-w-0 space-y-0.5">
                         <p className="truncate text-sm font-medium text-foreground">
                           {usage.api_key_name}
                         </p>
+                        <OwnerBadge source={usage.credential_source} />
                         <p className="text-xs text-muted-foreground">
                           Last used{" "}
                           {usage.last_used_at

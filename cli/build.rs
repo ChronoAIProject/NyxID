@@ -4,6 +4,10 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs");
     println!("cargo:rerun-if-env-changed=NYXID_GIT_HASH");
+    println!("cargo:rerun-if-env-changed=TARGET");
+
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=TARGET={target}");
 
     let hash = Command::new("git")
         .args(["rev-parse", "--short=12", "HEAD"])

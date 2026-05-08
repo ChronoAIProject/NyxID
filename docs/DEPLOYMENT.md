@@ -175,6 +175,12 @@ $EDITOR .env.production
 mkdir -p keys
 openssl genrsa -out keys/private.pem 4096
 openssl rsa -in keys/private.pem -pubout -out keys/public.pem
+chmod 755 keys
+chmod 644 keys/private.pem keys/public.pem
+# 644 lets the non-root `nyxid` user inside the backend container read the
+# bind-mounted keys when host UID != container UID (common on Windows WSL2).
+# For tighter perms in production, align host ownership with the container
+# `nyxid` user — see "RSA Key Management" below.
 
 # Pull published images and start the stack
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \

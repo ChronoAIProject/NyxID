@@ -432,6 +432,7 @@ source "$HOME/.cargo/env" 2>/dev/null  # Ensure cargo is available
 cargo build -p nyxid-cli                # Build CLI binary
 cargo install --path cli                # Install CLI as `nyxid`
 nyxid --help                            # Verify installation
+# End users install prebuilt release binaries; cargo install is for dev.
 
 # Backend (from project root)
 cargo build                             # Build backend (local provider only)

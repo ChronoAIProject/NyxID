@@ -44,7 +44,7 @@ Install the NyxID CLI (one-time):
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
 ```
 
-The installer handles everything: installs Rust if missing, builds the CLI, and configures your shell PATH. Open a new terminal afterwards, then log in:
+The installer downloads an attested prebuilt release binary (verified against the GitHub release workflow's Sigstore attestation), installs it into a versioned layout under `~/.local/share/nyxid/versions/`, links `~/.local/bin/nyxid` to the active version, and configures your shell PATH. No Rust toolchain required. The installer falls back to a Cargo source build only on platforms with no published binary. Open a new terminal afterwards, then log in:
 
 ```bash
 nyxid login --base-url https://nyx-api.chrono-ai.fun
@@ -67,9 +67,16 @@ The CLI stores tokens at `~/.nyxid/` and auto-refreshes them. The base URL is sa
 Update the CLI and all installed AI skills in one command:
 
 ```bash
-nyxid update                                 # update CLI binary + all installed skills
-nyxid update --skills-only                   # update only installed skills (skip CLI rebuild)
+nyxid update                                 # download + verify + install the latest prebuilt CLI, then update skills
+nyxid update --skills-only                   # update only installed skills (skip CLI download)
+nyxid update --check                         # report installed vs latest without installing anything
+nyxid update --version 0.5.0                 # pin to a specific release (rollback or test a prerelease)
+nyxid update --rollback                      # retarget the active symlink to the previous installed version
+nyxid update --list-versions                 # list versions installed under ~/.local/share/nyxid/versions
+nyxid update --from-source                   # force the cargo install fallback (useful on unsupported targets)
 ```
+
+`nyxid update` verifies the downloaded binary against the GitHub release workflow's Sigstore attestation before swapping the active symlink. Verification failures fail closed; pass `--insecure-skip-verify` only as an explicit opt-out.
 
 To update a specific tool's skill only:
 
@@ -77,11 +84,32 @@ To update a specific tool's skill only:
 nyxid ai-setup update --tool claude-code     # update a specific tool
 ```
 
+When running any nyxid subcommand interactively, the CLI also prints a one-line "newer version available" notice once per 24h (telemetry-free; only hits the GitHub releases API). Set `NYXID_NO_UPDATE_CHECK=1` to disable, or run in CI (`CI=true` is auto-detected).
+
 If `nyxid update` is not recognized, your CLI predates this command. Update it first with:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
 ```
+
+The wrapper installer detects an existing legacy single-file install at `~/.local/bin/nyxid` and migrates it into the versioned layout transparently.
+
+## Diagnosing install or auth issues
+
+When the user reports "nyxid is broken", "I can't log in", "is my install OK", or similar, run `nyxid doctor` first before debugging individual commands. It prints a structured health check covering:
+
+- **Installation**: binary path, active symlink target, whether the install dir is in `$PATH`
+- **GitHub Releases**: API reachability, latest release tag vs installed, rate limit + reset time
+- **Authentication**: stored base URL, login state (token expiry shown; the token itself is never printed)
+- **Telemetry**: consent state
+- **Update check**: last-check timestamp, whether auto-check is enabled
+
+```bash
+nyxid doctor                                 # human-readable report
+nyxid doctor --json                          # structured output for scripts
+```
+
+Doctor exits non-zero if any check fails (warnings do not fail). Use it as the first triage step, then drill into the failing area with the specific reference page (`references/admin.md` for auth/error codes, `references/services.md` for service issues, etc.).
 
 ## Reference map
 
