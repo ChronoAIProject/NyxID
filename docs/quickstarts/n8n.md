@@ -14,21 +14,47 @@ This guide uses four upstream APIs as worked examples — Gemini (header auth), 
 
 - A NyxID account and an Agent Key with the `proxy` scope. If you don't have these yet, complete **Step 0** below; otherwise jump to the [Procedure](#procedure).
 - An n8n instance (cloud or self-hosted) where you can add a credential and HTTP Request nodes.
-- The downstream API tokens you intend to register (Gemini key, Telegram bot token, etc.) saved locally with `chmod 600` permissions.
+- An upstream API token for each service you want n8n to call. The walkthrough below uses four; obtain each before starting:
+
+  | Upstream service | Where to obtain the token | Auth used | NyxID slug |
+  |---|---|---|---|
+  | Gemini | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) → **Create API key** | API key (header `x-goog-api-key`) | `llm-google-ai` (catalog) |
+  | TwitterAPI.io | [twitterapi.io](https://twitterapi.io) → sign up → **API Keys** | API key (header `x-api-key`) | `twitterapi-io` (custom) |
+  | Google Sheets | Google Cloud Console — full Cloud Console steps are in [Step 2](#2-register-an-oauth-service-google-sheets) | OAuth 2.0 (refresh token) | `api-google` (catalog) |
+  | Telegram Bot | Chat with [@BotFather](https://t.me/BotFather) on Telegram → `/newbot` and follow the prompts | Bot token (path `/bot<token>/`) | `api-telegram-bot` (catalog) |
+
+  Each token in this table is the *upstream* credential — what NyxID injects into the proxied request. The Agent Key from Step 0 is separate; that is what n8n authenticates to NyxID with.
 
 ### Step 0 — Get NyxID running and create an Agent Key
 
-**Hosted (recommended).** Sign up at [nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register) using the invite code in the [README Setup](../../README.md#setup). After signing in, open **AI Services → Agent Keys → Create API Key**, select the `proxy` scope, click **Create**, and save the displayed `nyx_…` value (shown once).
+**Hosted (recommended).** Sign up at [nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register) using the invite code in the [README Getting Started](../../README.md#1-install-nyxid). After signing in, open **AI Services → Agent Keys → Create API Key**, name the key `n8n`, select the `proxy` scope, click **Create**, and copy the displayed `nyx_…` value (shown once).
 
 **Self-host.** Follow [docs/SETUP.md](../SETUP.md) to bring up the Docker stack, register at `http://localhost:3000`, then create the Agent Key via the same web console flow.
 
-Save the Agent Key to `~/.nyx_key` with `chmod 600`. The procedure below assumes it lives there.
+Save the Agent Key value somewhere safe — a password manager works, or a local file with `chmod 600`. You will paste it into n8n in [Step 3](#3-paste-the-agent-key-into-an-n8n-header-auth-credential).
 
 ## Procedure
 
 ### 1. Register each upstream service in NyxID
 
-For services in NyxID's catalog, pass the catalog slug. For services not in the catalog, register a custom service with explicit auth metadata.
+There are two paths — the web UI (recommended for first-time setup) and the CLI (for scripting). Both produce the same result. Pick one and follow it for every service in the [Prerequisites table](#prerequisites).
+
+**Web UI.** Repeat for each upstream service:
+
+1. In the web console, open **AI Services**, then click **Add Service**.
+2. **Catalog services (Gemini, Telegram Bot, Google Sheets).** Search for the service name and click **Connect** on the matching catalog entry. NyxID prefills the endpoint URL and auth method from the catalog.
+3. **Custom services (TwitterAPI.io is not in the catalog).** Scroll to the bottom of the dialog and click **Add custom service**. Fill in:
+   - **Slug**: `twitterapi-io`
+   - **Label**: `TwitterAPI.io`
+   - **Endpoint URL**: `https://api.twitterapi.io`
+   - **Auth method**: `header`
+   - **Auth key name**: `x-api-key`
+4. Paste the upstream token from the Prerequisites table into the **Credential** field. Set a **Label** (e.g. `Gemini AI`). Click **Save**.
+5. NyxID lands on the service detail page with the assigned **Slug** at the top. Record it — n8n's HTTP Request URLs in [Step 4](#4-configure-http-request-nodes-in-n8n) need it.
+
+For **Google Sheets**, the catalog entry exists but the service requires an OAuth flow rather than a static API key — see [Step 2](#2-register-an-oauth-service-google-sheets).
+
+**CLI.** If you have the `nyxid` CLI installed and logged in, save each upstream token to a local file (`~/.gemini_key`, `~/.twitterapi_key`, `~/.tg_token`) with `chmod 600`, then run:
 
 ```bash
 # Gemini — catalog entry llm-google-ai
@@ -54,7 +80,7 @@ TG_TOKEN="$(cat ~/.tg_token)" \
   --label "Telegram Bot"
 ```
 
-Each `nyxid service add` prints the user-side slug NyxID landed on. On a fresh account this matches the catalog or `--slug` value; if you already have a service with that slug, NyxID appends `-2`, `-3`, or a random suffix to keep slugs unique. Record the printed slugs — you need them in the n8n HTTP Request URLs.
+Each `nyxid service add` prints the user-side slug NyxID assigned. On a fresh account it matches the catalog or `--slug` value; if you already have a service with that slug, NyxID appends `-2`, `-3`, or a random suffix to keep slugs unique. Record the printed slugs — they go into the HTTP Request URLs in [Step 4](#4-configure-http-request-nodes-in-n8n).
 
 ### 2. Register an OAuth service (Google Sheets)
 
@@ -89,19 +115,9 @@ Google Sheets lives on `sheets.googleapis.com`, but the catalog default for `api
 nyxid service update <ID> --endpoint-url "https://sheets.googleapis.com"
 ```
 
-### 3. Create the n8n credential
+### 3. Paste the Agent Key into an n8n Header Auth credential
 
-Generate an Agent Key reserved for n8n and write it to a temp file. The Agent Key is then pasted into n8n's Header Auth credential.
-
-```bash
-nyxid api-key create \
-  --name "n8n" \
-  --scopes "proxy" \
-  --output json \
-| jq -r '.full_key' > ~/.nyx_key && chmod 600 ~/.nyx_key
-```
-
-> The JSON field for the key value is `full_key` (not `key`, `api_key`, `value`, or `token`).
+The Agent Key from [Step 0](#step-0--get-nyxid-running-and-create-an-agent-key) is what n8n uses to authenticate to NyxID on every proxied request.
 
 In n8n, open **Credentials → New → Header Auth** and set:
 
@@ -109,16 +125,13 @@ In n8n, open **Credentials → New → Header Auth** and set:
 |---|---|
 | Name | `NyxID API Key` |
 | Header Name | `X-API-Key` |
-| Header Value | The `nyx_…` key (paste from clipboard) |
+| Header Value | The `nyx_…` Agent Key from Step 0 |
 
-After saving the credential, securely delete the temp file:
+Click **Save**.
 
-```bash
-shred -u ~/.nyx_key   # Linux
-rm -P ~/.nyx_key      # macOS
-```
+> If you saved the Agent Key to a local file, copy it into your clipboard with `cat ~/.nyx_key \| pbcopy` (macOS) or `cat ~/.nyx_key \| xclip -selection clipboard` (Linux), paste into the **Header Value** field, then securely delete the file with `rm -P ~/.nyx_key` (macOS) or `shred -u ~/.nyx_key` (Linux).
 
-For per-workflow blast-radius isolation, scope the key to only the four services it should reach: open **AI Services → Agent Keys → \[your key\]** in the web console, locate the **Service Scope** card, uncheck **Allow all services**, select the registered services, and save.
+For per-workflow blast-radius isolation (so a leaked key can only call the services this workflow uses), open **AI Services → Agent Keys → \[your key\]** in the web console, locate the **Service Scope** card, uncheck **Allow all services**, select the registered services, and save.
 
 ### 4. Configure HTTP Request nodes in n8n
 

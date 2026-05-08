@@ -106,9 +106,13 @@ Other tools solve parts of this — NyxID combines credential injection, NAT tra
 - Expose internal microservices to AI agents through a single MCP endpoint
 - Secure AI agent access to self-hosted tools (Grafana, Jenkins, n8n) behind your firewall
 
-## Setup
+## Getting Started
 
-There are two ways to use NyxID — pick the one that fits your situation:
+NyxID is used in two phases — install once, then pick a workflow. The install gives you a NyxID instance and an Agent Key; the workflow shows what to build with them.
+
+### 1. Install NyxID
+
+Choose hosted (we run it for you) or self-host (Docker on your machine).
 
 | | Hosted | Self-host |
 |---|---|---|
@@ -116,7 +120,7 @@ There are two ways to use NyxID — pick the one that fits your situation:
 | **Best for** | Getting started quickly, no setup | Full control, private networks, offline use |
 | **Status** | Early access (invite code below) | Open — anyone can run it |
 
-### Option A: Hosted (Recommended)
+#### Hosted (Recommended)
 
 Start using NyxID in under a minute — no Docker, no setup.
 
@@ -128,13 +132,13 @@ Start using NyxID in under a minute — no Docker, no setup.
 
 The full click-through flow is in **[Add your first AI Service](docs/connecting-services/web-ui.md)**. Early access is limited to 20 users.
 
-### Option B: Self-Host
+#### Self-Host
 
 Run NyxID on your own machine. This sets up three Docker containers (database, backend, frontend) — takes about 2 minutes.
 
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/) and a bash shell. macOS and Linux already have one — Windows users, see [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) before going further. The `nyxid` CLI is optional. Full prereqs and disk budgets are in [SETUP.md](docs/SETUP.md).
 
-#### AI-Assisted (Recommended)
+##### AI-Assisted (Recommended)
 
 If you have Claude Code, Cursor, or any AI coding assistant open, paste the prompt below into it and it will drive the entire self-host flow for you — preflight, clone, env generation, Docker stack, health check, optional CLI install, login, first credential, and MCP config.
 
@@ -153,7 +157,7 @@ If you have Claude Code, Cursor, or any AI coding assistant open, paste the prom
 
 <!-- AI setup-prompt maintenance: validate this prompt against actual CLI + web console on each release -->
 
-#### Manual Setup
+##### Manual Setup
 
 Prefer to run each step yourself, or need the full troubleshooting guide? Follow **[docs/SETUP.md](docs/SETUP.md)** (macOS, Linux, or Windows via WSL).
 
@@ -165,13 +169,13 @@ It covers:
 - Optional [CLI install](docs/SETUP.md#optional-install-the-nyxid-cli)
 - [Uninstall & reinstall](docs/SETUP.md#uninstall--reinstall), [orphan volume recovery](docs/SETUP.md#recovering-an-orphan-volume), and [SCRAM failure](docs/SETUP.md#stuck-on-scram-failure) troubleshooting
 
-Once NyxID is running and you've registered at `http://localhost:3000`, jump into a [Quickstart](#quickstart) below.
+Once NyxID is running and you've registered at `http://localhost:3000`, continue to [2. Pick a workflow](#2-pick-a-workflow).
 
 For production deployment (TLS, custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-## Quickstart
+### 2. Pick a workflow
 
-After Setup, pick the use case that matches what you want to do. Each quickstart is a step-by-step procedure that ends with a working integration; the four are independent and can be completed in any order.
+With NyxID running and an Agent Key in hand, pick the workflow that matches what you want to build. Each is a step-by-step procedure that ends with a working integration; the four are independent and can be completed in any order.
 
 | Quickstart | Outcome | NyxID capability |
 |---|---|---|
@@ -184,7 +188,7 @@ After Setup, pick the use case that matches what you want to do. Each quickstart
 
 ## Connecting AI Services (interface reference)
 
-The [Quickstart](#quickstart) section above is organized by use case. For an interface-oriented reference that ends with a verified proxy call (`HTTP/1.1 200`) using your preferred entry point — Web UI, CLI, AI-driven (MCP), or Direct API — see **[docs/connecting-services/](docs/connecting-services/)**. The hub distinguishes external service credentials from NyxID Agent Keys and links to one walkthrough per interface.
+[Pick a workflow](#2-pick-a-workflow) in Getting Started is organized by use case. For an interface-oriented reference that ends with a verified proxy call (`HTTP/1.1 200`) using your preferred entry point — Web UI, CLI, AI-driven (MCP), or Direct API — see **[docs/connecting-services/](docs/connecting-services/)**. The hub distinguishes external service credentials from NyxID Agent Keys and links to one walkthrough per interface.
 
 ## Resources
 
