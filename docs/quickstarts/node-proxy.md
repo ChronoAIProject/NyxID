@@ -1,6 +1,6 @@
 # Reach a Localhost API from a Cloud-Hosted Agent (Node Proxy)
 
-Expose an internal API running on a private host (home server, on-prem VM, anything not reachable from the public internet) to a cloud-hosted agent — without VPN, port forwarding, or a tunneling service. NyxID's **Credential Node** is a small agent installed on the private host that opens an outbound WebSocket to NyxID. NyxID routes proxy requests through that WebSocket; the node injects credentials locally and forwards to the localhost API.
+Expose an internal API running on a private host (home server, on-prem VM, anything not reachable from the public internet) to a cloud-hosted agent — without VPN, port forwarding, or a tunneling service. NyxID's `Credential Node` is a small agent installed on the private host that opens an outbound WebSocket to NyxID. NyxID routes proxy requests through that WebSocket; the node injects credentials locally and forwards to the localhost API.
 
 ```
 Cloud agent ──(HTTPS)──►  NyxID  ──(outbound WSS)──►  Node on private host  ──►  localhost:3000
@@ -22,7 +22,7 @@ This guide uses Grafana on `localhost:3000` as the worked example.
 
 ### 1. Mint a node registration token
 
-In the web console, open **Credential Nodes → Register Node**. Enter a name (for example, `home-server`) and click **Create**. Copy the displayed `nyx_nreg_…` token; it is shown once and expires after one hour by default (`NODE_REGISTRATION_TOKEN_TTL_SECS`).
+In the web console, open `Credential Nodes` → `Register Node`. Enter a name (for example, `home-server`) and click `Create`. Copy the displayed `nyx_nreg_…` token; it is shown once and expires after one hour by default (`NODE_REGISTRATION_TOKEN_TTL_SECS`).
 
 ### 2. Install and register the node on the private host
 
@@ -112,7 +112,7 @@ curl -sf "$NYXID_BASE/api/v1/proxy/s/grafana/api/dashboards/home" \
 
 A `200 OK` with the Grafana JSON response confirms the route. The token never left the private host.
 
-NyxID's audit log records each node-routed request with `routed_via: node` and the `node_id` set to the home-server UUID. Filter on these fields under **Admin → Audit Log** to confirm node routing was used.
+NyxID's audit log records each node-routed request with `routed_via: node` and the `node_id` set to the home-server UUID. Filter on these fields under `Admin` → `Audit Log` to confirm node routing was used.
 
 ## Troubleshooting
 
@@ -122,7 +122,7 @@ NyxID's audit log records each node-routed request with `routed_via: node` and t
 | `8003 NodeRegistrationFailed` | Registration token expired or already consumed | Mint a new token (Step 1) |
 | `401` from the upstream API | Local credential is wrong or revoked | Re-add the credential on the node: `nyxid node credentials add --service grafana --url http://localhost:3000 --header Authorization --secret-format bearer` (overwrites the existing entry) |
 | Connection times out at registration | Outbound WebSocket blocked by firewall or proxy | Allow `wss://<your-nyxid-host>` (port 443 hosted, 3001 self-host) outbound from the private host |
-| Audit log shows the request was routed direct (not via node) | Service is missing the `node_id` binding | Re-add the service with `--via-node <node-id>`, run `nyxid service update <service-id> --node-id <node-id>`, or open **AI Services → \[your service\] → Your Routing** in the web console and bind the node there |
+| Audit log shows the request was routed direct (not via node) | Service is missing the `node_id` binding | Re-add the service with `--via-node <node-id>`, run `nyxid service update <service-id> --node-id <node-id>`, or open `AI Services` → `[your service]` and bind the node in the `Your Routing` card |
 
 ## Operational notes
 

@@ -6,7 +6,7 @@ For first-time NyxID setup (Docker stack, hosted signup, account registration), 
 
 | Quickstart | Outcome | NyxID capability |
 |---|---|---|
-| [**n8n: One Credential for Every Upstream API**](n8n.md) | An n8n workflow uses one Header Auth credential to call multiple upstream APIs (header auth, OAuth, path-based auth) through NyxID. | Per-service credential injection |
+| [**n8n: One Credential for Every Upstream API**](n8n.md) | An n8n workflow uses one `Header Auth` credential to call multiple upstream APIs (header auth, OAuth, path-based auth) through NyxID. | Per-service credential injection |
 | [**Per-Agent Keys for Claude Code and Codex**](claude-code.md) | Two coding agents on one machine, each scoped to a distinct service and credential, attributed independently in the audit log. | Agent isolation, scoped Agent Keys |
 | [**Reach a Localhost API from a Cloud-Hosted Agent**](node-proxy.md) | A private-host API is reachable from a cloud agent without VPN, port forwarding, or a tunneling service. | Credential Node, outbound-only NAT traversal |
 | [**Wrap a REST API as MCP Tools**](mcp-wrapping.md) | An OpenAPI spec is exposed as typed MCP tools to Claude Code / Cursor / VS Code / Codex with no MCP server code. | OpenAPI → MCP auto-wrap |
