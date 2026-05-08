@@ -108,9 +108,7 @@ Other tools solve parts of this — NyxID combines credential injection, NAT tra
 
 ## Getting Started
 
-NyxID is used in two phases — install once, then pick a workflow. The install gives you a NyxID instance and an Agent Key; the workflow shows what to build with them.
-
-> Using an AI coding agent? See [Install the Nyx skill](#install-the-nyx-skill-for-ai-coding-agents) below for a one-line install your agent can drive.
+NyxID is used in two phases — install once, then pick a workflow. The install gives you a NyxID instance and an Agent Key; the workflow shows what to build with them. If you drive NyxID from an AI coding agent, an optional step in the middle installs the Nyx skill so the agent can drive the CLI for you.
 
 ### 1. Install NyxID
 
@@ -171,11 +169,23 @@ It covers:
 - Optional [CLI install](docs/SETUP.md#optional-install-the-nyxid-cli)
 - [Uninstall & reinstall](docs/SETUP.md#uninstall--reinstall), [orphan volume recovery](docs/SETUP.md#recovering-an-orphan-volume), and [SCRAM failure](docs/SETUP.md#stuck-on-scram-failure) troubleshooting
 
-Once NyxID is running and you've registered at `http://localhost:3000`, continue to [2. Pick a workflow](#2-pick-a-workflow).
+Once NyxID is running and you've registered at `http://localhost:3000`, continue to [3. Pick a workflow](#3-pick-a-workflow).
 
 For production deployment (TLS, custom domain, email verification), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-### 2. Pick a workflow
+### 2. (Optional) Install the Nyx skill
+
+If you drive NyxID from Claude Code, Cursor, OpenClaw, or another AI coding agent, hand it this single line:
+
+```
+Install nyx skills from https://github.com/ChronoAIProject/NyxID/blob/main/skills/INSTALL.md
+```
+
+The agent reads [`skills/INSTALL.md`](skills/INSTALL.md) and follows it end-to-end: installs the prebuilt `nyxid` CLI, copies the skill files into its own skill directory, and prompts you to run `nyxid login` against your NyxID instance.
+
+The skill teaches the agent how to use the `nyxid` CLI. Without it, the CLI still works — you just drive it manually.
+
+### 3. Pick a workflow
 
 With NyxID running and an Agent Key in hand, pick the workflow that matches what you want to build. Each is a step-by-step procedure that ends with a working integration; the four are independent and can be completed in any order.
 
@@ -190,19 +200,7 @@ With NyxID running and an Agent Key in hand, pick the workflow that matches what
 
 ## Connecting AI Services (interface reference)
 
-[Pick a workflow](#2-pick-a-workflow) in Getting Started is organized by use case. For an interface-oriented reference that ends with a verified proxy call (`HTTP/1.1 200`) using your preferred entry point — Web UI, CLI, AI-driven (MCP), or Direct API — see **[docs/connecting-services/](docs/connecting-services/)**. The hub distinguishes external service credentials from NyxID Agent Keys and links to one walkthrough per interface.
-
-### Install the Nyx skill (for AI coding agents)
-
-If you drive NyxID from Claude Code, Cursor, OpenClaw, or another AI coding agent, hand it this single line:
-
-```
-Install nyx skills from https://github.com/ChronoAIProject/NyxID/blob/main/skills/INSTALL.md
-```
-
-The agent reads [`skills/INSTALL.md`](skills/INSTALL.md) and follows it end-to-end: installs the prebuilt `nyxid` CLI, copies the skill files into its own skill directory, and prompts you to run `nyxid login` against your NyxID instance.
-
-The skill teaches the agent how to use the `nyxid` CLI. Without it, the CLI still works — you just drive it manually.
+[Pick a workflow](#3-pick-a-workflow) in Getting Started is organized by use case. For an interface-oriented reference that ends with a verified proxy call (`HTTP/1.1 200`) using your preferred entry point — Web UI, CLI, AI-driven (MCP), or Direct API — see **[docs/connecting-services/](docs/connecting-services/)**. The hub distinguishes external service credentials from NyxID Agent Keys and links to one walkthrough per interface.
 
 ## Resources
 
