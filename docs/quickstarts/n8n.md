@@ -27,7 +27,9 @@ This guide uses four upstream APIs as worked examples — Gemini (header auth), 
 
 ### Step 0 — Get NyxID running and create an Agent Key
 
-**Hosted (recommended).** Sign up at [nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register) using the invite code in the [README Getting Started](../../README.md#1-install-nyxid). After signing in, open `AI Services` → `Agent Keys` → `Create API Key`, name the key `n8n`, select the `proxy` scope, click `Create`, and copy the displayed `nyx_…` value (shown once).
+**Hosted (recommended).** Sign up at [nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register) using the invite code in the [README Getting Started](../../README.md#1-install-nyxid). After signing in, open `AI Services` → `Agent Keys` → `Create API Key`. In the dialog, name the key `n8n`, click the `proxy` badge under `Scopes` so it's highlighted, then click `Create key`. Copy the displayed `nyx_…` value (shown once).
+
+![Create API Key dialog with proxy scope selected](../connecting-services/img/06-create-agent-key.png)
 
 **Self-host.** Follow [docs/SETUP.md](../SETUP.md) to bring up the Docker stack, register at `http://localhost:3000`, then create the Agent Key via the same web console flow.
 
@@ -39,24 +41,41 @@ Save the Agent Key value somewhere safe — a password manager works, or a local
 
 There are two paths — the web UI (recommended for first-time setup) and the CLI (for scripting). Both produce the same result. Pick one and follow it for every API-key service. Google Sheets uses OAuth and is covered separately in [Step 2](#2-register-an-oauth-service-google-sheets).
 
+> The screenshots below show OpenAI being added (from the [Web UI walkthrough](../connecting-services/web-ui.md)). The dialog is identical for every service — substitute the upstream service name and token for the one you're registering.
+
 **Web UI — catalog services (Gemini, Telegram Bot).** For each:
 
-1. In the web console, open `AI Services` and click `Add Service`.
-2. Type the service name in the catalog search (e.g. `Gemini AI`, `Telegram Bot`) and click `Connect` on the matching entry. NyxID prefills the endpoint URL and auth method from the catalog.
-3. Paste the upstream token from the [Prerequisites table](#prerequisites) into the `Credential` field, set a `Label` (e.g. `Gemini AI`), and click `Save`.
-4. NyxID lands on the service detail page with the assigned `Slug` at the top — record it for [Step 4](#4-configure-http-request-nodes-in-n8n).
+1. In the web console, click `AI Services` in the left sidebar. The page shows your existing services and the `Add Service` button at top right.
+
+   ![AI Services page](../connecting-services/img/01-ai-services.png)
+
+2. Click `Add Service`. The `Add AI Service` dialog opens with the catalog. Type the service name (e.g. `Gemini AI`, `Telegram Bot`) in the search box and click `Connect` on the matching entry.
+
+   ![Add AI Service catalog with search](../connecting-services/img/02-add-service-catalog.png)
+
+3. The `Configure Routing` step appears. Click the `Direct` card (NyxID proxies the upstream API directly — `Via Node` is for self-hosted services behind a firewall). Click `Next: Enter Credentials`.
+
+   ![Configure Routing — Direct vs Via Node](../connecting-services/img/03-routing-step.png)
+
+4. The `Configure Service` step appears. Paste the upstream token from the [Prerequisites table](#prerequisites) into the `API Key / Credential` field and click `Create Service`.
+
+   ![Configure Service — credential entry](../connecting-services/img/04-credential-entry.png)
+
+5. NyxID lands on the service detail page with the assigned `Slug` at the top — record it for [Step 4](#4-configure-http-request-nodes-in-n8n).
+
+   ![Service detail page with slug and API Usage](../connecting-services/img/05-service-detail.png)
 
 **Web UI — custom services (TwitterAPI.io).**
 
-1. In the web console, open `AI Services` and click `Add Service`.
-2. Scroll past the catalog and click `Add custom service`.
+1. In the web console, click `AI Services` and click `Add Service`.
+2. In the `Add AI Service` dialog, scroll past the catalog and click `Add custom service`.
 3. Fill the form:
    - `Slug`: `twitterapi-io`
    - `Label`: `TwitterAPI.io`
    - `Endpoint URL`: `https://api.twitterapi.io`
    - `Auth method`: `header`
    - `Auth key name`: `x-api-key`
-4. Paste the upstream token into the `Credential` field and click `Save`.
+4. Paste the upstream token into the `API Key / Credential` field and click `Create Service`.
 5. Record the `Slug` shown on the service detail page for [Step 4](#4-configure-http-request-nodes-in-n8n).
 
 **CLI.** If you have the `nyxid` CLI installed and logged in, save each upstream token to a local file (`~/.gemini_key`, `~/.twitterapi_key`, `~/.tg_token`) with `chmod 600`, then run:
@@ -130,35 +149,57 @@ NyxID stores the resulting refresh token and refreshes the access token automati
 
 ### 3. Paste the Agent Key into an n8n Header Auth credential
 
-The Agent Key from [Step 0](#step-0--get-nyxid-running-and-create-an-agent-key) is what n8n uses to authenticate to NyxID on every proxied request.
+The Agent Key from [Step 0](#step-0--get-nyxid-running-and-create-an-agent-key) is what n8n uses to authenticate to NyxID on every proxied request. n8n stores it as a reusable `Header Auth` credential that any number of `HTTP Request` nodes can attach to.
 
-In n8n, open `Credentials` → `New` → `Header Auth` and set:
+1. Open your n8n instance. In the left sidebar, click `Credentials`.
 
-| Field | Value |
-|---|---|
-| `Name` | `NyxID API Key` |
-| `Header Name` | `X-API-Key` |
-| `Header Value` | The `nyx_…` Agent Key from Step 0 |
+   <!-- TODO: screenshot of n8n Credentials page on n8n.aelf.dev -->
 
-Click `Save`.
+2. Click `Add Credential` (or `Create New` on first use). A search modal opens listing every credential type n8n supports.
+3. Type `Header Auth` in the search box and click the `Header Auth` result.
 
-> If you saved the Agent Key to a local file, copy it into your clipboard with `cat ~/.nyx_key \| pbcopy` (macOS) or `cat ~/.nyx_key \| xclip -selection clipboard` (Linux), paste into the `Header Value` field, then securely delete the file with `rm -P ~/.nyx_key` (macOS) or `shred -u ~/.nyx_key` (Linux).
+   <!-- TODO: screenshot of n8n credential type search showing Header Auth -->
 
-For per-workflow blast-radius isolation (so a leaked key can only call the services this workflow uses), open `AI Services` → `Agent Keys` → `[your key]` in the web console, locate the `Service Scope` card, uncheck `Allow all services`, select the registered services, and save.
+4. Fill the credential form:
+
+   | Field | Value |
+   |---|---|
+   | `Name` | `NyxID API Key` |
+   | `Header Name` | `X-API-Key` |
+   | `Header Value` | The `nyx_…` Agent Key from Step 0 |
+
+   <!-- TODO: screenshot of completed n8n Header Auth credential form -->
+
+5. Click `Save`. n8n confirms `Connection tested successfully` for some credential types; for `Header Auth` it just persists the value.
+
+> **Pasting the key safely.** If you saved the Agent Key to a local file, copy it into your clipboard with `cat ~/.nyx_key | pbcopy` (macOS) or `cat ~/.nyx_key | xclip -selection clipboard` (Linux), paste into the `Header Value` field, then securely delete the file with `rm -P ~/.nyx_key` (macOS) or `shred -u ~/.nyx_key` (Linux). Avoid pasting the key into chat, terminal history, or any shared shell.
+
+**Optional but recommended — restrict the key's blast radius.** A fresh Agent Key can call any of your NyxID services. To scope it to only the services this workflow uses (so a leaked key can't reach the rest of your account):
+
+1. Back in the NyxID web console, open `AI Services` → `Agent Keys` → `[your key]`.
+2. Find the `Service Scope` card.
+3. Uncheck `Allow all services`.
+4. Pick the services this workflow needs (Gemini, TwitterAPI.io, Google Sheets, Telegram Bot).
+5. Click `Save`.
 
 ### 4. Configure HTTP Request nodes in n8n
 
-For each upstream service the workflow needs to call, add an `HTTP Request` node and configure four fields:
+For each upstream service the workflow calls, add an `HTTP Request` node to the workflow and configure these fields. The auth fields cascade — selecting one reveals the next.
 
-1. **`Method`** — set to the HTTP method the upstream API expects (`GET`, `POST`, etc.).
-2. **`URL`** — use the proxy pattern below, substituting the slug NyxID returned in [Step 1](#1-register-each-upstream-service-in-nyxid) (or [Step 2](#2-register-an-oauth-service-google-sheets) for Google Sheets) and the downstream API path you would normally use without NyxID:
+1. **`Method`** — set to the HTTP method the upstream API expects (`GET`, `POST`, `PUT`, etc.).
+2. **`URL`** — use the NyxID proxy pattern, substituting the slug NyxID returned in [Step 1](#1-register-each-upstream-service-in-nyxid) (or [Step 2](#2-register-an-oauth-service-google-sheets) for Google Sheets) and the downstream API path you would normally use without NyxID:
 
    ```
    https://<nyxid-host>/api/v1/proxy/s/<service-slug>/<downstream-api-path>
    ```
 
-3. **`Authentication`** — select `Generic Credential Type`. n8n then shows a **`Generic Auth Type`** dropdown — select `Header Auth`.
-4. **`Credential for Header Auth`** — select the `NyxID API Key` credential you saved in [Step 3](#3-paste-the-agent-key-into-an-n8n-header-auth-credential).
+3. **`Authentication`** — change from `None` to `Generic Credential Type`. n8n reveals a new field below.
+4. **`Generic Auth Type`** (newly visible) — select `Header Auth`. n8n reveals one more field below.
+5. **`Credential for Header Auth`** (newly visible) — select the `NyxID API Key` credential you saved in [Step 3](#3-paste-the-agent-key-into-an-n8n-header-auth-credential) from the dropdown.
+
+   <!-- TODO: screenshot of HTTP Request node with Authentication / Generic Auth Type / Credential dropdowns filled -->
+
+> **Important:** select `Generic Credential Type`, **not** `Predefined Credential Type`. The predefined list shows n8n's built-in OpenAI / GitHub / Google / etc. credentials, which would call those upstream APIs **directly** and bypass NyxID. The whole point of this setup is to keep the upstream credential out of n8n.
 
 Reference URLs for the four services in this guide:
 
