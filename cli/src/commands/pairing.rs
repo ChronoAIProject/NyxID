@@ -47,7 +47,7 @@ pub async fn run(command: PairingCommands) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&payload)?);
                 }
                 OutputFormat::Table => {
-                    wizard::print_resume_summary(&outcome, &base_url);
+                    wizard::print_resume_summary(&auth, &outcome, &base_url).await;
                 }
             }
 
@@ -90,6 +90,24 @@ fn outcome_to_json(
             "pairing_id": pairing_id,
             "api_key_id": ack.api_key_id,
         }),
+        wizard::WizardOutcome::ServiceAccountCreateAcknowledged(ack) => json!({
+            "status": "completed",
+            "kind": "service-account-create",
+            "pairing_id": pairing_id,
+            "service_account_id": ack.service_account_id,
+        }),
+        wizard::WizardOutcome::DeveloperAppCreateAcknowledged(ack) => json!({
+            "status": "completed",
+            "kind": "developer-app-create",
+            "pairing_id": pairing_id,
+            "developer_app_id": ack.developer_app_id,
+        }),
+        wizard::WizardOutcome::MfaSetupAcknowledged(ack) => json!({
+            "status": "completed",
+            "kind": "mfa-setup",
+            "pairing_id": pairing_id,
+            "factor_id": ack.factor_id,
+        }),
         wizard::WizardOutcome::NodeRegisterAcknowledged(ack) => json!({
             "status": "completed",
             "kind": "node-register-token",
@@ -97,17 +115,23 @@ fn outcome_to_json(
             "token_id": ack.token_id,
         }),
         wizard::WizardOutcome::RotationAcknowledged(ack) => {
-            // `RotationAcknowledged` is produced by both
-            // `api-key-rotate` and `node-rotate-token`. Use the
-            // kind string the server told us at poll-time so
-            // agents can dispatch on `kind == "api-key-rotate"` vs
-            // `kind == "node-rotate-token"` without digging into
-            // the resource id format.
+            // `RotationAcknowledged` is produced by all four
+            // rotation-shaped flows. Use the kind string the
+            // server told us at poll-time so agents can dispatch
+            // without digging into the resource id format.
             // Fallback to "rotation" when the server returned an
             // unknown kind or the poll call failed — less precise
             // but still accurate at a higher level.
             let kind = kind_hint
-                .filter(|k| matches!(*k, "api-key-rotate" | "node-rotate-token"))
+                .filter(|k| {
+                    matches!(
+                        *k,
+                        "api-key-rotate"
+                            | "node-rotate-token"
+                            | "service-account-rotate-secret"
+                            | "developer-app-rotate-secret"
+                    )
+                })
                 .unwrap_or("rotation");
             json!({
                 "status": "completed",

@@ -663,7 +663,10 @@ fn validate_ack_for_kind(kind: &str, ack: &serde_json::Value) -> AppResult<()> {
             require_bool_true("acknowledged")?;
             require_str("api_key_id")?;
         }
-        "api-key-rotate" | "node-rotate-token" => {
+        "api-key-rotate"
+        | "node-rotate-token"
+        | "service-account-rotate-secret"
+        | "developer-app-rotate-secret" => {
             require_exact_keys(&["acknowledged", "resource_id"])?;
             require_bool_true("acknowledged")?;
             require_str("resource_id")?;
@@ -672,6 +675,21 @@ fn validate_ack_for_kind(kind: &str, ack: &serde_json::Value) -> AppResult<()> {
             require_exact_keys(&["acknowledged", "token_id"])?;
             require_bool_true("acknowledged")?;
             require_str("token_id")?;
+        }
+        "service-account-create" => {
+            require_exact_keys(&["acknowledged", "service_account_id"])?;
+            require_bool_true("acknowledged")?;
+            require_str("service_account_id")?;
+        }
+        "developer-app-create" => {
+            require_exact_keys(&["acknowledged", "developer_app_id"])?;
+            require_bool_true("acknowledged")?;
+            require_str("developer_app_id")?;
+        }
+        "mfa-setup" => {
+            require_exact_keys(&["acknowledged", "factor_id"])?;
+            require_bool_true("acknowledged")?;
+            require_str("factor_id")?;
         }
         other => {
             // Unknown kind — don't accept any ack. The pairing record
@@ -1070,6 +1088,71 @@ mod tests {
             )
             .is_ok()
         );
+        // Issue #506 — wizard coverage extended to service-account /
+        // developer-app secret leaks and full MFA enrollment.
+        assert!(
+            validate_ack_for_kind(
+                "service-account-create",
+                &serde_json::json!({"acknowledged": true, "service_account_id": "sa-1"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_ack_for_kind(
+                "service-account-rotate-secret",
+                &serde_json::json!({"acknowledged": true, "resource_id": "sa-1"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_ack_for_kind(
+                "developer-app-create",
+                &serde_json::json!({"acknowledged": true, "developer_app_id": "app-1"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_ack_for_kind(
+                "developer-app-rotate-secret",
+                &serde_json::json!({"acknowledged": true, "resource_id": "app-1"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_ack_for_kind(
+                "mfa-setup",
+                &serde_json::json!({"acknowledged": true, "factor_id": "f-1"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_ack_rejects_secret_smuggle_on_new_kinds() {
+        // Per-kind extra-field rejection: a browser that tries to
+        // smuggle the raw client_secret / TOTP secret / recovery
+        // codes through the ack must be refused at the validator.
+        for (kind, base) in [
+            (
+                "service-account-create",
+                serde_json::json!({"acknowledged": true, "service_account_id": "sa-1"}),
+            ),
+            (
+                "developer-app-create",
+                serde_json::json!({"acknowledged": true, "developer_app_id": "app-1"}),
+            ),
+            (
+                "mfa-setup",
+                serde_json::json!({"acknowledged": true, "factor_id": "f-1"}),
+            ),
+        ] {
+            let mut tampered = base.clone();
+            tampered["client_secret"] = serde_json::json!("leaked");
+            assert!(
+                validate_ack_for_kind(kind, &tampered).is_err(),
+                "kind {kind} should reject smuggled client_secret"
+            );
+        }
     }
 
     #[test]

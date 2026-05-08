@@ -128,6 +128,44 @@ pub struct ApiKeyCreatePrefill {
     pub org_id: Option<String>,
 }
 
+/// CLI-supplied prefill for `nyxid service-account create`. Same
+/// shape principle as `ApiKeyCreatePrefill` — every field surfaces
+/// the corresponding CLI flag so the browser opens pre-populated.
+#[derive(Debug, Clone, Default)]
+pub struct ServiceAccountCreatePrefill {
+    pub name: Option<String>,
+    pub scopes: Option<String>,
+    pub description: Option<String>,
+    pub rate_limit_override: Option<u64>,
+    pub role_ids_csv: Option<String>,
+    pub org_id: Option<String>,
+}
+
+/// CLI-supplied prefill for `nyxid developer-app create`. The wizard
+/// only fires for confidential clients (the public-client path
+/// produces no `client_secret`, so the original terminal output has
+/// nothing to leak). `client_type` is therefore always
+/// "confidential" when this prefill is constructed.
+#[derive(Debug, Clone, Default)]
+pub struct DeveloperAppCreatePrefill {
+    pub name: Option<String>,
+    /// Repeated `--redirect-uri` flags. Required: at least one URI.
+    /// Captured as a list so the wizard can render an editable
+    /// multi-row input pre-populated with whatever the CLI passed.
+    pub redirect_uris: Vec<String>,
+    pub allowed_scopes: Option<String>,
+    pub delegation_scopes: Option<String>,
+    pub broker_capability: Option<bool>,
+    pub org_id: Option<String>,
+}
+
+/// CLI-supplied prefill for `nyxid mfa setup`. There are no CLI
+/// flags today, but the struct is kept for symmetry with the other
+/// flows and to leave room for future fields (e.g. an explicit
+/// factor name) without changing the wizard wire shape.
+#[derive(Debug, Clone, Default)]
+pub struct MfaSetupPrefill {}
+
 /// Typed completion payload posted by the browser when the user clicks
 /// "I have saved this — close" on the DisplayOnce panel. Two guards live
 /// in this struct:
@@ -167,6 +205,37 @@ pub struct NodeRegisterAckPayload {
 pub struct ApiKeyCreateAckPayload {
     pub acknowledged: bool,
     pub api_key_id: String,
+}
+
+/// Typed completion payload for `nyxid service-account create`. The
+/// raw `client_secret` lives only in the browser; `service_account_id`
+/// is the non-secret UUID, safe to print in the terminal summary.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceAccountCreateAckPayload {
+    pub acknowledged: bool,
+    pub service_account_id: String,
+}
+
+/// Typed completion payload for `nyxid developer-app create` for
+/// confidential clients only (public clients never enter the wizard,
+/// so an ack of this shape implies a `client_secret` was minted).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeveloperAppCreateAckPayload {
+    pub acknowledged: bool,
+    pub developer_app_id: String,
+}
+
+/// Typed completion payload for `nyxid mfa setup`. The wizard runs
+/// the full enrollment in the browser (`POST /mfa/setup` →
+/// `POST /mfa/confirm`); `factor_id` identifies the now-verified
+/// `MfaFactor` row and is non-secret.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MfaSetupAckPayload {
+    pub acknowledged: bool,
+    pub factor_id: String,
 }
 
 /// Typed completion payload for the pairing-transport flavor of
@@ -214,11 +283,40 @@ pub enum WizardOutcome {
     /// by the in-wizard SPA, while the pairing ack is the narrow
     /// typed payload above.
     AiKeyPaired(AiKeyPairingAckPayload),
+    /// Shared by all rotation flows: `api-key-rotate`,
+    /// `node-rotate-token`, `service-account-rotate-secret`,
+    /// `developer-app-rotate-secret`. The CLI dispatches the
+    /// per-flow success summary via `FlowKind` (see
+    /// `run_rotation_wizard`); only the resource_id round-trips.
     RotationAcknowledged(RotationAckPayload),
     NodeRegisterAcknowledged(NodeRegisterAckPayload),
     ApiKeyCreateAcknowledged(ApiKeyCreateAckPayload),
+    ServiceAccountCreateAcknowledged(ServiceAccountCreateAckPayload),
+    DeveloperAppCreateAcknowledged(DeveloperAppCreateAckPayload),
+    MfaSetupAcknowledged(MfaSetupAckPayload),
     Cancelled,
     TimedOut,
+}
+
+/// Best-effort fetch of a resource's display name AFTER a successful
+/// create-flow ack. The ack itself only carries the resource UUID
+/// (deny_unknown_fields keeps the payload narrow), but `nyxid …
+/// pairing resume` and the live wizard summaries are friendlier when
+/// they can echo the human-readable name. Falls through silently on
+/// any failure — the caller renders the ID-only line in that case.
+///
+/// `path` is the API path beneath `/api/v1` (e.g.
+/// `/admin/service-accounts/{id}`). `name_field` is the JSON key on
+/// the response that holds the display string — service-account uses
+/// `name`, developer-app uses `client_name`.
+async fn try_fetch_display_name(
+    auth: &crate::cli::AuthArgs,
+    path: &str,
+    name_field: &str,
+) -> Option<String> {
+    let mut api = crate::api::ApiClient::from_auth(auth).ok()?;
+    let v: serde_json::Value = api.get(path).await.ok()?;
+    v.get(name_field).and_then(|n| n.as_str()).map(String::from)
 }
 
 /// Run the named wizard flow. Used by the legacy `service add` entry
@@ -301,7 +399,10 @@ pub async fn run_ai_key_wizard(
         }
         WizardOutcome::RotationAcknowledged(_)
         | WizardOutcome::NodeRegisterAcknowledged(_)
-        | WizardOutcome::ApiKeyCreateAcknowledged(_) => {
+        | WizardOutcome::ApiKeyCreateAcknowledged(_)
+        | WizardOutcome::ServiceAccountCreateAcknowledged(_)
+        | WizardOutcome::DeveloperAppCreateAcknowledged(_)
+        | WizardOutcome::MfaSetupAcknowledged(_) => {
             // Defensive: a DisplayOnce outcome can't reach the ai-key
             // handler (server::handle_complete and the pairing client
             // dispatch by FlowKind / PairingFlow), but if it ever did
@@ -471,7 +572,15 @@ pub async fn run_api_key_create_wizard(
         WizardOutcome::ApiKeyCreateAcknowledged(ack) => {
             attract_terminal("NyxID wizard complete");
             // Field allowlist: only `ack.api_key_id` (validated UUID-ish).
+            // The display name is fetched best-effort via the same
+            // bearer the wizard already used; missing on failure.
+            let display_name =
+                try_fetch_display_name(auth, &format!("/api-keys/{}", ack.api_key_id), "name")
+                    .await;
             eprintln!("✓ API key created. New value was shown in the browser.");
+            if let Some(name) = display_name {
+                eprintln!("  Name: {name}");
+            }
             eprintln!("  ID: {}", ack.api_key_id);
             eprintln!("  Set as environment variable:");
             eprintln!("    export NYXID_API_KEY=\"<value-from-browser>\"");
@@ -573,15 +682,7 @@ async fn run_rotation_wizard(
     rerun_command: &'static str,
 ) -> Result<()> {
     if no_wait {
-        let pairing_flow = match flow_kind {
-            server::FlowKind::ApiKeyRotate => pairing::PairingFlow::ApiKeyRotate,
-            server::FlowKind::NodeRotateToken => pairing::PairingFlow::NodeRotateToken,
-            other => {
-                return Err(anyhow!(
-                    "internal: run_rotation_wizard called with non-rotation FlowKind {other:?}"
-                ));
-            }
-        };
+        let pairing_flow = rotation_pairing_flow(flow_kind)?;
         let prefill_json = pairing::prefill_rotate(&prefill);
         return pairing::run_no_wait_pairing(auth, pairing_flow, prefill_json).await;
     }
@@ -600,19 +701,11 @@ async fn run_rotation_wizard(
         server::run_flow(flow_kind, proxy, server::PrefillData::Rotate(prefill)).await?
     } else {
         // Map the local-server FlowKind to the pairing-transport
-        // PairingFlow. Rotation flows in the local server are the same
-        // two (api-key-rotate, node-rotate-token) that the pairing
-        // transport supports; other kinds aren't reachable from
-        // `run_rotation_wizard`.
-        let pairing_flow = match flow_kind {
-            server::FlowKind::ApiKeyRotate => pairing::PairingFlow::ApiKeyRotate,
-            server::FlowKind::NodeRotateToken => pairing::PairingFlow::NodeRotateToken,
-            other => {
-                return Err(anyhow!(
-                    "internal: run_rotation_wizard called with non-rotation FlowKind {other:?}"
-                ));
-            }
-        };
+        // PairingFlow. All four rotation-shaped flows (api-key-rotate,
+        // node-rotate-token, service-account-rotate-secret,
+        // developer-app-rotate-secret) share `RotatePrefill` +
+        // `RotationAckPayload`; only the kind string differs.
+        let pairing_flow = rotation_pairing_flow(flow_kind)?;
         let prefill_json = pairing::prefill_rotate(&prefill);
         pairing::run_display_once_pairing(auth, pairing_flow, prefill_json).await?
     };
@@ -630,7 +723,10 @@ async fn run_rotation_wizard(
         WizardOutcome::AiKeyCompleted(_)
         | WizardOutcome::AiKeyPaired(_)
         | WizardOutcome::NodeRegisterAcknowledged(_)
-        | WizardOutcome::ApiKeyCreateAcknowledged(_) => {
+        | WizardOutcome::ApiKeyCreateAcknowledged(_)
+        | WizardOutcome::ServiceAccountCreateAcknowledged(_)
+        | WizardOutcome::DeveloperAppCreateAcknowledged(_)
+        | WizardOutcome::MfaSetupAcknowledged(_) => {
             // Defensive: server dispatch shouldn't produce these for a
             // rotation flow.
             Err(anyhow!(
@@ -662,14 +758,340 @@ async fn run_rotation_wizard(
     }
 }
 
+/// Map a rotation `FlowKind` to its pairing-transport sibling.
+/// Centralized so `run_rotation_wizard`'s two branches (no-wait,
+/// local-or-pairing fallback) stay in lockstep when a new rotation-
+/// shaped flow lands.
+fn rotation_pairing_flow(flow_kind: server::FlowKind) -> Result<pairing::PairingFlow> {
+    match flow_kind {
+        server::FlowKind::ApiKeyRotate => Ok(pairing::PairingFlow::ApiKeyRotate),
+        server::FlowKind::NodeRotateToken => Ok(pairing::PairingFlow::NodeRotateToken),
+        server::FlowKind::ServiceAccountRotateSecret => {
+            Ok(pairing::PairingFlow::ServiceAccountRotateSecret)
+        }
+        server::FlowKind::DeveloperAppRotateSecret => {
+            Ok(pairing::PairingFlow::DeveloperAppRotateSecret)
+        }
+        other => Err(anyhow!(
+            "internal: run_rotation_wizard called with non-rotation FlowKind {other:?}"
+        )),
+    }
+}
+
+/// Shared entry point for `nyxid service-account rotate-secret`.
+/// Mirrors `run_api_key_rotate_wizard`. Caller has already resolved
+/// the service-account ID and fetched a display name (best-effort).
+pub async fn run_service_account_rotate_secret_wizard(
+    auth: &crate::cli::AuthArgs,
+    prefill: RotatePrefill,
+    no_wait: bool,
+) -> Result<()> {
+    run_rotation_wizard(
+        auth,
+        server::FlowKind::ServiceAccountRotateSecret,
+        prefill,
+        no_wait,
+        |display, id| {
+            eprintln!(
+                "✓ Service account '{display}' secret rotated. New value was shown in the browser."
+            );
+            eprintln!("  ID: {id}");
+            eprintln!("  All previously-issued tokens for this service account are now revoked.");
+        },
+        "client_secret",
+        "nyxid service-account rotate-secret <id>",
+    )
+    .await
+}
+
+/// Shared entry point for `nyxid developer-app rotate-secret`.
+/// Confidential clients only — the scripted path errors out for
+/// public clients before reaching here.
+pub async fn run_developer_app_rotate_secret_wizard(
+    auth: &crate::cli::AuthArgs,
+    prefill: RotatePrefill,
+    no_wait: bool,
+) -> Result<()> {
+    run_rotation_wizard(
+        auth,
+        server::FlowKind::DeveloperAppRotateSecret,
+        prefill,
+        no_wait,
+        |display, id| {
+            eprintln!(
+                "✓ Developer app '{display}' client_secret rotated. New value was shown in the browser."
+            );
+            eprintln!("  ID: {id}");
+            eprintln!("  Update any deployments using the previous secret.");
+        },
+        "client_secret",
+        "nyxid developer-app rotate-secret <id>",
+    )
+    .await
+}
+
+/// Shared entry point for the `nyxid service-account create` wizard.
+/// All CLI flags are plumbed through `prefill` so values typed on
+/// the command line appear pre-populated in the browser.
+pub async fn run_service_account_create_wizard(
+    auth: &crate::cli::AuthArgs,
+    prefill: ServiceAccountCreatePrefill,
+    no_wait: bool,
+) -> Result<()> {
+    if no_wait {
+        let prefill_json = pairing::prefill_service_account_create(&prefill);
+        return pairing::run_no_wait_pairing(
+            auth,
+            pairing::PairingFlow::ServiceAccountCreate,
+            prefill_json,
+        )
+        .await;
+    }
+
+    let outcome = if is_wizard_eligible() {
+        let base_url = auth.resolved_base_url()?;
+        let access_token = crate::auth::resolve_access_token(auth)?;
+        let base_url_root = base_url.trim_end_matches('/').to_string();
+        let proxy = ProxyContext {
+            base_url_root,
+            access_token,
+            profile: auth.profile.clone(),
+        };
+        server::run_flow(
+            server::FlowKind::ServiceAccountCreate,
+            proxy,
+            server::PrefillData::ServiceAccountCreate(prefill),
+        )
+        .await?
+    } else {
+        let prefill_json = pairing::prefill_service_account_create(&prefill);
+        pairing::run_display_once_pairing(
+            auth,
+            pairing::PairingFlow::ServiceAccountCreate,
+            prefill_json,
+        )
+        .await?
+    };
+
+    match outcome {
+        WizardOutcome::ServiceAccountCreateAcknowledged(ack) => {
+            attract_terminal("NyxID wizard complete");
+            // Field allowlist: only ack.service_account_id (validated
+            // UUID-ish server-side), never the raw client_secret.
+            let display_name = try_fetch_display_name(
+                auth,
+                &format!("/admin/service-accounts/{}", ack.service_account_id),
+                "name",
+            )
+            .await;
+            eprintln!("✓ Service account created. The client_secret was shown in the browser.");
+            if let Some(name) = display_name {
+                eprintln!("  Name: {name}");
+            }
+            eprintln!("  ID: {}", ack.service_account_id);
+            eprintln!("  Save the client_secret from the browser tab — it isn't shown again.");
+            Ok(())
+        }
+        WizardOutcome::Cancelled => {
+            attract_terminal("NyxID wizard cancelled");
+            eprintln!("✗ Service account wizard cancelled.");
+            eprintln!(
+                "  If the new client_secret was shown in the browser, the SA was created on the server."
+            );
+            eprintln!(
+                "  If you saved it, you're done. If not, run `nyxid service-account create` again."
+            );
+            std::process::exit(1);
+        }
+        WizardOutcome::TimedOut => {
+            attract_terminal("NyxID wizard timed out");
+            eprintln!("✗ Service account wizard timed out.");
+            eprintln!(
+                "  If the new client_secret was shown in the browser, the SA was created on the server."
+            );
+            eprintln!(
+                "  If you didn't save it, run `nyxid service-account create` again to issue a fresh secret."
+            );
+            std::process::exit(1);
+        }
+        _ => Err(anyhow!(
+            "internal: service-account-create wizard returned unexpected outcome"
+        )),
+    }
+}
+
+/// Shared entry point for the `nyxid developer-app create` wizard.
+/// Caller MUST gate on `client_type == "confidential"` upstream;
+/// public clients have no `client_secret` to display.
+pub async fn run_developer_app_create_wizard(
+    auth: &crate::cli::AuthArgs,
+    prefill: DeveloperAppCreatePrefill,
+    no_wait: bool,
+) -> Result<()> {
+    if no_wait {
+        let prefill_json = pairing::prefill_developer_app_create(&prefill);
+        return pairing::run_no_wait_pairing(
+            auth,
+            pairing::PairingFlow::DeveloperAppCreate,
+            prefill_json,
+        )
+        .await;
+    }
+
+    let outcome = if is_wizard_eligible() {
+        let base_url = auth.resolved_base_url()?;
+        let access_token = crate::auth::resolve_access_token(auth)?;
+        let base_url_root = base_url.trim_end_matches('/').to_string();
+        let proxy = ProxyContext {
+            base_url_root,
+            access_token,
+            profile: auth.profile.clone(),
+        };
+        server::run_flow(
+            server::FlowKind::DeveloperAppCreate,
+            proxy,
+            server::PrefillData::DeveloperAppCreate(prefill),
+        )
+        .await?
+    } else {
+        let prefill_json = pairing::prefill_developer_app_create(&prefill);
+        pairing::run_display_once_pairing(
+            auth,
+            pairing::PairingFlow::DeveloperAppCreate,
+            prefill_json,
+        )
+        .await?
+    };
+
+    match outcome {
+        WizardOutcome::DeveloperAppCreateAcknowledged(ack) => {
+            attract_terminal("NyxID wizard complete");
+            // Backend uses `client_name`, not `name`, on this response.
+            let display_name = try_fetch_display_name(
+                auth,
+                &format!("/developer/oauth-clients/{}", ack.developer_app_id),
+                "client_name",
+            )
+            .await;
+            eprintln!(
+                "✓ Developer app created. The confidential client_secret was shown in the browser."
+            );
+            if let Some(name) = display_name {
+                eprintln!("  Name: {name}");
+            }
+            eprintln!("  ID: {}", ack.developer_app_id);
+            eprintln!("  Save the client_secret from the browser tab — it isn't shown again.");
+            Ok(())
+        }
+        WizardOutcome::Cancelled => {
+            attract_terminal("NyxID wizard cancelled");
+            eprintln!("✗ Developer app wizard cancelled.");
+            eprintln!(
+                "  If the new client_secret was shown in the browser, the app was created on the server."
+            );
+            eprintln!(
+                "  If you saved it, you're done. If not, run `nyxid developer-app create` again."
+            );
+            std::process::exit(1);
+        }
+        WizardOutcome::TimedOut => {
+            attract_terminal("NyxID wizard timed out");
+            eprintln!("✗ Developer app wizard timed out.");
+            eprintln!(
+                "  If the new client_secret was shown in the browser, the app was created on the server."
+            );
+            eprintln!(
+                "  If you didn't save it, run `nyxid developer-app create` again to issue a fresh secret."
+            );
+            std::process::exit(1);
+        }
+        _ => Err(anyhow!(
+            "internal: developer-app-create wizard returned unexpected outcome"
+        )),
+    }
+}
+
+/// Shared entry point for the `nyxid mfa setup` wizard. The browser
+/// runs both halves of TOTP enrollment (`POST /mfa/setup` to mint the
+/// secret and render a QR, then `POST /mfa/confirm` to verify the
+/// user-entered TOTP and reveal the recovery codes). The CLI never
+/// sees the secret, the QR URL, or the recovery codes — only the
+/// non-secret `factor_id` echo.
+pub async fn run_mfa_setup_wizard(
+    auth: &crate::cli::AuthArgs,
+    prefill: MfaSetupPrefill,
+    no_wait: bool,
+) -> Result<()> {
+    if no_wait {
+        let prefill_json = pairing::prefill_mfa_setup(&prefill);
+        return pairing::run_no_wait_pairing(auth, pairing::PairingFlow::MfaSetup, prefill_json)
+            .await;
+    }
+
+    let outcome = if is_wizard_eligible() {
+        let base_url = auth.resolved_base_url()?;
+        let access_token = crate::auth::resolve_access_token(auth)?;
+        let base_url_root = base_url.trim_end_matches('/').to_string();
+        let proxy = ProxyContext {
+            base_url_root,
+            access_token,
+            profile: auth.profile.clone(),
+        };
+        server::run_flow(
+            server::FlowKind::MfaSetup,
+            proxy,
+            server::PrefillData::MfaSetup(prefill),
+        )
+        .await?
+    } else {
+        let prefill_json = pairing::prefill_mfa_setup(&prefill);
+        pairing::run_display_once_pairing(auth, pairing::PairingFlow::MfaSetup, prefill_json)
+            .await?
+    };
+
+    match outcome {
+        WizardOutcome::MfaSetupAcknowledged(ack) => {
+            attract_terminal("NyxID wizard complete");
+            eprintln!("✓ MFA enrollment complete. Recovery codes were shown in the browser.");
+            eprintln!("  Factor ID: {}", ack.factor_id);
+            eprintln!("  Save the recovery codes from the browser tab — they aren't shown again.");
+            Ok(())
+        }
+        WizardOutcome::Cancelled => {
+            attract_terminal("NyxID wizard cancelled");
+            eprintln!("✗ MFA wizard cancelled.");
+            eprintln!("  If the browser showed recovery codes, MFA was enabled on the server. Run");
+            eprintln!("  `nyxid mfa status` to confirm; if you didn't save the codes, disable");
+            eprintln!("  and re-run setup to mint fresh ones.");
+            std::process::exit(1);
+        }
+        WizardOutcome::TimedOut => {
+            attract_terminal("NyxID wizard timed out");
+            eprintln!("✗ MFA wizard timed out.");
+            eprintln!("  If the browser showed recovery codes, MFA was enabled on the server. Run");
+            eprintln!("  `nyxid mfa status` to confirm.");
+            std::process::exit(1);
+        }
+        _ => Err(anyhow!(
+            "internal: mfa-setup wizard returned unexpected outcome"
+        )),
+    }
+}
+
 /// Print a terminal summary for a pairing picked up via
 /// `nyxid pairing resume`. The CLI doesn't have the rich CLI-side
 /// context the original command had (resolved id-or-name, display
-/// labels), so the output is slightly terser than the `run_*_wizard`
-/// success summaries — but it uses the same field-allowlist
-/// discipline (only non-secret identifiers from the ack, no
-/// `format!("{ack:?}")`).
-pub fn print_resume_summary(outcome: &WizardOutcome, base_url: &str) {
+/// labels), so for create-flow outcomes we do a best-effort fetch
+/// of the resource's name via `try_fetch_display_name`. Falls
+/// through silently on any failure — the ID-only line is always
+/// rendered. Field-allowlist discipline preserved: only non-secret
+/// identifiers from the ack and the fetched name are printed; never
+/// `format!("{ack:?}")`.
+pub async fn print_resume_summary(
+    auth: &crate::cli::AuthArgs,
+    outcome: &WizardOutcome,
+    base_url: &str,
+) {
     match outcome {
         WizardOutcome::AiKeyPaired(ack) => {
             let pseudo = serde_json::json!({
@@ -679,10 +1101,51 @@ pub fn print_resume_summary(outcome: &WizardOutcome, base_url: &str) {
             print_wizard_summary(&pseudo, base_url);
         }
         WizardOutcome::ApiKeyCreateAcknowledged(ack) => {
+            let display_name =
+                try_fetch_display_name(auth, &format!("/api-keys/{}", ack.api_key_id), "name")
+                    .await;
             eprintln!("✓ API key created. New value was shown in the browser.");
+            if let Some(name) = display_name {
+                eprintln!("  Name: {name}");
+            }
             eprintln!("  ID: {}", ack.api_key_id);
             eprintln!("  Set as environment variable:");
             eprintln!("    export NYXID_API_KEY=\"<value-from-browser>\"");
+        }
+        WizardOutcome::ServiceAccountCreateAcknowledged(ack) => {
+            let display_name = try_fetch_display_name(
+                auth,
+                &format!("/admin/service-accounts/{}", ack.service_account_id),
+                "name",
+            )
+            .await;
+            eprintln!("✓ Service account created. The client_secret was shown in the browser.");
+            if let Some(name) = display_name {
+                eprintln!("  Name: {name}");
+            }
+            eprintln!("  ID: {}", ack.service_account_id);
+            eprintln!("  Save the client_secret from the browser tab — it isn't shown again.");
+        }
+        WizardOutcome::DeveloperAppCreateAcknowledged(ack) => {
+            let display_name = try_fetch_display_name(
+                auth,
+                &format!("/developer/oauth-clients/{}", ack.developer_app_id),
+                "client_name",
+            )
+            .await;
+            eprintln!(
+                "✓ Developer app created. The confidential client_secret was shown in the browser."
+            );
+            if let Some(name) = display_name {
+                eprintln!("  Name: {name}");
+            }
+            eprintln!("  ID: {}", ack.developer_app_id);
+            eprintln!("  Save the client_secret from the browser tab — it isn't shown again.");
+        }
+        WizardOutcome::MfaSetupAcknowledged(ack) => {
+            eprintln!("✓ MFA enrollment complete. Recovery codes were shown in the browser.");
+            eprintln!("  Factor ID: {}", ack.factor_id);
+            eprintln!("  Save the recovery codes from the browser tab — they aren't shown again.");
         }
         WizardOutcome::NodeRegisterAcknowledged(ack) => {
             eprintln!("✓ Registration token generated. New value was shown in the browser.");

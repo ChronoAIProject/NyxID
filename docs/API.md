@@ -4153,9 +4153,9 @@ curl https://auth.example.com/.well-known/jwks.json
 
 ### MFA (Multi-Factor Authentication)
 
-#### POST /api/v1/mfa/setup
+#### POST /api/v1/auth/mfa/setup
 
-Begin TOTP MFA enrollment. Returns a TOTP secret and a QR code provisioning URL.
+Begin TOTP MFA enrollment. Returns a TOTP secret and a QR code provisioning URL. If a previous unverified TOTP factor exists from an abandoned enrollment attempt, it is soft-deactivated and a fresh secret is minted (idempotent re-enrollment). A *verified* factor still 409s — disable MFA first via `POST /api/v1/auth/mfa/disable`.
 
 **Auth:** Required
 
@@ -4163,23 +4163,27 @@ Begin TOTP MFA enrollment. Returns a TOTP secret and a QR code provisioning URL.
 
 ```json
 {
+  "factor_id": "<uuid>",
   "secret": "JBSWY3DPEHPK3PXP",
-  "qr_url": "otpauth://totp/NyxID:user@example.com?secret=JBSWY3DPEHPK3PXP&issuer=NyxID"
+  "qr_code_url": "otpauth://totp/NyxID:user@example.com?secret=JBSWY3DPEHPK3PXP&issuer=NyxID"
 }
 ```
+
+**Errors:**
+- `1004 conflict` -- A *verified* TOTP factor already exists; disable it first
 
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3001/api/v1/mfa/setup \
+curl -X POST http://localhost:3001/api/v1/auth/mfa/setup \
   -H "Authorization: Bearer <access_token>"
 ```
 
 ---
 
-#### POST /api/v1/mfa/verify-setup
+#### POST /api/v1/auth/mfa/confirm
 
-Complete MFA enrollment by verifying a TOTP code. On success, MFA is enabled on the user account and recovery codes are returned.
+Complete MFA enrollment by verifying a TOTP code. On success, MFA is enabled on the user account and recovery codes are returned. (Pre-#506 this endpoint was incorrectly documented as `/api/v1/mfa/verify-setup` which never existed; the canonical route is `/api/v1/auth/mfa/confirm`.)
 
 **Auth:** Required
 
@@ -4215,7 +4219,7 @@ Complete MFA enrollment by verifying a TOTP code. On success, MFA is enabled on 
 **Example:**
 
 ```bash
-curl -X POST http://localhost:3001/api/v1/mfa/verify-setup \
+curl -X POST http://localhost:3001/api/v1/auth/mfa/confirm \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '{"code": "123456"}'

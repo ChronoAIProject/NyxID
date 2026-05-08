@@ -24,6 +24,11 @@ export type WizardFlow =
   | "api-key-rotate"
   | "node-register-token"
   | "node-rotate-token"
+  | "service-account-create"
+  | "service-account-rotate-secret"
+  | "developer-app-create"
+  | "developer-app-rotate-secret"
+  | "mfa-setup"
 
 export type WizardPhase =
   | "enter-code"
@@ -54,6 +59,17 @@ const TOTALS: Record<WizardFlow, number> = {
   "api-key-rotate": 2,
   "node-register-token": 2,
   "node-rotate-token": 2,
+  // Issue #506 — service-account / developer-app create are 3-step
+  // (configure → save → done) like api-key create. Rotation flows
+  // are 2-step (confirm → save). MFA enrollment has an extra
+  // verify-code step inside the confirm panel but it's purely
+  // internal to that panel; the outer step counter still treats
+  // it as 2 (configure → save the recovery codes).
+  "service-account-create": 3,
+  "service-account-rotate-secret": 2,
+  "developer-app-create": 3,
+  "developer-app-rotate-secret": 2,
+  "mfa-setup": 2,
 }
 
 /**
@@ -129,6 +145,31 @@ export function resolveStep(
       if (phase === "claimed") return { current: 1, total, label: "confirm rotate" }
       if (phase === "notifying-cli") return { current: 2, total, label: "notifying CLI" }
       if (phase === "secret") return { current: 2, total, label: "save the value" }
+      return { current: 2, total, label: "done" }
+    case "service-account-create":
+      if (phase === "claimed") return { current: 2, total, label: "configure account" }
+      if (phase === "notifying-cli") return { current: 3, total, label: "notifying CLI" }
+      if (phase === "secret") return { current: 3, total, label: "save the secret" }
+      return { current: 3, total, label: "done" }
+    case "service-account-rotate-secret":
+      if (phase === "claimed") return { current: 1, total, label: "confirm rotate" }
+      if (phase === "notifying-cli") return { current: 2, total, label: "notifying CLI" }
+      if (phase === "secret") return { current: 2, total, label: "save the secret" }
+      return { current: 2, total, label: "done" }
+    case "developer-app-create":
+      if (phase === "claimed") return { current: 2, total, label: "configure app" }
+      if (phase === "notifying-cli") return { current: 3, total, label: "notifying CLI" }
+      if (phase === "secret") return { current: 3, total, label: "save the secret" }
+      return { current: 3, total, label: "done" }
+    case "developer-app-rotate-secret":
+      if (phase === "claimed") return { current: 1, total, label: "confirm rotate" }
+      if (phase === "notifying-cli") return { current: 2, total, label: "notifying CLI" }
+      if (phase === "secret") return { current: 2, total, label: "save the secret" }
+      return { current: 2, total, label: "done" }
+    case "mfa-setup":
+      if (phase === "claimed") return { current: 1, total, label: "scan and verify" }
+      if (phase === "notifying-cli") return { current: 2, total, label: "notifying CLI" }
+      if (phase === "secret") return { current: 2, total, label: "save recovery codes" }
       return { current: 2, total, label: "done" }
   }
 }

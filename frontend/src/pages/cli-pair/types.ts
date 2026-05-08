@@ -15,7 +15,12 @@ export type PairingKind =
   | "api-key-create"
   | "api-key-rotate"
   | "node-register-token"
-  | "node-rotate-token";
+  | "node-rotate-token"
+  | "service-account-create"
+  | "service-account-rotate-secret"
+  | "developer-app-create"
+  | "developer-app-rotate-secret"
+  | "mfa-setup";
 
 export function isPairingKind(v: unknown): v is PairingKind {
   return (
@@ -23,7 +28,12 @@ export function isPairingKind(v: unknown): v is PairingKind {
     v === "api-key-create" ||
     v === "api-key-rotate" ||
     v === "node-register-token" ||
-    v === "node-rotate-token"
+    v === "node-rotate-token" ||
+    v === "service-account-create" ||
+    v === "service-account-rotate-secret" ||
+    v === "developer-app-create" ||
+    v === "developer-app-rotate-secret" ||
+    v === "mfa-setup"
   );
 }
 
@@ -74,6 +84,21 @@ export interface NodeRegisterAck {
   readonly token_id: string;
 }
 
+export interface ServiceAccountCreateAck {
+  readonly acknowledged: true;
+  readonly service_account_id: string;
+}
+
+export interface DeveloperAppCreateAck {
+  readonly acknowledged: true;
+  readonly developer_app_id: string;
+}
+
+export interface MfaSetupAck {
+  readonly acknowledged: true;
+  readonly factor_id: string;
+}
+
 /**
  * Ack for the ai-key (service-add) pairing flow. Unlike the
  * DisplayOnce acks this carries a handful of non-secret identifiers
@@ -97,7 +122,10 @@ export type AckPayload =
   | ApiKeyCreateAck
   | RotationAck
   | NodeRegisterAck
-  | AiKeyAck;
+  | AiKeyAck
+  | ServiceAccountCreateAck
+  | DeveloperAppCreateAck
+  | MfaSetupAck;
 
 /**
  * Per-kind prefill shapes — only the fields the CLI sends today.
@@ -156,3 +184,37 @@ export interface AiKeyPrefill {
    *  Defaults are derived per auth_method by the SPA when unset. */
   readonly auth_key_name?: string;
 }
+
+/** Prefill for `nyxid service-account create`. Each field maps to
+ *  the corresponding CLI flag; only `name` and `scopes` are
+ *  required upstream — the SPA still renders editable inputs so
+ *  org admins running with no flags can fill them in-browser. */
+export interface ServiceAccountCreatePrefill {
+  readonly name?: string;
+  readonly scopes?: string;
+  readonly description?: string;
+  /** Admin-only field (rate-limit override). Plumbed through as a
+   *  number so the SPA can render a numeric input pre-populated. */
+  readonly rate_limit_override?: number;
+  readonly role_ids_csv?: string;
+  readonly org_id?: string;
+}
+
+/** Prefill for `nyxid developer-app create`. The wizard only
+ *  fires for confidential clients (public clients have no secret
+ *  to leak), so `client_type` is implicitly "confidential" here
+ *  and not part of the prefill. */
+export interface DeveloperAppCreatePrefill {
+  readonly name?: string;
+  readonly redirect_uris?: readonly string[];
+  readonly allowed_scopes?: string;
+  readonly delegation_scopes?: string;
+  readonly broker_capability?: boolean;
+  readonly org_id?: string;
+}
+
+/** Prefill for `nyxid mfa setup`. Empty today; reserved for
+ *  future fields (e.g. an explicit factor name). Encoded as
+ *  `Record<string, never>` (rather than an empty interface) so
+ *  TS doesn't widen it to "any object". */
+export type MfaSetupPrefill = Record<string, never>;

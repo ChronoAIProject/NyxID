@@ -448,12 +448,28 @@ pub enum ProfileCommands {
 
 #[derive(Subcommand)]
 pub enum MfaCommands {
-    /// Set up MFA (displays QR code URL and secret)
+    /// Set up MFA — opens the wizard in your browser to render the QR code,
+    /// collect the TOTP verification code, and display recovery codes once.
     Setup {
+        /// Skip the browser wizard and use the scripted enrollment path.
+        /// Prints the TOTP secret + provisioning URL to the terminal so you
+        /// can hand them to a separate authenticator and finish via
+        /// `nyxid mfa verify`. Equivalent to setting `NYXID_NO_WIZARD=1`.
+        #[arg(long, alias = "no-wizard")]
+        terminal: bool,
+        /// Remote-pair mode: create a pairing, print the URL + code,
+        /// and EXIT without polling. Pick up the result later with
+        /// `nyxid pairing resume <PAIRING_ID>`. Useful for AI agents
+        /// that can't hold a long-running subprocess.
+        #[arg(long)]
+        no_wait: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Verify MFA setup with a TOTP code
+    /// Verify a pending MFA setup with a TOTP code (scripted path).
+    /// Prefer `nyxid mfa setup` — the wizard handles both halves of
+    /// enrollment in one browser tab and never prints recovery codes
+    /// to the terminal.
     Verify {
         /// TOTP code from authenticator app
         #[arg(long)]
@@ -2610,6 +2626,17 @@ pub enum ServiceAccountCommands {
             help = "Organization to act on (UUID, slug, or display name)"
         )]
         org: Option<String>,
+        /// Skip the browser wizard and print the new client_secret to the terminal.
+        /// The new secret is shown ONCE — copy it before scrolling away.
+        /// Equivalent to setting `NYXID_NO_WIZARD=1` for a single invocation.
+        #[arg(long, alias = "no-wizard")]
+        terminal: bool,
+        /// Remote-pair mode: create a pairing, print the URL + code,
+        /// and EXIT without polling. Pick up the result later with
+        /// `nyxid pairing resume <PAIRING_ID>`. Useful for AI agents
+        /// that can't hold a long-running subprocess.
+        #[arg(long)]
+        no_wait: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -2674,6 +2701,16 @@ pub enum ServiceAccountCommands {
     RotateSecret {
         /// Service account ID
         id: String,
+        /// Skip the browser wizard and print the new client_secret to the terminal.
+        /// The new secret is shown ONCE — copy it before scrolling away.
+        /// Equivalent to setting `NYXID_NO_WIZARD=1` for a single invocation.
+        #[arg(long, alias = "no-wizard")]
+        terminal: bool,
+        /// Remote-pair mode: create a pairing, print the URL + code,
+        /// and EXIT without polling. Resume with `nyxid pairing resume
+        /// <PAIRING_ID>` once the browser wizard is done.
+        #[arg(long)]
+        no_wait: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -2718,6 +2755,16 @@ pub enum DeveloperAppCommands {
             help = "Organization to act on (UUID, slug, or display name)"
         )]
         org: Option<String>,
+        /// Skip the browser wizard and print the new client_secret to the terminal.
+        /// Only relevant for `--client-type confidential`; public clients have no
+        /// secret and never enter the wizard. Equivalent to `NYXID_NO_WIZARD=1`.
+        #[arg(long, alias = "no-wizard")]
+        terminal: bool,
+        /// Remote-pair mode: create a pairing, print the URL + code,
+        /// and EXIT without polling. Resume with `nyxid pairing resume
+        /// <PAIRING_ID>` once the browser wizard is done.
+        #[arg(long)]
+        no_wait: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -2774,6 +2821,16 @@ pub enum DeveloperAppCommands {
     RotateSecret {
         /// OAuth client ID
         id: String,
+        /// Skip the browser wizard and print the new client_secret to the terminal.
+        /// The new secret is shown ONCE — copy it before scrolling away.
+        /// Equivalent to setting `NYXID_NO_WIZARD=1` for a single invocation.
+        #[arg(long, alias = "no-wizard")]
+        terminal: bool,
+        /// Remote-pair mode: create a pairing, print the URL + code,
+        /// and EXIT without polling. Resume with `nyxid pairing resume
+        /// <PAIRING_ID>` once the browser wizard is done.
+        #[arg(long)]
+        no_wait: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },

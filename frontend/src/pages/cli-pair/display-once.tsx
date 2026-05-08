@@ -4,4 +4,7 @@
 // preserves the existing `@/pages/cli-pair/display-once` import path for
 // callers that were already using it.
 
-export { DisplayOncePanel } from "@/components/cli-wizard/display-once-panel"
+export {
+  DisplayOncePanel,
+  RecoveryCodesPanel,
+} from "@/components/cli-wizard/display-once-panel"

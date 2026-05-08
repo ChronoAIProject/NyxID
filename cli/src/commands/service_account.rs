@@ -25,6 +25,8 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
             rate_limit_override,
             role_ids,
             org,
+            terminal,
+            no_wait,
             auth,
         } => {
             let mut api = ApiClient::from_auth(&auth)?;
@@ -32,6 +34,28 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
             };
+
+            // Browser-flow gate — see `api_key.rs::Create` for the
+            // full predicate rationale. `--terminal` / `--no-wizard`
+            // / piped output / `NYXID_NO_WIZARD=1` fall through to
+            // the byte-identical scripted path below; `--no-wait`
+            // forces the resumable pairing variant.
+            let interactive_output = matches!(auth.output, OutputFormat::Table);
+            let wizard_eligible = !terminal
+                && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
+
+            if wizard_eligible {
+                let prefill = crate::wizard::ServiceAccountCreatePrefill {
+                    name: Some(name),
+                    scopes: Some(scopes),
+                    description,
+                    rate_limit_override,
+                    role_ids_csv: role_ids,
+                    org_id: org,
+                };
+                return crate::wizard::run_service_account_create_wizard(&auth, prefill, no_wait)
+                    .await;
+            }
 
             let mut body = Map::new();
             body.insert("name".to_string(), Value::String(name));
@@ -244,7 +268,41 @@ pub async fn run(command: ServiceAccountCommands) -> Result<()> {
             Ok(())
         }
 
-        ServiceAccountCommands::RotateSecret { id, auth } => {
+        ServiceAccountCommands::RotateSecret {
+            id,
+            terminal,
+            no_wait,
+            auth,
+        } => {
+            let interactive_output = matches!(auth.output, OutputFormat::Table);
+            let wizard_eligible = !terminal
+                && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
+
+            if wizard_eligible {
+                let mut api = ApiClient::from_auth(&auth)?;
+                // Best-effort fetch of the display name for the
+                // confirm panel. Fallback to id if the fetch fails —
+                // non-fatal; the confirm panel just shows the raw id.
+                let display_name = match api
+                    .get::<Value>(&format!("/admin/service-accounts/{id}"))
+                    .await
+                {
+                    Ok(sa) => sa["name"]
+                        .as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| id.clone()),
+                    Err(_) => id.clone(),
+                };
+                let prefill = crate::wizard::RotatePrefill {
+                    resource_id: id,
+                    display_name,
+                };
+                return crate::wizard::run_service_account_rotate_secret_wizard(
+                    &auth, prefill, no_wait,
+                )
+                .await;
+            }
+
             let mut api = ApiClient::from_auth(&auth)?;
             let result: Value = api
                 .post(

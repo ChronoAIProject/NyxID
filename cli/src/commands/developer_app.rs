@@ -26,6 +26,8 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             delegation_scopes,
             broker_capability,
             org,
+            terminal,
+            no_wait,
             auth,
         } => {
             if redirect_uris.is_empty() {
@@ -37,6 +39,31 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
             };
+
+            // Browser-flow gate: confidential clients mint a
+            // `client_secret` (the leak surface). Public clients
+            // never produce a secret, so we skip the wizard for
+            // them and let the existing terminal output stand —
+            // there is nothing to leak. Defaults to "public" when
+            // unspecified, mirroring the backend default.
+            let resolved_client_type = client_type.clone().unwrap_or_else(|| "public".to_string());
+            let interactive_output = matches!(auth.output, OutputFormat::Table);
+            let wizard_eligible = resolved_client_type == "confidential"
+                && !terminal
+                && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
+
+            if wizard_eligible {
+                let prefill = crate::wizard::DeveloperAppCreatePrefill {
+                    name: Some(name),
+                    redirect_uris: redirect_uris.clone(),
+                    allowed_scopes,
+                    delegation_scopes,
+                    broker_capability,
+                    org_id: org,
+                };
+                return crate::wizard::run_developer_app_create_wizard(&auth, prefill, no_wait)
+                    .await;
+            }
 
             let mut body = Map::new();
             body.insert("name".to_string(), Value::String(name));
@@ -271,7 +298,41 @@ pub async fn run(command: DeveloperAppCommands) -> Result<()> {
             Ok(())
         }
 
-        DeveloperAppCommands::RotateSecret { id, auth } => {
+        DeveloperAppCommands::RotateSecret {
+            id,
+            terminal,
+            no_wait,
+            auth,
+        } => {
+            let interactive_output = matches!(auth.output, OutputFormat::Table);
+            let wizard_eligible = !terminal
+                && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
+
+            if wizard_eligible {
+                let mut api = ApiClient::from_auth(&auth)?;
+                // Best-effort fetch of the display name (client_name)
+                // for the confirm panel. Fallback to id if the fetch
+                // fails — non-fatal.
+                let display_name = match api
+                    .get::<Value>(&format!("/developer/oauth-clients/{id}"))
+                    .await
+                {
+                    Ok(c) => c["client_name"]
+                        .as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| id.clone()),
+                    Err(_) => id.clone(),
+                };
+                let prefill = crate::wizard::RotatePrefill {
+                    resource_id: id,
+                    display_name,
+                };
+                return crate::wizard::run_developer_app_rotate_secret_wizard(
+                    &auth, prefill, no_wait,
+                )
+                .await;
+            }
+
             let mut api = ApiClient::from_auth(&auth)?;
             let result: Value = api
                 .post(

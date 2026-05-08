@@ -31,13 +31,17 @@ use tokio::{
 };
 
 use super::{
-    ApiKeyCreateAckPayload, ApiKeyCreatePrefill, NodeRegisterAckPayload, NodeRegisterPrefill,
-    ProxyContext, RotatePrefill, RotationAckPayload, WizardOutcome, WizardPrefill,
+    ApiKeyCreateAckPayload, ApiKeyCreatePrefill, DeveloperAppCreateAckPayload,
+    DeveloperAppCreatePrefill, MfaSetupAckPayload, MfaSetupPrefill, NodeRegisterAckPayload,
+    NodeRegisterPrefill, ProxyContext, RotatePrefill, RotationAckPayload,
+    ServiceAccountCreateAckPayload, ServiceAccountCreatePrefill, WizardOutcome, WizardPrefill,
 };
 
 /// Which flow is running. Each flow gets its own allowlist and default
 /// page body. v2 shipped only `AiKey`; v3 added the two rotation
-/// (DisplayOnce-shaped) flows; v3.1 adds the create-side pair.
+/// (DisplayOnce-shaped) flows; v3.1 added the create-side pair; v3.2
+/// extends DisplayOnce coverage to service-account / developer-app
+/// secret leaks and full MFA enrollment (issue #506).
 #[derive(Debug, Clone, Copy)]
 pub enum FlowKind {
     AiKey,
@@ -45,6 +49,11 @@ pub enum FlowKind {
     NodeRotateToken,
     NodeRegisterToken,
     ApiKeyCreate,
+    ServiceAccountCreate,
+    ServiceAccountRotateSecret,
+    DeveloperAppCreate,
+    DeveloperAppRotateSecret,
+    MfaSetup,
 }
 
 impl FlowKind {
@@ -54,7 +63,9 @@ impl FlowKind {
     /// the CLI killing itself mid-save. (Previously named
     /// `is_rotation`; v3.1 generalized since `register-token` and
     /// `api-key create` have the same alt-tab risk despite not being
-    /// rotations.)
+    /// rotations. v3.2 covers the service-account, developer-app, and
+    /// MFA flows — same alt-tab risk applies to client_secret and
+    /// recovery codes.)
     fn is_display_once(&self) -> bool {
         matches!(
             self,
@@ -62,6 +73,11 @@ impl FlowKind {
                 | FlowKind::NodeRotateToken
                 | FlowKind::NodeRegisterToken
                 | FlowKind::ApiKeyCreate
+                | FlowKind::ServiceAccountCreate
+                | FlowKind::ServiceAccountRotateSecret
+                | FlowKind::DeveloperAppCreate
+                | FlowKind::DeveloperAppRotateSecret
+                | FlowKind::MfaSetup
         )
     }
 
@@ -74,6 +90,11 @@ impl FlowKind {
             FlowKind::NodeRotateToken => "node-rotate-token",
             FlowKind::NodeRegisterToken => "node-register-token",
             FlowKind::ApiKeyCreate => "api-key-create",
+            FlowKind::ServiceAccountCreate => "service-account-create",
+            FlowKind::ServiceAccountRotateSecret => "service-account-rotate-secret",
+            FlowKind::DeveloperAppCreate => "developer-app-create",
+            FlowKind::DeveloperAppRotateSecret => "developer-app-rotate-secret",
+            FlowKind::MfaSetup => "mfa-setup",
         }
     }
 }
@@ -89,6 +110,9 @@ pub enum PrefillData {
     Rotate(RotatePrefill),
     NodeRegister(NodeRegisterPrefill),
     ApiKeyCreate(ApiKeyCreatePrefill),
+    ServiceAccountCreate(ServiceAccountCreatePrefill),
+    DeveloperAppCreate(DeveloperAppCreatePrefill),
+    MfaSetup(MfaSetupPrefill),
 }
 
 /// Static assets live under `src/wizard/assets/` and are baked into the binary.
@@ -379,6 +403,111 @@ fn allowlist_for(kind: FlowKind) -> Vec<ProxyRoute> {
                     "callback_url",
                     "target_org_id",
                 ],
+            },
+        ],
+        // Service account creation (v3.2, issue #506). Body allowlist
+        // mirrors `CreateServiceAccountRequest` in
+        // `backend/src/handlers/admin_service_accounts.rs`. `/orgs`
+        // GET feeds the owner picker; service-account create is
+        // admin-only at the backend so the wizard renders the form
+        // at all only for users who pass that gate.
+        FlowKind::ServiceAccountCreate => vec![
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/orgs",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/admin/service-accounts",
+                body_fields: &[
+                    "name",
+                    "allowed_scopes",
+                    "description",
+                    "rate_limit_override",
+                    "role_ids",
+                    "target_org_id",
+                ],
+            },
+        ],
+        // Service account secret rotation. Two routes: a sanity GET
+        // for the confirm-panel display name + the rotate-secret POST.
+        // Empty body — the rotate handler takes no JSON.
+        FlowKind::ServiceAccountRotateSecret => vec![
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/admin/service-accounts/:sa_id",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/admin/service-accounts/:sa_id/rotate-secret",
+                body_fields: &[],
+            },
+        ],
+        // Developer app creation (confidential clients only — public
+        // clients have no client_secret and never enter the wizard).
+        // Body allowlist matches `CreateDeveloperOAuthClientRequest`.
+        // `client_type` is kept on the allowlist so the panel can
+        // assert "confidential", but `enforce_proxy_body_constraints`
+        // also rejects any value other than "confidential" for this
+        // kind — closing the defense-in-depth gap where a tampered
+        // page could downgrade to "public" and silently dodge
+        // DisplayOnce while still landing the create. The backend's
+        // default for missing `client_type` is "public", so we must
+        // send the field rather than omitting it.
+        FlowKind::DeveloperAppCreate => vec![
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/orgs",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/developer/oauth-clients",
+                body_fields: &[
+                    "name",
+                    "redirect_uris",
+                    "client_type",
+                    "allowed_scopes",
+                    "delegation_scopes",
+                    "broker_capability_enabled",
+                    "target_org_id",
+                ],
+            },
+        ],
+        // Developer app secret rotation.
+        FlowKind::DeveloperAppRotateSecret => vec![
+            ProxyRoute {
+                method: Method::GET,
+                path_template: "/api/v1/developer/oauth-clients/:client_id",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/developer/oauth-clients/:client_id/rotate-secret",
+                body_fields: &[],
+            },
+        ],
+        // MFA TOTP enrollment. The wizard runs both halves of the
+        // flow in one tab: `/auth/mfa/setup` mints the secret + QR
+        // (which never leave the browser), then `/auth/mfa/confirm`
+        // takes the user-typed TOTP code and reveals the recovery
+        // codes for DisplayOnce. The CLI proxies both calls; only
+        // the non-secret factor_id round-trips back via the ack.
+        // The MFA routes are nested under `/auth` in
+        // `backend/src/routes.rs` (see line 63: `.nest("/mfa",
+        // mfa_routes)` inside `auth_routes`), hence the path prefix.
+        FlowKind::MfaSetup => vec![
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/auth/mfa/setup",
+                body_fields: &[],
+            },
+            ProxyRoute {
+                method: Method::POST,
+                path_template: "/api/v1/auth/mfa/confirm",
+                body_fields: &["code"],
             },
         ],
     }
@@ -748,7 +877,10 @@ async fn handle_complete(
             };
             WizardOutcome::AiKeyCompleted(value)
         }
-        FlowKind::ApiKeyRotate | FlowKind::NodeRotateToken => {
+        FlowKind::ApiKeyRotate
+        | FlowKind::NodeRotateToken
+        | FlowKind::ServiceAccountRotateSecret
+        | FlowKind::DeveloperAppRotateSecret => {
             let payload: RotationAckPayload = match serde_json::from_slice(&body) {
                 Ok(p) => p,
                 Err(e) => {
@@ -842,6 +974,85 @@ async fn handle_complete(
                     .into_response();
             }
             WizardOutcome::ApiKeyCreateAcknowledged(payload)
+        }
+        FlowKind::ServiceAccountCreate => {
+            let payload: ServiceAccountCreateAckPayload = match serde_json::from_slice(&body) {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("complete: invalid service-account-create ack payload: {e}"),
+                    )
+                        .into_response();
+                }
+            };
+            if payload.service_account_id.is_empty()
+                || payload.service_account_id.len() > 64
+                || !is_uuid_like(&payload.service_account_id)
+            {
+                return (StatusCode::BAD_REQUEST, "complete: bad service_account_id")
+                    .into_response();
+            }
+            if !payload.acknowledged {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "complete: acknowledged must be true",
+                )
+                    .into_response();
+            }
+            WizardOutcome::ServiceAccountCreateAcknowledged(payload)
+        }
+        FlowKind::DeveloperAppCreate => {
+            let payload: DeveloperAppCreateAckPayload = match serde_json::from_slice(&body) {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("complete: invalid developer-app-create ack payload: {e}"),
+                    )
+                        .into_response();
+                }
+            };
+            if payload.developer_app_id.is_empty()
+                || payload.developer_app_id.len() > 64
+                || !is_uuid_like(&payload.developer_app_id)
+            {
+                return (StatusCode::BAD_REQUEST, "complete: bad developer_app_id").into_response();
+            }
+            if !payload.acknowledged {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "complete: acknowledged must be true",
+                )
+                    .into_response();
+            }
+            WizardOutcome::DeveloperAppCreateAcknowledged(payload)
+        }
+        FlowKind::MfaSetup => {
+            let payload: MfaSetupAckPayload = match serde_json::from_slice(&body) {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("complete: invalid mfa-setup ack payload: {e}"),
+                    )
+                        .into_response();
+                }
+            };
+            if payload.factor_id.is_empty()
+                || payload.factor_id.len() > 64
+                || !is_uuid_like(&payload.factor_id)
+            {
+                return (StatusCode::BAD_REQUEST, "complete: bad factor_id").into_response();
+            }
+            if !payload.acknowledged {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "complete: acknowledged must be true",
+                )
+                    .into_response();
+            }
+            WizardOutcome::MfaSetupAcknowledged(payload)
         }
     };
     signal_and_shutdown(state, outcome).await;
@@ -964,6 +1175,49 @@ pub(crate) fn classify_keys_response(
     KeysResponseSignal::None
 }
 
+/// Per-flow VALUE constraints applied to a proxy request body AFTER
+/// the field-presence allowlist accepts it. Returns `Some(Response)`
+/// when the body fails a flow-specific value pin (caller forwards
+/// the rejection upstream) or `None` when the body passes.
+///
+/// Currently the only constraint pins
+/// `client_type == "confidential"` for `developer-app-create`. The
+/// rest of the body shape is governed by the field allowlist
+/// (`allowlist_for`) and per-handler typed acks. Keep additions here
+/// narrow — value pins are easy to drift; prefer rejecting fields
+/// from the allowlist whenever feasible.
+///
+/// Returns `Option` rather than `Result` so the large
+/// `axum::Response` doesn't end up in the `Err` variant — clippy's
+/// `result_large_err` flags that shape and a `Result<(), Response>`
+/// adds no useful information over `Option<Response>` here.
+fn enforce_proxy_body_constraints(
+    flow: FlowKind,
+    method: &Method,
+    backend_path: &str,
+    parsed: &Value,
+) -> Option<Response> {
+    if matches!(flow, FlowKind::DeveloperAppCreate)
+        && method == Method::POST
+        && backend_path == "/api/v1/developer/oauth-clients"
+    {
+        let ct = parsed
+            .get("client_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if ct != "confidential" {
+            return Some(
+                (
+                    StatusCode::BAD_REQUEST,
+                    "proxy: developer-app-create wizard only mints confidential clients",
+                )
+                    .into_response(),
+            );
+        }
+    }
+    None
+}
+
 /// Proxy handler. The browser hits `/api/proxy/api/v1/...`; we strip the
 /// `/api/proxy` prefix, check the allowlist, attach the bearer token, and
 /// forward to the NyxID backend. The response body + content-type are
@@ -1045,7 +1299,7 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
             }
         };
         match parsed {
-            Value::Object(obj) => {
+            Value::Object(ref obj) => {
                 if route.body_fields.is_empty() && !obj.is_empty() {
                     return (
                         StatusCode::BAD_REQUEST,
@@ -1066,6 +1320,19 @@ async fn handle_proxy(State(state): State<ServerState>, req: Request<Body>) -> R
             _ => {
                 return (StatusCode::BAD_REQUEST, "body must be a JSON object").into_response();
             }
+        }
+        // Per-flow VALUE constraints, layered on top of the
+        // field-presence allowlist above. Today only the
+        // developer-app-create flow needs this — the panel always
+        // sends `client_type: "confidential"` (mirroring the CLI gate
+        // in `commands/developer_app.rs::Create`), so the proxy
+        // pins the value here. Without this check, a tampered wizard
+        // page could send `client_type: "public"` and silently dodge
+        // the DisplayOnce step while still landing the create.
+        if let Some(resp) =
+            enforce_proxy_body_constraints(state.flow, &method, backend_path, &parsed)
+        {
+            return resp;
         }
     }
 
@@ -1477,6 +1744,36 @@ fn prefill_query(prefill: &PrefillData) -> String {
             push_opt(&mut parts, "callback_url", &p.callback_url);
             push_opt(&mut parts, "org_id", &p.org_id);
         }
+        PrefillData::ServiceAccountCreate(p) => {
+            push_opt(&mut parts, "name", &p.name);
+            push_opt(&mut parts, "scopes", &p.scopes);
+            push_opt(&mut parts, "description", &p.description);
+            if let Some(rl) = p.rate_limit_override {
+                parts.push(format!("rate_limit_override={rl}"));
+            }
+            push_opt(&mut parts, "role_ids", &p.role_ids_csv);
+            push_opt(&mut parts, "org_id", &p.org_id);
+        }
+        PrefillData::DeveloperAppCreate(p) => {
+            push_opt(&mut parts, "name", &p.name);
+            // Repeated `redirect_uris` query params; the SPA reads
+            // `prefill.redirect_uris` from the bootstrap JSON anyway,
+            // but we mirror the format query consumers expect.
+            for uri in &p.redirect_uris {
+                if !uri.is_empty() {
+                    parts.push(format!("redirect_uri={}", urlencoding::encode(uri)));
+                }
+            }
+            push_opt(&mut parts, "allowed_scopes", &p.allowed_scopes);
+            push_opt(&mut parts, "delegation_scopes", &p.delegation_scopes);
+            if let Some(b) = p.broker_capability {
+                parts.push(format!("broker_capability={}", if b { 1 } else { 0 }));
+            }
+            push_opt(&mut parts, "org_id", &p.org_id);
+        }
+        PrefillData::MfaSetup(_) => {
+            // No prefill fields today.
+        }
     }
     if parts.is_empty() {
         String::new()
@@ -1555,6 +1852,42 @@ fn prefill_to_json(prefill: &PrefillData) -> serde_json::Value {
             put_opt(&mut obj, "allowed_nodes_csv", &p.allowed_nodes_csv);
             put_opt(&mut obj, "callback_url", &p.callback_url);
             put_opt(&mut obj, "org_id", &p.org_id);
+        }
+        PrefillData::ServiceAccountCreate(p) => {
+            put_opt(&mut obj, "name", &p.name);
+            put_opt(&mut obj, "scopes", &p.scopes);
+            put_opt(&mut obj, "description", &p.description);
+            if let Some(rl) = p.rate_limit_override {
+                obj.insert(
+                    "rate_limit_override".to_string(),
+                    Value::Number(serde_json::Number::from(rl)),
+                );
+            }
+            put_opt(&mut obj, "role_ids_csv", &p.role_ids_csv);
+            put_opt(&mut obj, "org_id", &p.org_id);
+        }
+        PrefillData::DeveloperAppCreate(p) => {
+            put_opt(&mut obj, "name", &p.name);
+            if !p.redirect_uris.is_empty() {
+                let arr: Vec<Value> = p
+                    .redirect_uris
+                    .iter()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| Value::String(s.clone()))
+                    .collect();
+                if !arr.is_empty() {
+                    obj.insert("redirect_uris".to_string(), Value::Array(arr));
+                }
+            }
+            put_opt(&mut obj, "allowed_scopes", &p.allowed_scopes);
+            put_opt(&mut obj, "delegation_scopes", &p.delegation_scopes);
+            if let Some(b) = p.broker_capability {
+                obj.insert("broker_capability".to_string(), Value::Bool(b));
+            }
+            put_opt(&mut obj, "org_id", &p.org_id);
+        }
+        PrefillData::MfaSetup(_) => {
+            // No prefill fields today.
         }
     }
     Value::Object(obj)

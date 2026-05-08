@@ -252,7 +252,7 @@ sdk/                     # OAuth SDK monorepo (TypeScript, @nyxids/* npm namespa
 All API routes under `/api/v1`:
 - `/auth` -- register, login, logout, refresh, verify-email, forgot/reset-password
 - `/users` -- get/update current user
-- `/mfa` -- setup, verify-setup
+- `/auth/mfa` -- setup, confirm, verify (login), disable (nested under `/auth` in `backend/src/routes.rs`; `setup` is idempotent against unverified factors per NyxID#506)
 - `/api-keys` -- CRUD + rotate. `ApiKey` model has scope fields: `allowed_service_ids`, `allowed_node_ids`, `allow_all_services`, `allow_all_nodes` (absorbed from deleted AgentGroup model). Also has agent isolation fields: `rate_limit_per_second`, `rate_limit_burst`, `platform`
 - `/api-keys/{id}/bindings` -- agent credential binding CRUD (list, create, delete). Maps an API key (agent) to a per-service credential override via `AgentServiceBinding`
 - `/services` -- CRUD + OIDC credentials + endpoints + requirements

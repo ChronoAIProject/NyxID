@@ -38,16 +38,29 @@ import {
   type WizardFlow,
   type WizardPhase,
 } from "@/components/cli-wizard/step-label"
-import { DisplayOncePanel } from "@/components/cli-wizard/display-once-panel"
+import {
+  DisplayOncePanel,
+  RecoveryCodesPanel,
+} from "@/components/cli-wizard/display-once-panel"
 import {
   ApiKeyCreateConfirm,
   ApiKeyRotateConfirm,
+  DeveloperAppCreateConfirm,
+  DeveloperAppRotateSecretConfirm,
+  MfaSetupConfirm,
   NodeRegisterConfirm,
   NodeRotateConfirm,
+  ServiceAccountCreateConfirm,
+  ServiceAccountRotateSecretConfirm,
   type ApiKeyCreateSuccess,
   type ApiKeyRotateSuccess,
+  type DeveloperAppCreateSuccess,
+  type DeveloperAppRotateSecretSuccess,
+  type MfaSetupSuccess,
   type NodeRegisterSuccess,
   type NodeRotateSuccess,
+  type ServiceAccountCreateSuccess,
+  type ServiceAccountRotateSecretSuccess,
 } from "@/components/cli-wizard/confirm-panels"
 import {
   AiKeyConfirm,
@@ -56,8 +69,10 @@ import {
 import type {
   AiKeyPrefill,
   ApiKeyCreatePrefill,
+  DeveloperAppCreatePrefill,
   NodeRegisterPrefill,
   RotatePrefill,
+  ServiceAccountCreatePrefill,
 } from "@/pages/cli-pair/types"
 import {
   installHeartbeat,
@@ -82,6 +97,11 @@ type ActionResult =
   | ApiKeyRotateSuccess
   | NodeRegisterSuccess
   | NodeRotateSuccess
+  | ServiceAccountCreateSuccess
+  | ServiceAccountRotateSecretSuccess
+  | DeveloperAppCreateSuccess
+  | DeveloperAppRotateSecretSuccess
+  | MfaSetupSuccess
 
 type ModeAPhase =
   | { readonly phase: "claimed" }
@@ -226,33 +246,45 @@ async function fireComplete(
   setStage: (next: ModeAPhase) => void,
 ): Promise<void> {
   try {
-    const ack: Record<string, unknown> =
-      result.kind === "ai-key"
-        ? {
-            acknowledged: true,
-            service_id: result.service_id,
-            slug: result.slug,
-            label: result.label,
-          }
-        : result.kind === "api-key-create"
-          ? {
-              acknowledged: true,
-              api_key_id: result.api_key_id,
-            }
-          : result.kind === "node-register-token"
-            ? {
-                acknowledged: true,
-                token_id: result.token_id,
-              }
-            : {
-                acknowledged: true,
-                resource_id: result.resource_id,
-              }
+    const ack = ackPayloadFor(result)
     await postWizardComplete(ack)
     setError(null)
     setStage({ phase: "done" })
   } catch (e) {
     setError(e instanceof Error ? e.message : String(e))
+  }
+}
+
+function ackPayloadFor(result: ActionResult): Record<string, unknown> {
+  switch (result.kind) {
+    case "ai-key":
+      return {
+        acknowledged: true,
+        service_id: result.service_id,
+        slug: result.slug,
+        label: result.label,
+      }
+    case "api-key-create":
+      return { acknowledged: true, api_key_id: result.api_key_id }
+    case "api-key-rotate":
+      return { acknowledged: true, resource_id: result.resource_id }
+    case "node-register-token":
+      return { acknowledged: true, token_id: result.token_id }
+    case "node-rotate-token":
+      return { acknowledged: true, resource_id: result.resource_id }
+    case "service-account-create":
+      return {
+        acknowledged: true,
+        service_account_id: result.service_account_id,
+      }
+    case "service-account-rotate-secret":
+      return { acknowledged: true, resource_id: result.resource_id }
+    case "developer-app-create":
+      return { acknowledged: true, developer_app_id: result.developer_app_id }
+    case "developer-app-rotate-secret":
+      return { acknowledged: true, resource_id: result.resource_id }
+    case "mfa-setup":
+      return { acknowledged: true, factor_id: result.factor_id }
   }
 }
 
@@ -342,6 +374,57 @@ export function ConfirmDispatcher({
           <CancelLink onCancel={onCancel} />
         </div>
       )
+    case "service-account-create":
+      return (
+        <div className="flex flex-col gap-4">
+          <ServiceAccountCreateConfirm
+            prefill={prefill as unknown as ServiceAccountCreatePrefill}
+            pairingId={pairingId}
+            onSuccess={onSuccess}
+          />
+          <CancelLink onCancel={onCancel} />
+        </div>
+      )
+    case "service-account-rotate-secret":
+      return (
+        <div className="flex flex-col gap-4">
+          <ServiceAccountRotateSecretConfirm
+            prefill={prefill as unknown as RotatePrefill}
+            pairingId={pairingId}
+            onSuccess={onSuccess}
+          />
+          <CancelLink onCancel={onCancel} />
+        </div>
+      )
+    case "developer-app-create":
+      return (
+        <div className="flex flex-col gap-4">
+          <DeveloperAppCreateConfirm
+            prefill={prefill as unknown as DeveloperAppCreatePrefill}
+            pairingId={pairingId}
+            onSuccess={onSuccess}
+          />
+          <CancelLink onCancel={onCancel} />
+        </div>
+      )
+    case "developer-app-rotate-secret":
+      return (
+        <div className="flex flex-col gap-4">
+          <DeveloperAppRotateSecretConfirm
+            prefill={prefill as unknown as RotatePrefill}
+            pairingId={pairingId}
+            onSuccess={onSuccess}
+          />
+          <CancelLink onCancel={onCancel} />
+        </div>
+      )
+    case "mfa-setup":
+      return (
+        <div className="flex flex-col gap-4">
+          <MfaSetupConfirm pairingId={pairingId} onSuccess={onSuccess} />
+          <CancelLink onCancel={onCancel} />
+        </div>
+      )
   }
 }
 
@@ -405,6 +488,61 @@ function SecretDispatcher({
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
+    )
+  }
+  if (result.kind === "service-account-create") {
+    return (
+      <DisplayOncePanel
+        title="Service account created"
+        description="Save the client_secret — it isn't shown again. Use it with the OAuth client_credentials flow."
+        secret={result.client_secret}
+        secondarySecret={{ label: "Client ID", value: result.client_id }}
+        ackButtonLabel="I have saved this — close"
+        onAcknowledge={onAck}
+        isAcknowledging={false}
+      />
+    )
+  }
+  if (result.kind === "service-account-rotate-secret") {
+    return (
+      <DisplayOncePanel
+        title="Service account secret rotated"
+        description="All previously-issued tokens have been revoked. Save this new client_secret — it isn't shown again."
+        secret={result.client_secret}
+        secondarySecret={{ label: "Client ID", value: result.client_id }}
+        ackButtonLabel="I have saved this — close"
+        onAcknowledge={onAck}
+        isAcknowledging={false}
+      />
+    )
+  }
+  if (result.kind === "developer-app-create") {
+    return (
+      <DisplayOncePanel
+        title="Developer app created"
+        description="Save the client_secret — it isn't shown again. Use it to sign Sign-in-with-NyxID requests."
+        secret={result.client_secret}
+        ackButtonLabel="I have saved this — close"
+        onAcknowledge={onAck}
+        isAcknowledging={false}
+      />
+    )
+  }
+  if (result.kind === "developer-app-rotate-secret") {
+    return (
+      <DisplayOncePanel
+        title="Developer app secret rotated"
+        description="The previous client_secret no longer authenticates. Update any deployments using it."
+        secret={result.client_secret}
+        ackButtonLabel="I have saved this — close"
+        onAcknowledge={onAck}
+        isAcknowledging={false}
+      />
+    )
+  }
+  if (result.kind === "mfa-setup") {
+    return (
+      <RecoveryCodesPanel codes={result.recovery_codes} onAcknowledged={onAck} />
     )
   }
   // ai-key uses `acking` phase instead of `secret`, so this is

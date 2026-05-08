@@ -6,9 +6,37 @@ use crate::cli::{MfaCommands, OutputFormat};
 
 pub async fn run(command: MfaCommands) -> Result<()> {
     match command {
-        MfaCommands::Setup { auth } => {
+        MfaCommands::Setup {
+            terminal,
+            no_wait,
+            auth,
+        } => {
+            // Browser-flow gate: open the local wizard when a browser
+            // is available, fall through to the remote-pairing
+            // transport otherwise. The wizard runs BOTH halves of
+            // enrollment (setup + confirm) in the browser, so neither
+            // the TOTP secret nor the recovery codes ever land in the
+            // terminal. `--terminal` and `NYXID_NO_WIZARD=1` opt out
+            // and use the legacy in-terminal output below.
+            //
+            // `--no-wait` always picks the pairing transport (matches
+            // the `api-key create/rotate` UX).
+            let interactive_output = matches!(auth.output, OutputFormat::Table);
+            let wizard_eligible = !terminal
+                && (no_wait || (interactive_output && crate::wizard::is_browser_flow_eligible()));
+
+            if wizard_eligible {
+                let prefill = crate::wizard::MfaSetupPrefill {};
+                return crate::wizard::run_mfa_setup_wizard(&auth, prefill, no_wait).await;
+            }
+
+            // Scripted path — preserved byte-identical to the
+            // pre-wizard behavior so existing CI / scripts keep
+            // working. Note this prints the TOTP secret + URL to
+            // the terminal; that's exactly the leak the wizard
+            // closes for the default interactive path.
             let mut api = ApiClient::from_auth(&auth)?;
-            let result: Value = api.post("/mfa/setup", &serde_json::json!({})).await?;
+            let result: Value = api.post("/auth/mfa/setup", &serde_json::json!({})).await?;
 
             match auth.output {
                 OutputFormat::Json => {
@@ -36,7 +64,11 @@ pub async fn run(command: MfaCommands) -> Result<()> {
         MfaCommands::Verify { code, auth } => {
             let mut api = ApiClient::from_auth(&auth)?;
             let body = serde_json::json!({ "code": code });
-            let result: Value = api.post("/mfa/verify-setup", &body).await?;
+            // Backend route is `/auth/mfa/confirm` — MFA endpoints are
+            // nested under `/auth` in `backend/src/routes.rs:63`. The
+            // previous CLI used the non-existent `/mfa/verify-setup`
+            // path, so this scripted command was broken pre-#506.
+            let result: Value = api.post("/auth/mfa/confirm", &body).await?;
 
             match auth.output {
                 OutputFormat::Json => {

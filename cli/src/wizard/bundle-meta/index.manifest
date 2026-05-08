@@ -21,6 +21,7 @@ frontend/src/components/ui/input.tsx
 frontend/src/components/ui/label.tsx
 frontend/src/components/ui/select.tsx
 frontend/src/components/ui/skeleton.tsx
+frontend/src/components/ui/switch.tsx
 frontend/src/components/ui/tooltip.tsx
 frontend/src/hooks/use-keys.ts
 frontend/src/hooks/use-nodes.ts

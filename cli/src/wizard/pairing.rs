@@ -19,8 +19,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    AiKeyPairingAckPayload, ApiKeyCreateAckPayload, ApiKeyCreatePrefill, NodeRegisterAckPayload,
-    NodeRegisterPrefill, RotatePrefill, RotationAckPayload, WizardOutcome, WizardPrefill,
+    AiKeyPairingAckPayload, ApiKeyCreateAckPayload, ApiKeyCreatePrefill,
+    DeveloperAppCreateAckPayload, DeveloperAppCreatePrefill, MfaSetupAckPayload, MfaSetupPrefill,
+    NodeRegisterAckPayload, NodeRegisterPrefill, RotatePrefill, RotationAckPayload,
+    ServiceAccountCreateAckPayload, ServiceAccountCreatePrefill, WizardOutcome, WizardPrefill,
 };
 
 /// Which flow the CLI is pairing for. One variant per wizard kind
@@ -35,6 +37,11 @@ pub enum PairingFlow {
     ApiKeyRotate,
     NodeRegisterToken,
     NodeRotateToken,
+    ServiceAccountCreate,
+    ServiceAccountRotateSecret,
+    DeveloperAppCreate,
+    DeveloperAppRotateSecret,
+    MfaSetup,
 }
 
 impl PairingFlow {
@@ -45,6 +52,11 @@ impl PairingFlow {
             Self::ApiKeyRotate => "api-key-rotate",
             Self::NodeRegisterToken => "node-register-token",
             Self::NodeRotateToken => "node-rotate-token",
+            Self::ServiceAccountCreate => "service-account-create",
+            Self::ServiceAccountRotateSecret => "service-account-rotate-secret",
+            Self::DeveloperAppCreate => "developer-app-create",
+            Self::DeveloperAppRotateSecret => "developer-app-rotate-secret",
+            Self::MfaSetup => "mfa-setup",
         }
     }
 
@@ -60,6 +72,11 @@ impl PairingFlow {
             "api-key-rotate" => Some(Self::ApiKeyRotate),
             "node-register-token" => Some(Self::NodeRegisterToken),
             "node-rotate-token" => Some(Self::NodeRotateToken),
+            "service-account-create" => Some(Self::ServiceAccountCreate),
+            "service-account-rotate-secret" => Some(Self::ServiceAccountRotateSecret),
+            "developer-app-create" => Some(Self::DeveloperAppCreate),
+            "developer-app-rotate-secret" => Some(Self::DeveloperAppRotateSecret),
+            "mfa-setup" => Some(Self::MfaSetup),
             _ => None,
         }
     }
@@ -632,7 +649,10 @@ fn parse_ack(flow: PairingFlow, ack: Value) -> Result<WizardOutcome> {
             }
             Ok(WizardOutcome::ApiKeyCreateAcknowledged(payload))
         }
-        PairingFlow::ApiKeyRotate | PairingFlow::NodeRotateToken => {
+        PairingFlow::ApiKeyRotate
+        | PairingFlow::NodeRotateToken
+        | PairingFlow::ServiceAccountRotateSecret
+        | PairingFlow::DeveloperAppRotateSecret => {
             let payload: RotationAckPayload =
                 serde_json::from_value(ack).context("invalid rotation ack from server")?;
             if !payload.acknowledged {
@@ -647,6 +667,30 @@ fn parse_ack(flow: PairingFlow, ack: Value) -> Result<WizardOutcome> {
                 return Err(anyhow!("node-register-token ack not acknowledged"));
             }
             Ok(WizardOutcome::NodeRegisterAcknowledged(payload))
+        }
+        PairingFlow::ServiceAccountCreate => {
+            let payload: ServiceAccountCreateAckPayload = serde_json::from_value(ack)
+                .context("invalid service-account-create ack from server")?;
+            if !payload.acknowledged {
+                return Err(anyhow!("service-account-create ack not acknowledged"));
+            }
+            Ok(WizardOutcome::ServiceAccountCreateAcknowledged(payload))
+        }
+        PairingFlow::DeveloperAppCreate => {
+            let payload: DeveloperAppCreateAckPayload = serde_json::from_value(ack)
+                .context("invalid developer-app-create ack from server")?;
+            if !payload.acknowledged {
+                return Err(anyhow!("developer-app-create ack not acknowledged"));
+            }
+            Ok(WizardOutcome::DeveloperAppCreateAcknowledged(payload))
+        }
+        PairingFlow::MfaSetup => {
+            let payload: MfaSetupAckPayload =
+                serde_json::from_value(ack).context("invalid mfa-setup ack from server")?;
+            if !payload.acknowledged {
+                return Err(anyhow!("mfa-setup ack not acknowledged"));
+            }
+            Ok(WizardOutcome::MfaSetupAcknowledged(payload))
         }
     }
 }
@@ -797,6 +841,67 @@ pub fn prefill_node_register(p: &NodeRegisterPrefill) -> Value {
     Value::Object(obj)
 }
 
+pub fn prefill_service_account_create(p: &ServiceAccountCreatePrefill) -> Value {
+    let mut obj = serde_json::Map::new();
+    if let Some(v) = &p.name {
+        obj.insert("name".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &p.scopes {
+        obj.insert("scopes".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &p.description {
+        obj.insert("description".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = p.rate_limit_override {
+        obj.insert(
+            "rate_limit_override".into(),
+            Value::Number(serde_json::Number::from(v)),
+        );
+    }
+    if let Some(v) = &p.role_ids_csv {
+        obj.insert("role_ids_csv".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &p.org_id {
+        obj.insert("org_id".into(), Value::String(v.clone()));
+    }
+    Value::Object(obj)
+}
+
+pub fn prefill_developer_app_create(p: &DeveloperAppCreatePrefill) -> Value {
+    let mut obj = serde_json::Map::new();
+    if let Some(v) = &p.name {
+        obj.insert("name".into(), Value::String(v.clone()));
+    }
+    if !p.redirect_uris.is_empty() {
+        let arr: Vec<Value> = p
+            .redirect_uris
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| Value::String(s.clone()))
+            .collect();
+        if !arr.is_empty() {
+            obj.insert("redirect_uris".into(), Value::Array(arr));
+        }
+    }
+    if let Some(v) = &p.allowed_scopes {
+        obj.insert("allowed_scopes".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = &p.delegation_scopes {
+        obj.insert("delegation_scopes".into(), Value::String(v.clone()));
+    }
+    if let Some(v) = p.broker_capability {
+        obj.insert("broker_capability".into(), Value::Bool(v));
+    }
+    if let Some(v) = &p.org_id {
+        obj.insert("org_id".into(), Value::String(v.clone()));
+    }
+    Value::Object(obj)
+}
+
+pub fn prefill_mfa_setup(_p: &MfaSetupPrefill) -> Value {
+    Value::Object(serde_json::Map::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,6 +916,128 @@ mod tests {
         assert_eq!(PairingFlow::ApiKeyRotate.kind(), "api-key-rotate");
         assert_eq!(PairingFlow::NodeRegisterToken.kind(), "node-register-token");
         assert_eq!(PairingFlow::NodeRotateToken.kind(), "node-rotate-token");
+        assert_eq!(
+            PairingFlow::ServiceAccountCreate.kind(),
+            "service-account-create"
+        );
+        assert_eq!(
+            PairingFlow::ServiceAccountRotateSecret.kind(),
+            "service-account-rotate-secret"
+        );
+        assert_eq!(
+            PairingFlow::DeveloperAppCreate.kind(),
+            "developer-app-create"
+        );
+        assert_eq!(
+            PairingFlow::DeveloperAppRotateSecret.kind(),
+            "developer-app-rotate-secret"
+        );
+        assert_eq!(PairingFlow::MfaSetup.kind(), "mfa-setup");
+    }
+
+    #[test]
+    fn from_kind_str_round_trips_all_slugs() {
+        for variant in [
+            PairingFlow::AiKey,
+            PairingFlow::ApiKeyCreate,
+            PairingFlow::ApiKeyRotate,
+            PairingFlow::NodeRegisterToken,
+            PairingFlow::NodeRotateToken,
+            PairingFlow::ServiceAccountCreate,
+            PairingFlow::ServiceAccountRotateSecret,
+            PairingFlow::DeveloperAppCreate,
+            PairingFlow::DeveloperAppRotateSecret,
+            PairingFlow::MfaSetup,
+        ] {
+            let slug = variant.kind();
+            let back = PairingFlow::from_kind_str(slug)
+                .unwrap_or_else(|| panic!("from_kind_str rejected its own slug: {slug}"));
+            assert_eq!(back.kind(), slug, "round-trip slug mismatch");
+        }
+        assert!(PairingFlow::from_kind_str("unknown-kind").is_none());
+    }
+
+    #[test]
+    fn parse_ack_service_account_create_rejects_unknown_fields() {
+        let ack = serde_json::json!({
+            "acknowledged": true,
+            "service_account_id": "abc",
+            "client_secret": "leak"
+        });
+        let outcome = parse_ack(PairingFlow::ServiceAccountCreate, ack);
+        assert!(outcome.is_err(), "deny_unknown_fields should reject");
+    }
+
+    #[test]
+    fn parse_ack_developer_app_create_rejects_unknown_fields() {
+        let ack = serde_json::json!({
+            "acknowledged": true,
+            "developer_app_id": "abc",
+            "client_secret": "leak"
+        });
+        let outcome = parse_ack(PairingFlow::DeveloperAppCreate, ack);
+        assert!(outcome.is_err(), "deny_unknown_fields should reject");
+    }
+
+    #[test]
+    fn parse_ack_mfa_setup_rejects_unknown_fields() {
+        let ack = serde_json::json!({
+            "acknowledged": true,
+            "factor_id": "abc",
+            "totp_secret": "leak"
+        });
+        let outcome = parse_ack(PairingFlow::MfaSetup, ack);
+        assert!(outcome.is_err(), "deny_unknown_fields should reject");
+    }
+
+    #[test]
+    fn rotation_ack_accepts_new_rotation_kinds() {
+        for flow in [
+            PairingFlow::ServiceAccountRotateSecret,
+            PairingFlow::DeveloperAppRotateSecret,
+        ] {
+            let ack = serde_json::json!({
+                "acknowledged": true,
+                "resource_id": "abc",
+            });
+            let outcome = parse_ack(flow, ack);
+            assert!(outcome.is_ok(), "rotation ack should be accepted");
+        }
+    }
+
+    #[test]
+    fn prefill_service_account_create_omits_none_fields() {
+        let p = ServiceAccountCreatePrefill {
+            name: Some("ci-bot".into()),
+            ..Default::default()
+        };
+        let v = prefill_service_account_create(&p);
+        let obj = v.as_object().expect("object");
+        assert_eq!(obj.get("name").and_then(|x| x.as_str()), Some("ci-bot"));
+        assert!(!obj.contains_key("scopes"));
+        assert!(!obj.contains_key("description"));
+        assert!(!obj.contains_key("rate_limit_override"));
+    }
+
+    #[test]
+    fn prefill_developer_app_create_emits_redirect_uri_array() {
+        let p = DeveloperAppCreatePrefill {
+            name: Some("My App".into()),
+            redirect_uris: vec!["https://app.example/cb".into()],
+            ..Default::default()
+        };
+        let v = prefill_developer_app_create(&p);
+        let obj = v.as_object().expect("object");
+        let uris = obj.get("redirect_uris").and_then(|x| x.as_array()).unwrap();
+        assert_eq!(uris.len(), 1);
+        assert_eq!(uris[0].as_str(), Some("https://app.example/cb"));
+    }
+
+    #[test]
+    fn prefill_mfa_setup_is_empty_object() {
+        let v = prefill_mfa_setup(&MfaSetupPrefill::default());
+        let obj = v.as_object().expect("object");
+        assert!(obj.is_empty());
     }
 
     #[test]

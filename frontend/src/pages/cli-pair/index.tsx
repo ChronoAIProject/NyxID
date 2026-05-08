@@ -30,21 +30,33 @@ import type {
   AiKeyPrefill,
   ApiKeyCreatePrefill,
   ClaimResponse,
+  DeveloperAppCreatePrefill,
   NodeRegisterPrefill,
   PairingKind,
   RotatePrefill,
+  ServiceAccountCreatePrefill,
 } from "./types";
 import { isPairingKind } from "./types";
-import { DisplayOncePanel } from "./display-once";
+import { DisplayOncePanel, RecoveryCodesPanel } from "./display-once";
 import {
   ApiKeyCreateConfirm,
   ApiKeyRotateConfirm,
+  DeveloperAppCreateConfirm,
+  DeveloperAppRotateSecretConfirm,
+  MfaSetupConfirm,
   NodeRegisterConfirm,
   NodeRotateConfirm,
+  ServiceAccountCreateConfirm,
+  ServiceAccountRotateSecretConfirm,
   type ApiKeyCreateSuccess,
   type ApiKeyRotateSuccess,
+  type DeveloperAppCreateSuccess,
+  type DeveloperAppRotateSecretSuccess,
+  type MfaSetupSuccess,
   type NodeRegisterSuccess,
   type NodeRotateSuccess,
+  type ServiceAccountCreateSuccess,
+  type ServiceAccountRotateSecretSuccess,
 } from "@/components/cli-wizard/confirm-panels";
 import {
   AiKeyConfirm,
@@ -57,7 +69,12 @@ type ActionResult =
   | ApiKeyCreateSuccess
   | ApiKeyRotateSuccess
   | NodeRegisterSuccess
-  | NodeRotateSuccess;
+  | NodeRotateSuccess
+  | ServiceAccountCreateSuccess
+  | ServiceAccountRotateSecretSuccess
+  | DeveloperAppCreateSuccess
+  | DeveloperAppRotateSecretSuccess
+  | MfaSetupSuccess;
 
 type Stage =
   | { readonly phase: "enter-code" }
@@ -198,7 +215,12 @@ export function CliPairPage() {
  * instead of timing out.
  */
 function reconstructRotationAck(claim: ClaimResponse): AckPayload | null {
-  if (claim.kind !== "api-key-rotate" && claim.kind !== "node-rotate-token") {
+  if (
+    claim.kind !== "api-key-rotate" &&
+    claim.kind !== "node-rotate-token" &&
+    claim.kind !== "service-account-rotate-secret" &&
+    claim.kind !== "developer-app-rotate-secret"
+  ) {
     return null;
   }
   const prefill = claim.prefill as { readonly resource_id?: unknown };
@@ -744,6 +766,45 @@ function ConfirmPanel({
           onSuccess={onActionComplete}
         />
       );
+    case "service-account-create":
+      return (
+        <ServiceAccountCreateConfirm
+          prefill={prefill as unknown as ServiceAccountCreatePrefill}
+          pairingId={claim.id}
+          onSuccess={onActionComplete}
+        />
+      );
+    case "service-account-rotate-secret":
+      return (
+        <ServiceAccountRotateSecretConfirm
+          prefill={prefill as unknown as RotatePrefill}
+          pairingId={claim.id}
+          onSuccess={onActionComplete}
+        />
+      );
+    case "developer-app-create":
+      return (
+        <DeveloperAppCreateConfirm
+          prefill={prefill as unknown as DeveloperAppCreatePrefill}
+          pairingId={claim.id}
+          onSuccess={onActionComplete}
+        />
+      );
+    case "developer-app-rotate-secret":
+      return (
+        <DeveloperAppRotateSecretConfirm
+          prefill={prefill as unknown as RotatePrefill}
+          pairingId={claim.id}
+          onSuccess={onActionComplete}
+        />
+      );
+    case "mfa-setup":
+      return (
+        <MfaSetupConfirm
+          pairingId={claim.id}
+          onSuccess={onActionComplete}
+        />
+      );
   }
 }
 
@@ -859,6 +920,14 @@ function managementTargetFor(
       return ["/keys?tab=nyxid", "NyxID API Keys page"];
     case "node-rotate-token":
       return ["/nodes", "Nodes page"];
+    case "service-account-create":
+    case "service-account-rotate-secret":
+      return ["/admin/service-accounts", "Service Accounts page"];
+    case "developer-app-create":
+    case "developer-app-rotate-secret":
+      return ["/developer/apps", "Developer Apps page"];
+    case "mfa-setup":
+      return ["/account/security", "Account Security page"];
   }
 }
 
@@ -874,6 +943,16 @@ function labelForKind(kind: PairingKind): string {
       return "node token rotation";
     case "ai-key":
       return "service setup";
+    case "service-account-create":
+      return "service account creation";
+    case "service-account-rotate-secret":
+      return "service account secret rotation";
+    case "developer-app-create":
+      return "developer app creation";
+    case "developer-app-rotate-secret":
+      return "developer app secret rotation";
+    case "mfa-setup":
+      return "MFA enrollment";
   }
 }
 
@@ -965,6 +1044,16 @@ function describeResultKind(kind: ActionResult["kind"]): string {
       return "registration token";
     case "node-rotate-token":
       return "rotated node credentials";
+    case "service-account-create":
+      return "service account";
+    case "service-account-rotate-secret":
+      return "rotated service account secret";
+    case "developer-app-create":
+      return "developer app";
+    case "developer-app-rotate-secret":
+      return "rotated developer app secret";
+    case "mfa-setup":
+      return "MFA enrollment";
   }
 }
 
@@ -1034,6 +1123,59 @@ function SecretPanel({
             ackButtonLabel="Close — I've saved both values"
             onAcknowledge={onAcknowledged}
             isAcknowledging={false}
+          />
+        );
+      case "service-account-create":
+        return (
+          <DisplayOncePanel
+            title="Service account created"
+            description="Save the client_secret — it isn't shown again. Use it with the OAuth client_credentials flow."
+            secret={result.client_secret}
+            secondarySecret={{ label: "Client ID", value: result.client_id }}
+            ackButtonLabel="Close — I've saved the secret"
+            onAcknowledge={onAcknowledged}
+            isAcknowledging={false}
+          />
+        );
+      case "service-account-rotate-secret":
+        return (
+          <DisplayOncePanel
+            title="Service account secret rotated"
+            description="All previously-issued tokens have been revoked. Save this new client_secret — it isn't shown again."
+            secret={result.client_secret}
+            secondarySecret={{ label: "Client ID", value: result.client_id }}
+            ackButtonLabel="Close — I've saved the new secret"
+            onAcknowledge={onAcknowledged}
+            isAcknowledging={false}
+          />
+        );
+      case "developer-app-create":
+        return (
+          <DisplayOncePanel
+            title="Developer app created"
+            description="Save the client_secret — it isn't shown again. Use it to sign Sign-in-with-NyxID requests."
+            secret={result.client_secret}
+            ackButtonLabel="Close — I've saved the secret"
+            onAcknowledge={onAcknowledged}
+            isAcknowledging={false}
+          />
+        );
+      case "developer-app-rotate-secret":
+        return (
+          <DisplayOncePanel
+            title="Developer app secret rotated"
+            description="The previous client_secret no longer authenticates. Update any deployments using it."
+            secret={result.client_secret}
+            ackButtonLabel="Close — I've saved the new secret"
+            onAcknowledge={onAcknowledged}
+            isAcknowledging={false}
+          />
+        );
+      case "mfa-setup":
+        return (
+          <RecoveryCodesPanel
+            codes={result.recovery_codes}
+            onAcknowledged={onAcknowledged}
           />
         );
     }
@@ -1226,6 +1368,22 @@ function ackForResult(result: ActionResult): AckPayload {
       return { acknowledged: true, token_id: result.token_id };
     case "node-rotate-token":
       return { acknowledged: true, resource_id: result.resource_id };
+    case "service-account-create":
+      return {
+        acknowledged: true,
+        service_account_id: result.service_account_id,
+      };
+    case "service-account-rotate-secret":
+      return { acknowledged: true, resource_id: result.resource_id };
+    case "developer-app-create":
+      return {
+        acknowledged: true,
+        developer_app_id: result.developer_app_id,
+      };
+    case "developer-app-rotate-secret":
+      return { acknowledged: true, resource_id: result.resource_id };
+    case "mfa-setup":
+      return { acknowledged: true, factor_id: result.factor_id };
   }
 }
 

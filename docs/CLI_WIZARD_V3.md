@@ -33,19 +33,31 @@ This document is also honest about what v3 does NOT promise (see §3.5).
 
 ## 2. Commands Affected
 
-| Credential                | Existing command               | Backend API                                    | v3.0  | v3.1  |
-|---------------------------|--------------------------------|------------------------------------------------|:-----:|:-----:|
-| API key rotation          | `nyxid api-key rotate <id>`    | `POST /api/v1/api-keys/{id}/rotate`            |  ✅   |       |
-| Node token rotation       | `nyxid node rotate-token <id>` | `POST /api/v1/nodes/{id}/rotate-token`         |  ✅   |       |
-| NyxID agent API key       | `nyxid api-key create`         | `POST /api/v1/api-keys`                        |       |  ✅   |
-| Node registration         | `nyxid node register-token`    | `POST /api/v1/nodes/register-token`            |       |  ✅   |
-| Channel bot               | `nyxid channel-bot register`   | `POST /api/v1/channel-bots`                    |       |       |
-| MFA / TOTP                | `nyxid mfa setup` + `verify`   | `POST /api/v1/mfa/setup` + `.../verify-setup`  |       |       |
+| Credential                       | Existing command                       | Backend API                                                | v3.0  | v3.1  | v3.2  |
+|----------------------------------|----------------------------------------|------------------------------------------------------------|:-----:|:-----:|:-----:|
+| API key rotation                 | `nyxid api-key rotate <id>`            | `POST /api/v1/api-keys/{id}/rotate`                        |  ✅   |       |       |
+| Node token rotation              | `nyxid node rotate-token <id>`         | `POST /api/v1/nodes/{id}/rotate-token`                     |  ✅   |       |       |
+| NyxID agent API key              | `nyxid api-key create`                 | `POST /api/v1/api-keys`                                    |       |  ✅   |       |
+| Node registration                | `nyxid node register-token`            | `POST /api/v1/nodes/register-token`                        |       |  ✅   |       |
+| Service account create           | `nyxid service-account create`         | `POST /api/v1/admin/service-accounts`                      |       |       |  ✅   |
+| Service account rotate-secret    | `nyxid service-account rotate-secret`  | `POST /api/v1/admin/service-accounts/{id}/rotate-secret`   |       |       |  ✅   |
+| Developer app create (confidential) | `nyxid developer-app create`        | `POST /api/v1/developer/oauth-clients`                     |       |       |  ✅   |
+| Developer app rotate-secret      | `nyxid developer-app rotate-secret`    | `POST /api/v1/developer/oauth-clients/{id}/rotate-secret`  |       |       |  ✅   |
+| MFA / TOTP enrollment            | `nyxid mfa setup`                      | `POST /api/v1/auth/mfa/setup` + `POST /api/v1/auth/mfa/confirm` |       |       |  ✅   |
+| Channel bot                      | `nyxid channel-bot register`           | `POST /api/v1/channel-bots`                                |       |       |       |
 
-v3.0 shipped the two rotation flows. v3.1 adds the create-side pair
-(`nyxid api-key create` with scope picker + `nyxid node register-token`).
+v3.0 shipped the two rotation flows. v3.1 added the create-side pair
+(`nyxid api-key create` + `nyxid node register-token`). v3.2 closes
+the remaining wizard leftovers tracked in NyxID#506: service-account
+secrets, confidential developer-app secrets, and full MFA enrollment.
 
 - **v3.1:** `api-key create` + `node register-token` — ✅ shipped.
+- **v3.2:** `service-account create` / `rotate-secret`,
+  `developer-app create` (confidential) / `rotate-secret`,
+  `mfa setup` — ✅ shipped (NyxID#506). Public-client
+  `developer-app create` is intentionally NOT wizarded — the public
+  flow has no `client_secret` to leak; the existing terminal output
+  is preserved.
 - **Deferred:** `channel-bot register` does not emit a one-time secret
   today (`CreateChannelBotResponse` in `backend/src/handlers/channel_bots.rs`
   returns only `id`/`platform`/`platform_bot_username`/`status`; the
@@ -55,7 +67,6 @@ v3.0 shipped the two rotation flows. v3.1 adds the create-side pair
   conversation — either add a backend change that reveals the webhook
   secret on creation + a rotate endpoint, or ship a v2-style bot-token
   input flow. Tracked for a follow-up PR.
-- **v3.2:** `mfa setup` (also needs the §10.3 QR-code work flagged in v2).
 
 ---
 
@@ -376,9 +387,65 @@ Net effect: a user who ran `nyxid api-key rotate` on a v3 CLI and runs `nyxid ap
 
 Not a DisplayOnce flow today: `CreateChannelBotResponse` returns only `id`/`platform`/`platform_bot_username`/`status`; the webhook secret is generated server-side, used to register the webhook with the external platform, then discarded. The right shape is either (a) a backend change to reveal the webhook secret + add a rotate-secret endpoint, or (b) a v2-style input flow that hides the platform bot token on entry. Design conversation pending.
 
-### 10.5 mfa setup (v3.2)
+### 10.5 mfa setup (v3.2) — ✅ shipped
 
-Needs the QR rendering work flagged in v2 §10.3.
+Single-tab enrollment: `FlowKind::MfaSetup` proxy allowlist covers
+`POST /api/v1/auth/mfa/setup` (empty body) and
+`POST /api/v1/auth/mfa/confirm` (`["code"]`). The MFA endpoints are
+nested under `/auth` in `backend/src/routes.rs:63` — that prefix
+must appear in the allowlist or the proxy returns 404 to the
+browser. The browser runs both halves of TOTP enrollment so
+the TOTP secret, the otpauth URL, and the recovery codes never
+land in the terminal. QR rendering uses the existing `qrcode` npm
+dep (no new runtime deps); the otpauth URL is also displayed as a
+fallback for users whose authenticator can't scan. Recovery codes
+render via a new `RecoveryCodesPanel` (sibling of `DisplayOncePanel`)
+that masks-by-default with reveal/copy-all/download affordances.
+
+The CLI's `nyxid mfa verify` command is preserved as a scripted-mode
+fallback for users who completed `nyxid mfa setup --terminal` on a
+headless host and need to finish enrollment from an authenticator
+on a different machine. Pre-#506 this command was broken (called
+`/mfa/verify-setup` which doesn't exist on the backend); the path
+is now `/auth/mfa/confirm` (`/auth/mfa/...` because MFA routes are
+nested under `/auth` in `backend/src/routes.rs:63`).
+
+`mfa_service::setup_totp` was also extended to soft-deactivate any
+pre-existing UNVERIFIED active TOTP factor before minting a fresh
+secret. Pre-#506 a stranded factor (e.g. user closed the wizard tab
+without verifying) returned 409 on every retry, with no CLI escape
+hatch. Verified factors still surface 409 — operators with active
+MFA must explicitly disable before re-enrolling.
+
+### 10.5.1 service-account / developer-app DisplayOnce (v3.2) — ✅ shipped
+
+Three new DisplayOnce flows for the remaining interactive secret-display
+leaks (NyxID#506):
+
+- `service-account-create` (`POST /admin/service-accounts`) and
+  `service-account-rotate-secret` (`POST /.../rotate-secret`) — both
+  flows mint a `client_secret` shown once in the browser DisplayOnce
+  panel. The CLI ack carries only `service_account_id` (create) or
+  `resource_id` (rotate). Backend admin gating is unchanged; the
+  wizard fronts the same admin-only endpoint.
+- `developer-app-create` (`POST /developer/oauth-clients`) for
+  `client_type=confidential` — `--client-type public` skips the
+  wizard entirely because the public-client response has no
+  `client_secret`. The wizard hard-codes `client_type: "confidential"`
+  in the body so a tampered prefill can't downgrade the client to
+  `public` to dodge the DisplayOnce step (and also because the user
+  already opted into the confidential flow at the CLI).
+- `developer-app-rotate-secret` (`POST /developer/oauth-clients/{id}/rotate-secret`)
+  — same shape as the api-key-rotate flow.
+
+All three reuse the existing `DisplayOncePanel`, `RotationAckPayload`
+(for the rotate variants) plus two new typed ack payloads
+(`ServiceAccountCreateAckPayload { service_account_id }`,
+`DeveloperAppCreateAckPayload { developer_app_id }`). The MFA flow
+adds `MfaSetupAckPayload { factor_id }`. Backend
+`validate_ack_for_kind` adds five branches; CLI-side `parse_ack` adds
+five matching variants — both with `deny_unknown_fields` so a
+tampered browser cannot smuggle the secret through the ack.
 
 ### 10.6 Disambiguate node names too
 
