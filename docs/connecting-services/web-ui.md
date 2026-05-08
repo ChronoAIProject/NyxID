@@ -71,7 +71,7 @@ You should see a chat-completion JSON response from OpenAI — the body has `"ch
 
 Console URL: **http://localhost:3000** (port 3000, while the API runs on 3001).
 
-Same steps as hosted, except you sign in with the account you registered against your local instance. If you don't have NyxID running locally yet, see [docs/QUICKSTART.md](../QUICKSTART.md) first.
+Same steps as hosted, except you sign in with the account you registered against your local instance. If you don't have NyxID running locally yet, see [docs/SETUP.md](../SETUP.md) first.
 
 ## What if the curl errors?
 

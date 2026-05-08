@@ -48,7 +48,7 @@ For private APIs the catalog doesn't know about, see the **Custom services** sec
 
 ## Related
 
-- [docs/QUICKSTART.md](../QUICKSTART.md) — self-host setup (macOS, Linux, or Windows via WSL)
+- [docs/SETUP.md](../SETUP.md) — self-host setup (macOS, Linux, or Windows via WSL)
 - [docs/MCP_DELEGATION_FLOW.md](../MCP_DELEGATION_FLOW.md) — MCP auth + delegation under the hood
 - [docs/AI_AGENT_PLAYBOOK.md](../AI_AGENT_PLAYBOOK.md) — patterns for using NyxID from agent code
 - [docs/API.md](../API.md) — full REST endpoint reference

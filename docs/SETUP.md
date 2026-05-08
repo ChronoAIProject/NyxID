@@ -1,10 +1,12 @@
-# NyxID Self-Host Quickstart
+# NyxID Self-Host Setup
 
 Step-by-step manual setup for running NyxID on your own machine, plus troubleshooting, uninstall/reinstall, and post-install AI-agent wiring.
 
-> **On Windows?** Install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (`wsl --install`), enable Docker Desktop's WSL integration (**Settings → Resources → WSL Integration**), then run this quickstart from your Ubuntu shell. The full one-time setup is in [docs/WINDOWS_SETUP.md](WINDOWS_SETUP.md).
+> **On Windows?** Install [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (`wsl --install`), enable Docker Desktop's WSL integration (**Settings → Resources → WSL Integration**), then run this setup from your Ubuntu shell. The full one-time setup is in [docs/WINDOWS_SETUP.md](WINDOWS_SETUP.md).
 
-For the one-paragraph overview and the AI-assisted setup prompt (drive the whole flow from Claude Code / Cursor), see the [README Quick Start](../README.md#quick-start).
+For the one-paragraph overview and the AI-assisted setup prompt (drive the whole flow from Claude Code / Cursor), see the [README Setup](../README.md#setup).
+
+Once NyxID is running, head to a [Quickstart](quickstarts/) — n8n, per-agent keys, node proxy, or MCP wrapping — for end-to-end recipes.
 
 ---
 
@@ -163,7 +165,7 @@ The full flow lives in **[docs/connecting-services/](connecting-services/)**. St
 
 ## Uninstall & reinstall
 
-Quickstart is a **first-time install**. To reinstall — e.g. to try a new config, wipe test data, or recover from a broken state — uninstall first, then re-run [Step 2](#step-2-of-3--install-and-start).
+This setup is a **first-time install**. To reinstall — e.g. to try a new config, wipe test data, or recover from a broken state — uninstall first, then re-run [Step 2](#step-2-of-3--install-and-start).
 
 Interactive uninstall:
 
