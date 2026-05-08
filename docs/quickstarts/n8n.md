@@ -37,22 +37,27 @@ Save the Agent Key value somewhere safe — a password manager works, or a local
 
 ### 1. Register each upstream service in NyxID
 
-There are two paths — the web UI (recommended for first-time setup) and the CLI (for scripting). Both produce the same result. Pick one and follow it for every service in the [Prerequisites table](#prerequisites).
+There are two paths — the web UI (recommended for first-time setup) and the CLI (for scripting). Both produce the same result. Pick one and follow it for every API-key service. Google Sheets uses OAuth and is covered separately in [Step 2](#2-register-an-oauth-service-google-sheets).
 
-**Web UI.** Repeat for each upstream service:
+**Web UI — catalog services (Gemini, Telegram Bot).** For each:
 
-1. In the web console, open `AI Services`, then click `Add Service`.
-2. **Catalog services (Gemini, Telegram Bot, Google Sheets).** Search for the service name and click `Connect` on the matching catalog entry. NyxID prefills the endpoint URL and auth method from the catalog.
-3. **Custom services (TwitterAPI.io is not in the catalog).** Scroll to the bottom of the dialog and click `Add custom service`. Fill in:
+1. In the web console, open `AI Services` and click `Add Service`.
+2. Type the service name in the catalog search (e.g. `Gemini AI`, `Telegram Bot`) and click `Connect` on the matching entry. NyxID prefills the endpoint URL and auth method from the catalog.
+3. Paste the upstream token from the [Prerequisites table](#prerequisites) into the `Credential` field, set a `Label` (e.g. `Gemini AI`), and click `Save`.
+4. NyxID lands on the service detail page with the assigned `Slug` at the top — record it for [Step 4](#4-configure-http-request-nodes-in-n8n).
+
+**Web UI — custom services (TwitterAPI.io).**
+
+1. In the web console, open `AI Services` and click `Add Service`.
+2. Scroll past the catalog and click `Add custom service`.
+3. Fill the form:
    - `Slug`: `twitterapi-io`
    - `Label`: `TwitterAPI.io`
    - `Endpoint URL`: `https://api.twitterapi.io`
    - `Auth method`: `header`
    - `Auth key name`: `x-api-key`
-4. Paste the upstream token from the Prerequisites table into the `Credential` field. Set a `Label` (e.g. `Gemini AI`). Click `Save`.
-5. NyxID lands on the service detail page with the assigned `Slug` at the top. Record it — n8n's `HTTP Request` URLs in [Step 4](#4-configure-http-request-nodes-in-n8n) need it.
-
-For `Google Sheets`, the catalog entry exists but the service requires an OAuth flow rather than a static API key — see [Step 2](#2-register-an-oauth-service-google-sheets).
+4. Paste the upstream token into the `Credential` field and click `Save`.
+5. Record the `Slug` shown on the service detail page for [Step 4](#4-configure-http-request-nodes-in-n8n).
 
 **CLI.** If you have the `nyxid` CLI installed and logged in, save each upstream token to a local file (`~/.gemini_key`, `~/.twitterapi_key`, `~/.tg_token`) with `chmod 600`, then run:
 
@@ -86,13 +91,24 @@ Each `nyxid service add` prints the user-side slug NyxID assigned. On a fresh ac
 
 OAuth services need an OAuth client (created in the upstream provider's developer console) before NyxID can run the consent flow.
 
+**Cloud Console steps (required for both web UI and CLI paths):**
+
 1. In Google Cloud Console, create an `OAuth 2.0 Client ID` (Web application) and add `https://<your-nyxid-host>/api/v1/providers/callback` to `Authorized redirect URIs`.
 2. Enable the `Google Sheets API` and `Google Drive API`.
-3. On the `OAuth consent screen`, open `Data access` → `Add or remove scopes` and add `https://www.googleapis.com/auth/spreadsheets`. NyxID's `--scope` flag only takes effect for scopes already declared on the consent screen.
+3. On the `OAuth consent screen`, open `Data access` → `Add or remove scopes` and add `https://www.googleapis.com/auth/spreadsheets`. NyxID's scope flag only takes effect for scopes already declared on the consent screen.
 4. Add your Google account to `Test users`.
-5. Save the Client ID to `~/.gc_id` and the Client Secret to `~/.gc_secret` (`chmod 600` both).
+5. Note the **Client ID** and **Client Secret** for the OAuth 2.0 Client. You'll paste both into NyxID in the next step.
 
-Configure the OAuth client on the NyxID `api-google` provider, then run the OAuth flow:
+**Web UI.**
+
+1. In the NyxID web console, open `AI Services` and click `Add Service`.
+2. Search for `Google` and click `Connect` on the Google catalog entry. NyxID detects the service uses OAuth and opens the OAuth client form.
+3. Paste the `Client ID` and `Client Secret` from the Cloud Console step above and click `Continue to Authentication`.
+4. On the next screen, paste `https://www.googleapis.com/auth/spreadsheets` into the `Additional scopes` field, then click `Connect with Google`.
+5. Approve the Google consent screen. NyxID redirects back and lands on the service detail page.
+6. The catalog default for `api-google` is `www.googleapis.com`, but Google Sheets lives on `sheets.googleapis.com`. On the service detail page, edit the `Endpoint URL` field to `https://sheets.googleapis.com` and save.
+
+**CLI.** Save the Client ID to `~/.gc_id` and the Client Secret to `~/.gc_secret` (`chmod 600` both), then:
 
 ```bash
 GC_ID="$(cat ~/.gc_id)" GC_SECRET="$(cat ~/.gc_secret)" \
@@ -104,16 +120,13 @@ nyxid service add api-google \
   --oauth \
   --scope "https://www.googleapis.com/auth/spreadsheets" \
   --label "Google Sheets"
-```
 
-The CLI prints an authorization URL. Open it, sign in to Google, and approve the consent screen. NyxID stores the resulting refresh token and refreshes the access token automatically on every proxied call.
-
-Google Sheets lives on `sheets.googleapis.com`, but the catalog default for `api-google` is `www.googleapis.com`. Override the endpoint URL on the registered service:
-
-```bash
-# Replace <ID> with the value printed by `nyxid service add` (or `nyxid service list`).
+# CLI prints an authorization URL. Open it, sign in, and approve.
+# After approval, override the endpoint URL (sheets, not www):
 nyxid service update <ID> --endpoint-url "https://sheets.googleapis.com"
 ```
+
+NyxID stores the resulting refresh token and refreshes the access token automatically on every proxied call. Replace `<ID>` with the user-side service ID printed by `nyxid service add` (or run `nyxid service list` to find it).
 
 ### 3. Paste the Agent Key into an n8n Header Auth credential
 
@@ -135,13 +148,19 @@ For per-workflow blast-radius isolation (so a leaked key can only call the servi
 
 ### 4. Configure HTTP Request nodes in n8n
 
-Every `HTTP Request` node uses the same credential (`NyxID API Key`) and the same proxy URL pattern:
+For each upstream service the workflow needs to call, add an `HTTP Request` node and configure four fields:
 
-```
-https://<nyxid-host>/api/v1/proxy/s/<service-slug>/<downstream-api-path>
-```
+1. **`Method`** — set to the HTTP method the upstream API expects (`GET`, `POST`, etc.).
+2. **`URL`** — use the proxy pattern below, substituting the slug NyxID returned in [Step 1](#1-register-each-upstream-service-in-nyxid) (or [Step 2](#2-register-an-oauth-service-google-sheets) for Google Sheets) and the downstream API path you would normally use without NyxID:
 
-Substitute the slug NyxID returned in Step 1 and the downstream API path you would normally use without NyxID.
+   ```
+   https://<nyxid-host>/api/v1/proxy/s/<service-slug>/<downstream-api-path>
+   ```
+
+3. **`Authentication`** — select `Generic Credential Type`. n8n then shows a **`Generic Auth Type`** dropdown — select `Header Auth`.
+4. **`Credential for Header Auth`** — select the `NyxID API Key` credential you saved in [Step 3](#3-paste-the-agent-key-into-an-n8n-header-auth-credential).
+
+Reference URLs for the four services in this guide:
 
 | Upstream | Method + Path |
 |---|---|
@@ -154,19 +173,40 @@ NyxID injects the correct authentication for each service: `x-goog-api-key` for 
 
 ## Verification
 
-From your terminal, send one request through each service to confirm the proxy is wired correctly before invoking it from n8n:
+Send one test request per service from your terminal to confirm the proxy is wired correctly before invoking it from n8n. Set the shell variables first:
 
 ```bash
-NYX_API_KEY="$(cat ~/.nyx_key 2>/dev/null || echo nyx_…)"
-NYXID_BASE="https://<your-nyxid-host>"   # or http://localhost:3001 for self-host
+NYX_API_KEY="nyx_…"                     # the Agent Key from Step 0
+NYXID_BASE="https://<your-nyxid-host>"  # use http://localhost:3001 for self-host
+```
 
-# Telegram getMe — succeeds when the bot token is injected correctly
+Then run each test. Each one passes when NyxID injects the correct upstream credential:
+
+```bash
+# Telegram — getMe returns the bot identity when the path-based token is injected
 curl -sf "$NYXID_BASE/api/v1/proxy/s/api-telegram-bot/getMe" \
   -H "X-API-Key: $NYX_API_KEY" | jq .ok
 # → true
+
+# Gemini — list models verifies the x-goog-api-key header is injected
+curl -sf "$NYXID_BASE/api/v1/proxy/s/llm-google-ai/v1beta/models" \
+  -H "X-API-Key: $NYX_API_KEY" | jq '.models | length'
+# → integer > 0
+
+# TwitterAPI.io — last_tweets verifies the x-api-key header is injected
+# (using elonmusk as a public account; substitute any handle you have access to)
+curl -sf "$NYXID_BASE/api/v1/proxy/s/twitterapi-io/twitter/user/last_tweets?userName=elonmusk" \
+  -H "X-API-Key: $NYX_API_KEY" | jq '.tweets | length'
+# → integer ≥ 0
+
+# Google Sheets — verifies the OAuth bearer is refreshed and injected.
+# Replace <SHEET_ID> with a spreadsheet ID your account can read.
+curl -sf "$NYXID_BASE/api/v1/proxy/s/api-google/v4/spreadsheets/<SHEET_ID>?fields=spreadsheetId" \
+  -H "X-API-Key: $NYX_API_KEY" | jq -r .spreadsheetId
+# → "<SHEET_ID>"
 ```
 
-Any `200 OK` with the expected upstream body confirms NyxID injected the right credential. If you see `401`, `403`, or a 5xx, see [Troubleshooting](#troubleshooting).
+Any `200 OK` with the expected upstream body confirms NyxID injected the right credential. If a request returns `401`, `403`, or a 5xx, see [Troubleshooting](#troubleshooting).
 
 ## Troubleshooting
 
