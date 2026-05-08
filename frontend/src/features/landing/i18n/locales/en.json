@@ -8,6 +8,13 @@
   "hero.cta": "Get Early Access",
   "hero.ctaSubtext": "Nyx guards the gate — Discord holds the key",
 
+  "install.heading": "Install Nyx skills",
+  "install.subheading": "Paste this into Claude Code, Cursor, or your AI coding agent — it handles the rest.",
+  "install.commandLabel": "Install command",
+  "install.copy": "Copy",
+  "install.copied": "Copied",
+  "install.helper": "Reads INSTALL.md from the NyxID GitHub repo. No agent? Use the manual install in our README.",
+
   "features.heading": "What Nyx protects",
   "features.subheading": "Every feature guards the threshold between access and breach. You always know exactly what you're approving — nothing passes unseen.",
   "features.pushApprovals.title": "Real-Time Push Approvals",

@@ -87,6 +87,11 @@ export function Hero() {
 
       {/* Content */}
       <div className="relative z-10 mt-[260px] flex flex-col items-center md:mt-[190px]">
+        <img
+          src="/nyxid-wordmark.svg"
+          alt="NyxID"
+          className="mb-8 h-12 w-auto drop-shadow-[0_0_24px_rgba(139,92,246,0.45)] md:h-14"
+        />
         <h1 className="max-w-[700px] text-center font-serif text-[32px] leading-tight text-white md:text-5xl lg:text-6xl">
           {t("hero.eyebrow")}
         </h1>

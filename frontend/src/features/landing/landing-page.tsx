@@ -5,6 +5,7 @@ import "./i18n";
 
 import { LandingNavbar } from "./components/landing-navbar";
 import { Hero } from "./components/hero";
+import { InstallSkills } from "./components/install-skills";
 import { FeaturesSection } from "./components/features-section";
 import { WhyNyx } from "./components/why-nyx";
 import { HowItWorks } from "./components/how-it-works";
@@ -30,6 +31,7 @@ export function LandingPage() {
       <ScrollFab />
       <main>
         <Hero />
+        <InstallSkills />
         <FeaturesSection />
         <WhyNyx />
         <HowItWorks />

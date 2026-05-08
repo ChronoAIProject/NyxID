@@ -110,6 +110,15 @@ Other tools solve parts of this — NyxID combines credential injection, NAT tra
 
 NyxID is used in two phases — install once, then pick a workflow. The install gives you a NyxID instance and an Agent Key; the workflow shows what to build with them.
 
+> **Using Claude Code, Cursor, or another AI coding agent?**
+> Paste this one line into your agent and it will install the `nyxid` CLI and skill, then prompt you to log in:
+>
+> ```
+> Install nyx skills from https://github.com/ChronoAIProject/NyxID/blob/main/skills/INSTALL.md
+> ```
+>
+> See [skills/INSTALL.md](skills/INSTALL.md) for what the agent will do. The skill talks to a running NyxID instance — pick hosted or self-hosted in step 1 below.
+
 ### 1. Install NyxID
 
 Choose hosted (we run it for you) or self-host (Docker on your machine).

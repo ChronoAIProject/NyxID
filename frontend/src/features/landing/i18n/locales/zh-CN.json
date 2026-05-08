@@ -8,6 +8,13 @@
   "hero.cta": "抢先体验",
   "hero.ctaSubtext": "Nyx 守护着大门 — Discord 持有钥匙",
 
+  "install.heading": "安装 Nyx 技能",
+  "install.subheading": "粘贴到 Claude Code、Cursor 或你的 AI 编程智能体 — 剩下的它会处理。",
+  "install.commandLabel": "安装命令",
+  "install.copy": "复制",
+  "install.copied": "已复制",
+  "install.helper": "从 NyxID GitHub 仓库读取 INSTALL.md。没有智能体？请参考 README 中的手动安装步骤。",
+
   "features.heading": "Nyx 守护什么",
   "features.subheading": "每项功能都守护着访问与入侵之间的门槛。你始终清楚自己在批准什么 — 一切尽在掌握。",
   "features.pushApprovals.title": "实时推送审批",
