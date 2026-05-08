@@ -91,6 +91,8 @@ mkdir -p keys
 openssl genrsa -out keys/private.pem 4096 2>/dev/null
 openssl rsa -in keys/private.pem -RSAPublicKey_out -out keys/public.pem 2>/dev/null \
   || openssl rsa -in keys/private.pem -pubout -out keys/public.pem 2>/dev/null
+chmod 755 keys
+chmod 644 keys/private.pem keys/public.pem
 
 echo "Downloading NyxID (this may take a few minutes on first run)..."
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
@@ -210,6 +212,18 @@ Then re-paste Step 2 — the pre-flight will pass and Step 2 will clone fresh.
 ### Stuck on SCRAM failure?
 
 If `docker logs nyxid-backend` shows `SCRAM failure: Authentication failed`, your MongoDB volume still has the previous `MONGO_ROOT_PASSWORD` baked in from a prior run, and `.env.dev` no longer matches. Run `./scripts/uninstall.sh --yes` to wipe the volume, then re-run [Step 2](#step-2-of-3--install-and-start).
+
+### Stuck on `Permission denied (os error 13)`?
+
+If `docker logs nyxid-backend` shows `Permission denied (os error 13)` while reading `/app/keys/*.pem`, the bind-mounted JWT key files aren't readable by the non-root `nyxid` user inside the backend container — common on Windows WSL2 because the host UID and container UID don't match. Fix in place without re-running Step 2:
+
+```bash
+chmod 755 keys
+chmod 644 keys/private.pem keys/public.pem
+docker compose -f docker-compose.yml -f docker-compose.prod.yml restart backend
+```
+
+The Step 2 block now sets these permissions automatically; this note is for checkouts created before that fix.
 
 ## Done when...
 
