@@ -82,11 +82,6 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: apiProxy,
-    fs: {
-      // Allow reading from the repo root so we can import the
-      // legal-authored markdown at /docs/legal/* into pages.
-      allow: [".."],
-    },
   },
   preview: {
     port: 3000,

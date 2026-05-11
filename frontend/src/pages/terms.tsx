@@ -4,10 +4,11 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
-// Single source of truth for the Terms of Use lives in /docs/legal/.
+// Source of truth for the Terms of Use lives alongside this component.
 // `?raw` inlines the markdown at build time so the rendered page can never
-// drift from the authored document.
-import termsMarkdown from "../../../docs/legal/TERMS_OF_USE_DRAFT.md?raw";
+// drift from the authored document. Kept inside frontend/src/ so the Docker
+// build context (which is only the frontend/ directory) can resolve it.
+import termsMarkdown from "./terms-of-use.md?raw";
 
 // ── Last-updated date (kept in sync with the markdown header) ──
 const LAST_UPDATED = "11 May 2026";
