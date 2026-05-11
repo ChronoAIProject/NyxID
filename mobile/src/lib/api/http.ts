@@ -355,8 +355,8 @@ function toBackendPushPlatform(platform: PushTokenRegisterRequest["platform"]): 
 }
 
 function resolveIosPushAppId(): string {
-  const fromEnv = process.env.EXPO_PUBLIC_IOS_BUNDLE_ID?.trim();
-  if (fromEnv) return fromEnv;
+  const fromConfig = Constants.expoConfig?.ios?.bundleIdentifier?.trim();
+  if (fromConfig) return fromConfig;
   return "fun.chrono-ai.nyxid";
 }
 

@@ -4,16 +4,19 @@
   "private": true,
   "main": "index.ts",
   "scripts": {
-    "start": "EXPO_PUBLIC_DEV_MODE=true expo start",
-    "android": "EXPO_PUBLIC_DEV_MODE=true expo run:android",
-    "ios": "EXPO_PUBLIC_DEV_MODE=true expo run:ios",
-    "ios:prod": "EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 expo run:ios",
-    "web": "expo start --web",
+    "postinstall": "node scripts/render-eas-json.js",
+    "start": "APP_ENV=dev expo start",
+    "android": "APP_ENV=dev expo run:android",
+    "ios": "APP_ENV=dev expo run:ios",
+    "web": "APP_ENV=dev expo start --web",
     "typecheck": "tsc --noEmit",
-    "bump:android:build": "sh scripts/bump-android-build.sh",
-    "build:ios": "EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1 expo run:ios --configuration Release",
-    "bump:ios:build": "sh scripts/bump-ios-build.sh",
-    "build:ios:testflight": "pnpm run bump:ios:build && grep -q 'EXPO_PUBLIC_API_BASE_URL' ios/.xcode.env.local 2>/dev/null || echo 'export EXPO_PUBLIC_API_BASE_URL=https://nyx-api.chrono-ai.fun/api/v1' >> ios/.xcode.env.local && xcodebuild -workspace ios/NyxIDMobile.xcworkspace -scheme NyxIDMobile -configuration Release -destination 'generic/platform=iOS' -archivePath ios/build/NyxIDMobile.xcarchive -allowProvisioningUpdates archive",
+    "render:eas": "node scripts/render-eas-json.js",
+    "build:dev": "node scripts/render-eas-json.js && APP_ENV=dev eas build --profile dev --platform all --local --non-interactive",
+    "build:prod": "node scripts/render-eas-json.js && APP_ENV=prod eas build --profile prod --platform all --local --non-interactive",
+    "submit:dev": "node scripts/render-eas-json.js && APP_ENV=dev eas submit --profile dev --platform all --non-interactive",
+    "submit:prod": "node scripts/render-eas-json.js && APP_ENV=prod eas submit --profile prod --platform all --non-interactive",
+    "release:dev": "pnpm build:dev && pnpm submit:dev",
+    "release:prod": "pnpm build:prod && pnpm submit:prod",
     "eas-build-post-install": "node scripts/patch-android-build-gradle.js"
   },
   "expo": {
@@ -61,6 +64,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.14",
+    "dotenv": "^16.4.5",
     "typescript": "~5.9.3"
   }
 }

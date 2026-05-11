@@ -29,12 +29,14 @@ cd mobile
 pnpm install
 ```
 
-**API 地址**（`mobile/.env`）：
+**API 地址**（`mobile/.env.dev`，因为 `pnpm android` 用 `APP_ENV=dev`）：
 
-- **模拟器**：`EXPO_PUBLIC_API_BASE_URL=http://10.0.2.2:3001/api/v1`（Android 模拟器里 `10.0.2.2` 指向宿主机）
-- **真机**：用本机局域网 IP，例如 `EXPO_PUBLIC_API_BASE_URL=http://192.168.1.100:3001/api/v1`（先在本机起好 backend）
+- **模拟器**：`DEV_API_BASE_URL=http://10.0.2.2:3001/api/v1`（Android 模拟器里 `10.0.2.2` 指向宿主机）
+- **真机**：用本机局域网 IP，例如 `DEV_API_BASE_URL=http://192.168.1.100:3001/api/v1`（先在本机起好 backend）
 
 确保 backend 在对应地址可访问（如 `cargo run` 在 3001 端口）。
+
+> `EXPO_PUBLIC_API_BASE_URL` 直接设置会被 `app.config.ts` 覆盖。请改 `DEV_API_BASE_URL`（或 `PROD_API_BASE_URL` 若运行 `APP_ENV=prod`）。
 
 ---
 
@@ -84,5 +86,5 @@ pnpm start
 ## 5. 小结
 
 1. 装好 Java 17、Android SDK，设好 `ANDROID_HOME`。
-2. `mobile/.env` 里按设备类型设 `EXPO_PUBLIC_API_BASE_URL`（模拟器 `10.0.2.2:3001`，真机本机 IP）。
+2. `mobile/.env.dev` 里按设备类型设 `DEV_API_BASE_URL`（模拟器 `10.0.2.2:3001`，真机本机 IP）。
 3. 在项目根起 backend，在 `mobile` 下执行 `pnpm android` 即可本地编译并跑起 Android 调试。
