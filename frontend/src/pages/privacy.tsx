@@ -240,7 +240,7 @@ export function PrivacyPage() {
               please contact us at:
             </p>
             <p className="font-mono text-xs text-foreground">
-              privacy@nyxid.com
+              contact@chrono-ai.fun
             </p>
           </Section>
         </div>
