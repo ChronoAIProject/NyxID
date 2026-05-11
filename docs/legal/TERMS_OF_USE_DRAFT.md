@@ -3,7 +3,7 @@
 **Status:** Draft — pending Legal sign-off. Tracks Issue #499 item 2.
 **Last updated:** 8 May 2026
 
-> **IMPORTANT NOTICE:** PLEASE READ THESE TERMS OF USE CAREFULLY BEFORE ACCESSING OR USING THE NYXID APPLICATION. BY ACCESSING OR USING THE APP, YOU CONFIRM THAT YOU HAVE READ, UNDERSTOOD, AND AGREE TO BE LEGALLY BOUND BY THESE TERMS. PAY PARTICULAR ATTENTION TO **SECTIONS 4 (AI DISCLAIMER), 6 (SECURITY DISCLAIMERS), 9 (INTELLECTUAL PROPERTY AND USER-GENERATED CONTENT LICENCE), 10 (TERMINATION RIGHTS), 12 (LIMITATION OF LIABILITY), 14 (AUTOMATIC RENEWAL AND REFUNDS), AND 15 (ARBITRATION AND CLASS-ACTION WAIVER).** IF YOU DO NOT AGREE TO THESE TERMS, DO NOT ACCESS OR USE THE APP.
+> **IMPORTANT NOTICE:** PLEASE READ THESE TERMS OF USE CAREFULLY BEFORE ACCESSING OR USING THE NYXID APPLICATION. BY ACCESSING OR USING THE APP, YOU CONFIRM THAT YOU HAVE READ, UNDERSTOOD, AND AGREE TO BE LEGALLY BOUND BY THESE TERMS. PAY PARTICULAR ATTENTION TO **SECTIONS 4 (AI DISCLAIMER), 6 (SECURITY DISCLAIMERS), 9 (INTELLECTUAL PROPERTY AND USER CONTENT), 10 (SUSPENSION AND TERMINATION), 12 (LIMITATION OF LIABILITY), 14 (FEES, REFUNDS AND AUTO-RENEWAL), AND 15 (ARBITRATION AND CLASS ACTION WAIVER).** IF YOU DO NOT AGREE TO THESE TERMS, DO NOT ACCESS OR USE THE APP.
 
 These NyxID Terms of Use ("**Terms**") constitute a legal agreement between you ("**User**" or "**you**") and ChronoAI Pte. Ltd. ("**we**," "**us**," or "**ChronoAI**") (the "**Agreement**"). These Terms apply when you visit or interact with the NyxID application, engage with our customer support, interact with us on social media, or otherwise communicate with us. By accessing or using the App, you agree to be bound by these Terms.
 
@@ -30,7 +30,7 @@ By accessing or using any or all of the App, you expressly acknowledge that (i) 
 
 ### 1.4 Modifications to these Terms
 
-ChronoAI reserves the right to amend these Terms from time to time, including to reflect changes in applicable law, regulatory guidance, or our Services. Material changes will be communicated by revising the "Last Updated" date, by displaying a notice within the App, or by contacting you directly where required by applicable law. Your continued use of the App following any modification constitutes acceptance of the revised Terms. If you do not agree to any modification, you must cease using the App.
+ChronoAI reserves the right to amend these Terms from time to time, including to reflect changes in applicable law, regulatory guidance, or our Services. Material changes will be communicated by revising the "Last updated" date, by displaying a notice within the App, or by contacting you directly where required by applicable law. Your continued use of the App following any modification constitutes acceptance of the revised Terms. If you do not agree to any modification, you must cease using the App.
 
 ### 1.5 Privacy Policy
 
@@ -56,7 +56,6 @@ These Terms govern your use of the **NyxID hosted Service operated by ChronoAI**
 For the purposes of this Agreement, the following terms shall have the meanings set out below:
 
 - **"AI Features"** means the artificial intelligence and machine learning functionalities integrated into the App, including the AI chat assistant, automated risk scoring, anomaly detection, and any other AI-driven processing described in Section 4.
-- **"Alert"** means a message displayed on the App's interface providing suggestions or notifications to Users regarding authentication requests, approval decisions, or system events.
 - **"API Keys and Tokens"** means authentication credentials, API keys, OAuth tokens, SSH certificates, and other similar access credentials that you store within the App for the purpose of proxied service access.
 - **"App"** means the NyxID mobile application, web application, CLI, and node agent software, including all updates, upgrades, and versions thereof.
 - **"Approval Request"** means a push notification or messaging-platform message sent to you requiring your approval or denial before a proxied credential request is executed.
@@ -96,7 +95,7 @@ The App provides the following core Services:
 - **Local Agent:** You may optionally run a Local Agent (the NyxID node agent or `nyxid` CLI) on your own hardware, allowing credentials to remain on your device and never be transmitted to ChronoAI's servers.
 - **Approval Interface:** The mobile App and supported Channel Platforms serve as approval interfaces, enabling you to approve, deny, or revoke access requests via push notification (iOS/Android) or messaging-platform message before each proxied request is executed.
 - **OAuth/OIDC Login Provider:** NyxID can act as an OAuth/OIDC login provider, enabling third-party developers to integrate "Sign in with NyxID" into their applications.
-- **SSH Certificate Issuance:** The App can issue short-lived SSH certificates for authenticating remote server access.
+- **SSH Certificate Issuance:** The App can issue short-lived SSH Certificates for authenticating remote server access.
 - **AI Chat Assistant:** The App includes an AI chat assistant powered by large language model ("**LLM**") technology to assist with delivering certain Services. Credential inputs requested by the assistant are encrypted locally and are not transmitted to the underlying LLM. See Section 4 (AI Features and Disclaimer) for full disclosure.
 
 ### 3.3 Service Evolution
@@ -128,7 +127,7 @@ In accordance with applicable law, including the EU AI Act (Regulation (EU) 2024
 - **Anomaly Detection (where enabled):** Machine learning models that may monitor usage patterns and flag unusual behaviour that may indicate unauthorised access or security incidents.
 - **Automated Approval Workflows (where enabled):** AI-assisted processing of credential injection requests based on pre-configured User preferences and risk thresholds.
 
-The availability of individual AI Features depends on your account configuration and the version of the Services in use; not every feature above may be active at a given time. Where a feature is not yet enabled, this disclosure is provided in advance for transparency.
+The availability of individual AI Features depends on your account configuration and the version of the Services in use; not all features listed above are necessarily active at a given time. Where a feature is not yet enabled, this disclosure is provided in advance for transparency.
 
 ### 4.2 Inputs Used by AI Systems
 
@@ -188,7 +187,7 @@ You are solely responsible for maintaining the security of your device(s) used t
 
 You are responsible for:
 
-- maintaining the confidentiality of your account credentials (username, password, and MFA secrets);
+- maintaining the confidentiality of your account credentials (username, password, and MFA Secrets);
 - not sharing your account credentials with any third party;
 - using strong, unique passwords and enabling multi-factor authentication for your NyxID account;
 - promptly revoking any API Keys or Tokens that you believe have been compromised;
@@ -207,7 +206,7 @@ You agree not to engage in any of the following activities in connection with yo
 - accessing or attempting to access another User's account, credentials, or data without authorisation;
 - using the App to proxy, store, or inject credentials for illegal, unauthorised, or malicious purposes;
 - using automated programs, bots, web crawlers, scraping tools, or similar technologies to extract data from or interfere with the App;
-- attempting to reverse engineer, decompile, disassemble, or otherwise derive the source code of the App or its AI systems, except to the extent that such activity is expressly permitted by applicable open-source license terms governing components of the App;
+- attempting to reverse engineer, decompile, disassemble, or otherwise derive the source code of the App or its AI systems, except to the extent that such activity is expressly permitted by applicable open-source licence terms governing components of the App;
 - uploading, transmitting, or storing malware, viruses, or other malicious code through the App;
 - conducting penetration testing, vulnerability scanning, or any security testing of the App or ChronoAI's infrastructure without prior written authorisation;
 - impersonating ChronoAI, its employees, or other Users;
@@ -235,7 +234,7 @@ You acknowledge and agree that:
 - you are solely responsible for the security of the credentials you store within the App;
 - ChronoAI's Credential Proxy only injects credentials into requests initiated by you or your authorised agents, and any misuse resulting from compromised credentials on your end is your sole responsibility;
 - the approval workflow (push notification and Channel Platform messages) is a security feature that you are strongly encouraged to enable; ChronoAI accepts no liability for unauthorised proxied requests where you have disabled the approval requirement, except to the extent such loss arises from ChronoAI's gross negligence, wilful misconduct, or failure to implement industry-standard security measures, or where liability cannot be excluded under applicable law;
-- SSH certificates issued by the App are short-lived and should be monitored; you are responsible for revoking certificates where there is a suspected compromise.
+- SSH Certificates issued by the App are short-lived and should be monitored; you are responsible for revoking certificates where there is a suspected compromise.
 
 ### 6.3 Limitation of Liability for Security Incidents
 
@@ -263,7 +262,7 @@ ChronoAI collects and processes personal data in connection with your use of the
 
 ### 7.2 PDPA Compliance (Singapore)
 
-ChronoAI is subject to the Personal Data Protection Act 2012 (Singapore) ("**PDPA**") and is committed to complying with all applicable obligations thereunder. In particular, ChronoAI will: (i) obtain valid consent, or rely on another lawful basis available under the PDPA (such as deemed consent, the legitimate interests exception, or legal/business improvement purposes), before collecting, using, or disclosing your personal data; (ii) notify you of the purposes for which your data is collected; (iii) implement reasonable security arrangements to protect your personal data; (iv) retain personal data only for as long as necessary for the stated purposes; and (v) apply appropriate safeguards to cross-border transfers of personal data.
+ChronoAI is subject to the PDPA and is committed to complying with all applicable obligations thereunder. In particular, ChronoAI will: (i) obtain valid consent, or rely on another lawful basis available under the PDPA (such as deemed consent, the legitimate interests exception, or legal/business improvement purposes), before collecting, using, or disclosing your personal data; (ii) notify you of the purposes for which your data is collected; (iii) implement reasonable security arrangements to protect your personal data; (iv) retain personal data only for as long as necessary for the stated purposes; and (v) apply appropriate safeguards to cross-border transfers of personal data.
 
 ### 7.3 GDPR Compliance (EU/EEA Users)
 
@@ -305,7 +304,7 @@ ChronoAI may use third-party analytics, marketing, and communications platforms 
 
 ### 8.6 Apple App Store and Google Play Requirements
 
-The App is distributed through the Apple App Store and the Google Play Store (collectively, "**App Platforms**"). ChronoAI complies with the App Platform guidelines and requirements applicable to the App, including Apple's App Tracking Transparency ("**ATT**") framework. Where required under ATT or equivalent requirements, ChronoAI will seek your explicit consent before engaging in cross-app tracking. ChronoAI's App complies with applicable privacy label requirements for the disclosure of data categories collected.
+The Mobile App is distributed through the Apple App Store and the Google Play Store (collectively, "**App Platforms**"). ChronoAI complies with the App Platform guidelines and requirements applicable to the App, including Apple's App Tracking Transparency ("**ATT**") framework. Where required under ATT or equivalent requirements, ChronoAI will seek your explicit consent before engaging in cross-app tracking. ChronoAI's App complies with applicable privacy label requirements for the disclosure of data categories collected.
 
 The following terms apply specifically to your use of the NyxID iOS application (the "**Licensed Application**" for purposes of this Section 8.6) as obtained from the Apple App Store:
 
@@ -320,7 +319,12 @@ The following terms apply specifically to your use of the NyxID iOS application 
 - **Developer Name and Address.** Inquiries relating to the Licensed Application may be addressed to ChronoAI at the contact address set out in Section 16.9.
 - **Third-Party Beneficiary.** You acknowledge and agree that Apple, and Apple's subsidiaries, are third-party beneficiaries of this Agreement, and that, upon your acceptance of this Agreement, Apple will have the right (and will be deemed to have accepted the right) to enforce this Agreement against you as a third-party beneficiary thereof.
 
-If you obtain the NyxID Android application from the Google Play Store, you acknowledge that: (i) ChronoAI, not Google LLC ("**Google**"), is solely responsible for the Mobile App and its content; (ii) Google is not a party to this Agreement; (iii) refunds, billing disputes, and subscription management for App Platform purchases are governed by Google Play's terms and policies; and (iv) ChronoAI complies with the Google Play Developer Distribution Agreement and the Google Play Developer Program Policies applicable to the Mobile App.
+If you obtain the NyxID Android application from the Google Play Store, the following terms apply specifically:
+
+- **Acknowledgement.** ChronoAI, not Google LLC ("**Google**"), is solely responsible for the Mobile App and its content.
+- **No Party Status.** Google is not a party to this Agreement.
+- **Payments and Refunds.** Refunds, billing disputes, and subscription management for App Platform purchases are governed by Google Play's terms and policies.
+- **Developer Policy Compliance.** ChronoAI complies with the Google Play Developer Distribution Agreement and the Google Play Developer Program Policies applicable to the Mobile App.
 
 The App Platforms are not parties to this Agreement.
 
@@ -328,11 +332,11 @@ The App Platforms are not parties to this Agreement.
 
 NyxID may be deployed by third-party operators on their own infrastructure under the open-source license accompanying the relevant components of the App. Where you access NyxID via a Self-Hosted Deployment, the operator of that deployment — not ChronoAI — is the controller (or equivalent) of your personal data, and your use is governed by the operator's own terms and privacy policy. Operators of Self-Hosted Deployments are themselves Users of the open-source software and are responsible for their own legal and regulatory compliance toward their end users. Operator-facing guidance is published in the project repository (see `docs/TELEMETRY_OPERATORS.md` and related documentation).
 
-## 9. INTELLECTUAL PROPERTY RIGHTS
+## 9. INTELLECTUAL PROPERTY AND USER CONTENT
 
 ### 9.1 Ownership
 
-The App, its underlying software, architecture, AI models and systems, and all content, trademarks, logos, design, text, and other proprietary materials available through the Services (collectively, "**NyxID Content**") are owned by ChronoAI Pte. Ltd. or licensed to ChronoAI by third-party licensors. All intellectual property rights in the NyxID Content are reserved. Nothing in these Terms shall be construed as transferring any intellectual property rights to you. Components of the App that are made available under open-source licenses are licensed to you separately under the terms of the applicable open-source license, which prevails over this Section to the extent of any conflict.
+The App, its underlying software, architecture, AI models and systems, and all content, trademarks, logos, design, text, and other proprietary materials available through the Services (collectively, "**NyxID Content**") are owned by ChronoAI Pte. Ltd. or licensed to ChronoAI by third-party licensors. All intellectual property rights in the NyxID Content are reserved. Nothing in these Terms shall be construed as transferring any intellectual property rights to you. Components of the App that are made available under open-source licences are licensed to you separately under the terms of the applicable open-source licence, which prevails over this Section to the extent of any conflict.
 
 ### 9.2 Limited Licence
 
@@ -342,7 +346,7 @@ Subject to your compliance with these Terms, ChronoAI grants you a limited, non-
 
 You agree that you will not, and will not permit any third party to:
 
-- reproduce, modify, adapt, translate, distribute, publicly display, sell, lease, reverse engineer, decompile, or disassemble the App or any NyxID Content, except to the extent permitted by applicable open-source license terms governing components of the App;
+- reproduce, modify, adapt, translate, distribute, publicly display, sell, lease, reverse engineer, decompile, or disassemble the App or any NyxID Content, except to the extent permitted by applicable open-source licence terms governing components of the App;
 - use any NyxID Content for purposes outside the licence granted in Section 9.2 without ChronoAI's prior written consent;
 - attempt to circumvent, disable, or interfere with any security or access control feature of the App;
 - remove or obscure any proprietary rights notices in or accompanying the NyxID Content;
@@ -360,7 +364,7 @@ ChronoAI respects the intellectual property rights of others. If you believe tha
 
 ### 10.1 Service Modifications
 
-ChronoAI may, at its sole discretion, modify, introduce, or discontinue any part of the Services at any time. ChronoAI will use reasonable efforts to provide advance notice of material modifications, but reserves the right to make changes without prior notice where required by law, regulation, or security considerations.
+ChronoAI may, at its sole discretion, modify, introduce, or discontinue any part of the Services at any time. ChronoAI will use reasonable endeavours to provide advance notice of material modifications, but reserves the right to make changes without prior notice where required by law, regulation, or security considerations.
 
 ### 10.2 Temporary Suspension
 
@@ -390,7 +394,7 @@ Upon termination of your access to the Services:
 - all licences granted to you under these Terms immediately terminate;
 - you must immediately cease all use of the App and delete all copies of the App from your devices;
 - ChronoAI will handle your personal data following termination in accordance with the Privacy Policy and applicable law; and
-- provisions of these Terms that by their nature should survive termination (including Sections 3.4 (Developer Integrations and SDK Use), 5, 6, 7 (Data Protection and Privacy), 9, 11, 12, 13, 14, 15, and 16) shall survive.
+- provisions of these Terms that by their nature should survive termination (including Sections 3.4 (Developer Integrations and SDK Use), 4 (AI Features and Disclaimer), 5 (User Rights and Obligations), 6 (Security Disclaimers), 7 (Data Protection and Privacy), 8 (Third-Party Integrations), 9 (Intellectual Property and User Content), 11 (Incident and Breach Handling), 12 (Disclaimer and Limitation of Liability), 13 (Representations and Warranties), 14 (Fees, Payment, Refunds and Auto-Renewal), 15 (Arbitration and Class Action Waiver), and 16 (Miscellaneous)) shall survive.
 
 ## 11. INCIDENT AND BREACH HANDLING
 
@@ -402,7 +406,7 @@ ChronoAI maintains documented incident response procedures designed to detect, c
 
 In the event of a personal data breach that is likely to result in a risk to the rights and freedoms of affected Users, ChronoAI will:
 
-- notify the relevant data protection authority within the timeframes required by applicable law (within 72 hours of becoming aware under the GDPR; **no later than 3 calendar days** of assessing the breach as notifiable under the Singapore PDPA);
+- notify the relevant data protection authority within the timeframes required by applicable law (within 72 hours of becoming aware under the GDPR; no later than 3 calendar days of assessing the breach as notifiable under the Singapore PDPA);
 - notify affected Users without undue delay where the breach is likely to result in a high risk to their rights and freedoms; and
 - provide affected Users and authorities with information regarding the nature of the breach, categories and approximate number of data subjects affected, likely consequences, and measures taken or proposed.
 
@@ -444,7 +448,7 @@ TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, CHRONOAI'S TOTAL AGGREGATE LI
 
 ### 12.5 Essential Basis of the Agreement
 
-YOU ACKNOWLEDGE THAT THE DISCLAIMERS AND LIMITATIONS OF LIABILITY IN THIS SECTION 12 REFLECT A REASONABLE AND FAIR ALLOCATION OF RISK BETWEEN THE PARTIES, AND THAT CHRONOAI WOULD NOT HAVE ENTERED INTO THIS AGREEMENT WITHOUT THESE LIMITATIONS. THESE LIMITATIONS SHALL APPLY NOTWITHSTANDING ANY FAILURE OF ESSENTIAL PURPOSE OF ANY LIMITED REMEDY. NOTHING IN THESE TERMS SHALL LIMIT OR EXCLUDE ANY LIABILITY THAT CANNOT BE EXCLUDED OR LIMITED BY APPLICABLE LAW (INCLUDING LIABILITY FOR DEATH OR PERSONAL INJURY CAUSED BY NEGLIGENCE, OR FOR FRAUD OR FRAUDULENT MISREPRESENTATION).
+YOU ACKNOWLEDGE THAT THE DISCLAIMERS AND LIMITATIONS OF LIABILITY IN THIS SECTION 12 REFLECT A REASONABLE AND FAIR ALLOCATION OF RISK BETWEEN THE PARTIES, AND THAT CHRONOAI WOULD NOT HAVE ENTERED INTO THIS AGREEMENT WITHOUT THESE LIMITATIONS. THESE LIMITATIONS SHALL APPLY NOTWITHSTANDING ANY FAILURE OF ESSENTIAL PURPOSE OF ANY LIMITED REMEDY. NOTHING IN THESE TERMS SHALL EXCLUDE OR LIMIT ANY LIABILITY THAT CANNOT LAWFULLY BE EXCLUDED OR LIMITED UNDER APPLICABLE LAW (INCLUDING LIABILITY FOR DEATH OR PERSONAL INJURY CAUSED BY NEGLIGENCE, OR FOR FRAUD OR FRAUDULENT MISREPRESENTATION).
 
 ### 12.6 No Professional Advice
 
@@ -462,7 +466,7 @@ By accessing or using the App, you represent and warrant to ChronoAI that:
 - any credentials you store within the App are yours to use and are not subject to any restrictions that would prohibit their use in connection with the Credential Proxy functionality; and
 - you will not use the App to circumvent the security controls, access controls, or terms of service of any third-party system or service.
 
-## 14. FEES AND PAYMENT
+## 14. FEES, PAYMENT, REFUNDS AND AUTO-RENEWAL
 
 ### 14.1 Applicable Fees
 
@@ -494,7 +498,7 @@ Any dispute, claim, or controversy ("**Claim**") relating in any way to this Agr
 
 ### 15.2 Singapore (Default Jurisdiction)
 
-This Agreement and any Claim (including non-contractual disputes or claims) arising out of or in connection with it, or its subject matter or formation, shall be governed by and construed in accordance with the laws of Singapore. Any Claim shall be submitted first to mediation in accordance with the Singapore International Arbitration Centre ("**SIAC**") Mediation Rules. If the dispute is not settled by mediation within fourteen (14) days of commencement, it shall be referred to and finally resolved by arbitration under the SIAC Rules. The arbitration tribunal shall consist of a single arbitrator, appointed by agreement of the parties, or failing agreement, by the Chairman of SIAC. The seat of arbitration shall be Singapore. The language shall be English.
+This Agreement and any Claim (including non-contractual disputes or claims) arising out of or in connection with it, or its subject matter or formation, shall be governed by and construed in accordance with the laws of Singapore. Any Claim shall be submitted first to mediation in accordance with the Singapore International Arbitration Centre ("**SIAC**") Mediation Rules. If the dispute is not settled by mediation within fourteen (14) days of commencement, it shall be referred to and finally resolved by arbitration under the SIAC Rules. The arbitration tribunal shall consist of a single arbitrator, appointed by agreement of the parties, or failing agreement, by the President of the Court of Arbitration of SIAC. The seat of arbitration shall be Singapore. The language shall be English.
 
 ### 15.3 United States Users
 
@@ -534,11 +538,11 @@ No failure or delay by ChronoAI in exercising any right or remedy under this Agr
 
 ### 16.6 Force Majeure
 
-ChronoAI shall not be in breach of this Agreement or liable for any delay or failure in performance resulting from causes beyond its reasonable control, including acts of God, natural disasters, war, terrorism, civil unrest, government orders, power failures, internet service interruptions, or cyberattacks of exceptional scale. ChronoAI will use reasonable efforts to mitigate the impact of force majeure events and to resume normal operations as soon as practicable.
+ChronoAI shall not be in breach of this Agreement or liable for any delay or failure in performance resulting from causes beyond its reasonable control, including acts of God, natural disasters, war, terrorism, civil unrest, government orders, power failures, internet service interruptions, or cyberattacks of exceptional scale. ChronoAI will use reasonable endeavours to mitigate the impact of force majeure events and to resume normal operations as soon as practicable.
 
 ### 16.7 Notices
 
-Notices or other communications from ChronoAI under these Terms will be provided by posting to the App, through in-app notifications, or via the email address associated with your account. You agree to receive electronic communications from ChronoAI relating to your account and use of the Services. Notices from you to ChronoAI must be submitted to **legal@nyxid.com** or to the postal address set out in Section 16.9.
+Notices or other communications from ChronoAI under these Terms will be provided by posting to the App, by displaying in-app notifications, or by emailing the address associated with your account. You agree to receive electronic communications from ChronoAI relating to your account and use of the Services. Notices from you to ChronoAI must be submitted to **legal@nyxid.com** or to the postal address set out in Section 16.9.
 
 ### 16.8 Governing Language
 
