@@ -54,7 +54,7 @@ For the purposes of this Agreement, the following terms shall have the meanings 
 - **"API Keys and Tokens"** means authentication credentials, API keys, OAuth tokens, SSH Certificates, and other similar access credentials that you store within the App for the purpose of proxied service access.
 - **"App"** means the NyxID mobile and/or web application, including all updates, upgrades, and versions thereof.
 - **"Approval Request"** means a push notification or messaging-platform message sent to you requiring your approval or denial before a proxied credential request is executed.
-- **"ChronoAI" / "we" / "us" / "our"** means ChronoAI Pte. Ltd., a company incorporated in Singapore (Company Registration No.: [insert]), and its successors and assigns.
+- **"ChronoAI" / "we" / "us" / "our"** means ChronoAI Pte. Ltd., a company incorporated in Singapore, and its successors and assigns.
 - **"Credential Proxy"** means the functionality by which the App injects your stored API Keys and Tokens into outbound requests to third-party services on your behalf.
 - **"GDPR"** means the General Data Protection Regulation (EU) 2016/679, as amended or replaced from time to time.
 - **"Intellectual Property"** means all patents, copyrights, trademarks, trade secrets, database rights, design rights, and all other intellectual property rights, whether registered or unregistered.
