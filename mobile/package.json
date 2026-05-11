@@ -4,20 +4,26 @@
   "private": true,
   "main": "index.ts",
   "scripts": {
-    "postinstall": "node scripts/render-eas-json.js",
     "start": "APP_ENV=dev expo start",
     "android": "APP_ENV=dev expo run:android",
     "ios": "APP_ENV=dev expo run:ios",
     "web": "APP_ENV=dev expo start --web",
     "typecheck": "tsc --noEmit",
-    "render:eas": "node scripts/render-eas-json.js",
-    "build:dev": "node scripts/render-eas-json.js && APP_ENV=dev eas build --profile dev --platform all --local --non-interactive",
-    "build:prod": "node scripts/render-eas-json.js && APP_ENV=prod eas build --profile prod --platform all --local --non-interactive",
-    "submit:dev": "node scripts/render-eas-json.js && APP_ENV=dev eas submit --profile dev --platform all --non-interactive",
-    "submit:prod": "node scripts/render-eas-json.js && APP_ENV=prod eas submit --profile prod --platform all --non-interactive",
-    "release:dev": "pnpm build:dev && pnpm submit:dev",
-    "release:prod": "pnpm build:prod && pnpm submit:prod",
-    "eas-build-post-install": "node scripts/patch-android-build-gradle.js"
+    "build:ios": "APP_ENV=prod node scripts/build-ios.js",
+    "build:ios:dev": "APP_ENV=dev node scripts/build-ios.js",
+    "build:android": "APP_ENV=prod node scripts/build-android.js",
+    "build:android:dev": "APP_ENV=dev node scripts/build-android.js",
+    "build:prod": "pnpm build:ios && pnpm build:android",
+    "build:dev": "pnpm build:ios:dev && pnpm build:android:dev",
+    "submit:ios": "APP_ENV=prod node scripts/submit-ios.js",
+    "submit:android": "APP_ENV=prod node scripts/submit-android.js",
+    "submit:prod": "pnpm submit:ios && pnpm submit:android",
+    "release:ios": "pnpm build:ios && pnpm submit:ios",
+    "release:android": "pnpm build:android && pnpm submit:android",
+    "release:prod": "pnpm release:ios && pnpm release:android",
+    "bump:ios": "node scripts/bump-version.js ios prod",
+    "bump:android": "node scripts/bump-version.js android prod",
+    "bump:both": "node scripts/bump-version.js both prod"
   },
   "expo": {
     "autolinking": {
@@ -65,6 +71,7 @@
   "devDependencies": {
     "@types/react": "~19.2.14",
     "dotenv": "^16.4.5",
+    "googleapis": "^144.0.0",
     "typescript": "~5.9.3"
   }
 }

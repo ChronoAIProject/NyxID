@@ -78,7 +78,7 @@ pnpm start
 | `ANDROID_HOME` 未设置 | 设置并 `source ~/.zshrc` 后重试 |
 | 真机访问不到 API | 用本机局域网 IP，不要用 `localhost`；确认手机和电脑同一网段 |
 | 模拟器访问不到 API | 用 `10.0.2.2:3001`，不要用 `localhost` |
-| Gradle / androidx 相关报错 | 若 prebuild 后出现，可手动跑一次 patch：`EAS_BUILD_PLATFORM=android node scripts/patch-android-build-gradle.js`（仅当脚本检测到 `android/build.gradle` 时生效） |
+| Gradle / androidx 相关报错 | `pnpm build:android` 已自动跑 `patch-android-build-gradle.js`；如需手动可用 `EAS_BUILD_PLATFORM=android node scripts/patch-android-build-gradle.js`（仅在 `android/build.gradle` 存在时生效） |
 | `adb devices` 为空 | 真机：换线/换口、确认 USB 调试已开、重插后点「允许」；模拟器：先启动 AVD 再 `pnpm android` |
 
 ---

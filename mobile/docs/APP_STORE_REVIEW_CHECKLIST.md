@@ -54,7 +54,7 @@
 
 | 项 | 状态 | 说明 |
 |----|------|------|
-| 提审/生产 API | ✅ | `pnpm build:prod` / `pnpm release:prod` 使用 `PROD_API_BASE_URL`（默认 `https://nyx-api.chrono-ai.fun/api/v1`，见 `.env.prod`），审核环境可访问 |
+| 提审/生产 API | ✅ | `pnpm build:ios` / `pnpm release:ios` 使用 `PROD_API_BASE_URL`（默认 `https://nyx-api.chrono-ai.fun/api/v1`，见 `.env.prod`），审核环境可访问 |
 | URL Scheme | ✅ | `nyxid`，用于 OAuth 回调 |
 | Associated Domains | ✅ | `applinks:nyx-api.chrono-ai.fun`（entitlements） |
 | 最低系统版本 | ✅ | LSMinimumSystemVersion 12.0 |
