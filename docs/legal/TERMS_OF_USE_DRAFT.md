@@ -10,7 +10,7 @@ These NyxID Terms of Use ("**Terms**") constitute a legal agreement between you 
 
 ### 1.1 Entire Agreement and Scope of Applicability
 
-These Terms of Use ("**Terms**"), together with the Privacy Policy and any other documents expressly incorporated by reference herein (collectively, the "**Agreement**"), constitute the entire and exclusive agreement between you ("**User**" or "**you**") and ChronoAI Pte. Ltd. ("**ChronoAI**", "**we**", "**us**", or "**our**") concerning your access to and use of the NyxID mobile and/or web application (the "**App**") and all related services, features, and content provided by ChronoAI (collectively, the "**Services**").
+These Terms of Use ("**Terms**"), together with the Privacy Policy and any other documents expressly incorporated by reference herein (collectively, the "**Agreement**"), constitute the entire and exclusive agreement between you ("**User**" or "**you**") and ChronoAI Pte. Ltd. ("**ChronoAI**", "**we**", "**us**", or "**our**") concerning your access to and use of the NyxID identity and credential infrastructure (the "**App**") — comprising the NyxID mobile application, web application, command-line interface ("**CLI**"), Node Agent daemon, and SDK client libraries — and all related services, features, and content provided by ChronoAI (collectively, the "**Services**"). References to the App in these Terms apply equally to each of these surfaces unless the context requires otherwise.
 
 This Agreement supersedes all prior or contemporaneous communications, proposals, or agreements, whether electronic, oral, or written, relating to the subject matter hereof. For the avoidance of doubt, this Agreement does not extend to, nor does ChronoAI assume any responsibility or liability for, services developed, operated, or provided by third parties, even if accessible or linked through the App.
 
@@ -44,7 +44,17 @@ To be eligible to use the App, you must:
 - not be listed on any sanctions list, including the UN Security Council Consolidated List, the U.S. Specially Designated Nationals List, or any equivalent list maintained by a relevant authority;
 - not use the Services if doing so would violate any applicable law or regulation in your jurisdiction.
 
-If you are accessing the Services on behalf of a legal entity, you represent and warrant that the entity is duly incorporated and that you are duly authorised to act on its behalf and bind it to this Agreement. ChronoAI reserves the right to modify eligibility criteria and restrict access at any time.
+If you are accessing the Services on behalf of a legal entity, you represent and warrant that the entity is duly incorporated and that you are duly authorised to act on its behalf and bind it to this Agreement. ChronoAI reserves the right to gate registration (for example, behind an invitation programme or waitlist), modify eligibility criteria, and restrict access at any time.
+
+### 1.7 Organizations and Org Admins
+
+The App supports Organizations as a deployment model in which a single legal entity provisions and administers NyxID accounts, credentials, services, nodes, and other resources on behalf of its members. Each Organization may designate one or more **Org Admins** who hold elevated authority to provision and revoke member access, manage org-owned services and credentials, and act on behalf of the Organization within the App. Org Admins are bound by these Terms in their own capacity and as agents of the Organization.
+
+Members of an Organization acknowledge that their account is administered by the Organization and that Org Admins may have visibility into credentials, services, and audit records associated with the Organization. Organizations are responsible for their own internal governance, including the consequences of administrator changes (for example, ensuring that registration tokens or other delegated authority granted by a removed administrator are revoked in a timely manner). ChronoAI's role is limited to applying the access-control rules configured within the App.
+
+### 1.8 Service Accounts
+
+The App allows you to provision Service Accounts — non-human identities that hold credentials and tokens for machine-to-machine use. Where you create or operate a Service Account, you remain the responsible User for all activity performed under that Service Account, including its compliance with these Terms. References in these Terms to your use of the App include use by any Service Account you have created or that operates on your behalf.
 
 ## 2. DEFINITIONS
 
@@ -52,36 +62,44 @@ For the purposes of this Agreement, the following terms shall have the meanings 
 
 - **"Alert"** means a message displayed on the App's interface providing suggestions or notifications to Users regarding authentication requests, approval decisions, or system events.
 - **"API Keys and Tokens"** means authentication credentials, API keys, OAuth tokens, SSH Certificates, and other similar access credentials that you store within the App for the purpose of proxied service access.
-- **"App"** means the NyxID mobile and/or web application, including all updates, upgrades, and versions thereof.
+- **"App"** means the NyxID identity and credential infrastructure offered by ChronoAI, comprising the mobile application, web application, CLI, Node Agent, SDK, and all updates, upgrades, and versions thereof. References to the App apply equally to each of these surfaces unless the context requires otherwise.
+- **"Channel Bot"** means a third-party messaging-platform bot (for example, a Telegram bot, a Lark / Feishu bot, or a Discord bot) that you register with the App so that inbound messages addressed to that bot are routed to agents or other services you have authorised.
+- **"CLI"** means the `nyxid` command-line interface tool distributed by ChronoAI.
 - **"Approval Request"** means a push notification or messaging-platform message sent to you requiring your approval or denial before a proxied credential request is executed.
 - **"ChronoAI" / "we" / "us" / "our"** means ChronoAI Pte. Ltd., a company incorporated in Singapore, and its successors and assigns.
 - **"Credential Proxy"** means the functionality by which the App injects your stored API Keys and Tokens into outbound requests to third-party services on your behalf.
 - **"GDPR"** means the General Data Protection Regulation (EU) 2016/679, as amended or replaced from time to time.
 - **"Intellectual Property"** means all patents, copyrights, trademarks, trade secrets, database rights, design rights, and all other intellectual property rights, whether registered or unregistered.
-- **"Local Agent"** means software operated by the User on their own hardware which may store API Keys and Tokens locally without transmitting them to ChronoAI's servers.
+- **"Local Agent"** means software operated by the User on their own hardware — including the Node Agent and the CLI — which may store API Keys and Tokens locally without transmitting them to ChronoAI's servers.
 - **"MFA Secrets"** means multi-factor authentication seeds, time-based one-time password (TOTP) secrets, and similar data used to generate authentication codes.
+- **"Node Agent"** means the NyxID daemon software that you may install on infrastructure you operate (for example, as a launchd, systemd, or Docker service), and that maintains a persistent connection to ChronoAI's servers in order to proxy requests using credentials held locally on that infrastructure.
 - **"OAuth/OIDC"** means the OAuth 2.0 and OpenID Connect authentication protocols.
+- **"Organization"** means a legal entity that has provisioned a NyxID account in the form of an Organization and on behalf of which one or more Users have been provisioned access by an Org Admin.
+- **"Org Admin"** means a User designated by an Organization with elevated authority to administer that Organization's accounts, credentials, services, nodes, and other resources within the App.
 - **"Partner Application"** means any application developed or operated by a third party (or by ChronoAI) that integrates with the App via "Sign in with NyxID" or similar shared authentication functionality.
 - **"PDPA"** means the Personal Data Protection Act 2012 (Singapore), as amended or replaced from time to time, including applicable subsidiary legislation and guidelines issued by the Personal Data Protection Commission (PDPC).
 - **"Personal Data"** has the meaning given to it under applicable data protection law, and includes information from which you can be identified directly or indirectly.
+- **"Reply Token"** means a single-use, short-lived token issued by the App to authorise a specific reply to a particular inbound message through a Channel Bot or similar integration.
+- **"SDK"** means the NyxID software development kits and client libraries published by ChronoAI for the purpose of integrating Partner Applications with the App (for example, "Sign in with NyxID" and related OAuth/OIDC flows).
+- **"Service Account"** means a non-human identity provisioned within the App that holds credentials and tokens for machine-to-machine use under the authority of a responsible User.
 - **"Services"** means all features, functions, tools, and content made available through the App, as further described in Section 3.
 - **"SSH Certificate"** means a short-lived cryptographically signed certificate issued by the App for the purpose of authenticating remote server access.
-- **"User" / "you" / "your"** means any natural person who accesses or uses the App, including both registered account holders and visitors.
+- **"User" / "you" / "your"** means any natural person who accesses or uses the App, including both registered account holders and visitors. Where a Service Account acts within the App, references to the User include the responsible natural person who provisioned or operates that Service Account.
 
 ## 3. SERVICES AND FUNCTIONALITIES
 
 ### 3.1 Service Description
 
-NyxID is an identity and secure credential proxy service. The App enables Users to create an account, securely store API Keys and Tokens for remote third-party services, and have those credentials injected into outbound requests via the Credential Proxy functionality. NyxID is network and identity infrastructure; it does not itself incorporate artificial intelligence or machine-learning features. See Section 4 for the position on user-operated AI agents.
+NyxID is an identity and secure credential proxy service. The App enables Users to create an account, securely store API Keys and Tokens for remote third-party services, and have those credentials injected into outbound requests via the Credential Proxy functionality. NyxID is network and identity infrastructure; it does not itself incorporate or perform artificial intelligence or machine-learning inference. Where the App routes requests to third-party AI providers via the Model Context Protocol ("**MCP**") or LLM gateway functionality, those providers process your prompts and responses under their own terms; NyxID acts solely as a routing, identity, and credential-injection layer between you and your chosen AI provider. See Section 4 for the position on user-operated AI agents.
 
 ### 3.2 Core Functionalities
 
 The App provides the following core Services:
 
 - **Credential Storage and Proxy:** You may store API Keys and Tokens within the App (encrypted at rest). NyxID proxies requests to third-party services by injecting your stored credentials on your behalf. Proxied request and response bodies are buffered in memory for the Approval Request flow only and are not written to disk or persistently logged.
-- **Local Agent:** You may optionally run a Local Agent on your own hardware, allowing credentials to remain on your device and never be transmitted to ChronoAI's servers.
-- **Approval Interface:** The mobile App serves as an approval interface, enabling you to approve, deny, or revoke access requests via push notification (iOS/Android) or messaging-platform message before each proxied request is executed.
-- **OAuth/OIDC Login Provider:** NyxID can act as an OAuth/OIDC login provider, enabling third-party developers to integrate "Sign in with NyxID" into their applications.
+- **Local Agent (Node Agent and CLI):** You may optionally run the Node Agent daemon (installed via launchd, systemd, or Docker, optionally in multi-profile mode) or the CLI on your own infrastructure, allowing credentials to remain on your hardware and never be transmitted to ChronoAI's servers. The Node Agent maintains a persistent connection to ChronoAI's servers for proxy routing and supports failover across multiple nodes you have registered.
+- **Approval Interface:** The mobile App and supported messaging platforms serve as approval interfaces, enabling you to approve, deny, or revoke access requests via push notification (iOS/Android) or messaging-platform message before each proxied request is executed.
+- **OAuth/OIDC Login Provider and SDK:** NyxID can act as an OAuth/OIDC login provider, enabling third-party developers to integrate "Sign in with NyxID" into their Partner Applications. ChronoAI publishes the SDK to support these integrations; developer obligations are addressed in Section 5.7.
 - **SSH Certificate Issuance:** The App can issue short-lived SSH Certificates for authenticating remote server access.
 
 ### 3.3 Service Evolution
@@ -126,7 +144,8 @@ You are solely responsible for maintaining the security of your device(s) used t
 - keep your device's operating system and the App updated to the latest version;
 - immediately notify ChronoAI at **contact@chrono-ai.fun** if you suspect your device has been lost, stolen, or compromised;
 - not jailbreak, root, or otherwise modify your device in a manner that circumvents security controls;
-- not install or permit the installation of software that may intercept, monitor, or tamper with App communications or stored credentials.
+- not install or permit the installation of software that may intercept, monitor, or tamper with App communications or stored credentials;
+- where you run the Node Agent or the CLI on infrastructure you operate, keep that host patched and protected against unauthorised access, safeguard any registration tokens, signing secrets, and locally stored credentials, and promptly revoke and rotate any of the foregoing on suspected compromise.
 
 ### 5.3 Credential and Account Security Obligations
 
@@ -164,6 +183,16 @@ You agree not to engage in any of the following activities in connection with yo
 
 You acknowledge that you are solely responsible for any violation of applicable laws or these Terms arising from your use of the App. You agree to indemnify, defend, and hold harmless ChronoAI and its officers, directors, employees, agents, and licensors from and against any and all claims, liabilities, damages, losses, costs, and expenses (including reasonable legal fees) arising out of or related to your violation of any applicable law or these Terms.
 
+### 5.7 Developer Obligations (SDK and Partner Applications)
+
+If you use the SDK or otherwise build a Partner Application that integrates with the App (for example, via "Sign in with NyxID" or other OAuth/OIDC flows), you additionally agree that:
+
+- you will use OAuth client credentials only for the Partner Application registered to receive them, will not share them with third parties, will not embed client secrets in distributed client-side or mobile binaries, and will rotate them on any suspected compromise;
+- you will configure and maintain redirect URIs in good faith, will not register redirect URIs you do not control, and will treat tokens issued by the App as bearer credentials to be stored and transmitted accordingly;
+- you will not misrepresent your identity or your Partner Application's affiliation with ChronoAI, and you will use NyxID branding only as expressly permitted by ChronoAI's brand guidelines;
+- you will handle End User data obtained through the App in accordance with a publicly accessible privacy policy that satisfies applicable law (including the GDPR and PDPA where relevant); and
+- ChronoAI may suspend or revoke developer access at any time for breach of these Terms or where required by applicable law.
+
 ## 6. SECURITY DISCLAIMERS AND AUTHENTICATION-SPECIFIC OBLIGATIONS
 
 ### 6.1 No Guarantee of Absolute Security
@@ -179,7 +208,8 @@ You acknowledge and agree that:
 - you are solely responsible for the security of the credentials you store within the App;
 - ChronoAI's Credential Proxy only injects credentials into requests initiated by you or your authorised agents, and any misuse resulting from compromised credentials on your end is your sole responsibility;
 - the approval workflow (push notification and messaging-platform messages) is a security feature that you are strongly encouraged to enable; ChronoAI accepts no liability for unauthorised proxied requests where you have disabled the approval requirement, except to the extent such loss arises from ChronoAI's gross negligence, wilful misconduct, or failure to implement industry-standard security measures, or where liability cannot be excluded under applicable law;
-- SSH Certificates issued by the App are short-lived and should be monitored; you are responsible for revoking certificates where there is a suspected compromise.
+- SSH Certificates issued by the App are short-lived and should be monitored; you are responsible for revoking certificates where there is a suspected compromise;
+- pairing codes issued by the App for CLI remote pairing (and any similar short-lived shared codes used to bind a local agent or session to your account) are sensitive credentials; you must treat them as such and not share them with any party who is not authorised to act on your behalf.
 
 ### 6.3 Limitation of Liability for Security Incidents
 
@@ -231,9 +261,21 @@ The App integrates with, and enables the proxying of credentials to, third-party
 
 The App supports authentication via third-party OAuth providers including Google, GitHub, and Apple (collectively, "**OAuth Providers**"). When you use social login, we receive limited profile information (name, email address, and provider-specific user identifier) from the relevant OAuth Provider. ChronoAI is not responsible for the security or privacy practices of OAuth Providers.
 
-### 8.3 Messaging-Platform Integrations
+### 8.3 Messaging-Platform Integrations and Channel Bots
 
-If you link a messaging-platform account (for example, Telegram, Lark / Feishu, Discord, or similar) to the App for the purposes of receiving Approval Requests or interacting with NyxID via that platform, ChronoAI will collect and process the minimum identifiers required for the integration (for example, your platform user ID, chat ID, and display name). ChronoAI is not affiliated with these messaging-platform operators and is not responsible for their privacy or security practices. Your use of each such platform is governed by the terms of service and privacy policy of that platform's operator.
+The App supports integration with third-party messaging and collaboration platforms (for example, Telegram, Lark / Feishu, Discord, or similar) in two modes:
+
+- **Outbound notifications.** Linking a messaging-platform account to the App for the purposes of receiving Approval Requests or other notifications. In this mode, ChronoAI collects and processes the minimum identifiers required for the integration (for example, your platform user ID, chat ID, and display name).
+- **Inbound Channel Bot routing.** Registering a Channel Bot you operate on a platform (for example, a Telegram bot, a Lark / Feishu bot, or a Discord bot) with the App so that inbound messages addressed to that bot are routed to agents or other services you have authorised. In this mode, you supply ChronoAI with the bot credentials and verification material required by the platform (which may include bot tokens, app IDs and secrets, verification tokens, and encrypt keys). You are responsible for:
+
+  - the lawful registration and continued compliance of your Channel Bot with the operator's developer terms, bot policies, and end-user requirements;
+  - the custody of bot credentials supplied to ChronoAI, and for prompt rotation of those credentials upon any suspected compromise;
+  - the rotation of webhook signing secrets you generate; and
+  - the use of Reply Tokens (single-use tokens ChronoAI issues to authorise per-message replies) only by the agent runtime intended to consume them.
+
+The App may also expose an HTTP event-ingress endpoint allowing devices or other systems you operate to deliver structured events into a conversation flow. The same custody, rotation, and platform-compliance obligations described above apply to credentials and material supplied for such event ingress.
+
+ChronoAI is not affiliated with any messaging-platform operator and is not responsible for their privacy or security practices. Your use of each such platform is governed by the terms of service and privacy policy of that platform's operator.
 
 ### 8.4 Cloud Infrastructure and Hosting Providers
 
