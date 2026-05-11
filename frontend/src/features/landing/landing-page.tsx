@@ -18,7 +18,7 @@ import { LandingFooter } from "./components/landing-footer";
 // Stopgap: auto-applied for Reddit-referred users without an explicit ?code=.
 // Operator must keep a matching invite code active in admin UI with high max_uses.
 // Remove when proper attribution/campaign codes are wired up.
-const REDDIT_DEFAULT_INVITE_CODE = "NYX-37YR43OH";
+const REDDIT_DEFAULT_INVITE_CODE = "NYX-QJGT6NHN";
 
 function injectRedditDefaultCode() {
   if (typeof window === "undefined") return;
