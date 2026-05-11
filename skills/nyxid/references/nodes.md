@@ -23,7 +23,12 @@ Nodes are for users who do not want their credentials stored on the NyxID server
 Org admins can mint registration tokens for an org:
 
 ```bash
+# Default — opens the browser wizard (v3.1 DisplayOnce on the new nyx_nreg_…)
 nyxid node register-token --org <ID|SLUG|NAME>
+
+# Headless agent — get a machine-readable pairing URL and resume later
+nyxid node register-token --org <ID|SLUG|NAME> --no-wait --output json
+nyxid pairing resume <pairing_id>
 ```
 
 The redeemed node belongs to the org. All current org admins can manage it; org members can list it and proxy through org services routed to it. Only org admins can create org-scoped registration tokens, delete org-owned nodes, rotate node auth tokens, or manage node bindings.
@@ -40,7 +45,7 @@ For confidential shared infrastructure, keep user login on the admin's laptop an
 
 | Machine | Runs |
 |---|---|
-| Laptop | `nyxid login`, `nyxid node register-token --org`, `nyxid keys create --service-slug ... --node-id ...`, all node management ops (`rotate-token`, `transfer`, `delete`, manage bindings) |
+| Laptop | `nyxid login`, `nyxid node register-token --org`, `nyxid service add <slug> --org <ORG> --via-node <NODE>` to mint the org-owned `UserService`, all node management ops (`rotate-token`, `transfer`, `delete`, manage bindings) |
 | VM | `nyxid node register --token`, `nyxid node credentials add` (purely local), `nyxid node start` / daemon. Never `nyxid login` on the VM. |
 
 The node's local credential store is keyed by service slug (`config.toml: credentials[<slug>]`). The binding to a NyxID `UserService` is established by matching slugs. Both ends must agree on the slug; no user identity passes through the VM.
@@ -49,8 +54,8 @@ Fresh shared-box checklist:
 
 1. Admin on laptop: `nyxid node register-token --org <ID|SLUG|NAME>` -> copy the `nyx_nreg_...` token.
 2. Operator on VM: `nyxid node register --token nyx_nreg_... --url wss://...` -> token is consumed, node receives its own `nyx_nauth_...` stored in the OS keychain or local secret backend.
-3. Admin on laptop: `nyxid keys create --service-slug <slug> --node-id <node-id>` -> creates the org-owned `UserService` routing through the node.
-4. Operator on VM: `nyxid node credentials add <slug> --header X-API-Key` (interactive secret prompt) -> credential stored locally, encrypted.
+3. Admin on laptop: `nyxid service add <slug> --org <ID|SLUG|NAME> --via-node <node-id-or-name>` -> creates the org-owned `UserService` routing through the node.
+4. Operator on VM: `nyxid node credentials add --service <slug> --header X-API-Key` (interactive secret prompt) -> credential stored locally, encrypted.
 5. Operator on VM: `nyxid node start` (or `nyxid node daemon install` + `start`).
 6. Optional: Admin on laptop: `nyxid node transfer <node-id> --to <org-id>` if the node was registered to a person owner first.
 
@@ -64,11 +69,11 @@ Remote credential provisioning lets an org admin push setup metadata to a node o
 
 | Laptop (admin) | VM (operator) |
 |---|---|
-| `nyxid node-credential push <node-id-or-name> --slug <slug> --injection-method header --field-name X-API-Key [--target-url ...] [--label ...]` |  |
+| `nyxid node-credential push <node-id-or-name> --slug <slug> --injection-method header --field-name X-API-Key [--target-url ...] [--label ...] --output json` |  |
 | Relay the slug, injection method, and field name to the operator. Do not send a secret value. | `nyxid node credentials pending` |
 |  | Verify the slug, method, field name, and target URL. |
 |  | `nyxid node credentials accept <slug>` and enter the secret when prompted. For non-interactive provisioning, use `--value-env <ENVVAR>`. |
-| `nyxid node-credential list <node-id-or-name>` |  |
+| `nyxid node-credential list <node-id-or-name> --output json` |  |
 | `nyxid node-credential cancel <node-id-or-name> <pending-id>` if the push is wrong or stale. | `nyxid node credentials decline <slug> --reason "wrong target"` if the operator refuses it. |
 
 Pending credentials expire automatically. The default TTL is 24 hours (`NODE_PENDING_CREDENTIAL_TTL_SECS`). Expired entries are not returned to admins or nodes; create a fresh push if the operator misses the window.
@@ -86,7 +91,10 @@ Transfer changes only server-side ownership. The node auth token is per-node, so
 Registration must happen before installing the daemon. Credentials can be added before or after starting -- the agent reloads them automatically within 5 seconds.
 
 ```bash
-# Step 1: Generate a registration token (on any machine with nyxid CLI)
+# Step 1: Generate a registration token (on any machine with nyxid CLI).
+# The wizard mints the nyx_nreg_… and shows it once with click-to-reveal.
+# On a headless agent, append --no-wait --output json to get a pairing URL
+# you can hand to the user and resume with `nyxid pairing resume <ID>`.
 nyxid node register-token
 
 # Step 2: Install nyxid CLI on the target machine
@@ -102,36 +110,50 @@ nyxid node register \
 nyxid node daemon install                              # install as system service
 nyxid node daemon start                                # start the service
 
-# Step 5: Add credentials (auto-registers catalog services in the backend)
+# Step 5 — CANONICAL for catalog services (llm-openai, llm-anthropic,
+# api-github, etc.). One command: it auto-registers the UserService in the
+# backend with this node's ID AND prompts for the credential locally.
+# DO NOT also run `nyxid service add <slug> --via-node …` — that creates
+# a duplicate backend record and the agent will get confused about which
+# one to route through.
 nyxid node credentials setup --service llm-openai      # agent picks up new credentials automatically
 
-# For custom endpoints: register first, then add credentials locally
+# Step 5 — for CUSTOM endpoints only (anything not in `nyxid catalog list`).
+# Custom services have no catalog config, so the backend record must be
+# created explicitly first; only then can the credential be stored locally.
 nyxid service add --custom --via-node my-node           # creates backend record (prompts for URL, auth, etc.)
 nyxid node credentials add --service my-api --header Authorization --secret-format bearer
 
 # Or run in foreground (for debugging)
 nyxid node start
 
-# Or run via Docker
-docker build -f cli/Dockerfile.node -t nyxid-node .    # build image (once)
-
-# Option A: auto-register + start (no host setup needed)
-docker run --user "$(id -u):$(id -g)" \
-  -v ~/.nyxid-node:/app/config \
-  -e NYXID_NODE_TOKEN=nyx_nreg_... \
-  -e NYXID_NODE_URL=wss://<server>/api/v1/nodes/ws \
-  nyxid-node
-
-# Option B: mount existing config (registered on host)
-docker run --user "$(id -u):$(id -g)" \
-  -v ~/.nyxid-node:/app/config \
-  nyxid-node
+# Or run via Docker. The CLI ships a `nyxid node docker` family that wraps
+# the underlying `docker build` / `docker run` calls. It mounts the profile's
+# config directory automatically and sets a profile-aware container name so
+# multiple node instances can run side-by-side on one host.
+nyxid node docker build                                # build the image once
+nyxid node docker start                                # start container (default profile)
+nyxid node docker start --profile edge-tokyo          # start a second profile
+nyxid node docker status                               # show container state
+nyxid node docker logs --follow                        # tail container logs
+nyxid node docker stop                                 # stop and remove container
+nyxid node docker restart                              # restart in place
 ```
 
-> `credentials setup` works for **catalog services only** -- it fetches config from the catalog and automatically registers the service in the backend with the node's ID.
-> For **custom endpoints**, use `nyxid service add --custom --via-node <node-name>` first to create the backend record, then `nyxid node credentials add` to store the credential locally on the node.
+> **Decision rule for AI agents** (deterministic — pick one path, don't mix):
+>
+> Two axes: (a) is the slug in the catalog? (b) is the operator on the SAME machine as the node, or on a different machine (e.g. admin laptop + shared VM)?
+>
+> | Same machine, catalog slug | → | `nyxid node credentials setup --service <slug>` (one command, auto-registers + stores credential) |
+> | Same machine, custom endpoint | → | `nyxid service add --custom --via-node <node>` then `nyxid node credentials add --service <slug> …` |
+> | Different machines (laptop + VM), catalog or custom | → | Admin on laptop: `nyxid service add <slug> [--org …] --via-node <node>` (catalog) or `nyxid service add --custom --via-node <node>` (custom). Operator on VM: `nyxid node credentials add --service <slug> …`. **Do NOT run `credentials setup` on the VM** — the service is already registered by the admin, so `setup` would duplicate state. |
+>
+> Auto-detect cheats:
+> - Catalog vs custom: if `nyxid catalog show <slug> --output json` returns metadata, it's catalog. Otherwise custom.
+> - Same-machine vs split: if you're on the same shell where the daemon is running, same-machine. If the user is describing a "shared / org-owned / company VM" or asks you to walk them through two machines, split.
 > Credentials can be added, updated, or removed while the agent is running. The agent watches the config file and reloads credentials automatically (no restart needed). This works for both native daemons and Docker containers (config is mounted as a volume).
 > Docker containers use the file backend (AES-GCM encrypted) -- OS keychain is not available in containers.
+> The `nyxid node docker` wrapper accepts `--profile <name>` on every subcommand. Each profile becomes a separate container with its own config volume at `~/.nyxid-node/profiles/<name>/`, so you can run multiple node instances on the same host (one per org / one per environment).
 
 ### Managing the node service
 
@@ -154,15 +176,22 @@ nyxid node daemon uninstall                             # remove service (stops 
 # nyxid CLI (manage nodes from user side)
 nyxid node list --output json                          # list nodes (includes IDs)
 nyxid node show <ID_OR_NAME> --output json             # show node details + metrics
-nyxid node register-token                              # interactive: opens browser wizard (v3.1)
-nyxid node register-token --org <ID|SLUG|NAME>         # org-owned node token (admin only)
-nyxid node register-token --name "edge-tokyo" --output json  # scripted: prints raw nyx_nreg_... (legacy shape)
+
+# register-token + rotate-token are wizard-capable: default to the bare form
+# (auto-picks local-browser vs remote-pairing); use --no-wait --output json
+# only when the agent specifically can't hold a subprocess open.
+nyxid node register-token                              # opens browser wizard (v3.1)
+nyxid node register-token --org <ID|SLUG|NAME>         # org-owned node token (admin only); wizard pre-selects org
+nyxid node register-token --name "edge-tokyo" --no-wait --output json   # headless: pairing handoff JSON
+nyxid pairing resume <pairing_id>                                       # …then resume once the user finishes
+nyxid node rotate-token <ID_OR_NAME>                   # opens browser wizard (shows new auth_token + signing_secret)
+nyxid node rotate-token <ID_OR_NAME> --no-wait --output json            # headless: pairing handoff JSON
+nyxid pairing resume <pairing_id>                                       # …then resume once the user finishes
+
 nyxid node delete <ID_OR_NAME> --yes                   # delete node
-nyxid node rotate-token <ID_OR_NAME>                   # interactive: opens browser wizard (shows new auth_token + signing_secret)
-nyxid node rotate-token <ID_OR_NAME> --output json     # scripted: prints raw secret to stdout (legacy shape)
 nyxid node transfer <ID_OR_NAME> --to <USER_OR_ORG_ID> # move node ownership, detaches cross-owner routing
-nyxid node-credential push <ID_OR_NAME> --slug <SLUG> --injection-method header --field-name X-API-Key
-nyxid node-credential list <ID_OR_NAME>                # list pending credential pushes
+nyxid node-credential push <ID_OR_NAME> --slug <SLUG> --injection-method header --field-name X-API-Key --output json
+nyxid node-credential list <ID_OR_NAME> --output json  # list pending credential pushes
 nyxid node-credential cancel <ID_OR_NAME> <PENDING_ID> # cancel a pending credential push
 
 # nyxid node CLI (run on the node machine)
@@ -214,7 +243,7 @@ nyxid node ssh-credentials list --service <SLUG>
 nyxid node ssh-credentials show --service <SLUG> --principal <USER>
 nyxid node ssh-credentials test --service <SLUG> --principal <USER>
 nyxid node ssh-credentials remove --service <SLUG> --principal <USER>
-nyxid node ssh-credentials prune --stale
+nyxid node ssh-credentials prune --stale  # all node `--profile <name>` flags also work here
 ```
 
 > `credentials setup` works for **catalog services**: it auto-detects whether the service needs an API key, OAuth, or gateway URL, guides the user through the right flow, and auto-registers the service in the backend with the node's ID. For **custom endpoints**, use `nyxid service add --custom --via-node <node>` first, then `nyxid node credentials add`.
@@ -242,6 +271,9 @@ nyxid ssh proxy <SERVICE>                              # ProxyCommand for OpenSS
 
 # List SSH services
 nyxid service list --output json | jq '.keys[] | select(.service_type == "ssh")'
+
+# Show one SSH service (handy when you need its UserService ID for `--via-service` later)
+nyxid service show <SERVICE_ID_OR_SLUG> --output json
 ```
 
 The SSH `--org` behavior matches `nyxid service add --org`: the service is created under the org owner, and members discover it through their own account. See [`organizations.md`](organizations.md#sharing-a-service-with-the-org) for org-scoped service ownership details.
@@ -257,7 +289,7 @@ SSH services have an `ssh_auth_mode`:
 Create a node-key service:
 
 ```bash
-nyxid service add-ssh routeros --host 10.0.0.1 --port 22 --via-node edge-node --node-key --principals nyxid-ro,nyxid-admin
+nyxid service add-ssh --label routeros --host 10.0.0.1 --port 22 --via-node edge-node --node-key --principals nyxid-ro,nyxid-admin
 nyxid node ssh-credentials add --service routeros --principal nyxid-ro --key-file ~/.ssh/routeros_ro --host 10.0.0.1 --port 22
 ```
 

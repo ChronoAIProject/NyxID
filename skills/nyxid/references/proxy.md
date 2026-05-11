@@ -138,6 +138,8 @@ nyxid proxy request api-twitter /tweets -m POST \
 nyxid proxy discover --output json
 ```
 
+> When piping `nyxid proxy request ...` output through `jq` or other tools, the proxy already prints the downstream response on stdout — pass `--output json` only to commands that have multiple shapes (`list`, `show`, `status`, `discover`). The proxy itself is shape-passthrough.
+
 NyxID injects the user's credentials automatically. Do not ask for or log raw downstream credentials.
 
 ## WebSocket-authenticated services

@@ -38,7 +38,7 @@ nyxid approval disable                                 # disable (auto-approve a
 ## Step 3: Check your notification settings
 
 ```bash
-nyxid notification settings                            # show current notification & approval status
+nyxid notification settings --output json              # show current notification & approval status
 ```
 
 If the user has not set up any notification channel yet, **proactively suggest** they do so before making proxy requests. Walk them through the steps above.
@@ -49,11 +49,11 @@ Approvals default to **per-request** mode: every proxy call needs fresh approval
 
 ```bash
 nyxid approval list --output json                      # list pending approvals (includes action_description)
-nyxid approval show <ID>                               # show approval details + action_description
+nyxid approval show <ID> --output json                 # show approval details + action_description
 nyxid approval approve <ID>                            # approve a request
 nyxid approval deny <ID>                               # deny a request
 nyxid approval enable                                  # enable global approval protection
-nyxid approval disable                                 # disable global approval protection
+nyxid approval disable --yes                           # disable global approval protection
 nyxid approval grants --output json                    # list active grants (grant mode only)
 nyxid approval service-configs --output json           # list per-service approval configs (includes approval_mode)
 nyxid approval set-config <SERVICE_ID> --require-approval true                    # per-request (default)
@@ -73,8 +73,10 @@ nyxid approval set-config <SERVICE_ID> --org <ID|SLUG|NAME> --require-approval t
 nyxid approval set-config <SERVICE_ID> --org <ID|SLUG|NAME> --require-approval true --approval-mode grant
 nyxid approval list --org <ID|SLUG|NAME> --output json # list requests against org services
 
-nyxid notification settings                            # show notification settings
+nyxid notification settings --output json              # show notification settings
 nyxid notification update --approval-telegram true     # enable telegram notifications
 nyxid notification update --approval-push true         # enable push notifications
+nyxid notification update --approval-email true        # enable email approvals (also accepts false to disable)
 nyxid notification telegram-link                       # link telegram account
+nyxid notification telegram-disconnect                 # unlink telegram account
 ```
