@@ -453,6 +453,3 @@ Address: 8 Marina Boulevard, #14-02, Singapore 018981
 Contact: **contact@chrono-ai.fun**
 Website: **https://nyx.chrono-ai.fun/**
 
----
-
-*Draft pending Legal sign-off — not for distribution without Legal review.*
