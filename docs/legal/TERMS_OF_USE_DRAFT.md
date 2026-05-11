@@ -283,11 +283,11 @@ The App is hosted on cloud infrastructure provided by third-party providers. All
 
 ### 8.5 Analytics and Communications Providers
 
-ChronoAI may use third-party analytics, marketing, and communications platforms in connection with the Services. For example, waitlist sign-up data (first name, email, optional company name) may be transmitted to third-party mailing list providers (such as Mailchimp) for communications purposes, and is not stored persistently by NyxID. You will be informed of, and your consent sought for, any use of third-party analytics or communications tools that involve the processing of your personal data.
+ChronoAI may use third-party analytics, marketing, and communications platforms in connection with the Services. For example, waitlist sign-up data (first name, email, optional company name) may be transmitted to third-party mailing list providers for communications purposes, and is not stored persistently by NyxID. You will be informed of, and your consent sought for, any use of third-party analytics or communications tools that involve the processing of your personal data.
 
 ### 8.6 Apple App Store and Google Play Requirements
 
-The App is distributed through the Apple App Store and the Google Play Store (collectively, "**App Platforms**"). ChronoAI complies with the App Platform guidelines and requirements applicable to the App, including Apple's App Tracking Transparency ("**ATT**") framework. Where required under ATT or equivalent requirements, ChronoAI will seek your explicit consent before engaging in cross-app tracking. ChronoAI's App complies with applicable privacy label requirements for the disclosure of data categories collected.
+The App is distributed through the Apple App Store and the Google Play Store (collectively, "**App Platforms**"). ChronoAI does not engage in cross-app tracking as defined by Apple's App Tracking Transparency framework or equivalent regimes; any analytics ChronoAI collects through the App are first-party product analytics, disclosed in the Privacy Policy. ChronoAI's App complies with applicable App Platform disclosure requirements (including the App Store Privacy Labels and the Google Play Data Safety form) for the data categories collected by the App.
 
 The App Platforms are not parties to this Agreement. ChronoAI is responsible for the App and the content thereof. The App Platforms disclaim all warranties in respect of the App and have no obligation to furnish any maintenance or support services with respect thereto.
 
