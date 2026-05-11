@@ -2,7 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 
 // ── Last updated date (update on each revision) ──
-const EFFECTIVE_DATE = "2026-02-25";
+const EFFECTIVE_DATE = "2026-05-11";
 
 function Section({
   title,
@@ -126,7 +126,7 @@ export function PrivacyPage() {
             </p>
           </Section>
 
-          <Section title="5. Data Sharing">
+          <Section title="5. Data Sharing and Sub-processors">
             <p>
               We do <strong className="text-foreground">not</strong> sell, rent,
               or trade your personal information. We share data only in the
@@ -146,6 +146,66 @@ export function PrivacyPage() {
                 prevent fraud or protect the rights and safety of our users
               </li>
             </ul>
+
+            <p className="mt-3 font-medium text-foreground">
+              Sub-processors and service providers
+            </p>
+            <p>
+              NyxID engages the following sub-processors to deliver parts of
+              the Service. We have data processing agreements in place with
+              each that require them to apply appropriate security measures
+              and to process personal data only on our instructions:
+            </p>
+            <ul className="list-inside list-disc space-y-1 pl-2">
+              <li>
+                <strong className="text-foreground">PostHog Inc.</strong>{" "}
+                (United States) — opt-in product analytics. Data category:
+                anonymous usage events keyed to your NyxID account UUID.
+                Processing region: US.
+              </li>
+              <li>
+                <strong className="text-foreground">
+                  Firebase Cloud Messaging
+                </strong>{" "}
+                by Google LLC (United States) — Android push-notification
+                delivery, where push is enabled. Data category: device push
+                token.
+              </li>
+              <li>
+                <strong className="text-foreground">
+                  Apple Push Notification service
+                </strong>{" "}
+                by Apple Inc. (United States) — iOS push-notification
+                delivery, where push is enabled. Data category: device push
+                token.
+              </li>
+            </ul>
+            <p>
+              NyxID also engages cloud infrastructure providers (for hosting
+              and database services) and a transactional email service
+              provider (for verification emails, password resets, and
+              security notices). A current copy of our service-provider
+              register and executed data processing agreements is available
+              on request to{" "}
+              <a
+                href="mailto:contact@chrono-ai.fun"
+                className="text-violet-400 underline decoration-violet-400/40 underline-offset-4 transition-colors hover:text-violet-300"
+              >
+                contact@chrono-ai.fun
+              </a>
+              . This list may be updated as the Service evolves; material
+              changes will be reflected in this Privacy Policy with a revised
+              effective date.
+            </p>
+            <p className="text-text-tertiary text-xs">
+              Note: third-party platforms you connect yourself — including
+              messaging-platform integrations (Telegram, Lark / Feishu,
+              Discord, OpenClaw), Channel Bots you register, OAuth providers
+              you use for social login (Google, GitHub, Apple), and any
+              third-party APIs you call via the Credential Proxy — are{" "}
+              <em>not</em> sub-processors of NyxID. They are independent
+              services governed by their own terms and privacy policies.
+            </p>
           </Section>
 
           <Section title="6. Data Retention">
@@ -187,9 +247,30 @@ export function PrivacyPage() {
               Sensitive URL segments (reset tokens, OAuth callback codes,
               approval IDs) are dropped at the egress layer before any event
               leaves your browser.
-              {/* TODO(legal): document EU→US transfer basis (SCCs / adequacy)
-                  here before broader EU launch. Tracked in
-                  docs/TELEMETRY_CONSENT_FIX.md §9.2. */}
+            </p>
+            <p>
+              <strong>EU→US transfer basis.</strong> PostHog Inc. is
+              established in the United States, which does not benefit from
+              an EU Commission adequacy decision at the time of this Privacy
+              Policy's effective date. Where you are located in the European
+              Economic Area, the United Kingdom, or another jurisdiction
+              subject to cross-border transfer restrictions, your opt-in
+              telemetry data is transferred to PostHog Inc. under the
+              Standard Contractual Clauses (Module 2:
+              Controller-to-Processor) approved by the European Commission
+              in Implementing Decision (EU) 2021/914 of 4 June 2021,
+              supplemented by encryption in transit (TLS 1.2 or higher),
+              encryption at rest, scoped access controls, and the
+              egress-scrubbing safeguards described above. A copy of the
+              executed Standard Contractual Clauses is available on request
+              to{" "}
+              <a
+                href="mailto:contact@chrono-ai.fun"
+                className="text-violet-400 underline decoration-violet-400/40 underline-offset-4 transition-colors hover:text-violet-300"
+              >
+                contact@chrono-ai.fun
+              </a>
+              .
             </p>
             <p>
               Events are keyed to your NyxID account UUID after you sign in,
