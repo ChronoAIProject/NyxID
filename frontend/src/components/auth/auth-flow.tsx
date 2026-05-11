@@ -128,13 +128,17 @@ interface AuthFlowProps {
   readonly initialPanel?: AuthPanel;
   readonly returnTo?: string;
   readonly socialError?: string;
+  readonly initialInviteCode?: string;
 }
 
 export function AuthFlow({
   initialPanel = 0,
   returnTo,
   socialError,
+  initialInviteCode,
 }: AuthFlowProps) {
+  const normalizedInitialInviteCode =
+    initialInviteCode?.trim().toUpperCase() ?? "";
   const { data: publicConfig } = usePublicConfig();
   const inviteRequired = publicConfig?.invite_code_required ?? true;
   const emailAuthEnabled = publicConfig?.email_auth_enabled ?? false;
@@ -162,7 +166,7 @@ export function AuthFlow({
   const registerForm = useForm<RegisterFormData>({
     resolver: zodResolver(registerSchema),
     defaultValues: {
-      inviteCode: "",
+      inviteCode: normalizedInitialInviteCode,
       name: "",
       email: "",
       password: "",
@@ -203,10 +207,15 @@ export function AuthFlow({
       setTimeout(() => {
         setPanel(target);
         const path = target === 0 ? "/login" : "/register";
-        const qs = returnTo
-          ? `?return_to=${encodeURIComponent(returnTo)}`
-          : "";
-        window.history.replaceState(null, "", `${path}${qs}`);
+        const nextParams = new URLSearchParams();
+        if (returnTo) nextParams.set("return_to", returnTo);
+        if (initialInviteCode) nextParams.set("code", initialInviteCode);
+        const qs = nextParams.toString();
+        window.history.replaceState(
+          null,
+          "",
+          `${path}${qs ? `?${qs}` : ""}`,
+        );
         // Small delay for React to render new content before fading in
         requestAnimationFrame(() => {
           setFadeOpacity(1);

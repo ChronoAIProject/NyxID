@@ -9,6 +9,10 @@ export function LandingNavbar() {
 
   useScroll((scrollY) => setScrolled(scrollY > 0));
 
+  const loginHref = `/login${
+    typeof window !== "undefined" ? window.location.search : ""
+  }`;
+
   return (
     <nav
       className={`fixed top-0 left-0 right-0 z-50 border-b backdrop-blur-md transition-all duration-500 ${
@@ -25,7 +29,7 @@ export function LandingNavbar() {
         <div className="flex items-center gap-3">
           <LanguageSwitcher />
           <a
-            href="/login"
+            href={loginHref}
             className="rounded-lg border border-primary/40 px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary/10"
           >
             {t("nav.login")}

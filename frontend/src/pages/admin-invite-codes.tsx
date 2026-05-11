@@ -49,7 +49,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Ticket, Plus, Copy, Check, Ban } from "lucide-react";
+import { Ticket, Plus, Copy, Check, Ban, Link2 } from "lucide-react";
 import { toast } from "sonner";
 import type { InviteCode } from "@/types/admin";
 
@@ -64,6 +64,7 @@ export function AdminInviteCodesPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createdCode, setCreatedCode] = useState<InviteCode | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
   const [deactivateTarget, setDeactivateTarget] = useState<InviteCode | null>(
     null,
   );
@@ -143,6 +144,20 @@ export function AdminInviteCodesPage() {
       toast.success("Code copied to clipboard");
       setTimeout(() => {
         setCopiedId((current) => (current === id ? null : current));
+      }, 2000);
+    } catch {
+      toast.error("Failed to copy to clipboard");
+    }
+  }
+
+  async function handleCopyLink(code: string, id: string) {
+    try {
+      const link = `${window.location.origin}/register?code=${encodeURIComponent(code)}`;
+      await copyToClipboard(link);
+      setCopiedLinkId(id);
+      toast.success("Invite link copied to clipboard");
+      setTimeout(() => {
+        setCopiedLinkId((current) => (current === id ? null : current));
       }, 2000);
     } catch {
       toast.error("Failed to copy to clipboard");
@@ -307,6 +322,26 @@ export function AdminInviteCodesPage() {
                           />
                         ) : (
                           <Copy className="h-4 w-4" aria-hidden="true" />
+                        )}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleCopyLink(ic.code, ic.id);
+                        }}
+                        aria-label={`Copy invite link for ${ic.code}`}
+                        title="Copy invite link"
+                      >
+                        {copiedLinkId === ic.id ? (
+                          <Check
+                            className="h-4 w-4 text-success"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <Link2 className="h-4 w-4" aria-hidden="true" />
                         )}
                       </Button>
                       {ic.is_active && (

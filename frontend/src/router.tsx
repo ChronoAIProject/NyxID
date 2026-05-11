@@ -113,9 +113,14 @@ const loginRoute = createRoute({
   getParentRoute: () => authLayout,
   validateSearch: (
     search: Record<string, unknown>,
-  ): { return_to?: string } => ({
+  ): { return_to?: string; code?: string } => ({
     ...(typeof search.return_to === "string"
       ? { return_to: search.return_to }
+      : {}),
+    ...(typeof search.code === "string" &&
+    search.code.length > 0 &&
+    search.code.length <= 64
+      ? { code: search.code }
       : {}),
   }),
   component: LoginPage,
@@ -126,9 +131,14 @@ const registerRoute = createRoute({
   getParentRoute: () => authLayout,
   validateSearch: (
     search: Record<string, unknown>,
-  ): { return_to?: string } => ({
+  ): { return_to?: string; code?: string } => ({
     ...(typeof search.return_to === "string"
       ? { return_to: search.return_to }
+      : {}),
+    ...(typeof search.code === "string" &&
+    search.code.length > 0 &&
+    search.code.length <= 64
+      ? { code: search.code }
       : {}),
   }),
   component: RegisterPage,
