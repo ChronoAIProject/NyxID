@@ -3,7 +3,7 @@ import FontAwesome from "@expo/vector-icons/FontAwesome";
 import * as WebBrowser from "expo-web-browser";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import Svg, { Circle, Path, Defs, LinearGradient, Stop } from "react-native-svg";
+import Svg, { Path, Defs, LinearGradient, Stop } from "react-native-svg";
 import type { RootStackParamList } from "../../app/AppNavigator";
 
 import { ScreenContainer } from "../../components/ScreenContainer";
@@ -105,37 +105,44 @@ function parseSocialCallback(url: string): SocialCallback | null {
   }
 }
 
-function PortalMarkLogo() {
+// Inline render of mobile/assets/sources/app_icon.svg
+// (kept in sync by hand — if the source changes, regenerate the PNG icons
+// AND update this JSX so the login screen matches the launcher icon)
+function PortalMarkLogo({ size = 96 }: { size?: number }) {
   return (
-    <View style={{ width: 96, height: 96, borderRadius: 48, backgroundColor: "#10101A", alignItems: "center", justifyContent: "center" }}>
-    <Svg width={72} height={72} viewBox="0 0 130 130" fill="none">
+    <Svg width={size} height={size} viewBox="0 0 702 702" fill="none">
       <Defs>
-        <LinearGradient id="pl_o" gradientUnits="userSpaceOnUse" x1="10" y1="65" x2="120" y2="65">
-          <Stop offset="0" stopColor="#A78BFA" />
-          <Stop offset="0.5" stopColor="#A78BFA" stopOpacity={0} />
+        <LinearGradient id="ai_bg" x1="351" y1="0" x2="351" y2="702" gradientUnits="userSpaceOnUse">
+          <Stop offset="0" stopColor="#221250" />
+          <Stop offset="1" stopColor="#070707" />
         </LinearGradient>
-        <LinearGradient id="pl_m" gradientUnits="userSpaceOnUse" x1="10" y1="65" x2="120" y2="65" gradientTransform="rotate(120 65 65)">
-          <Stop offset="0" stopColor="#C4B5FD" />
-          <Stop offset="0.5" stopColor="#C4B5FD" stopOpacity={0} />
+        <LinearGradient id="ai_n" x1="351" y1="140.062" x2="351" y2="561.933" gradientUnits="userSpaceOnUse">
+          <Stop offset="0" stopColor="#A672FB" />
+          <Stop offset="1" stopColor="#5E00F5" />
         </LinearGradient>
-        <LinearGradient id="pl_i" gradientUnits="userSpaceOnUse" x1="10" y1="65" x2="120" y2="65" gradientTransform="rotate(240 65 65)">
-          <Stop offset="0" stopColor="#DDD6FE" />
-          <Stop offset="0.5" stopColor="#DDD6FE" stopOpacity={0} />
-        </LinearGradient>
-        <LinearGradient id="pl_v" gradientUnits="userSpaceOnUse" x1="56" y1="62" x2="86" y2="62" gradientTransform="rotate(160 71 62)">
-          <Stop offset="0" stopColor="#C4B5FD" />
-          <Stop offset="1" stopColor="#7C3AED" />
+        <LinearGradient id="ai_hl" x1="351" y1="140.062" x2="351" y2="561.933" gradientUnits="userSpaceOnUse">
+          <Stop offset="0" stopColor="#FFFFFF" stopOpacity={0.5} />
+          <Stop offset="1" stopColor="#FFFFFF" stopOpacity={0} />
         </LinearGradient>
       </Defs>
-      <Circle cx={65} cy={65} r={55} fill="none" stroke="url(#pl_o)" strokeWidth={1} />
-      <Circle cx={65} cy={65} r={40} fill="none" stroke="url(#pl_m)" strokeWidth={1} />
-      <Circle cx={65} cy={65} r={25} fill="none" stroke="url(#pl_i)" strokeWidth={0.8} />
-      <Path d="M24 0q6 8 6 20 0 12-6 20-14-4-20-12-4-14-2-24 4-4 22-4z" transform="translate(56 42)" fill="url(#pl_v)" />
-      <Circle cx={31.5} cy={49.5} r={1.5} fill="#C4B5FD" />
-      <Circle cx={39} cy={63} r={1} fill="#C4B5FD" opacity={0.5} />
-      <Circle cx={25} cy={69} r={1} fill="#C4B5FD" opacity={0.31} />
+      <Path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M702 218.631C702 210.298 702.003 201.963 701.952 193.629C701.91 186.608 701.83 179.589 701.639 172.571C701.226 157.276 700.324 141.85 697.604 126.726C694.845 111.383 690.34 97.104 683.241 83.1637C676.262 69.462 667.146 56.924 656.268 46.0541C645.393 35.1842 632.852 26.0736 619.145 19.0988C605.19 11.9979 590.896 7.4945 575.536 4.73678C560.41 2.0208 544.98 1.1203 529.685 0.707109C522.662 0.517127 515.64 0.437045 508.616 0.393596C500.277 0.342479 491.938 0.346739 483.599 0.346739L386.779 0H314.364L219.257 0.346739C210.902 0.346739 202.547 0.342479 194.192 0.393596C187.153 0.437045 180.118 0.517127 173.082 0.707109C157.751 1.1203 142.286 2.02165 127.124 4.74104C111.744 7.49791 97.4282 11.9996 83.4547 19.0954C69.719 26.071 57.1504 35.1825 46.2524 46.0541C35.3562 56.9231 26.2226 69.4586 19.2307 83.1577C12.112 97.1048 7.59841 111.393 4.83303 126.744C2.11024 141.862 1.20804 157.283 0.793152 172.571C0.604022 179.59 0.522236 186.609 0.47964 193.629C0.428524 201.964 0 212.318 0 220.652L0.00255581 314.442L0 387.632L0.432783 483.415C0.432783 491.76 0.429375 500.106 0.47964 508.451C0.522236 515.482 0.604022 522.51 0.794004 529.538C1.20804 544.852 2.11195 560.3 4.83729 575.445C7.60182 590.808 12.1145 605.108 19.2273 619.066C26.22 632.788 35.3553 645.342 46.2524 656.227C57.1495 667.112 69.7147 676.235 83.4479 683.22C97.4299 690.33 111.753 694.839 127.142 697.601C142.297 700.321 157.757 701.223 173.082 701.636C180.118 701.826 187.154 701.907 194.193 701.95C202.548 702.001 210.902 701.997 219.257 701.997L315.224 702H387.818L483.599 701.997C491.938 701.997 500.277 702.001 508.616 701.95C515.64 701.907 522.662 701.826 529.685 701.636C544.986 701.222 560.421 700.319 575.554 697.597C590.904 694.836 605.192 690.328 619.139 683.222C632.848 676.238 645.392 667.114 656.268 656.227C667.144 645.344 676.26 632.791 683.239 619.072C690.342 605.107 694.847 590.801 697.607 575.427C700.325 560.289 701.226 544.846 701.64 529.538C701.83 522.509 701.91 515.481 701.952 508.451C702.004 500.106 702 491.76 702 483.415C702 483.415 701.995 389.323 701.995 387.632V314.365C701.995 313.116 702 218.631 702 218.631"
+        fill="url(#ai_bg)"
+      />
+      <Path
+        d="M561.938 227.109V474.887C561.938 522.96 522.965 561.933 474.891 561.933H353.39C352.071 561.933 351 560.862 351 559.543V330.962C351 328.524 347.783 327.649 346.55 329.752L211.071 560.752C210.641 561.483 209.857 561.933 209.011 561.933H142.453C141.133 561.933 140.062 560.862 140.062 559.543V142.453C140.062 141.133 141.133 140.062 142.453 140.062H278.299C279.618 140.062 280.689 141.133 280.689 142.453V371.034C280.689 373.471 283.906 374.346 285.139 372.243L420.623 141.243C421.053 140.512 421.837 140.062 422.683 140.062H474.887C522.96 140.062 561.933 179.035 561.933 227.109H561.938Z"
+        fill="url(#ai_n)"
+      />
+      <Path
+        d="M142.452 141.312H278.299C278.928 141.312 279.439 141.823 279.439 142.452V371.033C279.439 374.744 284.339 376.079 286.218 372.875L421.7 141.875C421.907 141.525 422.282 141.313 422.683 141.312H474.887C522.27 141.313 560.682 179.725 560.683 227.108V228.358H560.688V474.887C560.687 522.27 522.275 560.682 474.892 560.683H353.39C352.761 560.682 352.25 560.172 352.25 559.543V330.962C352.25 327.251 347.35 325.916 345.472 329.12L209.994 560.118C209.788 560.469 209.412 560.683 209.011 560.683H142.452C141.823 560.682 141.313 560.172 141.312 559.543V142.452C141.313 141.824 141.824 141.313 142.452 141.312Z"
+        stroke="url(#ai_hl)"
+        strokeOpacity={0.5}
+        strokeWidth={2.5}
+        fill="none"
+      />
     </Svg>
-    </View>
   );
 }
 

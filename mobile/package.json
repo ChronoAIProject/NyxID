@@ -59,6 +59,7 @@
     "expo-linear-gradient": "^55.0.12",
     "expo-notifications": "~55.0.17",
     "expo-secure-store": "~55.0.12",
+    "expo-splash-screen": "~55.0.20",
     "expo-status-bar": "~55.0.5",
     "expo-task-manager": "~55.0.13",
     "expo-web-browser": "~55.0.13",

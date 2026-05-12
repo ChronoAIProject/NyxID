@@ -56,11 +56,6 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     orientation: "portrait",
     icon: "./assets/icon.png",
     userInterfaceStyle: "automatic",
-    splash: {
-      image: "./assets/splash.png",
-      resizeMode: "contain",
-      backgroundColor: "#10101A",
-    },
     assetBundlePatterns: ["**/*"],
     ios: {
       supportsTablet: false,
@@ -85,6 +80,15 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     },
     plugins: [
       "expo-secure-store",
+      [
+        "expo-splash-screen",
+        {
+          image: "./assets/adaptive-icon.png",
+          backgroundColor: "#10101A",
+          imageWidth: 220,
+          resizeMode: "contain",
+        },
+      ],
       [
         "expo-notifications",
         {
