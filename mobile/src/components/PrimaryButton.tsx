@@ -57,6 +57,14 @@ const createStyles = (c: ThemeColors) =>
       justifyContent: "center",
       borderWidth: 1,
       borderColor: "transparent",
+      // DESIGN.md §Color → Primary Accent: brand CTAs carry a soft
+      // purple ambient. iOS uses the colored shadow stack; Android
+      // honors elevation only.
+      shadowColor: c.primary,
+      shadowOffset: { width: 0, height: 6 },
+      shadowOpacity: 0.35,
+      shadowRadius: 16,
+      elevation: 6,
     },
     basePressed: {
       backgroundColor: c.primaryDim,
@@ -67,10 +75,15 @@ const createStyles = (c: ThemeColors) =>
     ghost: {
       backgroundColor: c.ghostBg,
       borderColor: c.border,
+      // Ghost + danger variants are not brand CTAs — clear the purple glow.
+      shadowOpacity: 0,
+      elevation: 0,
     },
     danger: {
       backgroundColor: c.dangerSoftBg,
       borderColor: c.danger,
+      shadowOpacity: 0,
+      elevation: 0,
     },
     disabled: {
       opacity: 0.5,
