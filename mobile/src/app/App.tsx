@@ -1,7 +1,16 @@
 import "react-native-gesture-handler";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
+import * as SplashScreen from "expo-splash-screen";
 import { useCallback, useEffect, useRef, useState } from "react";
+
+// Keep the native splash visible until we've loaded fonts. The
+// expo-splash-screen plugin disables Expo's default auto-hide, so the
+// app must explicitly hide the splash itself (see effect below).
+SplashScreen.preventAutoHideAsync().catch(() => {
+  /* no-op — preventAutoHideAsync rejects if the splash has already
+     been hidden, e.g. during fast refresh. Safe to ignore. */
+});
 import { ActivityIndicator, AppState, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { onlineManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -115,6 +124,18 @@ export default function App() {
     const t = setTimeout(() => setFontLoadTimeout(true), 8000);
     return () => clearTimeout(t);
   }, []);
+
+  // Hide the native splash once we have enough state to render the UI.
+  // expo-splash-screen plugin disables the auto-hide, so without this
+  // call the splash never goes away.
+  const ready = fontsLoaded || fontLoadTimeout;
+  useEffect(() => {
+    if (ready) {
+      SplashScreen.hideAsync().catch(() => {
+        /* already hidden — fine */
+      });
+    }
+  }, [ready]);
 
   useEffect(() => {
     let disposed = false;
