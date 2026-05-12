@@ -14,6 +14,7 @@ import {
 } from "@react-navigation/native";
 import { useFonts } from "expo-font";
 import {
+  Manrope_400Regular,
   Manrope_500Medium,
   Manrope_600SemiBold,
   Manrope_700Bold,
@@ -99,6 +100,7 @@ export default function App() {
   }, [navigationRef]);
 
   const [fontsLoaded] = useFonts({
+    Manrope_400Regular,
     Manrope_500Medium,
     Manrope_600SemiBold,
     Manrope_700Bold,

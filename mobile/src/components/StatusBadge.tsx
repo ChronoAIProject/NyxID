@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { spacing } from "../theme/designTokens";
+import { radius, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 
@@ -55,15 +55,14 @@ export function StatusBadge({ variant, label }: StatusBadgeProps) {
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     badge: {
-      paddingHorizontal: spacing.sm,
+      // DESIGN.md §Layout: 100px (badges, pills) — pill-shaped
+      paddingHorizontal: spacing.md,
       paddingVertical: spacing.xxs,
-      borderRadius: 6,
+      borderRadius: radius.pill,
       borderWidth: 1,
       alignSelf: "flex-start",
     },
     text: {
-      fontSize: 10,
-      fontWeight: "700",
-      letterSpacing: 0.3,
+      ...typeScale.overline,
     },
   });

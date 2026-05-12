@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Feather } from "@expo/vector-icons";
-import { radius, spacing } from "../theme/designTokens";
+import { radius, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 
@@ -38,36 +38,36 @@ const createStyles = (c: ThemeColors) =>
       gap: spacing.sm,
       paddingHorizontal: spacing.lg,
       paddingVertical: spacing.sm,
-      borderRadius: radius.sm,
+      borderRadius: radius.md,
       backgroundColor: c.dangerSoftBg,
       borderWidth: 1,
-      borderColor: "rgba(239,68,68,0.25)",
+      borderColor: c.danger,
       marginBottom: spacing.lg,
     },
     textWrap: {
       flex: 1,
     },
     title: {
-      fontSize: 12,
-      fontWeight: "600",
-      color: c.dangerSoft,
+      ...typeScale.label,
+      color: c.danger,
     },
     subtitle: {
-      fontSize: 10,
+      ...typeScale.overline,
       color: c.textMuted,
+      letterSpacing: 0,
+      textTransform: "none",
       marginTop: 1,
     },
     retryBtn: {
       paddingHorizontal: spacing.md,
       paddingVertical: spacing.xs,
-      borderRadius: radius.sm,
+      borderRadius: radius.md,
       borderWidth: 1,
-      borderColor: "rgba(239,68,68,0.3)",
-      backgroundColor: "rgba(239,68,68,0.08)",
+      borderColor: c.danger,
+      backgroundColor: c.dangerSoftBg,
     },
     retryText: {
-      fontSize: 10,
-      fontWeight: "700",
-      color: c.dangerSoft,
+      ...typeScale.overline,
+      color: c.danger,
     },
   });

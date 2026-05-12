@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { radius, spacing } from "../theme/designTokens";
+import { radius, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 
@@ -64,36 +64,33 @@ export function EmptyState({ preset }: EmptyStateProps) {
 
 const createStyles = (c: ThemeColors) => StyleSheet.create({
   container: {
-    borderRadius: radius.md,
+    borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: c.border,
-    backgroundColor: c.cardSoft,
+    backgroundColor: c.card,
     padding: spacing.xxl,
     alignItems: "center",
     gap: spacing.sm,
   },
   iconWrap: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",
   },
   icon: {
-    fontSize: 14,
-    fontWeight: "700",
+    ...typeScale.bodyStrong,
   },
   title: {
-    fontSize: 14,
-    fontWeight: "700",
+    ...typeScale.title,
     color: c.textPrimary,
     textAlign: "center",
   },
   subtitle: {
-    fontSize: 12,
+    ...typeScale.body,
     color: c.textMuted,
-    lineHeight: 18,
     textAlign: "center",
   },
 });

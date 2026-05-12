@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { radius, spacing } from "../theme/designTokens";
+import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { StatusBadge } from "./StatusBadge";
@@ -75,8 +75,8 @@ export function GrantCard({ grant, onRevoke, isMutating = false }: GrantCardProp
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     card: {
-      borderRadius: radius.md,
-      backgroundColor: c.cardSoft,
+      borderRadius: radius.lg,
+      backgroundColor: c.card,
       borderWidth: 1,
       borderColor: c.border,
       padding: spacing.lg,
@@ -90,16 +90,15 @@ const createStyles = (c: ThemeColors) =>
     },
     chipRow: {
       flexDirection: "row",
-      gap: 6,
+      gap: spacing.xs,
     },
     title: {
       flex: 1,
-      fontSize: 14,
-      fontWeight: "700",
+      ...typeScale.title,
       color: c.textPrimary,
     },
     secondary: {
-      fontSize: 13,
+      ...typeScale.body,
       color: c.textSecondary,
     },
     expiryRow: {
@@ -109,21 +108,22 @@ const createStyles = (c: ThemeColors) =>
       gap: spacing.sm,
     },
     meta: {
-      fontSize: 12,
+      ...typeScale.small,
       color: c.textMuted,
       flex: 1,
     },
     revokeBtn: {
       paddingHorizontal: spacing.xxl,
-      paddingVertical: spacing.sm,
-      borderRadius: radius.sm,
+      minHeight: TOUCH_TARGET,
+      borderRadius: radius.md,
       borderWidth: 1,
       borderColor: c.danger,
-      backgroundColor: "transparent",
+      backgroundColor: c.dangerSoftBg,
+      alignItems: "center",
+      justifyContent: "center",
     },
     revokeBtnText: {
-      fontSize: 12,
-      fontWeight: "700",
+      ...typeScale.label,
       color: c.danger,
     },
     btnDisabled: {

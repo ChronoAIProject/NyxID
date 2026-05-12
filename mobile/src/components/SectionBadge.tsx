@@ -34,7 +34,8 @@ const createStyles = (_c: ThemeColors) =>
     wrap: {
       borderWidth: 1,
       alignSelf: "flex-start",
-      borderRadius: radius.md,
+      // DESIGN.md §Layout: 100px (badges, pills) — pill-shaped
+      borderRadius: radius.pill,
       paddingHorizontal: spacing.md,
       paddingVertical: spacing.xs,
     },

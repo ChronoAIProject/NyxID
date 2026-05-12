@@ -3,7 +3,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import Animated, { FadeIn, FadeOut, LinearTransition } from "react-native-reanimated";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
-import { radius } from "../theme/designTokens";
+import { radius, spacing, typeScale } from "../theme/designTokens";
 
 export type ToastKind = "success" | "error" | "info";
 
@@ -98,13 +98,13 @@ const createStyles = (c: ThemeColors) =>
     toast: {
       flexDirection: "row",
       alignItems: "center",
-      gap: 10,
+      gap: spacing.md,
       borderRadius: radius.pill,
       backgroundColor: c.card,
       borderWidth: 1,
-      borderColor: "rgba(255,255,255,0.08)",
-      paddingHorizontal: 16,
-      paddingVertical: 12,
+      borderColor: c.border,
+      paddingHorizontal: spacing.xxl,
+      paddingVertical: spacing.lg,
       maxWidth: "85%",
       shadowColor: c.shadowColor,
       shadowOffset: { width: 0, height: 4 },
@@ -119,9 +119,7 @@ const createStyles = (c: ThemeColors) =>
     },
     text: {
       flex: 1,
-      fontSize: 14,
-      fontWeight: "500",
-      lineHeight: 18,
+      ...typeScale.description,
       color: c.textPrimary,
     },
     divider: {
@@ -130,8 +128,7 @@ const createStyles = (c: ThemeColors) =>
       backgroundColor: c.borderSoft,
     },
     actionText: {
-      fontSize: 14,
-      fontWeight: "500",
-      color: c.textPrimary,
+      ...typeScale.label,
+      color: c.primary,
     },
   });

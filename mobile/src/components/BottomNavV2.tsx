@@ -3,7 +3,7 @@ import { Animated, LayoutChangeEvent, Pressable, StyleSheet, Text, View } from "
 import Svg, { Path, Circle } from "react-native-svg";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
-import { radius, spacing } from "../theme/designTokens";
+import { radius, spacing, typeScale } from "../theme/designTokens";
 
 export type BottomNavV2Tab = "activity" | "account";
 
@@ -150,18 +150,16 @@ const createStyles = (c: ThemeColors) =>
       zIndex: 1,
     },
     text: {
+      ...typeScale.overline,
       color: c.textMuted,
-      fontSize: 10,
-      fontWeight: "600",
-      letterSpacing: 0.02,
+      letterSpacing: 0.6,
     },
     textActive: {
       color: c.textPrimary,
     },
     fabLabel: {
+      ...typeScale.overline,
       color: c.primary,
-      fontSize: 10,
-      fontWeight: "600",
-      letterSpacing: 0.02,
+      letterSpacing: 0.6,
     },
   });

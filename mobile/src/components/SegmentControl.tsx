@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Animated, LayoutChangeEvent, Pressable, StyleSheet, Text, View } from "react-native";
-import { radius, spacing } from "../theme/designTokens";
+import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 
@@ -75,20 +75,21 @@ const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     container: {
       flexDirection: "row",
-      backgroundColor: c.primaryGlow,
+      backgroundColor: c.cardSoft,
       borderWidth: 1,
       borderColor: c.border,
-      borderRadius: radius.sm,
+      borderRadius: radius.md,
       padding: 2,
       marginBottom: spacing.xxl,
       position: "relative",
     },
+    // Active tab pill uses purple per DESIGN.md — purple marks identity + interaction.
     highlight: {
       position: "absolute",
       top: 2,
       left: 2,
       bottom: 2,
-      borderRadius: 6,
+      borderRadius: radius.sm,
       backgroundColor: c.primary,
     },
     item: {
@@ -96,36 +97,35 @@ const createStyles = (c: ThemeColors) =>
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "center",
-      gap: 4,
-      height: 41,
-      paddingHorizontal: 4,
-      borderRadius: 6,
+      gap: spacing.xs,
+      minHeight: TOUCH_TARGET,
+      paddingHorizontal: spacing.xs,
+      borderRadius: radius.sm,
       zIndex: 1,
     },
     label: {
-      fontSize: 12,
-      fontWeight: "600",
+      ...typeScale.label,
       color: c.textSecondary,
     },
     labelActive: {
       color: c.onPrimary,
     },
     countBadge: {
-      minWidth: 16,
-      height: 16,
-      borderRadius: 8,
+      minWidth: 18,
+      height: 18,
+      borderRadius: radius.pill,
       backgroundColor: c.primaryGlow,
       alignItems: "center",
       justifyContent: "center",
-      paddingHorizontal: 4,
+      paddingHorizontal: spacing.xs,
     },
     countBadgeActive: {
-      backgroundColor: "rgba(255,255,255,0.2)",
+      backgroundColor: "rgba(255,255,255,0.20)",
     },
     countText: {
-      fontSize: 9,
-      fontWeight: "700",
+      ...typeScale.overline,
       color: c.primary,
+      letterSpacing: 0,
     },
     countTextActive: {
       color: c.onPrimary,

@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { radius, spacing, typeScale } from "../theme/designTokens";
+import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { StatusBadge } from "./StatusBadge";
@@ -91,59 +91,68 @@ export function ChallengeCard({
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     card: {
-      borderRadius: radius.md,
-      backgroundColor: c.cardSoft,
+      // DESIGN.md: 10px radius for cards/panels
+      borderRadius: radius.lg,
+      backgroundColor: c.card,
       borderWidth: 1,
       borderColor: c.border,
+      // Pending approval gets a purple left-border accent per DESIGN.md
+      borderLeftWidth: 2,
+      borderLeftColor: c.primary,
       padding: spacing.lg,
-      gap: 6,
+      gap: spacing.xs,
     },
     title: {
-      fontSize: 14,
-      fontWeight: "700",
+      ...typeScale.title,
       color: c.textPrimary,
     },
     chipRow: {
       flexDirection: "row",
-      gap: 6,
+      gap: spacing.xs,
     },
     resource: {
-      fontSize: 13,
+      ...typeScale.body,
       color: c.textSecondary,
     },
     meta: {
-      fontSize: 12,
+      ...typeScale.small,
       color: c.textMuted,
     },
     actions: {
       flexDirection: "row",
-      gap: 6,
-      marginTop: spacing.xs,
+      gap: spacing.sm,
+      marginTop: spacing.sm,
     },
+    // DESIGN.md §Usage Rules: Approve = success green tint, Deny = error red tint.
+    // Purple NOT used on action buttons.
     approveBtn: {
       flex: 1,
-      paddingVertical: 8,
-      borderRadius: radius.sm,
-      backgroundColor: c.primary,
+      minHeight: TOUCH_TARGET,
+      paddingHorizontal: spacing.md,
+      borderRadius: radius.md,
+      backgroundColor: c.successSoft,
+      borderWidth: 1,
+      borderColor: c.success,
       alignItems: "center",
+      justifyContent: "center",
     },
     approveBtnText: {
-      fontSize: 13,
-      fontWeight: "700",
-      color: c.onPrimary,
+      ...typeScale.label,
+      color: c.success,
     },
     denyBtn: {
       flex: 1,
-      paddingVertical: 8,
-      borderRadius: radius.sm,
+      minHeight: TOUCH_TARGET,
+      paddingHorizontal: spacing.md,
+      borderRadius: radius.md,
+      backgroundColor: c.dangerSoftBg,
       borderWidth: 1,
-      borderColor: c.dangerSoftBg,
-      backgroundColor: "transparent",
+      borderColor: c.danger,
       alignItems: "center",
+      justifyContent: "center",
     },
     denyBtnText: {
-      fontSize: 13,
-      fontWeight: "700",
+      ...typeScale.label,
       color: c.danger,
     },
     btnDisabled: {

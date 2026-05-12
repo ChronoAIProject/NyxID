@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
-import { radius, spacing } from "../theme/designTokens";
+import { radius, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 
@@ -52,13 +52,12 @@ const createStyles = (c: ThemeColors) =>
       gap: spacing.sm,
     },
     title: {
+      ...typeScale.title,
       color: c.textPrimary,
-      fontSize: 16,
-      fontWeight: "600",
     },
     subtitle: {
+      ...typeScale.body,
       color: c.textMuted,
-      fontSize: 13,
       textAlign: "center",
     },
   });

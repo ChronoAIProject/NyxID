@@ -12,7 +12,7 @@ import * as Clipboard from "expo-clipboard";
 import Svg, { Path } from "react-native-svg";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
-import { radius, spacing } from "../theme/designTokens";
+import { TOUCH_TARGET, radius, spacing, typeScale } from "../theme/designTokens";
 import { mobileApi } from "../lib/api/mobileApi";
 import type { TelegramLinkInfo } from "../lib/api/types";
 
@@ -274,17 +274,14 @@ const createStyles = (c: ThemeColors) =>
       gap: spacing.lg,
     },
     title: {
-      fontSize: 18,
-      fontWeight: "700",
+      ...typeScale.h2,
       color: c.textPrimary,
-      fontFamily: "SpaceGrotesk_700Bold",
       textAlign: "center",
     },
     subtitle: {
-      fontSize: 13,
+      ...typeScale.description,
       color: c.textSecondary,
       textAlign: "center",
-      lineHeight: 19,
     },
     centerWrap: {
       alignItems: "center",
@@ -292,26 +289,26 @@ const createStyles = (c: ThemeColors) =>
       paddingVertical: spacing.md,
     },
     errorText: {
-      fontSize: 13,
-      color: c.dangerSoft,
+      ...typeScale.body,
+      color: c.danger,
       textAlign: "center",
     },
     successText: {
-      fontSize: 14,
-      fontWeight: "600",
-      color: "#34D399",
+      ...typeScale.label,
+      color: c.success,
       textAlign: "center",
     },
     retryBtn: {
       paddingHorizontal: spacing.lg,
-      paddingVertical: spacing.sm,
-      borderRadius: radius.sm,
+      minHeight: TOUCH_TARGET,
+      borderRadius: radius.md,
       borderWidth: 1,
       borderColor: c.border,
+      alignItems: "center",
+      justifyContent: "center",
     },
     retryText: {
-      fontSize: 12,
-      fontWeight: "600",
+      ...typeScale.label,
       color: c.textSecondary,
     },
     telegramBtn: {
@@ -319,13 +316,12 @@ const createStyles = (c: ThemeColors) =>
       alignItems: "center",
       justifyContent: "center",
       gap: spacing.sm,
-      paddingVertical: 12,
-      borderRadius: radius.sm,
+      minHeight: TOUCH_TARGET,
+      borderRadius: radius.md,
       backgroundColor: "#229ED9",
     },
     telegramBtnText: {
-      fontSize: 14,
-      fontWeight: "700",
+      ...typeScale.label,
       color: c.onPrimary,
     },
     divider: {
@@ -339,32 +335,31 @@ const createStyles = (c: ThemeColors) =>
       backgroundColor: c.borderSoft,
     },
     dividerText: {
-      fontSize: 11,
+      ...typeScale.overline,
       color: c.textMuted,
+      letterSpacing: 0.6,
     },
     codeRow: {
       flexDirection: "row",
       alignItems: "center",
       gap: spacing.sm,
-      paddingVertical: 10,
-      paddingHorizontal: 14,
-      borderRadius: radius.sm,
+      paddingVertical: spacing.md,
+      paddingHorizontal: spacing.lg,
+      borderRadius: radius.md,
       borderWidth: 1,
       borderColor: c.border,
-      backgroundColor: c.bg,
+      backgroundColor: c.cardSoft,
     },
     codeText: {
       flex: 1,
-      fontSize: 13,
-      fontWeight: "600",
+      ...typeScale.mono,
       color: c.textPrimary,
-      fontFamily: "SpaceGrotesk_700Bold",
     },
     copyBtn: {
       padding: spacing.xs,
     },
     instructionText: {
-      fontSize: 11,
+      ...typeScale.small,
       color: c.textMuted,
       textAlign: "center",
     },
@@ -375,16 +370,16 @@ const createStyles = (c: ThemeColors) =>
       gap: spacing.sm,
     },
     waitingText: {
-      fontSize: 11,
+      ...typeScale.small,
       color: c.textMuted,
     },
     cancelBtn: {
       alignItems: "center",
-      paddingVertical: spacing.sm,
+      minHeight: TOUCH_TARGET,
+      justifyContent: "center",
     },
     cancelText: {
-      fontSize: 13,
-      fontWeight: "600",
+      ...typeScale.label,
       color: c.textMuted,
     },
   });

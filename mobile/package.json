@@ -65,6 +65,7 @@
     "expo-task-manager": "~55.0.13",
     "expo-web-browser": "~55.0.13",
     "posthog-react-native": "^4.2.0",
+    "punycode": "^2.3.1",
     "react": "19.2.0",
     "react-native": "0.83.4",
     "react-native-gesture-handler": "^2.30.1",

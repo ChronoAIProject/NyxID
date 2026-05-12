@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { BlurView } from "expo-blur";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { radius, spacing } from "../theme/designTokens";
+import { radius, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { StatusBadge } from "./StatusBadge";
@@ -86,30 +86,29 @@ export function HistorySectionHeader({ title }: { title: string }) {
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     card: {
-      borderRadius: radius.md,
-      backgroundColor: c.cardSoft,
+      borderRadius: radius.lg,
+      backgroundColor: c.card,
       borderWidth: 1,
       borderColor: c.border,
       padding: spacing.lg,
-      gap: 4,
-      opacity: 0.8,
+      gap: spacing.xs,
+      opacity: 0.85,
     },
     chipRow: {
       flexDirection: "row",
-      gap: 6,
+      gap: spacing.xs,
     },
     title: {
       flex: 1,
-      fontSize: 14,
-      fontWeight: "700",
+      ...typeScale.title,
       color: c.textPrimary,
     },
     secondary: {
-      fontSize: 13,
+      ...typeScale.body,
       color: c.textSecondary,
     },
     meta: {
-      fontSize: 12,
+      ...typeScale.small,
       color: c.textMuted,
     },
     sectionHeaderRow: {
@@ -118,19 +117,16 @@ const createStyles = (c: ThemeColors) =>
       marginTop: spacing.xs,
     },
     sectionHeaderBlur: {
-      paddingHorizontal: spacing.sm,
+      paddingHorizontal: spacing.md,
       paddingVertical: spacing.xs,
-      borderRadius: 6,
+      borderRadius: radius.pill,
       overflow: "hidden",
       backgroundColor: c.cardSoft,
       borderWidth: 1,
       borderColor: c.borderSoft,
     },
     sectionHeader: {
-      fontSize: 11,
-      fontWeight: "600",
+      ...typeScale.overline,
       color: c.textSecondary,
-      textTransform: "uppercase",
-      letterSpacing: 0.4,
     },
   });

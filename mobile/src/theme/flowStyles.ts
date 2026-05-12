@@ -9,21 +9,22 @@ export function createFlowStyles(colors: ThemeColors) {
     },
     scrollContent: {
       paddingTop: spacing.sm,
-      gap: spacing.xl,
-      paddingBottom: spacing.xl,
+      gap: spacing.huge,
+      paddingBottom: spacing.huge,
     },
     title: {
       ...typeScale.h1,
       color: colors.textPrimary,
     },
     subtitle: {
-      ...typeScale.body,
+      ...typeScale.description,
       color: colors.textSecondary,
     },
+    // DESIGN.md §Layout: 10px (cards, panels) — uses radius.lg.
     card: {
       borderRadius: radius.lg,
       borderWidth: 1,
-      borderColor: colors.borderSoft,
+      borderColor: colors.border,
       backgroundColor: colors.card,
       padding: spacing.xl,
       gap: spacing.md,
@@ -32,6 +33,7 @@ export function createFlowStyles(colors: ThemeColors) {
       ...typeScale.title,
       color: colors.textPrimary,
     },
+    // Detail row dividers use the subtler `borderSoft` per DESIGN.md.
     row: {
       borderBottomWidth: 1,
       borderBottomColor: colors.borderSoft,
@@ -53,7 +55,7 @@ export function createFlowStyles(colors: ThemeColors) {
       color: colors.textMuted,
     },
     rowValue: {
-      ...typeScale.bodyStrong,
+      ...typeScale.label,
       color: colors.textPrimary,
       flexShrink: 1,
       textAlign: "right",
