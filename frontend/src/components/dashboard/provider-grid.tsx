@@ -200,7 +200,7 @@ export function ProviderGrid() {
         {scopeSelector}
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <KeyRound className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             {targetOrgId
               ? selectedOrgName
                 ? `No provider tokens for ${selectedOrgName}.`

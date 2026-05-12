@@ -12,7 +12,7 @@ import { CredentialDialog } from "@/components/dashboard/credential-dialog";
 import type { DownstreamService } from "@/types/api";
 import { DetailSection } from "@/components/shared/detail-section";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -145,7 +145,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
         {connectionsLoading ? (
           <Skeleton className="h-24 w-full" />
         ) : saConnections && saConnections.length > 0 ? (
-          <div className="rounded-md border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -155,7 +155,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                   <TableHead>Credential</TableHead>
                   <TableHead>Label</TableHead>
                   <TableHead>Connected</TableHead>
-                  <TableHead />
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -165,7 +165,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                       {conn.service_name}
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline">{conn.service_category}</Badge>
+                      <Badge variant="secondary">{conn.service_category}</Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {conn.auth_type ?? "-"}
@@ -184,11 +184,10 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                       {formatDate(conn.connected_at)}
                     </TableCell>
                     <TableCell>
-                      <div className="flex gap-1">
+                      <div className="flex justify-end gap-1">
                         {conn.has_credential && (
                           <Button
                             variant="ghost"
-                            size="sm"
                             onClick={() =>
                               handleUpdateServiceCredential(conn.service_id)
                             }
@@ -196,19 +195,18 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                               updateConnectionCredentialMutation.isPending
                             }
                           >
-                            <KeyRound className="mr-1 h-3 w-3" />
+                            <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>
                             Update
                           </Button>
                         )}
                         <Button
                           variant="ghost"
-                          size="sm"
                           onClick={() =>
                             void handleDisconnectService(conn.service_id)
                           }
                           disabled={disconnectServiceMutation.isPending}
                         >
-                          <Unlink className="mr-1 h-3 w-3" />
+                          <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
                           Disconnect
                         </Button>
                       </div>
@@ -219,7 +217,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
             </Table>
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No services connected to this service account.
           </p>
         )}
@@ -262,8 +260,8 @@ function ConnectServiceDropdown({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm">
-          <Plug className="mr-1 h-3 w-3" />
+        <Button variant="outline">
+          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>
           Connect Service
         </Button>
       </DropdownMenuTrigger>
@@ -274,7 +272,7 @@ function ConnectServiceDropdown({
             {s.requires_user_credential && (
               <KeyRound className="ml-1 h-3 w-3 text-muted-foreground" />
             )}
-            <Badge variant="outline" className="ml-auto text-xs">
+            <Badge variant="secondary" className="ml-auto text-xs">
               {s.service_category}
             </Badge>
           </DropdownMenuItem>

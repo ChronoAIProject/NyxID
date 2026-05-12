@@ -6,7 +6,7 @@ import { useNodes } from "@/hooks/use-nodes";
 import { useUpdateUserService } from "@/hooks/use-keys";
 import { ApiError } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -82,22 +82,30 @@ export function RoutingSection({
     : null;
 
   return (
-    <Card>
+    <Card className="h-full">
       <CardHeader className="pb-3">
-        <div className="flex items-center gap-2">
-          <Router className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">{title}</CardTitle>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Router className="h-4 w-4 text-primary" />
+            <CardTitle className="text-[15px]">{title}</CardTitle>
+          </div>
+          {!readOnly && !picking && (
+            <Button variant="outline" onClick={() => setPicking(true)}>
+              <ButtonIcon><Router className="h-3 w-3" /></ButtonIcon>
+              {nodeId ? "Change Route" : "Route via Node"}
+            </Button>
+          )}
         </div>
         <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-center gap-2">
-          <Badge variant={nodeId ? "default" : "outline"}>
+          <Badge variant={nodeId ? "default" : "secondary"}>
             {nodeId ? `Via node: ${currentNodeName}` : "Direct"}
           </Badge>
         </div>
 
-        {!readOnly && picking ? (
+        {!readOnly && picking && (
           <div className="space-y-2">
             <Label className="text-xs">Select routing</Label>
             <Select
@@ -125,19 +133,16 @@ export function RoutingSection({
                 No nodes registered. Register a node first.
               </p>
             )}
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setPicking(false)}
-            >
-              Cancel
-            </Button>
+            <div className="flex justify-end">
+              <Button
+                variant="outline"
+                onClick={() => setPicking(false)}
+              >
+                Cancel
+              </Button>
+            </div>
           </div>
-        ) : !readOnly ? (
-          <Button size="sm" variant="outline" onClick={() => setPicking(true)}>
-            {nodeId ? "Change Route" : "Route via Node"}
-          </Button>
-        ) : null}
+        )}
       </CardContent>
     </Card>
   );

@@ -51,7 +51,7 @@ export function IdentityPropagationConfig({
               className="focus:outline-none"
             >
               <Badge
-                variant={mode === option.value ? "default" : "outline"}
+                variant={mode === option.value ? "default" : "secondary"}
                 className="cursor-pointer px-3 py-1.5"
               >
                 {option.label}
@@ -66,10 +66,10 @@ export function IdentityPropagationConfig({
       </div>
 
       {showFieldToggles && (
-        <div className="space-y-3 rounded-md border p-3">
-          <p className="text-sm font-medium">Include Fields</p>
+        <div className="space-y-3 rounded-lg border p-3">
+          <p className="text-[12px] font-medium">Include Fields</p>
           <div className="flex items-center justify-between">
-            <Label htmlFor="include-user-id" className="text-sm font-normal">
+            <Label htmlFor="include-user-id" className="text-[12px] font-normal">
               User ID
             </Label>
             <Switch
@@ -79,7 +79,7 @@ export function IdentityPropagationConfig({
             />
           </div>
           <div className="flex items-center justify-between">
-            <Label htmlFor="include-email" className="text-sm font-normal">
+            <Label htmlFor="include-email" className="text-[12px] font-normal">
               Email
             </Label>
             <Switch
@@ -89,7 +89,7 @@ export function IdentityPropagationConfig({
             />
           </div>
           <div className="flex items-center justify-between">
-            <Label htmlFor="include-name" className="text-sm font-normal">
+            <Label htmlFor="include-name" className="text-[12px] font-normal">
               Display Name
             </Label>
             <Switch

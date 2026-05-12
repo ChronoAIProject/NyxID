@@ -19,7 +19,7 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
@@ -46,14 +46,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Pencil, Trash2, AlertCircle, UserPlus, UserMinus } from "lucide-react";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import { Pencil, Trash2, UserPlus, UserMinus } from "lucide-react";
 import { toast } from "sonner";
 
 export function AdminGroupDetailPage() {
   const { groupId } = useParams({ strict: false }) as { groupId: string };
   const navigate = useNavigate();
 
-  const { data: group, isLoading, error } = useGroup(groupId);
+  const { data: group, isLoading, error, refetch } = useGroup(groupId);
   const { data: membersData } = useGroupMembers(groupId);
   const { data: rolesData } = useRoles();
   const updateMutation = useUpdateGroup();
@@ -181,20 +182,12 @@ export function AdminGroupDetailPage() {
 
   if (error || !group) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
-          Group not found
-        </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The group you are looking for does not exist or has been deleted.
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => void navigate({ to: "/admin/groups" })}
-        >
-          Back to Groups
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="Group Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "The group you are looking for does not exist or has been deleted."}
+          onRetry={refetch}
+        />
       </div>
     );
   }
@@ -202,24 +195,19 @@ export function AdminGroupDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Group Management", to: "/admin/groups" },
-          { label: group.name },
-        ]}
         title={group.name}
         description={group.description ?? undefined}
         actions={
           <>
-            <Button variant="outline" size="sm" onClick={openEditDialog}>
-              <Pencil className="mr-1 h-3 w-3" />
+            <Button variant="outline" onClick={openEditDialog}>
+              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
               Edit
             </Button>
             <Button
               variant="destructive"
-              size="sm"
               onClick={() => setDeleteOpen(true)}
             >
-              <Trash2 className="mr-1 h-3 w-3" />
+              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
               Delete
             </Button>
           </>
@@ -227,16 +215,15 @@ export function AdminGroupDetailPage() {
       />
 
       <DetailSection title="Group Information">
-        <DetailRow label="ID" value={group.id} copyable mono />
+        <DetailRow label="ID" value={group.id} copyable />
         <DetailRow label="Name" value={group.name} />
-        <DetailRow label="Slug" value={group.slug} copyable mono />
+        <DetailRow label="Slug" value={group.slug} copyable />
         <DetailRow label="Members" value={String(group.member_count)} />
         {group.parent_group_id && (
           <DetailRow
             label="Parent Group"
             value={group.parent_group_id}
             copyable
-            mono
           />
         )}
         <DetailRow label="Created" value={formatDate(group.created_at)} />
@@ -247,13 +234,13 @@ export function AdminGroupDetailPage() {
 
       <DetailSection title="Inherited Roles">
         {group.roles.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No roles assigned to this group.
           </p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {group.roles.map((role) => (
-              <Badge key={role.id} variant="outline">
+              <Badge key={role.id} variant="secondary">
                 {role.name}
               </Badge>
             ))}
@@ -266,26 +253,25 @@ export function AdminGroupDetailPage() {
       <DetailSection title="Members">
         <div className="mb-3">
           <Button
-            size="sm"
             variant="outline"
             onClick={() => setAddMemberOpen(true)}
           >
-            <UserPlus className="mr-1 h-4 w-4" />
+            <ButtonIcon><UserPlus className="h-3 w-3" /></ButtonIcon>
             Add Member
           </Button>
         </div>
         {members.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No members in this group.
           </p>
         ) : (
-          <div className="rounded-xl border border-border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Email</TableHead>
                   <TableHead>Name</TableHead>
-                  <TableHead className="w-[60px]" />
+                  <TableHead className="w-[60px]">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -332,7 +318,7 @@ export function AdminGroupDetailPage() {
               className="space-y-4"
             >
               {form.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                   {form.formState.errors.root.message}
                 </div>
               )}
@@ -383,7 +369,7 @@ export function AdminGroupDetailPage() {
                     <FormLabel>Roles</FormLabel>
                     <FormControl>
                       <select
-                        className="flex w-full rounded-[10px] border border-input bg-popover px-3 py-2 text-[13px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
+                        className="flex w-full rounded-xl border border-input bg-popover px-3 py-2 text-[13px] text-foreground shadow-sm transition-colors duration-300 focus-visible:outline-none [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value
@@ -421,7 +407,7 @@ export function AdminGroupDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={updateMutation.isPending}>
+                <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
                   Save Changes
                 </Button>
               </DialogFooter>
@@ -466,7 +452,7 @@ export function AdminGroupDetailPage() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="add-member-id">
+              <label className="text-[12px] font-medium" htmlFor="add-member-id">
                 User ID
               </label>
               <Input
@@ -488,6 +474,7 @@ export function AdminGroupDetailPage() {
               Cancel
             </Button>
             <Button
+              variant="primary"
               onClick={() => void handleAddMember()}
               isLoading={addMemberMutation.isPending}
             >

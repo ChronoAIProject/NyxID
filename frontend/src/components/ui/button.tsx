@@ -4,29 +4,30 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 import { Loader2 } from "lucide-react";
 
-/* ── VoidPortal Button Variants ── */
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[10px] text-xs font-semibold font-sans transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-3.5 [&_svg]:shrink-0 cursor-pointer",
+  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-lg text-[12px] font-medium transition-all duration-200 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-3 [&_svg]:shrink-0 cursor-pointer",
   {
     variants: {
       variant: {
         default:
-          "bg-primary text-primary-foreground shadow-[0_0_12px_rgba(139,92,246,0.25)] hover:bg-primary/85 hover:shadow-[0_0_18px_rgba(139,92,246,0.35)]",
+          "border border-white/[0.08] bg-white/[0.04] text-foreground hover:border-white/[0.15] hover:bg-white/[0.06]",
         destructive:
-          "bg-destructive/15 text-destructive border border-destructive/30 hover:bg-destructive/25",
+          "border border-destructive/30 bg-destructive/10 text-destructive hover:border-destructive/50 hover:bg-destructive/15",
         outline:
-          "border border-primary/40 bg-transparent text-foreground hover:bg-primary/10 hover:border-primary/60",
+          "border border-white/[0.08] bg-transparent text-muted-foreground hover:border-white/[0.15] hover:text-foreground",
         secondary:
-          "bg-primary/10 text-secondary-foreground border border-border hover:bg-primary/20",
+          "border border-white/[0.08] bg-white/[0.04] text-muted-foreground hover:border-white/[0.15] hover:text-foreground",
         ghost:
-          "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-        link: "text-primary underline-offset-4 hover:underline",
+          "text-muted-foreground hover:bg-white/[0.04] hover:text-foreground",
+        link: "text-nyx-secondary-400 underline-offset-4 hover:underline",
+        primary:
+          "nyx-gradient-vivid text-white shadow-[0_0_12px_rgba(90,42,241,0.25)] hover:shadow-[0_0_18px_rgba(90,42,241,0.35)] hover:brightness-110",
       },
       size: {
-        default: "h-10 px-5 py-3",
-        sm: "h-9 rounded-[10px] px-3.5 py-2",
-        lg: "h-11 rounded-[10px] px-8",
-        icon: "h-10 w-10",
+        default: "h-8 px-3",
+        sm: "h-7 px-2.5",
+        lg: "h-9 px-4",
+        icon: "h-8 w-8",
       },
     },
     defaultVariants: {
@@ -35,6 +36,22 @@ const buttonVariants = cva(
     },
   },
 );
+
+export function ButtonIcon({ children, className, variant }: { readonly children: React.ReactNode; readonly className?: string; readonly variant?: "default" | "destructive" | "primary" }) {
+  return (
+    <span className={cn(
+      "flex h-[18px] w-[18px] items-center justify-center rounded-[4px]",
+      variant === "destructive"
+        ? "border border-destructive/20 bg-destructive/10"
+        : variant === "primary"
+          ? "border border-white/20 bg-white/10"
+          : "border border-white/[0.08] bg-white/[0.04]",
+      className,
+    )}>
+      {children}
+    </span>
+  );
+}
 
 export interface ButtonProps
   extends

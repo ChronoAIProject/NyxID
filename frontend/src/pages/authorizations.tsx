@@ -6,10 +6,12 @@ import {
 } from "@/hooks/use-broker-bindings";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -40,7 +42,7 @@ function formatExternalSubject(
 }
 
 export function AuthorizationsPage() {
-  const { data, isLoading, error } = useMyBrokerBindings();
+  const { data, isLoading, error, refetch } = useMyBrokerBindings();
   const revokeMutation = useRevokeBrokerBinding();
   const [revokeBindingHash, setRevokeBindingHash] = useState<string | null>(
     null,
@@ -85,21 +87,23 @@ export function AuthorizationsPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Link2 className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load authorizations. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load authorizations. Please try again." onRetry={refetch} />
       ) : bindings.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Link2 className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            No broker authorizations issued.
-          </p>
-        </div>
+        <Card>
+          <CardContent className="flex flex-col items-center gap-4 py-16">
+            <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+              <Link2 className="h-6 w-6 text-muted-foreground" />
+            </div>
+            <div className="max-w-md space-y-2 text-center">
+              <p className="text-[12px] font-medium">No Authorizations</p>
+              <p className="text-xs text-muted-foreground">
+                No broker authorizations issued. Apps that hold server-side credentials on your behalf will appear here.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
       ) : (
-        <div className="rounded-xl border border-border">
+        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -108,7 +112,7 @@ export function AuthorizationsPage() {
                 <TableHead>Scopes</TableHead>
                 <TableHead>Created</TableHead>
                 <TableHead>Last used</TableHead>
-                <TableHead className="w-[60px]" />
+                <TableHead className="w-[60px]">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -131,7 +135,7 @@ export function AuthorizationsPage() {
                       {binding.scopes.map((scope) => (
                         <Badge
                           key={scope}
-                          variant="outline"
+                          variant="secondary"
                           className="text-xs"
                         >
                           {scope}
@@ -154,7 +158,7 @@ export function AuthorizationsPage() {
                       className="h-8 w-8"
                       onClick={() => setRevokeBindingHash(binding.binding_hash)}
                     >
-                      <Trash2 className="h-4 w-4 text-muted-foreground" />
+                      <Trash2 className="h-4 w-4 text-destructive" />
                     </Button>
                   </TableCell>
                 </TableRow>

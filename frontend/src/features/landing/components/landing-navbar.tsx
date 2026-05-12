@@ -32,7 +32,7 @@ export function LandingNavbar() {
           </a>
           <a
             href="#beta"
-            className="hidden rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-void-400 md:inline-block"
+            className="hidden rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-nyx-400 md:inline-block"
           >
             {t("nav.requestBeta")}
           </a>

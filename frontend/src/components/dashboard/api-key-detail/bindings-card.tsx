@@ -33,7 +33,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, Link2, Trash2 } from "lucide-react";
+import { AlertTriangle, Link2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { AgentServiceBinding } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
@@ -161,16 +161,19 @@ export function BindingsCard({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Link2 className="h-4 w-4 text-primary" />
-            <CardTitle className="text-sm">Service Bindings</CardTitle>
+            <CardTitle className="text-[15px]">Service Bindings</CardTitle>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
+          <button
+            type="button"
             onClick={() => setAdding(true)}
             disabled={adding || availableServices.length === 0}
+            className="flex h-8 items-center gap-2 rounded-lg border border-white/[0.08] px-2.5 text-[12px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground disabled:pointer-events-none disabled:opacity-40"
           >
+            <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border border-white/[0.08] bg-white/[0.04]">
+              <Plus className="h-2.5 w-2.5" />
+            </span>
             Add Service
-          </Button>
+          </button>
         </div>
         <CardDescription>
           {allowAllServices
@@ -181,7 +184,7 @@ export function BindingsCard({
       <CardContent className="space-y-3">
         <div className="flex items-center justify-between rounded-lg border border-border p-3">
           <div className="space-y-0.5">
-            <Label htmlFor="allow-all-toggle" className="text-sm font-medium">
+            <Label htmlFor="allow-all-toggle" className="text-[12px] font-medium">
               Allow all services
             </Label>
             <p className="text-xs text-muted-foreground">
@@ -208,11 +211,9 @@ export function BindingsCard({
                 },
                 {
                   onSuccess: () =>
-                    toast.success(
-                      checked
-                        ? "Agent can now access all services"
-                        : "Agent restricted to bound services only",
-                    ),
+                    checked
+                      ? toast.success("Agent can now access all services")
+                      : toast.warning("Agent restricted to bound services only"),
                   onError: (err) =>
                     toast.error(
                       err instanceof ApiError
@@ -245,16 +246,8 @@ export function BindingsCard({
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex gap-2">
+            <div className="flex justify-end gap-2">
               <Button
-                size="sm"
-                onClick={handleCreate}
-                disabled={createBinding.isPending || !selectedServiceId}
-              >
-                Add
-              </Button>
-              <Button
-                size="sm"
                 variant="outline"
                 onClick={() => {
                   setAdding(false);
@@ -262,6 +255,13 @@ export function BindingsCard({
                 }}
               >
                 Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={handleCreate}
+                disabled={createBinding.isPending || !selectedServiceId}
+              >
+                Add
               </Button>
             </div>
           </div>
@@ -284,7 +284,7 @@ export function BindingsCard({
                 }
               >
                 <div className="space-y-0.5">
-                  <p className="text-sm font-medium flex items-center gap-1.5">
+                  <p className="text-[12px] font-medium flex items-center gap-1.5">
                     {b.is_invalid && (
                       <AlertTriangle
                         className="h-3.5 w-3.5 text-destructive shrink-0"
@@ -313,7 +313,7 @@ export function BindingsCard({
                   className="h-7 w-7 text-destructive hover:text-destructive"
                   onClick={() => setDeleteTarget(b)}
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="h-3.5 w-3.5 text-destructive" />
                 </Button>
               </div>
             ))}

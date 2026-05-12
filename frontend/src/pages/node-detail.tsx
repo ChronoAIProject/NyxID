@@ -22,7 +22,7 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -43,9 +43,16 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import {
   Activity,
   ArrowRightLeft,
-  HardDrive,
   KeyRound,
   Send,
   Trash2,
@@ -129,7 +136,7 @@ export function NodeDetailPage() {
   const { nodeId } = useParams({ strict: false }) as { nodeId: string };
   const navigate = useNavigate();
 
-  const { data: node, isLoading, error } = useNode(nodeId);
+  const { data: node, isLoading, error, refetch } = useNode(nodeId);
   const { data: admins, isLoading: adminsLoading } = useNodeAdmins(nodeId);
   const { data: keys } = useKeys();
   const currentUserId = useAuthStore((state) => state.user?.id ?? null);
@@ -276,18 +283,12 @@ export function NodeDetailPage() {
 
   if (error || !node) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-center">
-        <HardDrive className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <p className="text-sm text-muted-foreground">
-          Node not found or failed to load.
-        </p>
-        <Button
-          variant="outline"
-          className="mt-4"
-          onClick={() => void navigate({ to: "/nodes" })}
-        >
-          Back to Nodes
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="Node Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "Node not found or failed to load."}
+          onRetry={refetch}
+        />
       </div>
     );
   }
@@ -295,7 +296,6 @@ export function NodeDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[{ label: "Nodes", to: "/nodes" }, { label: node.name }]}
         title={node.name}
         description={
           canManage
@@ -307,30 +307,27 @@ export function NodeDetailPage() {
             <div className="flex gap-2">
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() => {
                   setTransferOwnerId(null);
                   setTransferConfirmed(false);
                   setShowTransferDialog(true);
                 }}
               >
-                <ArrowRightLeft className="mr-2 h-4 w-4" />
+                <ButtonIcon><ArrowRightLeft className="h-3 w-3" /></ButtonIcon>
                 Transfer
               </Button>
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() => setShowRotateDialog(true)}
               >
-                <KeyRound className="mr-2 h-4 w-4" />
+                <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>
                 Rotate Credentials
               </Button>
               <Button
                 variant="destructive"
-                size="sm"
                 onClick={() => setShowDeleteDialog(true)}
               >
-                <Trash2 className="mr-2 h-4 w-4" />
+                <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
                 Delete
               </Button>
             </div>
@@ -344,14 +341,12 @@ export function NodeDetailPage() {
           label="Owner"
           value={nodeOwnerLabel(node.owner, currentUserId)}
         />
-        <div className="flex items-center justify-between border-b border-border py-2 text-sm last:border-b-0">
-          <span className="text-text-tertiary">Status</span>
-          <div className="flex items-center gap-1">
-            <NodeStatusBadge
-              status={node.status}
-              isConnected={node.is_connected}
-            />
-          </div>
+        <div className="flex items-center justify-between px-5 py-3 text-[13px]">
+          <span className="text-muted-foreground">Status</span>
+          <NodeStatusBadge
+            status={node.status}
+            isConnected={node.is_connected}
+          />
         </div>
         <DetailRow label="Created" value={formatDate(node.created_at)} />
         <DetailRow
@@ -384,33 +379,31 @@ export function NodeDetailPage() {
       {/* Shared with */}
       <DetailSection title="Shared with">
         {adminsLoading ? (
-          <div className="space-y-2">
+          <div className="px-5 py-3 space-y-2">
             <Skeleton className="h-8 w-full" />
             <Skeleton className="h-8 w-2/3" />
           </div>
         ) : admins && admins.length > 0 ? (
-          <div className="divide-y divide-border">
+          <>
             {admins.map((admin) => (
               <div
                 key={admin.user_id}
-                className="flex items-center justify-between py-2 text-sm"
+                className="flex items-center justify-between px-5 py-3 text-[13px]"
               >
                 <div className="flex min-w-0 items-center gap-2">
-                  <Users className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="truncate text-foreground">
+                  <Users className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate text-foreground font-medium">
                     {adminDisplayName(admin, currentUserId)}
                   </span>
                 </div>
-                <Badge
-                  variant={admin.role === "owner" ? "outline" : "secondary"}
-                >
+                <Badge variant="secondary">
                   {admin.role === "owner" ? "Owner" : "Admin"}
                 </Badge>
               </div>
             ))}
-          </div>
+          </>
         ) : (
-          <p className="text-sm text-muted-foreground">
+          <p className="px-5 py-3 text-[12px] text-muted-foreground">
             No admins are currently listed for this node.
           </p>
         )}
@@ -419,34 +412,34 @@ export function NodeDetailPage() {
       {/* Metrics */}
       {node.metrics && node.metrics.total_requests > 0 && (
         <DetailSection title="Metrics">
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <div className="rounded-lg border border-border p-3 text-center">
-              <p className="text-2xl font-semibold text-foreground">
+          <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-4">
+            <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
+              <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
                 {String(node.metrics.total_requests)}
               </p>
-              <p className="text-xs text-muted-foreground">Total Requests</p>
+              <p className="text-[11px] text-muted-foreground mt-1">Total Requests</p>
             </div>
-            <div className="rounded-lg border border-border p-3 text-center">
-              <p className="text-2xl font-semibold text-foreground">
+            <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
+              <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
                 {(node.metrics.success_rate * 100).toFixed(1)}%
               </p>
-              <p className="text-xs text-muted-foreground">Success Rate</p>
+              <p className="text-[11px] text-muted-foreground mt-1">Success Rate</p>
             </div>
-            <div className="rounded-lg border border-border p-3 text-center">
-              <p className="text-2xl font-semibold text-foreground">
+            <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
+              <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
                 {node.metrics.avg_latency_ms.toFixed(0)}ms
               </p>
-              <p className="text-xs text-muted-foreground">Avg Latency</p>
+              <p className="text-[11px] text-muted-foreground mt-1">Avg Latency</p>
             </div>
-            <div className="rounded-lg border border-border p-3 text-center">
-              <p className="text-2xl font-semibold text-foreground">
+            <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
+              <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
                 {String(node.metrics.error_count)}
               </p>
-              <p className="text-xs text-muted-foreground">Errors</p>
+              <p className="text-[11px] text-muted-foreground mt-1">Errors</p>
             </div>
           </div>
           {node.metrics.last_error && (
-            <div className="mt-3 rounded-md bg-destructive/10 p-3">
+            <div className="mx-4 mb-4 rounded-xl bg-destructive/10 p-4">
               <div className="flex items-center gap-2 text-xs font-medium text-destructive">
                 <Activity className="h-3 w-3" />
                 Last Error
@@ -473,127 +466,111 @@ export function NodeDetailPage() {
       )}
 
       {canManage && (
-        <div className="space-y-4">
-          <div>
-            <h3 className="text-lg font-medium">Push Credential to VM Operator</h3>
-            <p className="text-sm text-muted-foreground">
-              The VM operator will be prompted for the secret value when they
-              accept this on the VM. The secret never leaves the VM.
-            </p>
-          </div>
-
-          <div className="rounded-xl border border-border p-4">
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="credential-service-slug">Service slug</Label>
-                <Input
-                  id="credential-service-slug"
-                  value={credentialSlug}
-                  onChange={(event) => setCredentialSlug(event.target.value)}
-                  placeholder="openclaw"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="credential-field-name">Field name</Label>
-                <Input
-                  id="credential-field-name"
-                  value={credentialFieldName}
-                  onChange={(event) =>
-                    setCredentialFieldName(event.target.value)
-                  }
-                  placeholder="X-API-Key"
-                />
-              </div>
-              <div className="space-y-2">
-                <p className="text-sm font-medium text-foreground">
-                  Injection method
-                </p>
-                <div className="grid gap-2 sm:grid-cols-3">
-                  {(
-                    [
-                      "header",
-                      "query-param",
-                      "path-prefix",
-                    ] as const
-                  ).map((method) => (
-                    <label
-                      key={method}
-                      className="flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"
-                    >
-                      <input
-                        type="radio"
-                        name="credential-injection-method"
-                        value={method}
-                        checked={credentialInjectionMethod === method}
-                        onChange={() => {
-                          const previousDefault = defaultFieldNameForMethod(
-                            credentialInjectionMethod,
-                          );
-                          setCredentialInjectionMethod(method);
-                          if (
-                            credentialFieldName.trim() === "" ||
-                            credentialFieldName === previousDefault
-                          ) {
-                            setCredentialFieldName(
-                              defaultFieldNameForMethod(method),
-                            );
-                          }
-                        }}
-                        className="h-4 w-4"
-                      />
-                      {injectionMethodLabel(method)}
-                    </label>
-                  ))}
+        <div className="space-y-6">
+          <DetailSection title="Push Credential to Node">
+            <div className="p-5 space-y-4">
+              <p className="text-[12px] text-muted-foreground">
+                The VM operator will be prompted for the secret value when they
+                accept this on the VM. The secret never leaves the VM.
+              </p>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="credential-service-slug">Service slug</Label>
+                  <Input
+                    id="credential-service-slug"
+                    value={credentialSlug}
+                    onChange={(event) => setCredentialSlug(event.target.value)}
+                    placeholder="openclaw"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="credential-field-name">Field name</Label>
+                  <Input
+                    id="credential-field-name"
+                    value={credentialFieldName}
+                    onChange={(event) =>
+                      setCredentialFieldName(event.target.value)
+                    }
+                    placeholder="X-API-Key"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Injection method</Label>
+                  <Select
+                    value={credentialInjectionMethod}
+                    onValueChange={(value) => {
+                      const method = value as NodePendingCredentialInjectionMethod;
+                      const previousDefault = defaultFieldNameForMethod(
+                        credentialInjectionMethod,
+                      );
+                      setCredentialInjectionMethod(method);
+                      if (
+                        credentialFieldName.trim() === "" ||
+                        credentialFieldName === previousDefault
+                      ) {
+                        setCredentialFieldName(
+                          defaultFieldNameForMethod(method),
+                        );
+                      }
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="header">Header</SelectItem>
+                      <SelectItem value="query-param">Query param</SelectItem>
+                      <SelectItem value="path-prefix">Path prefix</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="credential-target-url">Target URL</Label>
+                  <Input
+                    id="credential-target-url"
+                    value={credentialTargetUrl}
+                    onChange={(event) =>
+                      setCredentialTargetUrl(event.target.value)
+                    }
+                    placeholder="https://gateway.example.com/v1"
+                  />
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <Label htmlFor="credential-label">Label</Label>
+                  <Input
+                    id="credential-label"
+                    value={credentialLabel}
+                    onChange={(event) => setCredentialLabel(event.target.value)}
+                    placeholder="Production gateway"
+                  />
                 </div>
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="credential-target-url">Target URL</Label>
-                <Input
-                  id="credential-target-url"
-                  value={credentialTargetUrl}
-                  onChange={(event) =>
-                    setCredentialTargetUrl(event.target.value)
-                  }
-                  placeholder="https://gateway.example.com/v1"
-                />
-              </div>
-              <div className="space-y-2 md:col-span-2">
-                <Label htmlFor="credential-label">Label</Label>
-                <Input
-                  id="credential-label"
-                  value={credentialLabel}
-                  onChange={(event) => setCredentialLabel(event.target.value)}
-                  placeholder="Production gateway"
-                />
+              <div className="flex justify-end">
+                <Button
+                  variant="primary"
+                  onClick={() => void handlePushCredential()}
+                  disabled={!credentialSlug.trim() || !credentialFieldName.trim()}
+                  isLoading={pushCredentialMutation.isPending}
+                >
+                  <ButtonIcon variant="primary"><Send className="h-3 w-3" /></ButtonIcon>
+                  Push
+                </Button>
               </div>
             </div>
-            <div className="mt-4 flex justify-end">
-              <Button
-                onClick={() => void handlePushCredential()}
-                disabled={!credentialSlug.trim() || !credentialFieldName.trim()}
-                isLoading={pushCredentialMutation.isPending}
-              >
-                <Send className="mr-2 h-4 w-4" />
-                Push
-              </Button>
-            </div>
-          </div>
+          </DetailSection>
 
-          <div className="space-y-3">
-            <h4 className="text-sm font-medium text-foreground">
-              Pending Credentials
-            </h4>
+          <DetailSection title="Pending Credentials">
             {pendingCredentialsLoading ? (
-              <div className="space-y-2">
+              <div className="px-5 py-3 space-y-2">
                 <Skeleton className="h-10 w-full" />
                 <Skeleton className="h-10 w-2/3" />
               </div>
             ) : !pendingCredentials || pendingCredentials.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
+              <p className="px-5 py-3 text-[12px] text-muted-foreground">
                 No pending credentials are waiting for this node.
               </p>
             ) : (
-              <div className="rounded-xl border border-border">
+              <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -602,7 +579,7 @@ export function NodeDetailPage() {
                       <TableHead>Field</TableHead>
                       <TableHead>Age</TableHead>
                       <TableHead>Target</TableHead>
-                      <TableHead className="w-[96px]" />
+                      <TableHead className="w-[96px]">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -637,7 +614,6 @@ export function NodeDetailPage() {
                         <TableCell>
                           <Button
                             variant="ghost"
-                            size="sm"
                             className="text-muted-foreground hover:text-destructive"
                             onClick={() =>
                               void handleCancelPendingCredential(credential.id)
@@ -653,7 +629,7 @@ export function NodeDetailPage() {
                 </Table>
               </div>
             )}
-          </div>
+          </DetailSection>
         </div>
       )}
 
@@ -679,7 +655,7 @@ export function NodeDetailPage() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <p className="text-sm font-medium text-foreground">
+              <p className="text-[12px] font-medium text-foreground">
                 Destination owner
               </p>
               <OrgScopeSelect
@@ -691,7 +667,7 @@ export function NodeDetailPage() {
                 label="Destination owner"
               />
             </div>
-            <div className="rounded-md border border-border bg-muted/40 p-3 text-sm">
+            <div className="rounded-lg border border-border bg-muted/40 p-3 text-[12px]">
               <p className="font-medium text-foreground">Transfer preview</p>
               <ul className="mt-2 space-y-1 text-muted-foreground">
                 <li>
@@ -705,7 +681,7 @@ export function NodeDetailPage() {
                 </p>
               )}
             </div>
-            <label className="flex items-start gap-2 text-sm text-muted-foreground">
+            <label className="flex items-start gap-2 text-[12px] text-muted-foreground">
               <Checkbox
                 checked={transferConfirmed}
                 onCheckedChange={(checked) =>
@@ -730,6 +706,7 @@ export function NodeDetailPage() {
               Cancel
             </Button>
             <Button
+              variant="primary"
               onClick={() => void handleTransferNode()}
               disabled={
                 !transferConfirmed || transferIsNoop || !transferTargetOwnerId
@@ -801,7 +778,7 @@ export function NodeDetailPage() {
                   label="New Signing Secret"
                   value={rotatedCredentials.signing_secret}
                 />
-                <div className="rounded-md bg-muted p-3">
+                <div className="rounded-lg bg-muted p-3">
                   <p className="mb-1 text-xs font-medium text-text-tertiary">
                     Run on your node
                   </p>
@@ -814,6 +791,7 @@ export function NodeDetailPage() {
               </div>
               <DialogFooter>
                 <Button
+                  variant="primary"
                   onClick={() => {
                     setShowRotateDialog(false);
                     setRotatedCredentials(null);
@@ -841,6 +819,7 @@ export function NodeDetailPage() {
                   Cancel
                 </Button>
                 <Button
+                  variant="primary"
                   onClick={() => void handleRotateToken()}
                   isLoading={rotateMutation.isPending}
                 >

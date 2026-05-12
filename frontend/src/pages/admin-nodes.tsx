@@ -6,6 +6,7 @@ import {
 } from "@/hooks/use-admin-nodes";
 import { ApiError } from "@/lib/api-client";
 import { formatRelativeTime } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -57,7 +58,7 @@ export function AdminNodesPage() {
     readonly action: "disconnect" | "delete";
   } | null>(null);
 
-  const { data, isLoading, error } = useAdminNodes(
+  const { data, isLoading, error, refetch } = useAdminNodes(
     page,
     PER_PAGE,
     statusFilter || undefined,
@@ -124,14 +125,13 @@ export function AdminNodesPage() {
               className="pl-9"
             />
           </div>
-          <Button type="submit" variant="outline" size="sm">
+          <Button type="submit" variant="outline">
             Search
           </Button>
           {search && (
             <Button
               type="button"
               variant="ghost"
-              size="sm"
               onClick={() => {
                 setSearchInput("");
                 setSearch("");
@@ -171,16 +171,11 @@ export function AdminNodesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <HardDrive className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load nodes. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load nodes. Please try again." onRetry={refetch} />
       ) : nodes.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <HardDrive className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             {search || statusFilter
               ? "No nodes match your filters."
               : "No credential nodes registered."}
@@ -188,7 +183,7 @@ export function AdminNodesPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -218,7 +213,7 @@ export function AdminNodesPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm text-muted-foreground">
+                      <span className="text-[12px] text-muted-foreground">
                         {node.user_email ?? node.user_id}
                       </span>
                     </TableCell>
@@ -229,19 +224,19 @@ export function AdminNodesPage() {
                       />
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm tabular-nums text-muted-foreground">
+                      <span className="text-[12px] tabular-nums text-muted-foreground">
                         {node.metrics
                           ? String(node.metrics.total_requests)
                           : "0"}
                       </span>
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm tabular-nums text-muted-foreground">
+                      <span className="text-[12px] tabular-nums text-muted-foreground">
                         {formatSuccessRate(node.metrics)}
                       </span>
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm tabular-nums text-muted-foreground">
+                      <span className="text-[12px] tabular-nums text-muted-foreground">
                         {formatLatency(node.metrics)}
                       </span>
                     </TableCell>
@@ -276,7 +271,7 @@ export function AdminNodesPage() {
                             setActionTarget({ node, action: "delete" })
                           }
                         >
-                          <Trash2 className="h-4 w-4" />
+                          <Trash2 className="h-4 w-4 text-destructive" />
                           <span className="sr-only">Delete {node.name}</span>
                         </Button>
                       </div>
@@ -288,7 +283,7 @@ export function AdminNodesPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[12px] text-muted-foreground">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               nodes
@@ -296,19 +291,17 @@ export function AdminNodesPage() {
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
-                size="sm"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
                 <ChevronLeft className="h-4 w-4" />
                 Previous
               </Button>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-[12px] text-muted-foreground">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button
                 variant="outline"
-                size="sm"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
               >

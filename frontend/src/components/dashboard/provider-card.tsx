@@ -20,7 +20,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Plug,
@@ -81,13 +81,13 @@ export function ProviderCard({
           ? "border-primary/30 bg-primary/5"
           : needsAttention
             ? "border-warning/30 bg-warning/5"
-            : "transition-colors hover:border-border/80"
+            : "transition-colors duration-300 hover:border-white/[0.15]"
       }
     >
       <CardHeader className="pb-3">
         <div className="flex min-w-0 items-start gap-3">
           <div
-            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${
+            className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
               hasBrand
                 ? brand.bgClass
                 : isConnected && !needsAttention
@@ -101,10 +101,10 @@ export function ProviderCard({
               <img
                 src={provider.icon_url}
                 alt={provider.name}
-                className="h-6 w-6 rounded"
+                className="h-4 w-4 rounded"
               />
             ) : hasBrand ? (
-              <span className={`text-sm font-bold ${brand.textClass}`}>
+              <span className={`text-[13px] font-bold ${brand.textClass}`}>
                 {brand.initial}
               </span>
             ) : (
@@ -137,7 +137,7 @@ export function ProviderCard({
               {llmStatus?.status === "ready" && (
                 <LlmReadyBadge llmStatus={llmStatus} gatewayUrl={gatewayUrl} />
               )}
-              <Badge variant="outline" className="text-[10px]">
+              <Badge variant="secondary" className="text-[10px]">
                 {provider.provider_type === "api_key"
                   ? "API Key"
                   : provider.provider_type === "device_code"
@@ -195,23 +195,21 @@ export function ProviderCard({
                   provider.provider_type === "device_code") && (
                   <Button
                     variant="outline"
-                    size="sm"
                     onClick={() => onRefresh(provider.id)}
                     disabled={isRefreshing}
                     isLoading={isRefreshing}
                   >
-                    <RefreshCw className="mr-1.5 h-3 w-3" />
+                    <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
                     Refresh
                   </Button>
                 )}
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() => onDisconnect(provider.id)}
                 disabled={isDisconnecting}
                 isLoading={isDisconnecting}
               >
-                <Unlink className="mr-1.5 h-3 w-3" />
+                <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
                 Disconnect
               </Button>
             </div>
@@ -244,31 +242,29 @@ export function ProviderCard({
             <div className="flex flex-wrap items-center gap-1.5">
               {showCredentialsSetup && !hasUserCredentials && (
                 <Button
-                  size="sm"
                   variant="outline"
                   onClick={() => onSetupCredentials(provider)}
                 >
-                  <Settings2 className="mr-1.5 h-3 w-3" />
+                  <ButtonIcon><Settings2 className="h-3 w-3" /></ButtonIcon>
                   Setup OAuth App
                 </Button>
               )}
               {showCredentialsSetup && hasUserCredentials && (
                 <Button
-                  size="sm"
                   variant="ghost"
                   onClick={() => onSetupCredentials(provider)}
                 >
-                  <Settings2 className="mr-1.5 h-3 w-3" />
+                  <ButtonIcon><Settings2 className="h-3 w-3" /></ButtonIcon>
                   Manage App
                 </Button>
               )}
               <Button
-                size="sm"
+                variant="primary"
                 onClick={() => onConnect(provider, hasUserCredentials)}
                 disabled={isConnecting || !canConnect}
                 isLoading={isConnecting}
               >
-                <Plug className="mr-1.5 h-3 w-3" />
+                <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>
                 {connectLabel}
               </Button>
             </div>

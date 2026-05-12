@@ -43,7 +43,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -57,16 +57,15 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  ShieldCheck,
-  ShieldOff,
-  TriangleAlert,
+  Trash2,
   Monitor,
   Smartphone,
   Globe,
-  Terminal,
   ExternalLink,
   Copy,
   Check,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -79,10 +78,10 @@ export function SettingsPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">
+        <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
           Settings
         </h2>
-        <p className="text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Manage your account settings and preferences.
         </p>
       </div>
@@ -155,7 +154,7 @@ function ProfileTab() {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
-          <label className="text-sm font-medium" htmlFor="profile-name">
+          <label className="text-[12px] font-medium" htmlFor="profile-name">
             Name
           </label>
           <Input
@@ -166,17 +165,10 @@ function ProfileTab() {
           />
         </div>
         <div className="space-y-2">
-          <label className="text-sm font-medium" htmlFor="profile-email">
-            Email
-          </label>
-          <Input
-            id="profile-email"
-            value={user?.email ?? ""}
-            disabled
-            className="opacity-50"
-            aria-readonly="true"
-          />
-          <div>
+          <div className="flex items-center justify-between">
+            <label className="text-[12px] font-medium" htmlFor="profile-email">
+              Email
+            </label>
             {user?.email_verified ? (
               <Badge variant="success" className="text-xs">
                 Verified
@@ -187,10 +179,17 @@ function ProfileTab() {
               </Badge>
             )}
           </div>
+          <Input
+            id="profile-email"
+            value={user?.email ?? ""}
+            disabled
+            className="opacity-50"
+            aria-readonly="true"
+          />
         </div>
       </CardContent>
       <CardFooter>
-        <Button onClick={() => void handleSave()} isLoading={saving}>
+        <Button variant="primary" onClick={() => void handleSave()} isLoading={saving} disabled={!name || name === (user?.display_name ?? "")}>
           Save changes
         </Button>
       </CardFooter>
@@ -211,6 +210,10 @@ function SecurityTab() {
   const [deleteConfirmEmail, setDeleteConfirmEmail] = useState("");
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
   const disableMfa = useMfaDisable();
+
+  const [showCurrentPw, setShowCurrentPw] = useState(false);
+  const [showNewPw, setShowNewPw] = useState(false);
+  const [showConfirmPw, setShowConfirmPw] = useState(false);
 
   const passwordForm = useForm<ChangePasswordFormData>({
     resolver: zodResolver(changePasswordSchema),
@@ -303,20 +306,7 @@ function SecurityTab() {
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            {user?.mfa_enabled ? (
-              <ShieldCheck
-                className="h-5 w-5 text-success"
-                aria-hidden="true"
-              />
-            ) : (
-              <ShieldOff
-                className="h-5 w-5 text-muted-foreground"
-                aria-hidden="true"
-              />
-            )}
-            Two-Factor Authentication
-          </CardTitle>
+          <CardTitle>Two-Factor Authentication</CardTitle>
           <CardDescription>
             {user?.mfa_enabled
               ? "Your account is protected with two-factor authentication."
@@ -337,7 +327,7 @@ function SecurityTab() {
                 }}
                 aria-label="Toggle two-factor authentication"
               />
-              <span className="text-sm">
+              <span className="text-[12px]">
                 {user?.mfa_enabled ? "Enabled" : "Disabled"}
               </span>
             </div>
@@ -360,14 +350,14 @@ function SecurityTab() {
             {disableMfaError && (
               <div
                 role="alert"
-                className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+                className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
               >
                 {disableMfaError}
               </div>
             )}
             <div className="space-y-2">
               <label
-                className="text-sm font-medium"
+                className="text-[12px] font-medium"
                 htmlFor="disable-mfa-password"
               >
                 Password
@@ -414,7 +404,7 @@ function SecurityTab() {
               {passwordForm.formState.errors.root && (
                 <div
                   role="alert"
-                  className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+                  className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
                 >
                   {passwordForm.formState.errors.root.message}
                 </div>
@@ -427,11 +417,23 @@ function SecurityTab() {
                   <FormItem>
                     <FormLabel>Current Password</FormLabel>
                     <FormControl>
-                      <Input
-                        type="password"
-                        autoComplete="current-password"
-                        {...field}
-                      />
+                      <div className="relative">
+                        <Input
+                          type={showCurrentPw ? "text" : "password"}
+                          autoComplete="current-password"
+                          className="pr-10"
+                          {...field}
+                        />
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          onClick={() => setShowCurrentPw((v) => !v)}
+                          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                          aria-label={showCurrentPw ? "Hide password" : "Show password"}
+                        >
+                          {showCurrentPw ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                        </button>
+                      </div>
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -447,11 +449,23 @@ function SecurityTab() {
                   <FormItem>
                     <FormLabel>New Password</FormLabel>
                     <FormControl>
-                      <Input
-                        type="password"
-                        autoComplete="new-password"
-                        {...field}
-                      />
+                      <div className="relative">
+                        <Input
+                          type={showNewPw ? "text" : "password"}
+                          autoComplete="new-password"
+                          className="pr-10"
+                          {...field}
+                        />
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          onClick={() => setShowNewPw((v) => !v)}
+                          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                          aria-label={showNewPw ? "Hide password" : "Show password"}
+                        >
+                          {showNewPw ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                        </button>
+                      </div>
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -465,47 +479,62 @@ function SecurityTab() {
                   <FormItem>
                     <FormLabel>Confirm New Password</FormLabel>
                     <FormControl>
-                      <Input
-                        type="password"
-                        autoComplete="new-password"
-                        {...field}
-                      />
+                      <div className="relative">
+                        <Input
+                          type={showConfirmPw ? "text" : "password"}
+                          autoComplete="new-password"
+                          className="pr-10"
+                          {...field}
+                        />
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          onClick={() => setShowConfirmPw((v) => !v)}
+                          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                          aria-label={showConfirmPw ? "Hide password" : "Show password"}
+                        >
+                          {showConfirmPw ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                        </button>
+                      </div>
                     </FormControl>
                     <FormMessage />
                   </FormItem>
                 )}
               />
 
-              <Button
-                type="submit"
-                isLoading={passwordForm.formState.isSubmitting}
-              >
-                Change password
-              </Button>
+              <div className="flex justify-end">
+                <Button
+                  variant="primary"
+                  type="submit"
+                  isLoading={passwordForm.formState.isSubmitting}
+                  disabled={!passwordForm.formState.isDirty}
+                >
+                  Change password
+                </Button>
+              </div>
             </form>
           </Form>
         </CardContent>
       </Card>
 
       <Card className="border-destructive/40">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-destructive">
-            <TriangleAlert className="h-5 w-5" aria-hidden="true" />
-            Delete Account
-          </CardTitle>
-          <CardDescription>
-            Permanently delete your account and all associated data. This action
-            cannot be undone.
-          </CardDescription>
-        </CardHeader>
-        <CardFooter>
+        <CardHeader className="flex-row items-center justify-between gap-4">
+          <div className="space-y-1.5">
+            <CardTitle className="text-destructive">Delete Account</CardTitle>
+            <CardDescription className="text-destructive/70">
+              Permanently delete your account and all associated data. This action
+              cannot be undone.
+            </CardDescription>
+          </div>
           <Button
             variant="destructive"
+            className="shrink-0"
             onClick={() => setDeleteAccountOpen(true)}
           >
+            <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
             Delete My Account
           </Button>
-        </CardFooter>
+        </CardHeader>
       </Card>
 
       <Dialog open={deleteAccountOpen} onOpenChange={handleDeleteAccountDialog}>
@@ -520,7 +549,7 @@ function SecurityTab() {
 
           <div className="space-y-2">
             <label
-              className="text-sm font-medium"
+              className="text-[12px] font-medium"
               htmlFor="delete-account-email"
             >
               Email
@@ -673,10 +702,7 @@ function McpTab() {
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <ExternalLink className="h-5 w-5" aria-hidden="true" />
-            Install to Cursor
-          </CardTitle>
+          <CardTitle>Install to Cursor</CardTitle>
           <CardDescription>
             One-click install via Cursor's deeplink protocol. Cursor will open
             and prompt you to confirm the MCP server installation.
@@ -684,10 +710,11 @@ function McpTab() {
         </CardHeader>
         <CardContent className="space-y-4">
           <Button
+            variant="primary"
             onClick={() => void openExternal(cursorDeeplink)}
             className="w-full"
           >
-            <ExternalLink className="mr-2 h-4 w-4" aria-hidden="true" />
+            <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>
             Install to Cursor
           </Button>
           <Separator />
@@ -696,12 +723,12 @@ function McpTab() {
               <p className="text-xs font-medium text-muted-foreground">
                 Or copy manually
               </p>
-              <Badge variant="outline" className="text-[10px]">
+              <Badge variant="secondary" className="text-[10px]">
                 .cursor/mcp.json
               </Badge>
             </div>
             <div className="relative">
-              <pre className="rounded-[10px] bg-muted px-3 py-2 pr-10 font-mono text-xs overflow-x-auto">
+              <pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-10 font-mono text-xs overflow-x-auto leading-relaxed">
                 {cursorConfig}
               </pre>
               <CopyInlineButton text={cursorConfig} label="Cursor config" />
@@ -712,10 +739,7 @@ function McpTab() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Terminal className="h-5 w-5" aria-hidden="true" />
-            Install to Claude Code
-          </CardTitle>
+          <CardTitle>Install to Claude Code</CardTitle>
           <CardDescription>
             Run this command in your terminal to add NyxID as an MCP server in
             Claude Code.
@@ -723,7 +747,7 @@ function McpTab() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="relative">
-            <code className="block rounded-[10px] bg-muted px-3 py-2 pr-10 text-xs break-all font-mono">
+            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-xs break-all font-mono">
               {claudeCommand}
             </code>
             <CopyInlineButton text={claudeCommand} label="CLI command" />
@@ -734,12 +758,12 @@ function McpTab() {
               <p className="text-xs font-medium text-muted-foreground">
                 Or add manually
               </p>
-              <Badge variant="outline" className="text-[10px]">
+              <Badge variant="secondary" className="text-[10px]">
                 .claude/settings.json or .mcp.json
               </Badge>
             </div>
             <div className="relative">
-              <pre className="rounded-[10px] bg-muted px-3 py-2 pr-10 font-mono text-xs overflow-x-auto">
+              <pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-10 font-mono text-xs overflow-x-auto leading-relaxed">
                 {claudeConfig}
               </pre>
               <CopyInlineButton
@@ -753,10 +777,7 @@ function McpTab() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Terminal className="h-5 w-5" aria-hidden="true" />
-            Install to Codex
-          </CardTitle>
+          <CardTitle>Install to Codex</CardTitle>
           <CardDescription>
             Run this command in your terminal to add NyxID as an MCP server in
             Codex CLI.
@@ -764,7 +785,7 @@ function McpTab() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="relative">
-            <code className="block rounded bg-muted px-3 py-2 pr-10 text-xs break-all font-mono">
+            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-xs break-all font-mono">
               {codexCommand}
             </code>
             <CopyInlineButton text={codexCommand} label="CLI command" />
@@ -775,12 +796,12 @@ function McpTab() {
               <p className="text-xs font-medium text-muted-foreground">
                 Or add manually
               </p>
-              <Badge variant="outline" className="text-[10px]">
+              <Badge variant="secondary" className="text-[10px]">
                 ~/.codex/config.toml
               </Badge>
             </div>
             <div className="relative">
-              <pre className="rounded bg-muted px-3 py-2 pr-10 text-xs overflow-x-auto">
+              <pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-10 font-mono text-xs overflow-x-auto leading-relaxed">
                 {codexConfig}
               </pre>
               <CopyInlineButton text={codexConfig} label="Codex config" />
@@ -789,7 +810,7 @@ function McpTab() {
         </CardContent>
       </Card>
 
-      <div className="rounded-[10px] border border-border bg-muted/30 p-4">
+      <div className="rounded-xl border border-border/50 bg-muted/30 p-4">
         <p className="mb-1 text-[13px] font-medium">How it works</p>
         <p className="text-xs text-muted-foreground">
           When your MCP client connects for the first time, NyxID will open an
@@ -829,43 +850,51 @@ function SessionsTab() {
       </CardHeader>
       <CardContent>
         {!sessions || sessions.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted-foreground">
-            No active sessions found.
-          </p>
+          <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
+            <div className="flex h-8 w-8 items-center justify-center rounded-xl border border-border">
+              <Monitor className="h-4 w-4 text-muted-foreground" />
+            </div>
+            <p className="text-[12px] font-medium">No Active Sessions</p>
+            <p className="text-[12px] text-muted-foreground">
+              Your active sessions across devices will appear here.
+            </p>
+          </div>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Device</TableHead>
-                <TableHead>IP Address</TableHead>
-                <TableHead>Created</TableHead>
-                <TableHead>Expires</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sessions.map((session) => (
-                <TableRow key={session.id}>
-                  <TableCell>
-                    <div className="flex items-center gap-2">
-                      {getDeviceIcon(session.user_agent)}
-                      <span className="max-w-[200px] truncate text-sm">
-                        {session.user_agent}
-                      </span>
-                    </div>
-                  </TableCell>
-                  <TableCell className="font-mono text-sm">
-                    {session.ip_address}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {formatDate(session.created_at)}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {formatDate(session.expires_at)}
-                  </TableCell>
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Device</TableHead>
+                  <TableHead>IP Address</TableHead>
+                  <TableHead>Created</TableHead>
+                  <TableHead>Expires</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {sessions.map((session) => (
+                  <TableRow key={session.id}>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        {getDeviceIcon(session.user_agent)}
+                        <span className="max-w-[200px] truncate">
+                          {session.user_agent}
+                        </span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      {session.ip_address}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatDate(session.created_at)}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatDate(session.expires_at)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
         )}
       </CardContent>
     </Card>
@@ -914,10 +943,10 @@ function PrivacyTab() {
             onCheckedChange={handleToggle}
             aria-label="Toggle anonymous usage telemetry"
           />
-          <span className="text-sm">{statusLabel}</span>
+          <span className="text-[12px]">{statusLabel}</span>
         </div>
         <Separator />
-        <div className="space-y-2 text-sm text-muted-foreground">
+        <div className="space-y-2 text-[12px] text-muted-foreground">
           <p>
             For the full disclosure of what we collect, how it's stored, and
             retention windows, see the{" "}

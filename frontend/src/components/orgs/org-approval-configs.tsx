@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Shield, RotateCcw, Trash2 } from "lucide-react";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -49,6 +50,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
     data: serviceConfigs,
     isLoading: isConfigsLoading,
     error: configsError,
+    refetch: refetchConfigs,
   } = useServiceApprovalConfigs(orgId);
   const setConfigMutation = useSetServiceApprovalConfig();
   const deleteConfigMutation = useDeleteServiceApprovalConfig();
@@ -187,7 +189,9 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
           <div className="flex items-center justify-between">
             <div>
               <CardTitle className="flex items-center gap-2">
-                <Shield className="h-5 w-5" aria-hidden="true" />
+                <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-white/[0.08] bg-white/[0.04]">
+                  <Shield className="h-4 w-4" aria-hidden="true" />
+                </span>
                 Org Approval Policies
               </CardTitle>
               <CardDescription>
@@ -198,7 +202,6 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
               </CardDescription>
             </div>
             <Button
-              size="sm"
               variant="outline"
               onClick={() => setAddDialogOpen(true)}
               disabled={
@@ -218,16 +221,16 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
               <Skeleton className="h-16 w-full" />
             </div>
           ) : configsError ? (
-            <p className="py-4 text-center text-sm text-muted-foreground">
-              Failed to load org approval policies. Try refreshing the page.
-            </p>
+            <div className="py-4">
+              <ErrorBanner message="Failed to load org approval policies. Try refreshing the page." onRetry={refetchConfigs} />
+            </div>
           ) : orgServices.length === 0 ? (
-            <p className="py-4 text-center text-sm text-muted-foreground">
+            <p className="py-4 text-center text-[12px] text-muted-foreground">
               No org-owned services yet. Add a key to this org before
               configuring approval policies.
             </p>
           ) : serviceConfigs?.configs.length === 0 ? (
-            <p className="py-4 text-center text-sm text-muted-foreground">
+            <p className="py-4 text-center text-[12px] text-muted-foreground">
               No org approval policies configured. Members use their personal
               approval settings.
             </p>
@@ -247,7 +250,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                 >
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
-                      <p className="text-sm font-medium">
+                      <p className="text-[12px] font-medium">
                         {config.service_name}
                       </p>
                       <p className="text-xs text-muted-foreground">
@@ -329,7 +332,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <label
-                className="text-sm font-medium"
+                className="text-[12px] font-medium"
                 htmlFor="org-service-select"
               >
                 Service
@@ -358,7 +361,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
-                <p className="text-sm font-medium">Require Approval</p>
+                <p className="text-[12px] font-medium">Require Approval</p>
                 <p className="text-xs text-muted-foreground">
                   Whether members must get an admin&rsquo;s approval to use
                   this service.
@@ -372,7 +375,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             {selectedApprovalRequired && (
               <div className="space-y-2">
                 <label
-                  className="text-sm font-medium"
+                  className="text-[12px] font-medium"
                   htmlFor="org-approval-mode-select"
                 >
                   Approval Mode
@@ -404,6 +407,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
               Cancel
             </Button>
             <Button
+              variant="primary"
               onClick={() => void handleAdd()}
               disabled={!selectedServiceId}
               isLoading={setConfigMutation.isPending}
@@ -427,7 +431,7 @@ interface OrgApprovalGrantsProps {
  * user_id, so without this admin-only panel they would be unreachable.
  */
 function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
-  const { data, isLoading, error } = useApprovalGrants(1, 50, orgId);
+  const { data, isLoading, error, refetch } = useApprovalGrants(1, 50, orgId);
   const revokeMutation = useRevokeGrant();
   const grants = data?.grants ?? [];
 
@@ -446,7 +450,9 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <Shield className="h-5 w-5" aria-hidden="true" />
+          <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-white/[0.08] bg-white/[0.04]">
+            <Shield className="h-4 w-4" aria-hidden="true" />
+          </span>
           Org Approval Grants
         </CardTitle>
         <CardDescription>
@@ -462,11 +468,11 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
             <Skeleton className="h-14 w-full" />
           </div>
         ) : error ? (
-          <p className="py-4 text-center text-sm text-muted-foreground">
-            Failed to load org approval grants. Try refreshing the page.
-          </p>
+          <div className="py-4">
+            <ErrorBanner message="Failed to load org approval grants. Try refreshing the page." onRetry={refetch} />
+          </div>
         ) : grants.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted-foreground">
+          <p className="py-4 text-center text-[12px] text-muted-foreground">
             No active org approval grants.
           </p>
         ) : (
@@ -477,7 +483,7 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
                 className="flex items-center justify-between rounded-lg border border-border p-4"
               >
                 <div className="space-y-0.5">
-                  <p className="text-sm font-medium">{grant.service_name}</p>
+                  <p className="text-[12px] font-medium">{grant.service_name}</p>
                   <p className="text-xs text-muted-foreground">
                     {grant.requester_label ?? grant.requester_type} ·
                     granted {formatDate(grant.granted_at)} · expires{" "}
@@ -490,7 +496,7 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
                   onClick={() => void handleRevoke(grant.id)}
                   title="Revoke grant"
                 >
-                  <Trash2 className="h-4 w-4 text-muted-foreground" />
+                  <Trash2 className="h-4 w-4 text-destructive" />
                 </Button>
               </div>
             ))}

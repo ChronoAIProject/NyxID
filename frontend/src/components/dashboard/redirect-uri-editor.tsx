@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useUpdateRedirectUris } from "@/hooks/use-services";
 import { redirectUriSchema } from "@/schemas/services";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -71,7 +71,7 @@ export function RedirectUriEditor({
               className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
               onClick={() => handleRemove(index)}
             >
-              <Trash2 className="h-3 w-3" />
+              <Trash2 className="h-3 w-3 text-destructive" />
               <span className="sr-only">Remove URI</span>
             </Button>
           </div>
@@ -98,7 +98,7 @@ export function RedirectUriEditor({
                 handleAdd();
               }
             }}
-            className="h-8 text-sm"
+            className="h-8 text-[12px]"
           />
           {validationError && (
             <p className="text-xs text-destructive">{validationError}</p>
@@ -106,18 +106,17 @@ export function RedirectUriEditor({
         </div>
         <Button
           variant="outline"
-          size="sm"
           className="h-8 shrink-0"
           onClick={handleAdd}
         >
-          <Plus className="mr-1 h-3 w-3" />
+          <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>
           Add
         </Button>
       </div>
 
       {hasChanges && (
         <Button
-          size="sm"
+          variant="primary"
           onClick={() => void handleSave()}
           isLoading={updateMutation.isPending}
         >

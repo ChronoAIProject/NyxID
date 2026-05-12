@@ -10,7 +10,7 @@ import {
 } from "@/hooks/use-endpoints";
 import { EndpointFormDialog } from "./endpoint-form-dialog";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Pencil, Plus, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
@@ -103,18 +103,17 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <Button variant="outline" size="sm" onClick={handleAdd}>
-          <Plus className="mr-1 h-3 w-3" />
+        <Button variant="outline" onClick={handleAdd}>
+          <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>
           Add Endpoint
         </Button>
         {hasApiSpecUrl && (
           <Button
             variant="outline"
-            size="sm"
             onClick={() => void handleDiscover()}
             isLoading={discoverMutation.isPending}
           >
-            <Wand2 className="mr-1 h-3 w-3" />
+            <ButtonIcon><Wand2 className="h-3 w-3" /></ButtonIcon>
             Auto-discover from OpenAPI
           </Button>
         )}
@@ -128,8 +127,8 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
             : "Add one manually or set an OpenAPI spec URL to auto-discover."}
         </p>
       ) : (
-        <div className="rounded-md border">
-          <table className="w-full text-sm">
+        <div className="rounded-lg border">
+          <table className="w-full text-[12px]">
             <thead>
               <tr className="border-b bg-muted/50">
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">
@@ -151,7 +150,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                 <tr key={ep.id} className="border-b last:border-0">
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
-                      <span className="font-mono text-xs">{ep.name}</span>
+                      <span className="text-xs">{ep.name}</span>
                       {!ep.is_active && (
                         <Badge variant="secondary" className="text-[10px]">
                           Inactive
@@ -161,8 +160,8 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                   </td>
                   <td className="px-3 py-2">
                     <Badge
-                      variant="outline"
-                      className={`font-mono text-[10px] ${getMethodColor(ep.method)}`}
+                      variant="secondary"
+                      className={`text-[10px] ${getMethodColor(ep.method)}`}
                     >
                       {ep.method}
                     </Badge>
@@ -190,7 +189,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
                         onClick={() => void handleDelete(ep.id)}
                         disabled={deletingId === ep.id}
                       >
-                        <Trash2 className="h-3 w-3" />
+                        <Trash2 className="h-3 w-3 text-destructive" />
                         <span className="sr-only">Delete endpoint</span>
                       </Button>
                     </div>

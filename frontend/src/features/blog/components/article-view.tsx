@@ -27,7 +27,7 @@ export function ArticleView({ article, previewBanner = false }: ArticleViewProps
         </Link>
 
         {article.tags[0] ? (
-          <p className="mt-8 font-mono text-[10px] tracking-widest text-primary uppercase">
+          <p className="mt-8 font-mono text-[11px] tracking-[1.5px] text-primary uppercase">
             {article.tags[0].name}
             {article.series ? (
               <>
@@ -104,12 +104,12 @@ function AuthorBio({ article }: { readonly article: BlogArticle }) {
 
   return (
     <div className="border-landing-border-subtle bg-landing-surface mt-10 flex flex-col gap-4 rounded-2xl border p-6 sm:flex-row sm:items-start sm:gap-5 sm:p-8">
-      <span className="from-void-300 to-void-700 grid h-14 w-14 shrink-0 place-items-center rounded-full bg-gradient-to-br text-base font-semibold text-white">
+      <span className="from-nyx-200 to-nyx-700 grid h-14 w-14 shrink-0 place-items-center rounded-full bg-gradient-to-br text-base font-semibold text-white">
         {(author.first_name?.[0] ?? "").toUpperCase()}
         {(author.last_name?.[0] ?? "").toUpperCase()}
       </span>
       <div>
-        <p className="font-mono text-[10px] tracking-widest text-primary uppercase">
+        <p className="font-mono text-[11px] tracking-[1.5px] text-primary uppercase">
           Written by
         </p>
         <p className="mt-1 font-serif text-xl text-white">

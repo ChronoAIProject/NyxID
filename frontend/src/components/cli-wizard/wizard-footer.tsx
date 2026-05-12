@@ -19,7 +19,7 @@ export interface WizardFooterProps {
 export function WizardFooter({ context, localOrigin }: WizardFooterProps) {
   if (context === "local") {
     return (
-      <footer className="mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-[13px] text-muted-foreground">
+      <footer className="mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-[12px] text-muted-foreground">
         <span>
           Served locally from{" "}
           <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs">
@@ -32,7 +32,7 @@ export function WizardFooter({ context, localOrigin }: WizardFooterProps) {
   }
 
   return (
-    <footer className="mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-[13px] text-muted-foreground">
+    <footer className="mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-[12px] text-muted-foreground">
       <span>Pairing with a remote CLI</span>
       <span>· Secrets never travel back through the pairing channel</span>
     </footer>

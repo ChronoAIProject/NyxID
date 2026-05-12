@@ -94,7 +94,7 @@ export function HowItWorks() {
           {/* Fill */}
           <div
             ref={lineRef}
-            className="absolute left-[39px] w-[2px] bg-gradient-to-b from-primary via-void-400 to-primary"
+            className="absolute left-[39px] w-[2px] bg-gradient-to-b from-primary via-nyx-300 to-primary"
             style={{ top: 0, height: 0, transition: "height 0.05s linear" }}
           />
 

@@ -29,7 +29,7 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
@@ -63,6 +63,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import {
   Pencil,
   Trash2,
@@ -73,7 +74,6 @@ import {
   KeyRound,
   MailCheck,
   LogOut,
-  AlertCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -91,7 +91,7 @@ export function AdminUserDetailPage() {
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
 
-  const { data: user, isLoading, error } = useAdminUser(userId);
+  const { data: user, isLoading, error, refetch } = useAdminUser(userId);
   const { data: sessionsData } = useAdminUserSessions(userId);
 
   const updateMutation = useUpdateAdminUser();
@@ -264,20 +264,12 @@ export function AdminUserDetailPage() {
 
   if (error || !user) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
-          User not found
-        </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The user you are looking for does not exist or has been deleted.
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => void navigate({ to: "/admin/users" })}
-        >
-          Back to Users
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="User Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "The user you are looking for does not exist or has been deleted."}
+          onRetry={refetch}
+        />
       </div>
     );
   }
@@ -285,25 +277,20 @@ export function AdminUserDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "User Management", to: "/admin/users" },
-          { label: user.email },
-        ]}
         title={user.display_name ?? user.email}
         description={user.display_name ? user.email : undefined}
         actions={
           <>
-            <Button variant="outline" size="sm" onClick={openEditDialog}>
-              <Pencil className="mr-1 h-3 w-3" />
+            <Button variant="outline" onClick={openEditDialog}>
+              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
               Edit
             </Button>
             {!isSelf && (
               <Button
                 variant="destructive"
-                size="sm"
                 onClick={() => setConfirmAction("delete")}
               >
-                <Trash2 className="mr-1 h-3 w-3" />
+                <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
                 Delete
               </Button>
             )}
@@ -312,7 +299,7 @@ export function AdminUserDetailPage() {
       />
 
       <DetailSection title="User Information">
-        <DetailRow label="ID" value={user.id} copyable mono />
+        <DetailRow label="ID" value={user.id} copyable />
         <DetailRow label="Email" value={user.email} copyable />
         <DetailRow
           label="Display Name"
@@ -354,25 +341,23 @@ export function AdminUserDetailPage() {
             <>
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() => setConfirmAction("toggle-admin")}
               >
                 {user.is_admin ? (
-                  <ShieldOff className="mr-1 h-3 w-3" />
+                  <ButtonIcon><ShieldOff className="h-3 w-3" /></ButtonIcon>
                 ) : (
-                  <ShieldCheck className="mr-1 h-3 w-3" />
+                  <ButtonIcon><ShieldCheck className="h-3 w-3" /></ButtonIcon>
                 )}
                 {user.is_admin ? "Change to User" : "Change to Admin"}
               </Button>
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() => setConfirmAction("toggle-status")}
               >
                 {user.is_active ? (
-                  <UserX className="mr-1 h-3 w-3" />
+                  <ButtonIcon><UserX className="h-3 w-3" /></ButtonIcon>
                 ) : (
-                  <UserCheck className="mr-1 h-3 w-3" />
+                  <ButtonIcon><UserCheck className="h-3 w-3" /></ButtonIcon>
                 )}
                 {user.is_active ? "Disable User" : "Enable User"}
               </Button>
@@ -381,27 +366,24 @@ export function AdminUserDetailPage() {
           {!user.email_verified && (
             <Button
               variant="outline"
-              size="sm"
               onClick={() => setConfirmAction("verify-email")}
             >
-              <MailCheck className="mr-1 h-3 w-3" />
+              <ButtonIcon><MailCheck className="h-3 w-3" /></ButtonIcon>
               Verify Email
             </Button>
           )}
           <Button
             variant="outline"
-            size="sm"
             onClick={() => setConfirmAction("reset-password")}
           >
-            <KeyRound className="mr-1 h-3 w-3" />
+            <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>
             Reset Password
           </Button>
           <Button
             variant="outline"
-            size="sm"
             onClick={() => setConfirmAction("revoke-sessions")}
           >
-            <LogOut className="mr-1 h-3 w-3" />
+            <ButtonIcon><LogOut className="h-3 w-3" /></ButtonIcon>
             Revoke Sessions
           </Button>
         </div>
@@ -419,9 +401,9 @@ export function AdminUserDetailPage() {
 
       <DetailSection title="Sessions">
         {sessions.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No sessions found.</p>
+          <p className="text-[12px] text-muted-foreground">No sessions found.</p>
         ) : (
-          <div className="rounded-xl border border-border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -436,7 +418,7 @@ export function AdminUserDetailPage() {
               <TableBody>
                 {sessions.map((session) => (
                   <TableRow key={session.id}>
-                    <TableCell className="font-mono text-xs">
+                    <TableCell className="text-xs">
                       {session.ip_address ?? "--"}
                     </TableCell>
                     <TableCell
@@ -484,7 +466,7 @@ export function AdminUserDetailPage() {
               className="space-y-4"
             >
               {form.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                   {form.formState.errors.root.message}
                 </div>
               )}
@@ -535,7 +517,7 @@ export function AdminUserDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={updateMutation.isPending}>
+                <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
                   Save Changes
                 </Button>
               </DialogFooter>
@@ -686,7 +668,7 @@ function UserRolesSection({ userId }: { readonly userId: string }) {
   return (
     <DetailSection title="Roles">
       <div className="mb-3">
-        <Button size="sm" variant="outline" onClick={() => setAssignOpen(true)}>
+        <Button variant="outline" onClick={() => setAssignOpen(true)}>
           Assign Role
         </Button>
       </div>
@@ -739,7 +721,7 @@ function UserRolesSection({ userId }: { readonly userId: string }) {
           </p>
           <div className="flex flex-wrap gap-1">
             {effectivePermissions.map((perm) => (
-              <Badge key={perm} variant="outline" className="font-mono text-xs">
+              <Badge key={perm} variant="secondary" className="text-xs">
                 {perm}
               </Badge>
             ))}
@@ -748,7 +730,7 @@ function UserRolesSection({ userId }: { readonly userId: string }) {
       )}
 
       {directRoles.length === 0 && inheritedRoles.length === 0 && (
-        <p className="text-sm text-muted-foreground">No roles assigned.</p>
+        <p className="text-[12px] text-muted-foreground">No roles assigned.</p>
       )}
 
       <Dialog open={assignOpen} onOpenChange={setAssignOpen}>
@@ -778,6 +760,7 @@ function UserRolesSection({ userId }: { readonly userId: string }) {
               Cancel
             </Button>
             <Button
+              variant="primary"
               onClick={() => void handleAssign()}
               disabled={!selectedRoleId}
               isLoading={assignMutation.isPending}
@@ -806,11 +789,11 @@ function UserGroupsSection({ userId }: { readonly userId: string }) {
   return (
     <DetailSection title="Groups">
       {groups.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No group memberships.</p>
+        <p className="text-[12px] text-muted-foreground">No group memberships.</p>
       ) : (
         <div className="flex flex-wrap gap-2">
           {groups.map((group) => (
-            <Badge key={group.id} variant="outline">
+            <Badge key={group.id} variant="secondary">
               {group.name}
               {group.roles.length > 0 && (
                 <span className="ml-1 text-muted-foreground">

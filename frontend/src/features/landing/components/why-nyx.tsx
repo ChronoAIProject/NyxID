@@ -203,7 +203,7 @@ export function WhyNyx() {
             <div className="space-y-4 leading-relaxed text-gray-300">
               <p>{t("whyNyx.para1")}</p>
               <p>{t("whyNyx.para2")}</p>
-              <p className="font-medium text-void-200">
+              <p className="font-medium text-nyx-100">
                 {t("whyNyx.para3")}
               </p>
             </div>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Link } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import {
   useAllAdminedApiKeys,
   useDeleteApiKey,
@@ -7,22 +7,17 @@ import {
 } from "@/hooks/use-api-keys";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
 import type { ApiKey } from "@/types/api";
-import {
-  maskApiKey,
-  formatDate,
-  formatRelativeTime,
-  copyToClipboard,
-} from "@/lib/utils";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { formatDate, formatRelativeTime, copyToClipboard } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from "@/components/ui/table";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -49,11 +44,16 @@ function parseScopesString(scopes: string): readonly string[] {
 function servicesSummary(key: ApiKey): string {
   if (key.allow_all_services) return "All services";
   const count = key.allowed_service_ids?.length ?? 0;
-  if (count === 0) return "None";
+  if (count === 0) return "—";
   return `${String(count)} service${count === 1 ? "" : "s"}`;
 }
 
+function scopeBadgeVariant(scope: string): "info" | "warning" {
+  return scope === "write" || scope === "delete" ? "warning" : "info";
+}
+
 export function ApiKeyTable() {
+  const navigate = useNavigate();
   const { data: apiKeys, isLoading } = useAllAdminedApiKeys();
   const deleteMutation = useDeleteApiKey();
   const rotateMutation = useRotateApiKey();
@@ -111,7 +111,7 @@ export function ApiKeyTable() {
   if (!apiKeys || apiKeys.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-center">
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           No API keys yet. Create one to get started.
         </p>
       </div>
@@ -120,139 +120,134 @@ export function ApiKeyTable() {
 
   return (
     <>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Name</TableHead>
-            <TableHead>Owner</TableHead>
-            <TableHead>Key</TableHead>
-            <TableHead>Platform</TableHead>
-            <TableHead>Scopes</TableHead>
-            <TableHead>Services</TableHead>
-            <TableHead>Bindings</TableHead>
-            <TableHead>Created</TableHead>
-            <TableHead>Last Used</TableHead>
-            <TableHead className="w-12">
-              <span className="sr-only">Actions</span>
-            </TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {apiKeys.map((key) => {
-            const scopesList = parseScopesString(key.scopes);
-            const source = key.credential_source;
-            const isOrg = source?.type === "org";
-            const ownerLabel = isOrg ? source.org_name : "Personal";
-            return (
-              <TableRow key={key.id}>
-                <TableCell className="font-medium">
-                  <Link
-                    to="/keys/api-key/$keyId"
-                    params={{ keyId: key.id }}
-                    className="hover:underline"
-                  >
-                    {key.name}
-                  </Link>
-                </TableCell>
-                <TableCell>
-                  {isOrg ? (
-                    <span className="inline-flex items-center gap-2 text-xs">
-                      <OrgAvatar
-                        avatarUrl={source.avatar_url ?? null}
-                        displayName={source.org_name}
-                        className="h-5 w-5 text-[0.625rem]"
-                      />
-                      <span className="font-medium text-foreground">
-                        {ownerLabel}
-                      </span>
-                    </span>
-                  ) : (
-                    <span className="text-xs text-muted-foreground">
-                      Personal
-                    </span>
-                  )}
-                </TableCell>
-                <TableCell>
-                  <code className="rounded bg-muted px-2 py-1 font-mono text-xs">
-                    {maskApiKey(key.key_prefix)}
-                  </code>
-                </TableCell>
-                <TableCell>
-                  {key.platform ? (
-                    <Badge variant="secondary" className="text-xs">
-                      {key.platform}
-                    </Badge>
-                  ) : (
-                    <span className="text-xs text-muted-foreground">--</span>
-                  )}
-                </TableCell>
-                <TableCell>
-                  <div className="flex flex-wrap gap-1">
-                    {scopesList.map((scope) => (
-                      <Badge
-                        key={scope}
-                        variant="secondary"
-                        className="text-xs"
-                      >
-                        {scope}
-                      </Badge>
-                    ))}
-                  </div>
-                </TableCell>
-                <TableCell className="text-muted-foreground text-xs">
-                  {servicesSummary(key)}
-                </TableCell>
-                <TableCell className="text-muted-foreground text-xs">
-                  {key.bindings_count > 0
-                    ? `${String(key.bindings_count)} binding${key.bindings_count === 1 ? "" : "s"}`
-                    : "--"}
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {formatDate(key.created_at)}
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {key.last_used_at
-                    ? formatRelativeTime(key.last_used_at)
-                    : "Never"}
-                </TableCell>
-                <TableCell>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon" className="h-8 w-8">
-                        <MoreHorizontal
-                          className="h-4 w-4"
-                          aria-hidden="true"
-                        />
-                        <span className="sr-only">Actions for {key.name}</span>
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem
-                        onClick={() => void handleRotate(key)}
-                        disabled={!key.is_active}
-                      >
-                        <RefreshCw
-                          className="mr-2 h-4 w-4"
-                          aria-hidden="true"
-                        />
-                        Rotate
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={() => setDeleteTarget(key)}
-                        className="text-destructive focus:text-destructive"
-                        disabled={!key.is_active}
-                      >
-                        <Trash2 className="mr-2 h-4 w-4" aria-hidden="true" />
-                        Revoke
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </TableCell>
-              </TableRow>
-            );
-          })}
-        </TableBody>
-      </Table>
+      <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+        <Table>
+          <TableHeader>
+            <TableRow className="border-border/50 hover:bg-transparent">
+              <TableHead className="w-[22%]">Name</TableHead>
+              <TableHead className="w-[14%]">Key</TableHead>
+              <TableHead className="w-[12%]">Platform</TableHead>
+              <TableHead className="w-[14%]">Scopes</TableHead>
+              <TableHead className="w-[10%]">Services</TableHead>
+              <TableHead className="w-[10%]">Bindings</TableHead>
+              <TableHead className="w-[14%]">Last Used</TableHead>
+              <TableHead className="w-10">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {apiKeys.map((key) => {
+              const scopesList = parseScopesString(key.scopes);
+              const source = key.credential_source;
+              const isOrg = source?.type === "org";
+              const ownerLabel = isOrg ? source.org_name : "Personal";
+              return (
+                <TableRow
+                  key={key.id}
+                  className="border-border/30 cursor-pointer hover:bg-white/[0.03]"
+                  onClick={() => void navigate({ to: "/keys/api-key/$keyId", params: { keyId: key.id } })}
+                >
+                  <TableCell>
+                    <p className="truncate font-medium text-foreground">
+                      {key.name}
+                    </p>
+                    <p className="truncate text-[11px] text-text-tertiary mt-0.5">
+                      {isOrg ? (
+                        <span className="inline-flex items-center gap-1">
+                          <OrgAvatar
+                            avatarUrl={source.avatar_url ?? null}
+                            displayName={source.org_name}
+                            className="h-3.5 w-3.5 text-[0.5rem]"
+                          />
+                          {ownerLabel}
+                        </span>
+                      ) : (
+                        ownerLabel
+                      )}
+                    </p>
+                  </TableCell>
+
+                  <TableCell>
+                    <code className="font-mono text-[11px] text-muted-foreground">
+                      {key.key_prefix}••••••••
+                    </code>
+                  </TableCell>
+
+                  <TableCell className="whitespace-nowrap">
+                    {key.platform ? (
+                      <Badge variant="secondary">{key.platform}</Badge>
+                    ) : (
+                      <span className="text-text-tertiary">—</span>
+                    )}
+                  </TableCell>
+
+                  <TableCell>
+                    <div className="flex flex-wrap gap-1">
+                      {scopesList.length > 0 ? (
+                        scopesList.map((scope) => (
+                          <Badge key={scope} variant={scopeBadgeVariant(scope)}>
+                            {scope.charAt(0).toUpperCase() + scope.slice(1)}
+                          </Badge>
+                        ))
+                      ) : (
+                        <span className="text-text-tertiary">—</span>
+                      )}
+                    </div>
+                  </TableCell>
+
+                  <TableCell className="text-muted-foreground">
+                    {servicesSummary(key)}
+                  </TableCell>
+
+                  <TableCell className="text-muted-foreground">
+                    {key.bindings_count > 0
+                      ? `${String(key.bindings_count)} binding${key.bindings_count === 1 ? "" : "s"}`
+                      : <span className="text-text-tertiary">—</span>}
+                  </TableCell>
+
+                  <TableCell>
+                    <p className="text-muted-foreground">
+                      {key.last_used_at
+                        ? formatRelativeTime(key.last_used_at)
+                        : <span className="text-text-tertiary">—</span>}
+                    </p>
+                    <p className="text-[10px] text-text-tertiary mt-0.5">
+                      Created {formatDate(key.created_at)}
+                    </p>
+                  </TableCell>
+
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon" className="h-7 w-7">
+                          <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span className="sr-only">Actions for {key.name}</span>
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          onClick={() => void handleRotate(key)}
+                          disabled={!key.is_active}
+                        >
+                          <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />
+                          Rotate
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={() => setDeleteTarget(key)}
+                          className="text-destructive focus:text-destructive"
+                          disabled={!key.is_active}
+                        >
+                          <Trash2 className="mr-2 h-4 w-4 text-destructive" aria-hidden="true" />
+                          Revoke
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
 
       <Dialog
         open={deleteTarget !== null}
@@ -301,7 +296,7 @@ export function ApiKeyTable() {
             </DialogDescription>
           </DialogHeader>
           <div className="flex items-center gap-2">
-            <code className="flex-1 rounded-md bg-muted p-3 font-mono text-sm break-all select-all">
+            <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-[12px] break-all select-all">
               {newKeyValue}
             </code>
             <Button
@@ -319,6 +314,7 @@ export function ApiKeyTable() {
           </div>
           <DialogFooter>
             <Button
+              variant="primary"
               onClick={() => {
                 setNewKeyValue(null);
                 setCopied(false);

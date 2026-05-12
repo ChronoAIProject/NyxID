@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { Link } from "@tanstack/react-router";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -83,7 +83,7 @@ export function NotificationSetupCard() {
   if (allDone && dismissed) return null;
 
   if (isLoading) {
-    return <Skeleton className="h-48 w-full rounded-[10px]" />;
+    return <Skeleton className="h-48 w-full rounded-xl" />;
   }
 
   const steps = [
@@ -96,11 +96,10 @@ export function NotificationSetupCard() {
 
   return (
     <>
-      <div className="relative rounded-[10px] border border-border bg-transparent p-7">
+      <div className="relative rounded-xl border border-border/50 bg-transparent p-4">
         {allDone && (
           <Button
             variant="ghost"
-            size="sm"
             className="absolute right-2 top-2 h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
             onClick={handleDismiss}
             aria-label="Dismiss"
@@ -114,10 +113,10 @@ export function NotificationSetupCard() {
           <div className="flex items-center gap-3">
             <Bell className="h-5 w-5 text-primary" aria-hidden="true" />
             <div className="flex flex-col gap-0.5">
-              <h3 className="font-display text-[22px] font-normal leading-tight">
+              <h3 className="text-[22px] font-normal leading-tight">
                 Notifications & Approvals
               </h3>
-              <p className="text-[13px] text-muted-foreground">
+              <p className="text-[12px] text-muted-foreground">
                 Control how AI agents access your services
               </p>
             </div>
@@ -128,11 +127,11 @@ export function NotificationSetupCard() {
             {steps.map((step, i) => (
               <div key={i} className="flex items-center gap-2.5">
                 {step.done ? (
-                  <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                  <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground">
                     <Check className="h-3 w-3" />
                   </div>
                 ) : (
-                  <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 border-muted-foreground/30 text-xs text-muted-foreground">
+                  <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-xl border-2 border-muted-foreground/30 text-xs text-muted-foreground">
                     {i + 1}
                   </div>
                 )}
@@ -190,12 +189,11 @@ export function NotificationSetupCard() {
                 <Badge variant="success">Connected</Badge>
               ) : (
                 <Button
-                  size="sm"
                   variant="outline"
                   onClick={() => void handleLinkTelegram()}
                   isLoading={telegramLinkMutation.isPending}
                 >
-                  <MessageSquare className="mr-1 h-3.5 w-3.5" />
+                  <ButtonIcon><MessageSquare className="h-3.5 w-3.5" /></ButtonIcon>
                   Connect
                 </Button>
               )}
@@ -221,15 +219,15 @@ export function NotificationSetupCard() {
                   {(pushDevices?.devices.length ?? 0) !== 1 ? "s" : ""}
                 </Badge>
               ) : (
-                <Button size="sm" variant="outline" asChild>
+                <Button variant="outline" asChild>
                   <a
                     href={MOBILE_APP_LINK}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    <Download className="mr-1 h-3.5 w-3.5" />
+                    <ButtonIcon><Download className="h-3.5 w-3.5" /></ButtonIcon>
                     Download
-                    <ExternalLink className="ml-1 h-3 w-3" />
+                    <ExternalLink className="h-3 w-3" />
                   </a>
                 </Button>
               )}
@@ -238,11 +236,12 @@ export function NotificationSetupCard() {
             {/* Enable approval button */}
             {hasChannel && !approvalEnabled && (
               <Button
+                variant="primary"
                 className="w-full"
                 onClick={() => void handleToggleApproval(true)}
                 isLoading={updateMutation.isPending}
               >
-                <Shield className="mr-2 h-4 w-4" />
+                <ButtonIcon><Shield className="h-4 w-4" /></ButtonIcon>
                 Enable Approval Protection
               </Button>
             )}

@@ -141,11 +141,12 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
 
         {step === "setup" && (
           <div className="space-y-4">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[12px] text-muted-foreground">
               You will need an authenticator app like Google Authenticator,
               Authy, or 1Password to complete setup.
             </p>
             <Button
+              variant="primary"
               onClick={handleSetup}
               className="w-full"
               isLoading={setupMutation.isPending}
@@ -174,7 +175,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                 <p className="text-xs text-muted-foreground">
                   Or enter this code manually:
                 </p>
-                <code className="block rounded-md bg-muted p-2 text-center font-mono text-sm select-all">
+                <code className="block rounded-lg bg-muted p-2 text-center font-mono text-[12px] select-all">
                   {setupData.secret}
                 </code>
               </div>
@@ -188,7 +189,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                 {form.formState.errors.root && (
                   <div
                     role="alert"
-                    className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+                    className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
                   >
                     {form.formState.errors.root.message}
                   </div>
@@ -216,8 +217,8 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                   )}
                 />
 
-                <Button type="submit" className="w-full">
-                  Verify and enable
+                <Button variant="primary" type="submit" className="w-full" disabled={!form.formState.isValid || form.formState.isSubmitting}>
+                  Verify and Enable
                 </Button>
               </form>
             </Form>
@@ -236,7 +237,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                   key={code}
                   type="button"
                   onClick={() => void handleCopyCode(code, index)}
-                  className="flex items-center justify-between rounded-md bg-muted px-3 py-2 font-mono text-sm transition-colors hover:bg-muted/80"
+                  className="flex items-center justify-between rounded-lg bg-muted px-3 py-2 font-mono text-[12px] transition-colors duration-300 hover:bg-muted/80"
                   aria-label={`Copy recovery code ${String(index + 1)}`}
                 >
                   <span>{code}</span>
@@ -255,7 +256,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
               ))}
             </div>
 
-            <Button onClick={handleClose} className="w-full">
+            <Button variant="primary" onClick={handleClose} className="w-full">
               Done
             </Button>
           </div>

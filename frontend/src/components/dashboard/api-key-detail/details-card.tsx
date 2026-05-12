@@ -89,9 +89,9 @@ export function DetailsCard({
       : effectiveStatus === "expired"
         ? "Expired"
         : "Inactive";
-  const statusVariant: "default" | "secondary" | "destructive" =
+  const statusVariant: "success" | "secondary" | "destructive" =
     effectiveStatus === "active"
-      ? "default"
+      ? "success"
       : effectiveStatus === "expired"
         ? "destructive"
         : "secondary";
@@ -101,7 +101,7 @@ export function DetailsCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <KeyRound className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">Key Details</CardTitle>
+          <CardTitle className="text-[15px]">Key Details</CardTitle>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -122,15 +122,7 @@ export function DetailsCard({
                 placeholder="Optional description"
               />
             </div>
-            <div className="flex gap-2">
-              <Button
-                size="icon"
-                variant="ghost"
-                onClick={handleSaveName}
-                disabled={updateApiKey.isPending}
-              >
-                <Check className="h-4 w-4" />
-              </Button>
+            <div className="flex justify-end gap-2">
               <Button
                 size="icon"
                 variant="ghost"
@@ -142,12 +134,20 @@ export function DetailsCard({
               >
                 <X className="h-4 w-4" />
               </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={handleSaveName}
+                disabled={updateApiKey.isPending}
+              >
+                <Check className="h-4 w-4" />
+              </Button>
             </div>
           </div>
         ) : (
           <div className="flex items-start justify-between">
             <div>
-              <p className="text-sm font-medium">{name}</p>
+              <p className="text-[12px] font-medium">{name}</p>
               {description && (
                 <p className="text-xs text-muted-foreground">{description}</p>
               )}
@@ -162,31 +162,33 @@ export function DetailsCard({
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-2 text-xs">
-          <div>
-            <span className="text-muted-foreground">Prefix: </span>
-            <code className="rounded bg-muted px-1.5 py-0.5 font-mono">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
+          <div className="min-w-0 space-y-1">
+            <p className="text-muted-foreground">Prefix</p>
+            <code className="block truncate rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">
               {maskApiKey(keyPrefix)}
             </code>
           </div>
-          <div>
-            <span className="text-muted-foreground">Status: </span>
-            <Badge variant={statusVariant} className="text-[10px]">
-              {statusLabel}
-            </Badge>
+          <div className="space-y-1">
+            <p className="text-muted-foreground">Status</p>
+            <div>
+              <Badge variant={statusVariant} className="text-[10px]">
+                {statusLabel}
+              </Badge>
+            </div>
           </div>
-          <div>
-            <span className="text-muted-foreground">Created: </span>
-            {formatDate(createdAt)}
+          <div className="space-y-1">
+            <p className="text-muted-foreground">Created</p>
+            <p className="text-foreground">{formatDate(createdAt)}</p>
           </div>
-          <div>
-            <span className="text-muted-foreground">Last used: </span>
-            {lastUsedAt ? formatRelativeTime(lastUsedAt) : "Never"}
+          <div className="space-y-1">
+            <p className="text-muted-foreground">Last used</p>
+            <p className="text-foreground">{lastUsedAt ? formatRelativeTime(lastUsedAt) : "Never"}</p>
           </div>
           {expiresAt && (
-            <div className="col-span-2">
-              <span className="text-muted-foreground">Expires: </span>
-              {new Date(expiresAt).toLocaleString()}
+            <div className="col-span-2 space-y-1">
+              <p className="text-muted-foreground">Expires</p>
+              <p className="text-foreground">{new Date(expiresAt).toLocaleString()}</p>
             </div>
           )}
         </div>
@@ -228,7 +230,7 @@ export function DetailsCard({
                   </div>
                 ))}
               </div>
-              <div className="flex gap-2">
+              <div className="flex justify-end gap-2">
                 <Button
                   size="icon"
                   variant="ghost"

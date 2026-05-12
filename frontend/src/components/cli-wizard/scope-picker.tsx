@@ -54,7 +54,7 @@ export function ScopePicker({
         aria-label="Scopes"
         aria-invalid={isEmpty}
         className={
-          "flex flex-wrap gap-2 rounded-[10px] p-2 transition-colors " +
+          "flex flex-wrap gap-2 rounded-lg p-2 transition-colors duration-300 " +
           (isEmpty
             ? "border border-destructive"
             : "border border-transparent")
@@ -94,7 +94,7 @@ function ScopeChip({
   return (
     <label
       className={
-        "inline-flex cursor-pointer select-none items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition-colors " +
+        "inline-flex cursor-pointer select-none items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12px] transition-colors duration-300 " +
         (checked
           ? "border-primary bg-primary/15 text-foreground"
           : "border-border bg-transparent text-muted-foreground hover:border-border hover:bg-muted/40")
@@ -107,7 +107,7 @@ function ScopeChip({
         onChange={onToggle}
         value={scope}
       />
-      <span className="font-mono text-xs">{scope}</span>
+      <span className="text-xs">{scope}</span>
     </label>
   )
 }

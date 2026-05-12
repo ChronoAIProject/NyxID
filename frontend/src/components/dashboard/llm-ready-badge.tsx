@@ -5,7 +5,6 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { CircleCheck } from "lucide-react";
 import { CopyableField } from "@/components/shared/copyable-field";
 
 interface LlmReadyBadgeProps {
@@ -23,10 +22,7 @@ export function LlmReadyBadge({ llmStatus, gatewayUrl }: LlmReadyBadgeProps) {
     <Popover>
       <PopoverTrigger asChild>
         <button type="button" className="cursor-pointer">
-          <Badge variant="success" className="gap-1">
-            <CircleCheck className="h-3 w-3" />
-            LLM Ready
-          </Badge>
+          <Badge variant="success">LLM Ready</Badge>
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-80" align="end">
@@ -36,7 +32,6 @@ export function LlmReadyBadge({ llmStatus, gatewayUrl }: LlmReadyBadgeProps) {
           <CopyableField
             label="Direct Proxy URL"
             value={llmStatus.proxy_url}
-            size="sm"
           />
 
           <CopyableField label="Gateway URL" value={gatewayUrl} size="sm" />

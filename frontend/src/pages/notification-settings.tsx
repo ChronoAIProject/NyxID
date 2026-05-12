@@ -18,9 +18,10 @@ import {
   type UpdateNotificationSettingsFormData,
 } from "@/schemas/approvals";
 import { ApiError } from "@/lib/api-client";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -56,11 +57,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Bell,
   MessageSquare,
   RotateCcw,
-  Shield,
-  Smartphone,
   Trash2,
   Unlink,
 } from "lucide-react";
@@ -68,7 +66,7 @@ import { toast } from "sonner";
 import { ApprovalSetupWizard } from "@/components/shared/approval-setup-wizard";
 
 export function NotificationSettingsPage() {
-  const { data: settings, isLoading, error } = useNotificationSettings();
+  const { data: settings, isLoading, error, refetch } = useNotificationSettings();
   const updateMutation = useUpdateNotificationSettings();
   const telegramLinkMutation = useTelegramLink();
   const telegramDisconnectMutation = useTelegramDisconnect();
@@ -82,6 +80,7 @@ export function NotificationSettingsPage() {
     data: serviceConfigs,
     isLoading: isServiceConfigsLoading,
     error: serviceConfigsError,
+    refetch: refetchServiceConfigs,
   } = useServiceApprovalConfigs();
   const setConfigMutation = useSetServiceApprovalConfig();
   const deleteConfigMutation = useDeleteServiceApprovalConfig();
@@ -359,12 +358,7 @@ export function NotificationSettingsPage() {
           <Skeleton className="h-64 w-full" />
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Bell className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load notification settings. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load notification settings. Please try again." onRetry={refetch} />
       ) : (
         <div className="space-y-6">
           {/* Setup Wizard */}
@@ -383,10 +377,7 @@ export function NotificationSettingsPage() {
           {/* Telegram Connection Card */}
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <MessageSquare className="h-5 w-5" aria-hidden="true" />
-                Telegram Connection
-              </CardTitle>
+              <CardTitle>Telegram Connection</CardTitle>
               <CardDescription>
                 Connect your Telegram account to receive approval notifications.
               </CardDescription>
@@ -398,31 +389,30 @@ export function NotificationSettingsPage() {
                     <>
                       <Badge variant="success">Connected</Badge>
                       {settings.telegram_username && (
-                        <span className="text-sm text-muted-foreground">
+                        <span className="text-[12px] text-muted-foreground">
                           {settings.telegram_username}
                         </span>
                       )}
                     </>
                   ) : (
-                    <Badge variant="outline">Not connected</Badge>
+                    <Badge variant="secondary">Not connected</Badge>
                   )}
                 </div>
                 {settings?.telegram_connected ? (
                   <Button
                     variant="outline"
-                    size="sm"
                     onClick={() => setDisconnectDialogOpen(true)}
                   >
-                    <Unlink className="mr-1 h-4 w-4" />
+                    <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
                     Disconnect
                   </Button>
                 ) : (
                   <Button
-                    size="sm"
+                    variant="primary"
                     onClick={() => void handleLinkTelegram()}
                     isLoading={telegramLinkMutation.isPending}
                   >
-                    <MessageSquare className="mr-1 h-4 w-4" />
+                    <ButtonIcon variant="primary"><MessageSquare className="h-3 w-3" /></ButtonIcon>
                     Connect Telegram
                   </Button>
                 )}
@@ -433,10 +423,7 @@ export function NotificationSettingsPage() {
           {/* Push Devices Card */}
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Smartphone className="h-5 w-5" aria-hidden="true" />
-                Push Devices
-              </CardTitle>
+              <CardTitle>Push Devices</CardTitle>
               <CardDescription>
                 Mobile devices registered for push notifications. Devices are
                 registered from the NyxID mobile app.
@@ -449,7 +436,7 @@ export function NotificationSettingsPage() {
                   <Skeleton className="h-14 w-full" />
                 </div>
               ) : !pushDevices?.devices.length ? (
-                <p className="py-4 text-center text-sm text-muted-foreground">
+                <p className="py-4 text-center text-[12px] text-muted-foreground">
                   No devices registered. Install the NyxID mobile app and sign
                   in to register a device.
                 </p>
@@ -463,13 +450,13 @@ export function NotificationSettingsPage() {
                       <div className="flex items-center gap-3">
                         <Badge
                           variant={
-                            device.platform === "apns" ? "outline" : "secondary"
+                            device.platform === "apns" ? "secondary" : "secondary"
                           }
                         >
                           {device.platform === "apns" ? "iOS" : "Android"}
                         </Badge>
                         <div className="space-y-0.5">
-                          <p className="text-sm font-medium">
+                          <p className="text-[12px] font-medium">
                             {device.device_name ?? "Unknown device"}
                           </p>
                           <p className="text-xs text-muted-foreground">
@@ -495,7 +482,7 @@ export function NotificationSettingsPage() {
                         onClick={() => setRemoveDeviceId(device.device_id)}
                         title="Remove device"
                       >
-                        <Trash2 className="h-4 w-4 text-muted-foreground" />
+                        <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
                     </div>
                   ))}
@@ -507,10 +494,7 @@ export function NotificationSettingsPage() {
           {/* Approval Preferences */}
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Bell className="h-5 w-5" aria-hidden="true" />
-                Approval Preferences
-              </CardTitle>
+              <CardTitle>Approval Preferences</CardTitle>
               <CardDescription>
                 Configure approval settings. When enabled, every request
                 requires approval by default (per-request mode). You can
@@ -526,7 +510,7 @@ export function NotificationSettingsPage() {
                   {form.formState.errors.root && (
                     <div
                       role="alert"
-                      className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+                      className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
                     >
                       {form.formState.errors.root.message}
                     </div>
@@ -536,9 +520,9 @@ export function NotificationSettingsPage() {
                     control={form.control}
                     name="approval_required"
                     render={({ field }) => (
-                      <FormItem className="flex items-center justify-between rounded-lg border border-border p-4">
+                      <FormItem className="!space-y-0 flex items-center justify-between rounded-lg border border-border p-4">
                         <div className="space-y-0.5">
-                          <FormLabel className="text-base">
+                          <FormLabel>
                             Require Approval (Global Default)
                           </FormLabel>
                           <FormDescription>
@@ -563,9 +547,9 @@ export function NotificationSettingsPage() {
                     control={form.control}
                     name="telegram_enabled"
                     render={({ field }) => (
-                      <FormItem className="flex items-center justify-between rounded-lg border border-border p-4">
+                      <FormItem className="!space-y-0 flex items-center justify-between rounded-lg border border-border p-4">
                         <div className="space-y-0.5">
-                          <FormLabel className="text-base">
+                          <FormLabel>
                             Telegram Notifications
                           </FormLabel>
                           <FormDescription>
@@ -587,9 +571,9 @@ export function NotificationSettingsPage() {
                     control={form.control}
                     name="push_enabled"
                     render={({ field }) => (
-                      <FormItem className="flex items-center justify-between rounded-lg border border-border p-4">
+                      <FormItem className="!space-y-0 flex items-center justify-between rounded-lg border border-border p-4">
                         <div className="space-y-0.5">
-                          <FormLabel className="text-base">
+                          <FormLabel>
                             Push Notifications
                           </FormLabel>
                           <FormDescription>
@@ -667,7 +651,7 @@ export function NotificationSettingsPage() {
                     )}
                   />
 
-                  <Button type="submit" isLoading={updateMutation.isPending}>
+                  <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty || updateMutation.isPending}>
                     Save Preferences
                   </Button>
                 </form>
@@ -680,10 +664,7 @@ export function NotificationSettingsPage() {
             <CardHeader>
               <div className="flex items-center justify-between">
                 <div>
-                  <CardTitle className="flex items-center gap-2">
-                    <Shield className="h-5 w-5" aria-hidden="true" />
-                    Per-Service Approval Overrides
-                  </CardTitle>
+                  <CardTitle>Per-Service Approval Overrides</CardTitle>
                   <CardDescription>
                     Override the global approval setting for specific services.
                     Services without an override use per-request approval by
@@ -692,7 +673,6 @@ export function NotificationSettingsPage() {
                   </CardDescription>
                 </div>
                 <Button
-                  size="sm"
                   variant="outline"
                   onClick={() => setAddServiceDialogOpen(true)}
                   disabled={
@@ -712,11 +692,9 @@ export function NotificationSettingsPage() {
                   <Skeleton className="h-16 w-full" />
                 </div>
               ) : serviceConfigsError ? (
-                <p className="py-4 text-center text-sm text-muted-foreground">
-                  Failed to load per-service overrides. Try refreshing the page.
-                </p>
+                <ErrorBanner message="Failed to load per-service overrides. Try refreshing the page." onRetry={refetchServiceConfigs} />
               ) : serviceConfigs?.configs.length === 0 ? (
-                <p className="py-4 text-center text-sm text-muted-foreground">
+                <p className="py-4 text-center text-[12px] text-muted-foreground">
                   No per-service overrides configured. All services use the
                   global default.
                 </p>
@@ -736,7 +714,7 @@ export function NotificationSettingsPage() {
                     >
                       <div className="flex items-center justify-between">
                         <div className="space-y-0.5">
-                          <p className="text-sm font-medium">
+                          <p className="text-[12px] font-medium">
                             {config.service_name}
                           </p>
                           <p className="text-xs text-muted-foreground">
@@ -925,7 +903,7 @@ export function NotificationSettingsPage() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="service-select">
+              <label className="text-[12px] font-medium" htmlFor="service-select">
                 Service
               </label>
               <Select
@@ -950,7 +928,7 @@ export function NotificationSettingsPage() {
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
-                <p className="text-sm font-medium">Require Approval</p>
+                <p className="text-[12px] font-medium">Require Approval</p>
                 <p className="text-xs text-muted-foreground">
                   Whether this service requires approval for programmatic
                   access.
@@ -964,7 +942,7 @@ export function NotificationSettingsPage() {
             {selectedApprovalRequired && (
               <div className="space-y-2">
                 <label
-                  className="text-sm font-medium"
+                  className="text-[12px] font-medium"
                   htmlFor="approval-mode-select"
                 >
                   Approval Mode
@@ -999,6 +977,7 @@ export function NotificationSettingsPage() {
               Cancel
             </Button>
             <Button
+              variant="primary"
               onClick={() => void handleAddServiceConfig()}
               disabled={!selectedServiceId}
               isLoading={setConfigMutation.isPending}

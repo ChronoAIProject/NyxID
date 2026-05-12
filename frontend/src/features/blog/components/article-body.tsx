@@ -29,7 +29,7 @@ const COMPONENTS: Components = {
       href={href}
       target={href?.startsWith("http") ? "_blank" : undefined}
       rel={href?.startsWith("http") ? "noopener noreferrer" : undefined}
-      className="text-primary decoration-primary/40 underline-offset-4 transition-colors hover:text-void-300 hover:decoration-void-300 underline"
+      className="text-primary decoration-primary/40 underline-offset-4 transition-colors hover:text-nyx-200 hover:decoration-nyx-200 underline"
     >
       {children}
     </a>
@@ -94,7 +94,7 @@ const COMPONENTS: Components = {
       return <code className={className}>{children}</code>;
     }
     return (
-      <code className="bg-primary/10 text-void-300 rounded px-1.5 py-0.5 font-mono text-[0.85em]">
+      <code className="bg-primary/10 text-nyx-200 rounded px-1.5 py-0.5 font-mono text-[0.85em]">
         {children}
       </code>
     );

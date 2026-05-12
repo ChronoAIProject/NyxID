@@ -7,7 +7,7 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
@@ -17,7 +17,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Pencil, Trash2, AlertCircle } from "lucide-react";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import { ApiError } from "@/lib/api-client";
+import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
@@ -32,7 +34,7 @@ export function ProviderDetailPage() {
     providerId: string;
   };
   const navigate = useNavigate();
-  const { data: provider, isLoading, error } = useProvider(providerId);
+  const { data: provider, isLoading, error, refetch } = useProvider(providerId);
   const deleteMutation = useDeleteProvider();
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -61,20 +63,12 @@ export function ProviderDetailPage() {
 
   if (error || !provider) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
-          Provider not found
-        </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The provider you are looking for does not exist or has been deleted.
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => void navigate({ to: "/providers/manage" })}
-        >
-          Back to Providers
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="Provider Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "The provider you are looking for does not exist or has been deleted."}
+          onRetry={refetch}
+        />
       </div>
     );
   }
@@ -87,17 +81,12 @@ export function ProviderDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Manage Providers", to: "/providers/manage" },
-          { label: provider.name },
-        ]}
         title={provider.name}
         description={provider.description ?? undefined}
         actions={
           <>
             <Button
               variant="outline"
-              size="sm"
               onClick={() =>
                 void navigate({
                   to: "/providers/$providerId/edit",
@@ -105,15 +94,14 @@ export function ProviderDetailPage() {
                 })
               }
             >
-              <Pencil className="mr-1 h-3 w-3" />
+              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
               Edit
             </Button>
             <Button
               variant="destructive"
-              size="sm"
               onClick={() => setDeleteOpen(true)}
             >
-              <Trash2 className="mr-1 h-3 w-3" />
+              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
               Delete
             </Button>
           </>
@@ -173,11 +161,11 @@ export function ProviderDetailPage() {
               badgeVariant={provider.supports_pkce ? "success" : "secondary"}
             />
             {provider.default_scopes && provider.default_scopes.length > 0 && (
-              <div className="flex items-start justify-between text-sm">
+              <div className="flex items-start justify-between text-[12px]">
                 <span className="text-muted-foreground">Default Scopes</span>
                 <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
                   {provider.default_scopes.map((scope) => (
-                    <Badge key={scope} variant="outline">
+                    <Badge key={scope} variant="secondary">
                       {scope}
                     </Badge>
                   ))}
@@ -220,11 +208,11 @@ export function ProviderDetailPage() {
               />
             )}
             {provider.default_scopes && provider.default_scopes.length > 0 && (
-              <div className="flex items-start justify-between text-sm">
+              <div className="flex items-start justify-between text-[12px]">
                 <span className="text-muted-foreground">Default Scopes</span>
                 <div className="flex flex-wrap gap-1 justify-end max-w-[60%]">
                   {provider.default_scopes.map((scope) => (
-                    <Badge key={scope} variant="outline">
+                    <Badge key={scope} variant="secondary">
                       {scope}
                     </Badge>
                   ))}
@@ -240,11 +228,11 @@ export function ProviderDetailPage() {
           <Separator />
           <DetailSection title="API Key Configuration">
             {provider.api_key_instructions && (
-              <div className="text-sm">
+              <div className="text-[12px]">
                 <span className="text-muted-foreground block mb-1">
                   Instructions
                 </span>
-                <p className="whitespace-pre-wrap text-sm">
+                <p className="whitespace-pre-wrap text-[12px]">
                   {provider.api_key_instructions}
                 </p>
               </div>

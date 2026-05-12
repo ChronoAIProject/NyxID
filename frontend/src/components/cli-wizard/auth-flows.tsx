@@ -18,7 +18,7 @@
 // own the rest — placeholder creation, polling, and cleanup.
 
 import { useEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, api } from "@/lib/api-client";
@@ -943,7 +943,7 @@ export function OAuthFlow({
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
           <h3 className="font-medium">Paste your OAuth app credentials</h3>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             This provider expects you to register your own OAuth app
             (Developer Settings → OAuth Apps) and paste the resulting
             Client ID and Client Secret below.
@@ -993,6 +993,7 @@ export function OAuthFlow({
         {error ? <ErrorLine message={error} /> : null}
 
         <Button
+          variant="primary"
           onClick={() => void saveUserCredentials()}
           disabled={saving || !clientId.trim() || !clientSecret.trim()}
         >
@@ -1013,23 +1014,23 @@ export function OAuthFlow({
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
         <h3 className="font-medium">Complete sign-in on the provider</h3>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           We opened a new tab where you'll authorize NyxID. When it
           completes, come back — this page will finish automatically.
         </p>
       </div>
       {phase === "checking-credentials" ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
           Checking provider credentials...
         </div>
       ) : phase === "starting" ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
           Creating placeholder service...
         </div>
       ) : phase === "waiting" ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
           Waiting for provider authorization...
         </div>
@@ -1040,7 +1041,7 @@ export function OAuthFlow({
           href={authUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center justify-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm hover:bg-muted"
+          className="inline-flex items-center justify-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-[12px] hover:bg-muted"
         >
           Reopen provider sign-in
           <ExternalLink className="h-4 w-4" />
@@ -1388,19 +1389,19 @@ export function DeviceCodeFlow({
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
         <h3 className="font-medium">Authorize via device code</h3>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Open the verification URL, enter the code, and complete
           sign-in on the provider. This page will finish automatically.
         </p>
       </div>
 
       {phase === "starting" ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
           Requesting device code...
         </div>
       ) : phase === "waiting" && code && verifyUrl ? (
-        <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-4">
+        <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-4">
           <div className="flex flex-col gap-1">
             <span className="text-xs uppercase tracking-wide text-muted-foreground">
               Code
@@ -1411,10 +1412,9 @@ export function DeviceCodeFlow({
               </code>
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() => void handleCopy()}
               >
-                <Copy className="mr-1.5 h-3.5 w-3.5" />
+                <ButtonIcon><Copy className="h-3.5 w-3.5" /></ButtonIcon>
                 {copied ? "Copied" : "Copy"}
               </Button>
             </div>
@@ -1427,7 +1427,7 @@ export function DeviceCodeFlow({
               href={verifyUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-sm underline-offset-2 hover:underline"
+              className="inline-flex items-center gap-1.5 text-[12px] underline-offset-2 hover:underline"
             >
               {verifyUrl}
               <ExternalLink className="h-3.5 w-3.5" />
@@ -1440,10 +1440,10 @@ export function DeviceCodeFlow({
         </div>
       ) : phase === "expired" ? (
         <div className="flex flex-col gap-2">
-          <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+          <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
             The device code expired before authorization completed.
           </p>
-          <Button onClick={() => void startSession()}>
+          <Button variant="primary" onClick={() => void startSession()}>
             Request a new code
           </Button>
         </div>
@@ -1464,7 +1464,7 @@ export function DeviceCodeFlow({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
       {message}
     </p>
   );

@@ -3,10 +3,10 @@ import { useParams } from "@tanstack/react-router";
 import { useApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
 import { maskApiKey } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { RefreshCw, Trash2 } from "lucide-react";
 import { DetailsCard } from "@/components/dashboard/api-key-detail/details-card";
 import { NodeScopeCard } from "@/components/dashboard/api-key-detail/node-scope-card";
@@ -20,7 +20,7 @@ import { UsageStatsCard } from "@/components/dashboard/api-key-detail/usage-stat
 
 export function ApiKeyDetailPage() {
   const { keyId } = useParams({ strict: false }) as { keyId: string };
-  const { data: apiKey, isLoading, error } = useApiKey(keyId);
+  const { data: apiKey, isLoading, error, refetch } = useApiKey(keyId);
   const [rotateOpen, setRotateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -42,19 +42,15 @@ export function ApiKeyDetailPage() {
       <div className="space-y-8">
         <PageHeader
           title="Key Not Found"
-          breadcrumbs={[
-            { label: "AI Services", to: "/keys" },
-            { label: "Agent Keys", to: "/keys?tab=nyxid" },
-            { label: "Not Found" },
-          ]}
         />
-        <Card>
-          <CardContent className="py-8 text-center text-sm text-destructive">
-            {error instanceof ApiError
+        <ErrorBanner
+          message={
+            error instanceof ApiError
               ? error.message
-              : "Failed to load key details."}
-          </CardContent>
-        </Card>
+              : "Failed to load key details."
+          }
+          onRetry={refetch}
+        />
       </div>
     );
   }
@@ -66,28 +62,21 @@ export function ApiKeyDetailPage() {
         description={
           apiKey.description ?? `API key ${maskApiKey(apiKey.key_prefix)}`
         }
-        breadcrumbs={[
-          { label: "AI Services", to: "/keys" },
-          { label: "Agent Keys", to: "/keys?tab=nyxid" },
-          { label: apiKey.name },
-        ]}
         actions={
           <div className="flex gap-2">
             <Button
               variant="outline"
-              size="sm"
               onClick={() => setRotateOpen(true)}
               disabled={!apiKey.is_active}
             >
-              <RefreshCw className="mr-2 h-4 w-4" />
+              <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
               Rotate Key
             </Button>
             <Button
               variant="destructive"
-              size="sm"
               onClick={() => setDeleteOpen(true)}
             >
-              <Trash2 className="mr-2 h-4 w-4" />
+              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
               Revoke
             </Button>
           </div>

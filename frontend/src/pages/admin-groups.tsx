@@ -11,6 +11,7 @@ import {
 import { createGroupSchema, type CreateGroupFormData } from "@/schemas/rbac";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -40,7 +41,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Users, Plus, Trash2 } from "lucide-react";
+import { Users, Trash2 } from "lucide-react";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 
 export function AdminGroupsPage() {
@@ -48,7 +50,7 @@ export function AdminGroupsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteGroupId, setDeleteGroupId] = useState<string | null>(null);
 
-  const { data, isLoading, error } = useGroups();
+  const { data, isLoading, error, refetch } = useGroups();
   const { data: rolesData } = useRoles();
   const createMutation = useCreateGroup();
   const deleteMutation = useDeleteGroup();
@@ -124,10 +126,7 @@ export function AdminGroupsPage() {
         title="Group Management"
         description="Manage groups and their role assignments."
         actions={
-          <Button size="sm" onClick={openCreateDialog}>
-            <Plus className="mr-1 h-4 w-4" />
-            Add Group
-          </Button>
+          <AddCtaButton label="Add Group" onClick={openCreateDialog} />
         }
       />
 
@@ -138,19 +137,14 @@ export function AdminGroupsPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Users className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load groups. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load groups. Please try again." onRetry={refetch} />
       ) : groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <Users className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">No groups found.</p>
+          <p className="text-[12px] text-muted-foreground">No groups found.</p>
         </div>
       ) : (
-        <div className="rounded-xl border border-border">
+        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -159,14 +153,14 @@ export function AdminGroupsPage() {
                 <TableHead>Roles</TableHead>
                 <TableHead>Members</TableHead>
                 <TableHead>Created</TableHead>
-                <TableHead className="w-[60px]" />
+                <TableHead className="w-[60px]">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {groups.map((group) => (
                 <TableRow
                   key={group.id}
-                  className="cursor-pointer"
+                  className="cursor-pointer hover:bg-white/[0.03]"
                   tabIndex={0}
                   role="link"
                   onClick={() =>
@@ -186,7 +180,7 @@ export function AdminGroupsPage() {
                   }}
                 >
                   <TableCell className="font-medium">{group.name}</TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="text-xs">
                     {group.slug}
                   </TableCell>
                   <TableCell>
@@ -199,7 +193,7 @@ export function AdminGroupsPage() {
                         group.roles.map((role) => (
                           <Badge
                             key={role.id}
-                            variant="outline"
+                            variant="secondary"
                             className="text-xs"
                           >
                             {role.name}
@@ -226,7 +220,7 @@ export function AdminGroupsPage() {
                         setDeleteGroupId(group.id);
                       }}
                     >
-                      <Trash2 className="h-4 w-4 text-muted-foreground" />
+                      <Trash2 className="h-4 w-4 text-destructive" />
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -253,7 +247,7 @@ export function AdminGroupsPage() {
               className="space-y-4"
             >
               {createForm.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                   {createForm.formState.errors.root.message}
                 </div>
               )}
@@ -304,7 +298,7 @@ export function AdminGroupsPage() {
                     <FormLabel>Roles</FormLabel>
                     <FormControl>
                       <select
-                        className="flex w-full rounded-[10px] border border-input bg-popover px-3 py-2 text-[13px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
+                        className="flex w-full rounded-xl border border-input bg-popover px-3 py-2 text-[13px] text-foreground shadow-sm transition-colors duration-300 focus-visible:outline-none [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value
@@ -342,7 +336,7 @@ export function AdminGroupsPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={createMutation.isPending}>
+                <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!createForm.formState.isValid || createMutation.isPending}>
                   Create Group
                 </Button>
               </DialogFooter>

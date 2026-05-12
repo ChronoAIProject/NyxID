@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useAdminAuditLog } from "@/hooks/use-admin";
 import { formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -25,12 +26,12 @@ function responseStatus(entry: { readonly event_data: Record<string, unknown> | 
 
 function statusVariant(
   status: number | null,
-): "default" | "secondary" | "destructive" | "outline" {
-  if (status === null) return "outline";
+): "default" | "secondary" | "destructive" {
+  if (status === null) return "secondary";
   if (status >= 500) return "destructive";
   if (status >= 400) return "secondary";
   if (status >= 200) return "default";
-  return "outline";
+  return "secondary";
 }
 
 export function AdminAuditLogPage() {
@@ -39,7 +40,7 @@ export function AdminAuditLogPage() {
   const [apiKeyIdInput, setApiKeyIdInput] = useState("");
   const [filters, setFilters] = useState<{ userId?: string; apiKeyId?: string }>({});
 
-  const { data, isLoading, error } = useAdminAuditLog(page, PER_PAGE, filters);
+  const { data, isLoading, error, refetch } = useAdminAuditLog(page, PER_PAGE, filters);
   const entries = data?.entries ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
@@ -79,14 +80,13 @@ export function AdminAuditLogPage() {
             className="pl-9"
           />
         </div>
-        <Button type="submit" variant="outline" size="sm">
+        <Button type="submit" variant="outline">
           Search
         </Button>
         {(filters.userId || filters.apiKeyId) && (
           <Button
             type="button"
             variant="ghost"
-            size="sm"
             onClick={() => {
               setUserIdInput("");
               setApiKeyIdInput("");
@@ -106,22 +106,17 @@ export function AdminAuditLogPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ClipboardList className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load audit log entries.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load audit log entries." onRetry={refetch} />
       ) : entries.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <ClipboardList className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No audit events match the current filters.
           </p>
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -150,10 +145,10 @@ export function AdminAuditLogPage() {
                           <span className="text-xs text-muted-foreground">--</span>
                         )}
                       </TableCell>
-                      <TableCell className="font-mono text-xs">
+                      <TableCell className="text-xs">
                         {entry.api_key_id ?? "--"}
                       </TableCell>
-                      <TableCell className="font-mono text-xs">
+                      <TableCell className="text-xs">
                         {entry.user_id ?? "--"}
                       </TableCell>
                       <TableCell>
@@ -171,29 +166,27 @@ export function AdminAuditLogPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[12px] text-muted-foreground">
               Showing {(page - 1) * PER_PAGE + 1}
               {" - "}
               {Math.min(page * PER_PAGE, total)} of {total}
             </p>
-            <div className="flex gap-2">
+            <div className="flex justify-end gap-2">
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() => setPage((current) => Math.max(1, current - 1))}
                 disabled={page <= 1}
               >
-                <ChevronLeft className="mr-1 h-4 w-4" />
+                <ButtonIcon><ChevronLeft className="h-3 w-3" /></ButtonIcon>
                 Previous
               </Button>
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
                 disabled={page >= totalPages}
               >
                 Next
-                <ChevronRight className="ml-1 h-4 w-4" />
+                <ButtonIcon><ChevronRight className="h-3 w-3" /></ButtonIcon>
               </Button>
             </div>
           </div>

@@ -41,7 +41,7 @@ const LAST_ACTIVE_ADMIN_TOOLTIP =
  */
 function scopeSummary(member: MemberResponse): string {
   const list = member.effective_allowed_service_ids;
-  if (list === null) return "All services";
+  if (list == null) return "All services";
   if (list.length === 0) return "No services";
   return `${String(list.length)} service${list.length === 1 ? "" : "s"}`;
 }
@@ -65,14 +65,14 @@ export function MemberRow({
   const displayName =
     member.display_name ?? member.email ?? member.user_id;
   const scopeLabel = scopeSummary(member);
-  const isScopeRestricted = member.effective_allowed_service_ids !== null;
+  const isScopeRestricted = member.effective_allowed_service_ids != null;
   const hasCustomScope = member.scope_source === "override";
 
   return (
     <TableRow>
       <TableCell>
         <div className="flex flex-col gap-0.5">
-          <span className="text-sm font-medium text-foreground">
+          <span className="text-[12px] font-medium text-foreground">
             {displayName}
             {isSelf && (
               <span className="ml-2 text-xs text-muted-foreground">(you)</span>
@@ -149,9 +149,9 @@ export function MemberRow({
       <TableCell className="text-muted-foreground">
         {formatRelativeTime(member.created_at) ?? "—"}
       </TableCell>
-      <TableCell>
-        <div className="flex items-center justify-end gap-1">
-          {canManage && (
+      {canManage && (
+        <TableCell>
+          <div className="flex items-center justify-end gap-1">
             <Button
               variant="ghost"
               size="icon"
@@ -163,22 +163,20 @@ export function MemberRow({
             >
               <SlidersHorizontal className="h-4 w-4" />
             </Button>
-          )}
-          {canManage && hasCustomScope && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-muted-foreground"
-              onClick={() => onResetScope(member)}
-              disabled={isUpdating}
-              aria-label={`Reset ${displayName} to role defaults`}
-              title="Reset to role defaults"
-            >
-              <RotateCcw className="h-4 w-4" />
-            </Button>
-          )}
-          {canManage &&
-            (isLastAdmin ? (
+            {hasCustomScope && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-muted-foreground"
+                onClick={() => onResetScope(member)}
+                disabled={isUpdating}
+                aria-label={`Reset ${displayName} to role defaults`}
+                title="Reset to role defaults"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </Button>
+            )}
+            {isLastAdmin ? (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <span tabIndex={0} className="inline-flex">
@@ -190,7 +188,7 @@ export function MemberRow({
                       disabled
                       aria-label={`Remove ${displayName}`}
                     >
-                      <Trash2 className="h-4 w-4" />
+                      <Trash2 className="h-4 w-4 text-destructive" />
                     </Button>
                   </span>
                 </TooltipTrigger>
@@ -207,11 +205,12 @@ export function MemberRow({
                 disabled={isUpdating}
                 aria-label={`Remove ${displayName}`}
               >
-                <Trash2 className="h-4 w-4" />
+                <Trash2 className="h-4 w-4 text-destructive" />
               </Button>
-            ))}
-        </div>
-      </TableCell>
+            )}
+          </div>
+        </TableCell>
+      )}
     </TableRow>
   );
 }

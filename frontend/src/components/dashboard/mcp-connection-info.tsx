@@ -93,7 +93,7 @@ export function McpConnectionInfo() {
 
   return (
     <div className="space-y-4">
-      <div className="rounded-md border border-border/50 bg-muted/30 p-3">
+      <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
         <p className="text-xs text-muted-foreground">
           NyxID exposes a single MCP endpoint that provides tools for all your
           connected services. Connect your MCP client once and it will
@@ -118,7 +118,7 @@ export function McpConnectionInfo() {
           <p className="text-xs font-medium text-muted-foreground">
             Cursor Configuration
           </p>
-          <Badge variant="outline" className="text-[10px]">
+          <Badge variant="secondary" className="text-[10px]">
             .cursor/mcp.json
           </Badge>
         </div>
@@ -135,7 +135,7 @@ export function McpConnectionInfo() {
           <p className="text-xs font-medium text-muted-foreground">
             Claude Code Configuration
           </p>
-          <Badge variant="outline" className="text-[10px]">
+          <Badge variant="secondary" className="text-[10px]">
             .claude/settings.json
           </Badge>
         </div>
@@ -152,7 +152,7 @@ export function McpConnectionInfo() {
           <p className="text-xs font-medium text-muted-foreground">
             Codex Configuration
           </p>
-          <Badge variant="outline" className="text-[10px]">
+          <Badge variant="secondary" className="text-[10px]">
             ~/.codex/config.toml
           </Badge>
         </div>
@@ -164,7 +164,7 @@ export function McpConnectionInfo() {
         </div>
       </div>
 
-      <div className="rounded-md border border-border/50 bg-muted/30 p-3">
+      <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
         <p className="text-xs font-medium mb-1">How it works</p>
         <p className="text-xs text-muted-foreground">
           When an MCP client connects, NyxID authenticates via OAuth in your

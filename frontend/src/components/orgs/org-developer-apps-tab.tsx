@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { Code, Plus, Shield, ShieldCheck } from "lucide-react";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import {
   useCreateDeveloperApp,
   useDeveloperApps,
@@ -9,7 +10,7 @@ import {
 import { parseRedirectUris } from "@/lib/oauth";
 import { ApiError } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -81,9 +82,9 @@ function StatCard({
 }) {
   return (
     <Card>
-      <CardContent className="flex items-start justify-between p-6">
+      <CardContent className="flex items-start justify-between p-4">
         <div className="space-y-1">
-          <p className="text-sm text-muted-foreground">{title}</p>
+          <p className="text-[12px] text-muted-foreground">{title}</p>
           <p className="text-2xl font-semibold text-foreground">{value}</p>
           <p className="text-xs text-text-tertiary">{description}</p>
         </div>
@@ -98,7 +99,7 @@ export function OrgDeveloperAppsTab({
   orgName,
 }: OrgDeveloperAppsTabProps) {
   const navigate = useNavigate();
-  const { data, isLoading, error } = useDeveloperApps(orgId);
+  const { data, isLoading, error, refetch } = useDeveloperApps(orgId);
   const createMutation = useCreateDeveloperApp();
   const [createOpen, setCreateOpen] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
@@ -179,7 +180,7 @@ export function OrgDeveloperAppsTab({
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogTrigger asChild>
             <Button>
-              <Plus className="mr-2 h-4 w-4" />
+              <ButtonIcon><Plus className="h-4 w-4" /></ButtonIcon>
               New Application
             </Button>
           </DialogTrigger>
@@ -193,7 +194,7 @@ export function OrgDeveloperAppsTab({
             <div className="space-y-4">
               <OrgReadOnlyRow orgName={orgName} />
               <div className="space-y-2">
-                <label className="text-sm font-medium" htmlFor="org-app-name">
+                <label className="text-[12px] font-medium" htmlFor="org-app-name">
                   Application Name
                 </label>
                 <Input
@@ -205,7 +206,7 @@ export function OrgDeveloperAppsTab({
               </div>
               <div className="space-y-2">
                 <label
-                  className="text-sm font-medium"
+                  className="text-[12px] font-medium"
                   htmlFor="org-redirect-uris"
                 >
                   Redirect URIs (one per line)
@@ -217,11 +218,11 @@ export function OrgDeveloperAppsTab({
                   placeholder={
                     "https://app.example.com/oauth/callback\nmyapp://oauth/callback"
                   }
-                  className="flex min-h-[120px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none"
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">Client Type</label>
+                <label className="text-[12px] font-medium">Client Type</label>
                 <Select
                   value={clientType}
                   onValueChange={(value: "public" | "confidential") =>
@@ -238,7 +239,7 @@ export function OrgDeveloperAppsTab({
                 </Select>
               </div>
               <div className="space-y-3">
-                <label className="text-sm font-medium">Allowed Scopes</label>
+                <label className="text-[12px] font-medium">Allowed Scopes</label>
                 <p className="text-xs text-muted-foreground">
                   OIDC scopes this app can request. Determines what user data
                   and NyxID capabilities are included in tokens.
@@ -261,7 +262,7 @@ export function OrgDeveloperAppsTab({
                       <div className="grid gap-0.5 leading-none">
                         <label
                           htmlFor={`scope-org-create-${scope.id}`}
-                          className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                          className="text-[12px] font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                         >
                           {scope.label}
                           {scope.required && (
@@ -290,6 +291,7 @@ export function OrgDeveloperAppsTab({
                 Cancel
               </Button>
               <Button
+                variant="primary"
                 onClick={() => void handleCreate()}
                 isLoading={createMutation.isPending}
               >
@@ -331,10 +333,8 @@ export function OrgDeveloperAppsTab({
       <div className="grid gap-4 xl:grid-cols-2">
         {!isLoading && error && (
           <Card className="xl:col-span-2">
-            <CardContent className="p-8 text-center">
-              <p className="text-sm text-muted-foreground">
-                Failed to load developer apps owned by {orgName}.
-              </p>
+            <CardContent className="p-4">
+              <ErrorBanner message={`Failed to load developer apps owned by ${orgName}.`} onRetry={refetch} />
             </CardContent>
           </Card>
         )}
@@ -358,7 +358,7 @@ export function OrgDeveloperAppsTab({
           visibleApps.map((app) => (
             <Card
               key={app.id}
-              className="cursor-pointer transition-colors hover:border-primary/50"
+              className="cursor-pointer transition-colors duration-300 hover:border-white/[0.15]"
               role="link"
               tabIndex={0}
               onClick={() =>
@@ -381,20 +381,20 @@ export function OrgDeveloperAppsTab({
                 <div className="flex items-center justify-between gap-3">
                   <CardTitle className="text-base">{app.client_name}</CardTitle>
                   <Badge variant={app.is_active ? "success" : "secondary"}>
-                    {app.is_active ? "active" : "inactive"}
+                    {app.is_active ? "Active" : "Inactive"}
                   </Badge>
                 </div>
                 <CardDescription className="break-all">
                   Client ID:{" "}
-                  <span className="font-mono text-xs text-foreground">
+                  <span className="text-xs text-foreground">
                     {app.id}
                   </span>
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="outline">{app.client_type}</Badge>
-                  <Badge variant="outline">
+                  <Badge variant="secondary">{app.client_type}</Badge>
+                  <Badge variant="secondary">
                     {app.redirect_uris.length} redirect URIs
                   </Badge>
                 </div>
@@ -418,8 +418,8 @@ export function OrgDeveloperAppsTab({
 
         {!isLoading && visibleApps.length === 0 && (
           <Card className="xl:col-span-2">
-            <CardContent className="p-8 text-center">
-              <p className="text-sm text-muted-foreground">
+            <CardContent className="p-4 text-center">
+              <p className="text-[12px] text-muted-foreground">
                 {apps.length === 0
                   ? `No developer apps owned by ${orgName}.`
                   : `No active developer apps owned by ${orgName}. Enable "Show inactive" to view deactivated apps.`}

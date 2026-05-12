@@ -127,8 +127,8 @@ export function WsFrameInjectionsEditor({
   };
 
   return (
-    <details className="rounded-[10px] border border-border p-3">
-      <summary className="cursor-pointer text-sm font-semibold">
+    <details className="rounded-xl border border-border/50 bg-card p-4">
+      <summary className="cursor-pointer text-[13px] font-semibold text-foreground">
         WebSocket auth frames
       </summary>
       <div className="mt-4 space-y-3">
@@ -136,7 +136,6 @@ export function WsFrameInjectionsEditor({
           <Button
             type="button"
             variant="outline"
-            size="sm"
             disabled={value.length >= 4}
             onClick={() => onChange([...value, cloneRule(emptyWsFrameRule)])}
           >
@@ -146,13 +145,12 @@ export function WsFrameInjectionsEditor({
           <Button
             type="button"
             variant="secondary"
-            size="sm"
             onClick={() => onChange([cloneRule(homeAssistantWsFrameRule)])}
           >
             <Wand2 />
             Home Assistant preset
           </Button>
-          <Badge variant="outline">{value.length}/4</Badge>
+          <Badge variant="secondary">{value.length}/4</Badge>
         </div>
 
         {errorMessage && (
@@ -178,7 +176,7 @@ export function WsFrameInjectionsEditor({
           return (
             <div
               key={index}
-              className="space-y-3 rounded-[10px] border border-border p-3"
+              className="space-y-3 rounded-xl border border-border/50 bg-card p-4"
             >
               <div className="flex items-center justify-between gap-3">
                 <p className="text-xs font-medium">Rule {index + 1}</p>
@@ -191,7 +189,7 @@ export function WsFrameInjectionsEditor({
                     onChange(value.filter((_, idx) => idx !== index))
                   }
                 >
-                  <Trash2 />
+                  <Trash2 className="text-destructive" />
                 </Button>
               </div>
 
@@ -338,7 +336,7 @@ export function WsFrameInjectionsEditor({
                 />
                 <Label
                   htmlFor={`ws-consume-trigger-${index}`}
-                  className="text-sm font-normal"
+                  className="text-[12px] font-normal"
                 >
                   Consume trigger frame
                 </Label>
@@ -347,7 +345,7 @@ export function WsFrameInjectionsEditor({
               <div className="space-y-1.5">
                 <Label>Injected frame template</Label>
                 <textarea
-                  className="flex min-h-[96px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 font-mono text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex min-h-[96px] w-full rounded-lg border border-input bg-transparent px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                   value={rule.template}
                   maxLength={4096}
                   placeholder='{"type":"auth","access_token":"${credential}"}'

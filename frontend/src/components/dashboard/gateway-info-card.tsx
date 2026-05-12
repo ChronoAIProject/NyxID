@@ -84,7 +84,7 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
         <CardContent className="space-y-4">
           <CopyableField label="Gateway URL" value={llmStatus.gateway_url} />
 
-          <div className="rounded-md border border-border/50 bg-muted/30 p-3">
+          <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
             <p className="text-xs text-muted-foreground">
               The gateway accepts OpenAI-compatible requests and routes them to
               the correct provider based on the model name. Your provider
@@ -101,7 +101,7 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
                 {readyProviders.map((p) => (
                   <Badge
                     key={p.provider_slug}
-                    variant="outline"
+                    variant="secondary"
                     className="text-xs"
                   >
                     {p.provider_name}

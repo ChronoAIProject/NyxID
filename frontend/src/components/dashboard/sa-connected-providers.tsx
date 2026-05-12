@@ -14,7 +14,7 @@ import { SaDeviceCodeDialog } from "@/components/dashboard/sa-device-code-dialog
 import type { ProviderConfig } from "@/types/api";
 import { DetailSection } from "@/components/shared/detail-section";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -125,7 +125,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
         {providersLoading ? (
           <Skeleton className="h-24 w-full" />
         ) : saProviders && saProviders.length > 0 ? (
-          <div className="rounded-md border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -134,7 +134,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
                   <TableHead>Status</TableHead>
                   <TableHead>Label</TableHead>
                   <TableHead>Connected</TableHead>
-                  <TableHead />
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -144,7 +144,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
                       {token.provider_name}
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline">
+                      <Badge variant="secondary">
                         {providerTypeLabel(token.provider_type)}
                       </Badge>
                     </TableCell>
@@ -154,7 +154,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
                           token.status === "active" ? "success" : "secondary"
                         }
                       >
-                        {token.status}
+                        {token.status.charAt(0).toUpperCase() + token.status.slice(1)}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
@@ -166,13 +166,12 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
                     <TableCell>
                       <Button
                         variant="ghost"
-                        size="sm"
                         onClick={() =>
                           void handleDisconnectSaProvider(token.provider_id)
                         }
                         disabled={disconnectMutation.isPending}
                       >
-                        <Unlink className="mr-1 h-3 w-3" />
+                        <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
                         Disconnect
                       </Button>
                     </TableCell>
@@ -182,7 +181,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
             </Table>
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No providers connected to this service account.
           </p>
         )}
@@ -241,8 +240,8 @@ function ConnectProviderDropdown({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm">
-          <Plug className="mr-1 h-3 w-3" />
+        <Button variant="outline">
+          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>
           Connect Provider
         </Button>
       </DropdownMenuTrigger>
@@ -251,7 +250,7 @@ function ConnectProviderDropdown({
           <DropdownMenuItem key={p.id} onClick={() => onSelect(p)}>
             <ProviderTypeIcon type={p.provider_type} />
             <span>{p.name}</span>
-            <Badge variant="outline" className="ml-auto text-xs">
+            <Badge variant="secondary" className="ml-auto text-xs">
               {providerTypeLabel(p.provider_type)}
             </Badge>
           </DropdownMenuItem>

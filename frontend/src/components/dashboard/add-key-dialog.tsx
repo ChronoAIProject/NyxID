@@ -12,7 +12,7 @@ import {
 import { ApiError } from "@/lib/api-client";
 import { hardRedirect } from "@/lib/navigation";
 import { copyToClipboard } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
@@ -264,7 +264,7 @@ function CatalogGrid({
         <button
           type="button"
           onClick={onCustom}
-          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors hover:border-primary/40 hover:bg-accent/40"
+          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
         >
           <Globe className="h-5 w-5 text-muted-foreground" />
           <span className="text-xs font-medium">Custom Endpoint</span>
@@ -273,7 +273,7 @@ function CatalogGrid({
         <button
           type="button"
           onClick={onCustomSsh}
-          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors hover:border-primary/40 hover:bg-accent/40"
+          className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
         >
           <Terminal className="h-5 w-5 text-muted-foreground" />
           <span className="text-xs font-medium">Custom SSH</span>
@@ -284,9 +284,9 @@ function CatalogGrid({
             key={entry.slug}
             type="button"
             onClick={() => onSelect(entry)}
-            className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors hover:border-primary/40 hover:bg-accent/40"
+            className="flex min-h-[7.5rem] flex-col items-start gap-1.5 rounded-lg border border-border p-4 text-left transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/40"
           >
-            <span className="line-clamp-1 w-full text-sm font-medium">
+            <span className="line-clamp-1 w-full text-[12px] font-medium">
               {entry.name}
             </span>
             <span className="line-clamp-2 w-full text-[11px] leading-snug text-muted-foreground">
@@ -299,7 +299,7 @@ function CatalogGrid({
                 </Badge>
               )}
               {entry.requires_gateway_url && (
-                <Badge variant="outline" className="text-[10px]">
+                <Badge variant="secondary" className="text-[10px]">
                   URL required
                 </Badge>
               )}
@@ -366,7 +366,7 @@ function RoutingStep({
 
       {catalogEntry && (
         <div className="rounded-lg border border-border bg-muted/50 p-3">
-          <p className="text-sm font-medium">{catalogEntry.name}</p>
+          <p className="text-[12px] font-medium">{catalogEntry.name}</p>
           {catalogEntry.description && (
             <p className="text-xs text-muted-foreground">
               {catalogEntry.description}
@@ -386,10 +386,10 @@ function RoutingStep({
                 setRoutingChoice("direct");
                 onChange({ nodeId: "" });
               }}
-              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors ${
+              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
                 routingChoice === "direct"
                   ? "border-primary bg-primary/5"
-                  : "border-border hover:border-primary/40"
+                  : "border-border hover:border-white/[0.15]"
               }`}
             >
               <Globe className="h-5 w-5" />
@@ -401,10 +401,10 @@ function RoutingStep({
             <button
               type="button"
               onClick={() => setRoutingChoice("node")}
-              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors ${
+              className={`flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center transition-colors duration-300 ${
                 routingChoice === "node"
                   ? "border-primary bg-primary/5"
-                  : "border-border hover:border-primary/40"
+                  : "border-border hover:border-white/[0.15]"
               }`}
             >
               <Server className="h-5 w-5" />
@@ -415,7 +415,7 @@ function RoutingStep({
             </button>
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             SSH services must be routed through a credential node.
           </p>
         )}
@@ -456,6 +456,7 @@ function RoutingStep({
       </div>
 
       <Button
+        variant="primary"
         className="w-full"
         onClick={handleNext}
         disabled={routingChoice === "node" && !form.nodeId}
@@ -508,7 +509,7 @@ function KeyForm({
 
       {catalogEntry && (
         <div className="rounded-lg border border-border bg-muted/50 p-3">
-          <p className="text-sm font-medium">{catalogEntry.name}</p>
+          <p className="text-[12px] font-medium">{catalogEntry.name}</p>
           {catalogEntry.description && (
             <p className="text-xs text-muted-foreground">
               {catalogEntry.description}
@@ -725,6 +726,7 @@ function KeyForm({
       </div>
 
       <Button
+        variant="primary"
         className="w-full"
         onClick={onSubmit}
         disabled={
@@ -949,7 +951,7 @@ function NodeSetupStep({
       <div className="rounded-lg border border-border bg-muted/50 p-4 space-y-3">
         <div className="flex items-center gap-2">
           <Terminal className="h-4 w-4 text-primary" />
-          <p className="text-sm font-medium">Node Setup Instructions</p>
+          <p className="text-[12px] font-medium">Node Setup Instructions</p>
         </div>
 
         {isSsh ? (
@@ -993,6 +995,7 @@ function NodeSetupStep({
       </div>
 
       <Button
+        variant="primary"
         className="w-full"
         onClick={onSubmit}
         disabled={
@@ -1077,7 +1080,7 @@ function OAuthStep({
       </button>
 
       <div className="rounded-lg border border-border bg-muted/50 p-3">
-        <p className="text-sm font-medium">{catalogEntry.name}</p>
+        <p className="text-[12px] font-medium">{catalogEntry.name}</p>
         {catalogEntry.description && (
           <p className="text-xs text-muted-foreground">
             {catalogEntry.description}
@@ -1085,7 +1088,7 @@ function OAuthStep({
         )}
       </div>
 
-      <p className="text-sm text-muted-foreground">
+      <p className="text-[12px] text-muted-foreground">
         This service uses OAuth to authenticate. Click the button below to
         connect your account.
       </p>
@@ -1109,24 +1112,25 @@ function OAuthStep({
       </div>
 
       {error && (
-        <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+        <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
           {error}
         </div>
       )}
 
       <Button
+        variant="primary"
         className="w-full"
         onClick={() => void handleConnect()}
         disabled={initiateOAuth.isPending}
       >
         {initiateOAuth.isPending ? (
           <>
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <ButtonIcon><Loader2 className="h-3 w-3 animate-spin" /></ButtonIcon>
             Connecting...
           </>
         ) : (
           <>
-            <ExternalLink className="mr-2 h-4 w-4" />
+            <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>
             Connect with {catalogEntry.name}
           </>
         )}
@@ -1378,7 +1382,7 @@ function DeviceCodeStep({
         </button>
 
         <div className="rounded-lg border border-border bg-muted/50 p-3">
-          <p className="text-sm font-medium">{catalogEntry.name}</p>
+          <p className="text-[12px] font-medium">{catalogEntry.name}</p>
           {catalogEntry.description && (
             <p className="text-xs text-muted-foreground">
               {catalogEntry.description}
@@ -1386,7 +1390,7 @@ function DeviceCodeStep({
           )}
         </div>
 
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           This service uses a device code to authenticate. Click continue to
           request a code.
         </p>
@@ -1416,7 +1420,7 @@ function DeviceCodeStep({
           </p>
         )}
 
-        <Button className="w-full" onClick={() => void handleInitiate()}>
+        <Button variant="primary" className="w-full" onClick={() => void handleInitiate()}>
           Continue
         </Button>
       </div>
@@ -1436,7 +1440,7 @@ function DeviceCodeStep({
         </button>
         <div className="flex flex-col items-center gap-3 py-8">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             Requesting code from {catalogEntry.name}...
           </p>
         </div>
@@ -1448,12 +1452,13 @@ function DeviceCodeStep({
     return (
       <div className="space-y-4">
         <div className="flex flex-col items-center gap-3 py-4">
-          <CheckCircle2 className="h-10 w-10 text-success" />
-          <p className="text-sm text-center text-muted-foreground">
+          <CheckCircle2 className="h-8 w-8 text-success" />
+          <p className="text-[12px] text-center text-muted-foreground">
             Your {catalogEntry.name} account has been connected successfully.
           </p>
         </div>
         <Button
+          variant="primary"
           className="w-full"
           onClick={() => {
             if (createdKeyId) {
@@ -1480,14 +1485,14 @@ function DeviceCodeStep({
           Back
         </button>
         <div className="flex flex-col items-center gap-3 py-4">
-          <AlertCircle className="h-10 w-10 text-destructive" />
-          <p className="text-sm text-destructive text-center">{errorMessage}</p>
+          <AlertCircle className="h-8 w-8 text-destructive" />
+          <p className="text-[12px] text-destructive text-center">{errorMessage}</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex justify-end gap-2">
           <Button variant="outline" className="flex-1" onClick={onBack}>
             Cancel
           </Button>
-          <Button className="flex-1" onClick={handleRetry}>
+          <Button variant="primary" className="flex-1" onClick={handleRetry}>
             Try Again
           </Button>
         </div>
@@ -1518,7 +1523,6 @@ function DeviceCodeStep({
           <Button
             type="button"
             variant="ghost"
-            size="sm"
             onClick={handleCopyCode}
             className="h-8 w-8 p-0"
             title="Copy code"
@@ -1531,13 +1535,13 @@ function DeviceCodeStep({
       <div className="flex justify-center">
         <Button type="button" variant="default" size="lg" asChild>
           <a href={verificationUri} target="_blank" rel="noopener noreferrer">
-            <ExternalLink className="mr-2 h-4 w-4" />
+            <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>
             Open {catalogEntry.name} Authentication
           </a>
         </Button>
       </div>
 
-      <div className="rounded-md bg-muted p-3 text-sm text-muted-foreground">
+      <div className="rounded-lg bg-muted p-3 text-[12px] text-muted-foreground">
         <ol className="list-decimal list-inside space-y-1">
           <li>Click the link above to open the authentication page</li>
           <li>Enter the code shown above</li>
@@ -1604,7 +1608,7 @@ function OAuthCredentialsStep({
       </button>
 
       <div className="rounded-lg border border-border bg-muted/50 p-3">
-        <p className="text-sm font-medium">{catalogEntry.name}</p>
+        <p className="text-[12px] font-medium">{catalogEntry.name}</p>
         <p className="text-xs text-muted-foreground">
           This service requires your own OAuth app credentials.
         </p>
@@ -1623,7 +1627,7 @@ function OAuthCredentialsStep({
       )}
 
       {error && (
-        <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+        <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
           {error}
         </div>
       )}
@@ -1656,6 +1660,7 @@ function OAuthCredentialsStep({
       </div>
 
       <Button
+        variant="primary"
         className="w-full"
         onClick={() => void handleSave()}
         disabled={setCredentials.isPending || !clientId.trim()}

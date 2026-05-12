@@ -4,10 +4,10 @@ export function ConnectionsPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">
+        <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
           Connections
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Manage your connections to downstream services.
         </p>
       </div>

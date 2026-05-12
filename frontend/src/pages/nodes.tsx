@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -16,6 +16,7 @@ import { usePublicConfig } from "@/hooks/use-public-config";
 import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
 import { formatRelativeTime } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { CopyableField } from "@/components/shared/copyable-field";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
@@ -125,10 +126,15 @@ function RegisterNodeDialog() {
       onOpenChange={(o) => (o ? setOpen(true) : handleClose())}
     >
       <DialogTrigger asChild>
-        <Button>
-          <Plus className="mr-2 h-4 w-4" />
+        <button
+          type="button"
+          className="flex h-10 items-center gap-2.5 rounded-xl border border-white/[0.08] px-3 text-[13px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
+        >
+          <span className="flex h-[22px] w-[22px] items-center justify-center rounded-[6px] border border-white/[0.08] bg-white/[0.04]">
+            <Plus className="h-3 w-3" />
+          </span>
           Register Node
-        </Button>
+        </button>
       </DialogTrigger>
       <DialogContent>
         {createdToken ? (
@@ -146,7 +152,7 @@ function RegisterNodeDialog() {
                 label="Registration Token"
                 value={createdToken.token}
               />
-              <div className="rounded-md bg-muted p-3 space-y-2">
+              <div className="rounded-lg bg-muted p-3 space-y-2">
                 <p className="text-xs font-medium text-text-tertiary">
                   Run on your node
                 </p>
@@ -172,7 +178,7 @@ function RegisterNodeDialog() {
               </div>
             </div>
             <DialogFooter>
-              <Button onClick={handleClose}>Done</Button>
+              <Button variant="primary" onClick={handleClose}>Done</Button>
             </DialogFooter>
           </>
         ) : (
@@ -189,7 +195,7 @@ function RegisterNodeDialog() {
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}
@@ -227,7 +233,7 @@ function RegisterNodeDialog() {
                   <Button type="button" variant="outline" onClick={handleClose}>
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>
                     Create Token
                   </Button>
                 </DialogFooter>
@@ -241,7 +247,8 @@ function RegisterNodeDialog() {
 }
 
 export function NodesPage() {
-  const { data: nodes, isLoading, error } = useNodes();
+  const navigate = useNavigate();
+  const { data: nodes, isLoading, error, refetch } = useNodes();
   const { data: orgs } = useOrgs();
   const currentUserId = useAuthStore((state) => state.user?.id ?? null);
   const deleteMutation = useDeleteNode();
@@ -284,22 +291,21 @@ export function NodesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <HardDrive className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load nodes. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load nodes. Please try again." onRetry={refetch} />
       ) : !nodes || nodes.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <HardDrive className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            No credential nodes registered. Create a registration token to get
-            started.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <HardDrive className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="max-w-md space-y-1">
+            <p className="text-[12px] font-medium">No Credential Nodes</p>
+            <p className="text-[12px] text-muted-foreground">
+              Create a registration token to get started.
+            </p>
+          </div>
         </div>
       ) : (
-        <div className="rounded-xl border border-border">
+        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -308,20 +314,22 @@ export function NodesPage() {
                 <TableHead>Status</TableHead>
                 <TableHead>Last Heartbeat</TableHead>
                 <TableHead>Created</TableHead>
-                <TableHead className="w-[80px]" />
+                {nodes.some((n) => canManageNode(n, currentUserId, adminOrgIds)) && (
+                  <TableHead className="w-[80px]">Actions</TableHead>
+                )}
               </TableRow>
             </TableHeader>
             <TableBody>
               {nodes.map((node) => (
-                <TableRow key={node.id}>
+                <TableRow
+                  key={node.id}
+                  className="cursor-pointer hover:bg-white/[0.03]"
+                  onClick={() => void navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id } })}
+                >
                   <TableCell>
-                    <Link
-                      to="/nodes/$nodeId"
-                      params={{ nodeId: node.id }}
-                      className="font-medium text-foreground hover:underline"
-                    >
+                    <span className="font-medium">
                       {node.name}
-                    </Link>
+                    </span>
                     {node.metadata?.agent_version && (
                       <span className="ml-2 text-xs text-muted-foreground">
                         v{node.metadata.agent_version}
@@ -331,7 +339,7 @@ export function NodesPage() {
                   <TableCell>
                     <Badge
                       variant={
-                        node.owner.kind === "org" ? "secondary" : "outline"
+                        node.owner.kind === "org" ? "secondary" : "secondary"
                       }
                     >
                       {nodeOwnerLabel(node.owner, currentUserId)}
@@ -349,21 +357,24 @@ export function NodesPage() {
                   <TableCell className="text-muted-foreground">
                     {formatRelativeTime(node.created_at)}
                   </TableCell>
-                  <TableCell>
-                    {canManageNode(node, currentUserId, adminOrgIds) && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                        onClick={() =>
-                          setDeleteTarget({ id: node.id, name: node.name })
-                        }
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        <span className="sr-only">Delete {node.name}</span>
-                      </Button>
-                    )}
-                  </TableCell>
+                  {nodes.some((n) => canManageNode(n, currentUserId, adminOrgIds)) && (
+                    <TableCell>
+                      {canManageNode(node, currentUserId, adminOrgIds) && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteTarget({ id: node.id, name: node.name });
+                          }}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                          <span className="sr-only">Delete {node.name}</span>
+                        </Button>
+                      )}
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>

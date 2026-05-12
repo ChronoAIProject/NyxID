@@ -16,7 +16,7 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
@@ -35,7 +35,8 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
-import { Pencil, Trash2, AlertCircle, Users } from "lucide-react";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import { Pencil, Trash2, Users } from "lucide-react";
 import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 
@@ -43,7 +44,7 @@ export function AdminRoleDetailPage() {
   const { roleId } = useParams({ strict: false }) as { roleId: string };
   const navigate = useNavigate();
 
-  const { data: role, isLoading, error } = useRole(roleId);
+  const { data: role, isLoading, error, refetch } = useRole(roleId);
   const updateMutation = useUpdateRole();
   const deleteMutation = useDeleteRole();
   const bulkAssignMutation = useBulkAssignRole();
@@ -144,20 +145,12 @@ export function AdminRoleDetailPage() {
 
   if (error || !role) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
-          Role not found
-        </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The role you are looking for does not exist or has been deleted.
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => void navigate({ to: "/admin/roles" })}
-        >
-          Back to Roles
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="Role Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "The role you are looking for does not exist or has been deleted."}
+          onRetry={refetch}
+        />
       </div>
     );
   }
@@ -165,33 +158,27 @@ export function AdminRoleDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Role Management", to: "/admin/roles" },
-          { label: role.name },
-        ]}
         title={role.name}
         description={role.description ?? undefined}
         actions={
           <>
             <Button
               variant="outline"
-              size="sm"
               onClick={() => setBulkAssignOpen(true)}
             >
-              <Users className="mr-1 h-3 w-3" />
+              <ButtonIcon><Users className="h-3 w-3" /></ButtonIcon>
               Assign to All Users
             </Button>
-            <Button variant="outline" size="sm" onClick={openEditDialog}>
-              <Pencil className="mr-1 h-3 w-3" />
+            <Button variant="outline" onClick={openEditDialog}>
+              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
               Edit
             </Button>
             {!role.is_system && (
               <Button
                 variant="destructive"
-                size="sm"
                 onClick={() => setDeleteOpen(true)}
               >
-                <Trash2 className="mr-1 h-3 w-3" />
+                <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
                 Delete
               </Button>
             )}
@@ -200,14 +187,14 @@ export function AdminRoleDetailPage() {
       />
 
       <DetailSection title="Role Information">
-        <DetailRow label="ID" value={role.id} copyable mono />
+        <DetailRow label="ID" value={role.id} copyable />
         <DetailRow label="Name" value={role.name} />
-        <DetailRow label="Slug" value={role.slug} copyable mono />
+        <DetailRow label="Slug" value={role.slug} copyable />
         <DetailRow
           label="Type"
           value={role.is_system ? "System" : "Custom"}
           badge
-          badgeVariant={role.is_system ? "secondary" : "outline"}
+          badgeVariant={role.is_system ? "secondary" : "secondary"}
         />
         <DetailRow
           label="Default"
@@ -216,7 +203,7 @@ export function AdminRoleDetailPage() {
           badgeVariant={role.is_default ? "success" : "secondary"}
         />
         {role.client_id && (
-          <DetailRow label="Client ID" value={role.client_id} copyable mono />
+          <DetailRow label="Client ID" value={role.client_id} copyable />
         )}
         <DetailRow label="Created" value={formatDate(role.created_at)} />
         <DetailRow label="Updated" value={formatDate(role.updated_at)} />
@@ -226,13 +213,13 @@ export function AdminRoleDetailPage() {
 
       <DetailSection title="Permissions">
         {role.permissions.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No permissions assigned.
           </p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {role.permissions.map((perm) => (
-              <Badge key={perm} variant="outline" className="font-mono text-xs">
+              <Badge key={perm} variant="secondary" className="text-xs">
                 {perm}
               </Badge>
             ))}
@@ -255,7 +242,7 @@ export function AdminRoleDetailPage() {
               className="space-y-4"
             >
               {form.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                   {form.formState.errors.root.message}
                 </div>
               )}
@@ -348,7 +335,7 @@ export function AdminRoleDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={updateMutation.isPending}>
+                <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
                   Save Changes
                 </Button>
               </DialogFooter>
@@ -399,6 +386,7 @@ export function AdminRoleDetailPage() {
               Cancel
             </Button>
             <Button
+              variant="primary"
               onClick={() => void handleBulkAssignAll()}
               isLoading={bulkAssignMutation.isPending}
             >

@@ -2,9 +2,10 @@ import { useState } from "react";
 import { useApprovalRequests, useDecideApproval } from "@/hooks/use-approvals";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Select,
@@ -33,12 +34,9 @@ import {
   ClipboardList,
   CheckCircle2,
   XCircle,
-  Clock,
-  Timer,
   ChevronLeft,
   ChevronRight,
   Wrench,
-  AlertTriangle,
 } from "lucide-react";
 import type { ApprovalRequestItem } from "@/types/approvals";
 import { toast } from "sonner";
@@ -54,35 +52,15 @@ const STATUS_OPTIONS = [
 function getStatusBadge(status: string) {
   switch (status) {
     case "approved":
-      return (
-        <Badge variant="success" className="gap-1">
-          <CheckCircle2 className="h-3 w-3" />
-          Approved
-        </Badge>
-      );
+      return <Badge variant="success">Approved</Badge>;
     case "rejected":
-      return (
-        <Badge variant="destructive" className="gap-1">
-          <XCircle className="h-3 w-3" />
-          Rejected
-        </Badge>
-      );
+      return <Badge variant="destructive">Rejected</Badge>;
     case "expired":
-      return (
-        <Badge variant="secondary" className="gap-1">
-          <Timer className="h-3 w-3" />
-          Expired
-        </Badge>
-      );
+      return <Badge variant="secondary">Expired</Badge>;
     case "pending":
-      return (
-        <Badge variant="warning" className="gap-1">
-          <Clock className="h-3 w-3" />
-          Pending
-        </Badge>
-      );
+      return <Badge variant="warning">Pending</Badge>;
     default:
-      return <Badge variant="outline">{status}</Badge>;
+      return <Badge variant="secondary">{status}</Badge>;
   }
 }
 
@@ -102,7 +80,7 @@ export function ApprovalHistoryPage() {
 
   const perPage = 20;
   const filterValue = statusFilter === "all" ? undefined : statusFilter;
-  const { data, isLoading, error } = useApprovalRequests(
+  const { data, isLoading, error, refetch } = useApprovalRequests(
     page,
     perPage,
     filterValue,
@@ -170,22 +148,22 @@ export function ApprovalHistoryPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ClipboardList className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load approval history. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load approval history. Please try again." onRetry={refetch} />
       ) : requests.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ClipboardList className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            No approval requests found.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <ClipboardList className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="max-w-md space-y-1">
+            <p className="text-[12px] font-medium">No Approval Requests</p>
+            <p className="text-[12px] text-muted-foreground">
+              No approval requests match the current filter.
+            </p>
+          </div>
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -195,7 +173,9 @@ export function ApprovalHistoryPage() {
                   <TableHead>Status</TableHead>
                   <TableHead>Requested</TableHead>
                   <TableHead>Decided</TableHead>
-                  <TableHead className="w-[100px]" />
+                  {requests.some((r) => r.status === "pending") && (
+                    <TableHead className="w-[100px]">Actions</TableHead>
+                  )}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -211,29 +191,26 @@ export function ApprovalHistoryPage() {
                             </span>
                           </div>
                           {request.is_destructive && (
-                            <Badge variant="destructive" className="w-fit gap-1 text-[10px]">
-                              <AlertTriangle className="h-2.5 w-2.5" />
-                              Destructive
-                            </Badge>
+                            <Badge variant="destructive">Destructive</Badge>
                           )}
                         </div>
                       ) : (
-                        <div className="flex flex-col">
+                        <div className="flex flex-col gap-0.5">
                           <span className="font-medium">
                             {request.service_name}
                           </span>
-                          <span className="text-xs text-muted-foreground">
+                          <span className="text-[11px] text-muted-foreground">
                             {request.service_slug}
                           </span>
                         </div>
                       )}
                     </TableCell>
                     <TableCell>
-                      <div className="flex flex-col">
-                        <span className="text-sm">
+                      <div className="flex flex-col gap-0.5">
+                        <span>
                           {request.requester_label ?? request.requester_type}
                         </span>
-                        <span className="text-xs text-muted-foreground">
+                        <span className="text-[11px] text-muted-foreground">
                           {request.requester_type}
                         </span>
                       </div>
@@ -242,23 +219,23 @@ export function ApprovalHistoryPage() {
                       <div className="flex flex-col gap-0.5">
                         {isToolApproval(request) ? (
                           <>
-                            <span className="text-sm">
+                            <span>
                               Tool execution approval
                             </span>
                             {request.tool_arguments && (
-                              <span className="max-w-[300px] truncate text-xs font-mono text-muted-foreground">
+                              <span className="max-w-[300px] truncate text-[11px] text-muted-foreground">
                                 {request.tool_arguments}
                               </span>
                             )}
                           </>
                         ) : (
                           <>
-                            <span className="text-sm">
+                            <span>
                               {request.action_description ??
                                 request.operation_summary}
                             </span>
                             {request.action_description && (
-                              <span className="text-xs text-muted-foreground">
+                              <span className="text-[11px] text-muted-foreground">
                                 {request.operation_summary}
                               </span>
                             )}
@@ -275,44 +252,44 @@ export function ApprovalHistoryPage() {
                         ? formatDate(request.decided_at)
                         : "-"}
                     </TableCell>
-                    <TableCell>
-                      {request.status === "pending" && (
-                        <div className="flex gap-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 text-xs"
-                            onClick={() =>
-                              setDecideTarget({
-                                id: request.id,
-                                service: request.service_name,
-                                approvalMode: request.approval_mode,
-                                action: "approve",
-                              })
-                            }
-                          >
-                            <CheckCircle2 className="mr-1 h-3 w-3 text-success" />
-                            Approve
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 text-xs"
-                            onClick={() =>
-                              setDecideTarget({
-                                id: request.id,
-                                service: request.service_name,
-                                approvalMode: request.approval_mode,
-                                action: "reject",
-                              })
-                            }
-                          >
-                            <XCircle className="mr-1 h-3 w-3 text-destructive" />
-                            Reject
-                          </Button>
-                        </div>
-                      )}
-                    </TableCell>
+                    {requests.some((r) => r.status === "pending") && (
+                      <TableCell>
+                        {request.status === "pending" && (
+                          <div className="flex justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              className="h-7 text-xs"
+                              onClick={() =>
+                                setDecideTarget({
+                                  id: request.id,
+                                  service: request.service_name,
+                                  approvalMode: request.approval_mode,
+                                  action: "approve",
+                                })
+                              }
+                            >
+                              <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>
+                              Approve
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              className="h-7 text-xs"
+                              onClick={() =>
+                                setDecideTarget({
+                                  id: request.id,
+                                  service: request.service_name,
+                                  approvalMode: request.approval_mode,
+                                  action: "reject",
+                                })
+                              }
+                            >
+                              <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>
+                              Reject
+                            </Button>
+                          </div>
+                        )}
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>
@@ -322,25 +299,23 @@ export function ApprovalHistoryPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-sm text-muted-foreground">
+              <p className="text-[12px] text-muted-foreground">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
-                  size="sm"
                   disabled={page <= 1}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
-                <span className="text-sm">
+                <span className="text-[12px]">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button
                   variant="outline"
-                  size="sm"
                   disabled={page >= totalPages}
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 >

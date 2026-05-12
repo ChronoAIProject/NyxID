@@ -14,7 +14,7 @@ function Section({
   return (
     <section className="space-y-3">
       <h2 className="text-base font-semibold text-foreground">{title}</h2>
-      <div className="space-y-2 text-sm leading-relaxed text-muted-foreground">
+      <div className="space-y-2 text-[12px] leading-relaxed text-muted-foreground">
         {children}
       </div>
     </section>
@@ -92,7 +92,7 @@ export function PrivacyPage() {
               <li>User-agent string and device type</li>
               <li>Timestamps of login events and API requests</li>
             </ul>
-            <p className="mt-2 text-muted-foreground text-sm">
+            <p className="mt-2 text-muted-foreground text-[12px]">
               These are received by our servers as part of normal HTTPS
               requests. The web application does not collect, store, or share
               this technical metadata beyond what the server needs for security
@@ -239,7 +239,7 @@ export function PrivacyPage() {
               If you have any questions about this Privacy Policy or your data,
               please contact us at:
             </p>
-            <p className="font-mono text-xs text-foreground">
+            <p className="text-xs text-foreground">
               privacy@nyxid.com
             </p>
           </Section>
@@ -249,7 +249,7 @@ export function PrivacyPage() {
         <div className="flex justify-center">
           <Link
             to="/"
-            className="flex items-center gap-1.5 text-xs text-violet-400 transition-colors hover:text-violet-300"
+            className="flex items-center gap-1.5 text-xs text-nyx-secondary-400 transition-colors duration-300 hover:text-nyx-300"
           >
             <ArrowLeft className="h-3 w-3" />
             Back to NyxID

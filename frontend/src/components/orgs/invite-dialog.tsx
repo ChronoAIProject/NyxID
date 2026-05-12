@@ -129,12 +129,12 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
 
         {createdInvite ? (
           <div className="space-y-4">
-            <div className="rounded-md border border-border bg-muted/30 p-4">
+            <div className="rounded-lg border border-border bg-muted/30 p-4">
               <p className="mb-2 text-xs uppercase tracking-wider text-text-tertiary">
                 Invite link
               </p>
               <div className="flex items-center justify-between gap-2">
-                <span className="break-all font-mono text-sm text-foreground">
+                <span className="break-all text-[12px] text-foreground">
                   {buildOrgInviteJoinUrl(createdInvite.nonce)}
                 </span>
                 <Button
@@ -156,7 +156,7 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
               Expires {new Date(createdInvite.expires_at).toLocaleString()}
             </p>
             <DialogFooter>
-              <Button onClick={() => handleOpenChange(false)}>Done</Button>
+              <Button variant="primary" onClick={() => handleOpenChange(false)}>Done</Button>
             </DialogFooter>
           </div>
         ) : (
@@ -215,7 +215,7 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
               />
 
               {form.formState.errors.root && (
-                <p className="text-sm text-destructive">
+                <p className="text-[12px] text-destructive">
                   {form.formState.errors.root.message}
                 </p>
               )}
@@ -229,8 +229,8 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={createMutation.isPending}>
-                  Create invite
+                <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>
+                  Create Invite
                 </Button>
               </DialogFooter>
             </form>

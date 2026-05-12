@@ -12,6 +12,7 @@ import {
 } from "@/schemas/service-accounts";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -46,10 +47,10 @@ import {
   Search,
   ChevronLeft,
   ChevronRight,
-  Plus,
   Copy,
   AlertTriangle,
 } from "lucide-react";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 import { copyToClipboard } from "@/lib/utils";
 import type { CreateServiceAccountResponse } from "@/types/service-accounts";
@@ -68,7 +69,7 @@ export function AdminServiceAccountsPage() {
   const [createdResult, setCreatedResult] =
     useState<CreateServiceAccountResponse | null>(null);
 
-  const { data, isLoading, error } = useServiceAccounts(page, PER_PAGE, search);
+  const { data, isLoading, error, refetch } = useServiceAccounts(page, PER_PAGE, search);
   const createMutation = useCreateServiceAccount();
 
   const accounts = data?.service_accounts ?? [];
@@ -144,42 +145,38 @@ export function AdminServiceAccountsPage() {
       <PageHeader
         title="Service Accounts"
         description="Manage machine-to-machine service accounts for programmatic access."
+        actions={
+          <AddCtaButton label="Create Service Account" onClick={openCreateDialog} />
+        }
       />
 
-      <div className="flex items-center justify-between gap-2">
-        <form onSubmit={handleSearch} className="flex items-center gap-2">
-          <div className="relative flex-1 max-w-sm">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder="Search by name..."
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              className="pl-9"
-            />
-          </div>
-          <Button type="submit" variant="outline" size="sm">
-            Search
-          </Button>
-          {search && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setSearchInput("");
-                setSearch("");
-                setPage(1);
-              }}
-            >
-              Clear
-            </Button>
-          )}
-        </form>
-        <Button size="sm" onClick={openCreateDialog}>
-          <Plus className="mr-1 h-4 w-4" />
-          Create Service Account
+      <form onSubmit={handleSearch} className="flex items-center gap-2">
+        <div className="relative flex-1 max-w-sm">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search by name..."
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+        <Button type="submit" variant="outline">
+          Search
         </Button>
-      </div>
+        {search && (
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => {
+              setSearchInput("");
+              setSearch("");
+              setPage(1);
+            }}
+          >
+            Clear
+          </Button>
+        )}
+      </form>
 
       {isLoading ? (
         <div className="space-y-2">
@@ -188,16 +185,11 @@ export function AdminServiceAccountsPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Bot className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load service accounts. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load service accounts. Please try again." onRetry={refetch} />
       ) : accounts.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <Bot className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             {search
               ? "No service accounts match your search."
               : "No service accounts found."}
@@ -205,7 +197,7 @@ export function AdminServiceAccountsPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-md border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -221,7 +213,7 @@ export function AdminServiceAccountsPage() {
                 {accounts.map((sa) => (
                   <TableRow
                     key={sa.id}
-                    className="cursor-pointer"
+                    className="cursor-pointer hover:bg-white/[0.03]"
                     tabIndex={0}
                     role="link"
                     onClick={() =>
@@ -241,7 +233,7 @@ export function AdminServiceAccountsPage() {
                     }}
                   >
                     <TableCell className="font-medium">{sa.name}</TableCell>
-                    <TableCell className="font-mono text-xs">
+                    <TableCell className="text-xs">
                       {sa.client_id}
                     </TableCell>
                     <TableCell>
@@ -268,7 +260,7 @@ export function AdminServiceAccountsPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[12px] text-muted-foreground">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               service accounts
@@ -276,19 +268,17 @@ export function AdminServiceAccountsPage() {
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
-                size="sm"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
                 <ChevronLeft className="h-4 w-4" />
                 Previous
               </Button>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-[12px] text-muted-foreground">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button
                 variant="outline"
-                size="sm"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
               >
@@ -313,10 +303,10 @@ export function AdminServiceAccountsPage() {
 
           {createdResult ? (
             <div className="space-y-4">
-              <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                  <p className="text-sm text-amber-700 dark:text-amber-400">
+                  <p className="text-[12px] text-amber-700 dark:text-amber-400">
                     Save these credentials now. The client secret cannot be
                     retrieved later.
                   </p>
@@ -329,7 +319,7 @@ export function AdminServiceAccountsPage() {
                     Client ID
                   </p>
                   <div className="flex items-center gap-2">
-                    <code className="flex-1 rounded bg-muted px-2 py-1 text-sm font-mono">
+                    <code className="flex-1 rounded bg-muted px-2 py-1 text-[12px] font-mono">
                       {createdResult.client_id}
                     </code>
                     <Button
@@ -353,7 +343,7 @@ export function AdminServiceAccountsPage() {
                     Client Secret
                   </p>
                   <div className="flex items-center gap-2">
-                    <code className="flex-1 rounded bg-muted px-2 py-1 text-sm font-mono break-all">
+                    <code className="flex-1 rounded bg-muted px-2 py-1 text-[12px] font-mono break-all">
                       {createdResult.client_secret}
                     </code>
                     <Button
@@ -374,7 +364,7 @@ export function AdminServiceAccountsPage() {
               </div>
 
               <DialogFooter>
-                <Button onClick={closeCreateDialog}>Done</Button>
+                <Button variant="primary" onClick={closeCreateDialog}>Done</Button>
               </DialogFooter>
             </div>
           ) : (
@@ -386,7 +376,7 @@ export function AdminServiceAccountsPage() {
                 className="space-y-4"
               >
                 {createForm.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                     {createForm.formState.errors.root.message}
                   </div>
                 )}
@@ -472,7 +462,7 @@ export function AdminServiceAccountsPage() {
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!createForm.formState.isValid || createMutation.isPending}>
                     Create
                   </Button>
                 </DialogFooter>

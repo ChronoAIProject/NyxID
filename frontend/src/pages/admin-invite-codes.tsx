@@ -13,9 +13,10 @@ import {
 } from "@/schemas/admin";
 import { ApiError } from "@/lib/api-client";
 import { cn, copyToClipboard, formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
@@ -49,14 +50,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Ticket, Plus, Copy, Check, Ban } from "lucide-react";
+import { Ticket, Copy, Check, Ban } from "lucide-react";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 import type { InviteCode } from "@/types/admin";
 
 const DEFAULT_MAX_USES = 10;
 
 export function AdminInviteCodesPage() {
-  const { data, isLoading, error } = useAdminInviteCodes();
+  const { data, isLoading, error, refetch } = useAdminInviteCodes();
   const createMutation = useCreateInviteCode();
   const deactivateMutation = useDeactivateInviteCode();
   const updateMutation = useUpdateInviteCode();
@@ -207,14 +209,10 @@ export function AdminInviteCodesPage() {
       <PageHeader
         title="Invite Codes"
         description="Create and manage invite codes that gate new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time."
+        actions={
+          <AddCtaButton label="Create Invite Code" onClick={openCreateDialog} />
+        }
       />
-
-      <div className="flex items-center justify-end">
-        <Button size="sm" onClick={openCreateDialog}>
-          <Plus className="mr-1 h-4 w-4" />
-          Create Invite Code
-        </Button>
-      </div>
 
       {isLoading ? (
         <div className="space-y-2">
@@ -226,21 +224,16 @@ export function AdminInviteCodesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Ticket className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load invite codes. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load invite codes. Please try again." onRetry={refetch} />
       ) : inviteCodes.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <Ticket className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No invite codes yet. Create one to allow a new user to register.
           </p>
         </div>
       ) : (
-        <div className="rounded-xl border border-border">
+        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -261,24 +254,24 @@ export function AdminInviteCodesPage() {
                     setSelectedCodeId(ic.id);
                   }}
                   className={cn(
-                    "cursor-pointer",
+                    "cursor-pointer hover:bg-white/[0.03]",
                     isSaving && "pointer-events-none opacity-60",
                   )}
                 >
                   <TableCell>
-                    <span className="font-mono text-sm font-medium text-foreground">
+                    <span className="text-[12px] font-medium text-foreground">
                       {ic.code}
                     </span>
                   </TableCell>
                   <TableCell>
-                    <span className="text-sm tabular-nums text-muted-foreground">
+                    <span className="text-[12px] tabular-nums text-muted-foreground">
                       {String(ic.used_count)}/{String(ic.max_uses)}
                     </span>
                   </TableCell>
                   <TableCell>{getStatusBadge(ic)}</TableCell>
                   <TableCell>
                     {ic.note ? (
-                      <span className="text-sm text-muted-foreground">
+                      <span className="text-[12px] text-muted-foreground">
                         {ic.note}
                       </span>
                     ) : (
@@ -356,32 +349,31 @@ export function AdminInviteCodesPage() {
 
           {createdCode ? (
             <div className="space-y-4">
-              <div className="rounded-md border border-border bg-muted/30 p-4">
+              <div className="rounded-lg border border-border bg-muted/30 p-4">
                 <p className="mb-2 text-xs uppercase tracking-wider text-text-tertiary">
                   Invite code
                 </p>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-lg font-medium text-foreground">
+                  <span className="text-lg font-medium text-foreground">
                     {createdCode.code}
                   </span>
                   <Button
                     variant="outline"
-                    size="sm"
                     onClick={() =>
                       void handleCopyCode(createdCode.code, createdCode.id)
                     }
                   >
                     {copiedId === createdCode.id ? (
                       <>
-                        <Check
-                          className="mr-1 h-4 w-4 text-success"
+                        <ButtonIcon><Check
+                          className="h-3 w-3 text-success"
                           aria-hidden="true"
-                        />
+                        /></ButtonIcon>
                         Copied
                       </>
                     ) : (
                       <>
-                        <Copy className="mr-1 h-4 w-4" aria-hidden="true" />
+                        <ButtonIcon><Copy className="h-3 w-3" aria-hidden="true" /></ButtonIcon>
                         Copy
                       </>
                     )}
@@ -392,7 +384,7 @@ export function AdminInviteCodesPage() {
                 </p>
               </div>
               <DialogFooter>
-                <Button onClick={() => setCreateOpen(false)}>Done</Button>
+                <Button variant="primary" onClick={() => setCreateOpen(false)}>Done</Button>
               </DialogFooter>
             </div>
           ) : (
@@ -404,7 +396,7 @@ export function AdminInviteCodesPage() {
                 className="space-y-4"
               >
                 {createForm.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                     {createForm.formState.errors.root.message}
                   </div>
                 )}
@@ -466,7 +458,7 @@ export function AdminInviteCodesPage() {
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!createForm.formState.isValid || createMutation.isPending}>
                     Create Invite Code
                   </Button>
                 </DialogFooter>
@@ -534,7 +526,7 @@ export function AdminInviteCodesPage() {
             <>
               <SheetHeader>
                 <div className="flex items-center gap-3">
-                  <SheetTitle className="font-mono">
+                  <SheetTitle>
                     {selectedCode.code}
                   </SheetTitle>
                   {getStatusBadge(selectedCode)}
@@ -544,7 +536,7 @@ export function AdminInviteCodesPage() {
                 </SheetDescription>
               </SheetHeader>
 
-              <div className="grid grid-cols-2 gap-4 rounded-md border border-border bg-muted/20 p-4 text-sm">
+              <div className="grid grid-cols-2 gap-4 rounded-lg border border-border bg-muted/20 p-4 text-[12px]">
                 <div>
                   <p className="text-xs uppercase tracking-wider text-text-tertiary">
                     Uses
@@ -584,9 +576,9 @@ export function AdminInviteCodesPage() {
                       <>
                         <p
                           className={cn(
-                            "mt-1 truncate text-sm text-foreground",
+                            "mt-1 truncate text-[12px] text-foreground",
                             isUuidFallback &&
-                              "font-mono text-xs text-muted-foreground",
+                              "text-xs text-muted-foreground",
                           )}
                         >
                           {primary}
@@ -605,7 +597,7 @@ export function AdminInviteCodesPage() {
               <div className="space-y-2">
                 <label
                   htmlFor="invite-code-note"
-                  className="text-sm font-medium"
+                  className="text-[12px] font-medium"
                 >
                   Note
                 </label>
@@ -621,7 +613,7 @@ export function AdminInviteCodesPage() {
                     Visible to admins only. Leave blank to clear.
                   </p>
                   <Button
-                    size="sm"
+                    variant="primary"
                     onClick={() => void handleSaveNote()}
                     disabled={!noteHasChanges || isSaving}
                     isLoading={isSaving}
@@ -633,17 +625,17 @@ export function AdminInviteCodesPage() {
 
               <div className="space-y-3">
                 <div className="flex items-baseline justify-between">
-                  <h3 className="text-sm font-medium">Redemptions</h3>
+                  <h3 className="text-[12px] font-medium">Redemptions</h3>
                   <span className="text-xs text-muted-foreground">
                     {selectedCode.usages.length} total
                   </span>
                 </div>
                 {selectedCode.usages.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-border py-8 text-center text-sm text-muted-foreground">
+                  <div className="rounded-lg border border-dashed border-border py-8 text-center text-[12px] text-muted-foreground">
                     No redemptions yet.
                   </div>
                 ) : (
-                  <ul className="divide-y divide-border rounded-md border border-border">
+                  <ul className="divide-y divide-border rounded-lg border border-border">
                     {selectedCode.usages.map((usage) => {
                       const primary =
                         usage.user_display_name ??
@@ -658,7 +650,7 @@ export function AdminInviteCodesPage() {
                           className="flex items-start justify-between gap-4 px-3 py-2"
                         >
                           <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm text-foreground">
+                            <p className="truncate text-[12px] text-foreground">
                               {primary}
                             </p>
                             {showEmailLine && (
@@ -668,7 +660,7 @@ export function AdminInviteCodesPage() {
                             )}
                             {usage.user_email === null &&
                               usage.user_display_name === null && (
-                                <p className="truncate font-mono text-xs text-muted-foreground">
+                                <p className="truncate text-xs text-muted-foreground">
                                   account deleted
                                 </p>
                               )}

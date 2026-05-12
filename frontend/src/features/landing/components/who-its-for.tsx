@@ -67,7 +67,7 @@ export function WhoItsFor() {
           {segmentKeys.map((key, i) => (
             <div
               key={key}
-              className={`rounded-2xl border border-landing-border-subtle bg-landing-surface p-8 transition-colors hover:border-primary/30 ${
+              className={`rounded-2xl border border-landing-border-subtle bg-landing-surface p-8 transition-colors hover:border-white/[0.15] ${
                 inView ? "animate-fade-up" : "opacity-0"
               }`}
               style={{ animationDelay: `${i * 120}ms` }}

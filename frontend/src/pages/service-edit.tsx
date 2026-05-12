@@ -47,13 +47,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertCircle } from "lucide-react";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { toast } from "sonner";
 
 export function ServiceEditPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const navigate = useNavigate();
-  const { data: service, isLoading, error } = useService(serviceId);
+  const { data: service, isLoading, error, refetch } = useService(serviceId);
   const updateMutation = useUpdateService();
   const user = useAuthStore((s) => s.user);
   const { data: appsData } = useDeveloperApps();
@@ -278,20 +278,12 @@ export function ServiceEditPage() {
 
   if (error || !service) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
-          Service not found
-        </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The service you are trying to edit does not exist or has been deleted.
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => void navigate({ to: "/services" })}
-        >
-          Back to Services
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="Service Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "The service you are trying to edit does not exist or has been deleted."}
+          onRetry={refetch}
+        />
       </div>
     );
   }
@@ -307,14 +299,6 @@ export function ServiceEditPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Services", to: "/services" },
-          {
-            label: service.name,
-            to: `/services/${serviceId}`,
-          },
-          { label: "Edit" },
-        ]}
         title={`Edit ${service.name}`}
       />
 
@@ -322,7 +306,7 @@ export function ServiceEditPage() {
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             {form.formState.errors.root && (
-              <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -332,7 +316,7 @@ export function ServiceEditPage() {
                 {SERVICE_TYPE_LABELS[service.service_type] ??
                   service.service_type}
               </Badge>
-              <Badge variant="outline">
+              <Badge variant="secondary">
                 {SERVICE_CATEGORY_LABELS[service.service_category] ??
                   service.service_category}
               </Badge>
@@ -360,7 +344,7 @@ export function ServiceEditPage() {
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -405,7 +389,7 @@ export function ServiceEditPage() {
               user?.is_admin &&
               developerApps.length > 0 && (
                 <div className="space-y-2">
-                  <p className="text-sm font-medium">Developer App Scoping</p>
+                  <p className="text-[12px] font-medium">Developer App Scoping</p>
                   <p className="text-xs text-muted-foreground">
                     Select which developer apps grant access to this service.
                     Users who log in through a selected app will have this
@@ -419,7 +403,7 @@ export function ServiceEditPage() {
                       return (
                         <div
                           key={app.id}
-                          className="flex items-center gap-2 rounded-[10px] border border-border p-2"
+                          className="flex items-center gap-2 rounded-lg border border-border p-2"
                         >
                           <Checkbox
                             id={`app-${app.id}`}
@@ -437,11 +421,11 @@ export function ServiceEditPage() {
                           />
                           <Label
                             htmlFor={`app-${app.id}`}
-                            className="text-sm font-normal"
+                            className="text-[12px] font-normal"
                           >
                             {app.client_name}
                           </Label>
-                          <Badge variant="outline" className="ml-auto text-xs">
+                          <Badge variant="secondary" className="ml-auto text-xs">
                             {app.client_type}
                           </Badge>
                         </div>
@@ -486,10 +470,10 @@ export function ServiceEditPage() {
                   />
                 </div>
 
-                <div className="flex items-center justify-between rounded-[10px] border border-border p-3">
+                <div className="flex items-center justify-between rounded-lg border border-border p-3">
                   <Label
                     htmlFor="edit-ssh-cert-auth"
-                    className="text-sm font-normal"
+                    className="text-[12px] font-normal"
                   >
                     Enable short-lived SSH certificates
                   </Label>
@@ -610,7 +594,7 @@ export function ServiceEditPage() {
                 />
 
                 <div>
-                  <p className="mb-1 text-sm font-medium">Auth Type</p>
+                  <p className="mb-1 text-[12px] font-medium">Auth Type</p>
                   <Badge variant="secondary">{getAuthTypeLabel(service)}</Badge>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Auth type cannot be changed after creation.
@@ -621,7 +605,7 @@ export function ServiceEditPage() {
                   <>
                     <Separator className="my-2" />
                     <div className="space-y-2">
-                      <h3 className="text-sm font-semibold">
+                      <h3 className="text-[13px] font-semibold">
                         Identity Propagation
                       </h3>
                       <p className="text-xs text-muted-foreground">
@@ -664,7 +648,7 @@ export function ServiceEditPage() {
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-sm font-semibold">
+                        <h3 className="text-[13px] font-semibold">
                           Service Metadata
                         </h3>
                         <p className="text-xs text-muted-foreground">
@@ -820,7 +804,7 @@ export function ServiceEditPage() {
                       <Separator className="my-2" />
                       <div className="space-y-2">
                         <div className="space-y-1">
-                          <p className="text-sm font-medium">
+                          <p className="text-[12px] font-medium">
                             Default request headers
                           </p>
                           <p className="text-xs text-muted-foreground">
@@ -892,7 +876,7 @@ export function ServiceEditPage() {
                       </div>
 
                       <div className="space-y-2">
-                        <p className="text-sm font-medium">Capabilities</p>
+                        <p className="text-[12px] font-medium">Capabilities</p>
                         <p className="text-xs text-muted-foreground">
                           Flags describing what this service supports through
                           NyxID proxy.
@@ -911,7 +895,7 @@ export function ServiceEditPage() {
                           ).map(([key, label]) => (
                             <div
                               key={key}
-                              className="flex items-center justify-between rounded-[10px] border border-border p-2"
+                              className="flex items-center justify-between rounded-lg border border-border p-2"
                             >
                               <Label
                                 htmlFor={`cap-${key}`}
@@ -935,7 +919,7 @@ export function ServiceEditPage() {
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-sm font-semibold">
+                        <h3 className="text-[13px] font-semibold">
                           Forward Access Token
                         </h3>
                         <p className="text-xs text-muted-foreground">
@@ -944,10 +928,10 @@ export function ServiceEditPage() {
                         </p>
                       </div>
 
-                      <div className="flex items-center justify-between rounded-[10px] border border-border p-3">
+                      <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="forward-access-token"
-                          className="text-sm font-normal"
+                          className="text-[12px] font-normal"
                         >
                           Forward Access Token
                         </Label>
@@ -966,7 +950,7 @@ export function ServiceEditPage() {
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-sm font-semibold">
+                        <h3 className="text-[13px] font-semibold">
                           Delegation Token Injection
                         </h3>
                         <p className="text-xs text-muted-foreground">
@@ -978,10 +962,10 @@ export function ServiceEditPage() {
                         </p>
                       </div>
 
-                      <div className="flex items-center justify-between rounded-[10px] border border-border p-3">
+                      <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="inject-delegation-token"
-                          className="text-sm font-normal"
+                          className="text-[12px] font-normal"
                         >
                           Inject delegation token
                         </Label>
@@ -1023,7 +1007,7 @@ export function ServiceEditPage() {
             )}
 
             <div className="flex items-center gap-3 pt-4">
-              <Button type="submit" isLoading={updateMutation.isPending}>
+              <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
                 Save changes
               </Button>
               <Button

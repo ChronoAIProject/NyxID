@@ -6,6 +6,7 @@ import { useRoles, useCreateRole, useDeleteRole } from "@/hooks/use-rbac";
 import { createRoleSchema, type CreateRoleFormData } from "@/schemas/rbac";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -35,7 +36,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ShieldCheck, Plus, Trash2 } from "lucide-react";
+import { ShieldCheck, Trash2 } from "lucide-react";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 
@@ -44,7 +46,7 @@ export function AdminRolesPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteRoleId, setDeleteRoleId] = useState<string | null>(null);
 
-  const { data, isLoading, error } = useRoles();
+  const { data, isLoading, error, refetch } = useRoles();
   const createMutation = useCreateRole();
   const deleteMutation = useDeleteRole();
 
@@ -121,10 +123,7 @@ export function AdminRolesPage() {
         title="Role Management"
         description="Manage roles and permissions for your organization."
         actions={
-          <Button size="sm" onClick={openCreateDialog}>
-            <Plus className="mr-1 h-4 w-4" />
-            Add Role
-          </Button>
+          <AddCtaButton label="Add Role" onClick={openCreateDialog} />
         }
       />
 
@@ -135,19 +134,14 @@ export function AdminRolesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ShieldCheck className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load roles. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load roles. Please try again." onRetry={refetch} />
       ) : roles.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <ShieldCheck className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">No roles found.</p>
+          <p className="text-[12px] text-muted-foreground">No roles found.</p>
         </div>
       ) : (
-        <div className="rounded-xl border border-border">
+        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -157,14 +151,16 @@ export function AdminRolesPage() {
                 <TableHead>Type</TableHead>
                 <TableHead>Default</TableHead>
                 <TableHead>Created</TableHead>
-                <TableHead className="w-[60px]" />
+                {roles.some((r) => !r.is_system) && (
+                  <TableHead className="w-[60px]">Actions</TableHead>
+                )}
               </TableRow>
             </TableHeader>
             <TableBody>
               {roles.map((role) => (
                 <TableRow
                   key={role.id}
-                  className="cursor-pointer"
+                  className="cursor-pointer hover:bg-white/[0.03]"
                   tabIndex={0}
                   role="link"
                   onClick={() =>
@@ -184,7 +180,7 @@ export function AdminRolesPage() {
                   }}
                 >
                   <TableCell className="font-medium">{role.name}</TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="text-xs">
                     {role.slug}
                   </TableCell>
                   <TableCell>
@@ -197,7 +193,7 @@ export function AdminRolesPage() {
                     {role.is_system ? (
                       <Badge variant="secondary">System</Badge>
                     ) : (
-                      <Badge variant="outline">Custom</Badge>
+                      <Badge variant="secondary">Custom</Badge>
                     )}
                   </TableCell>
                   <TableCell>
@@ -210,21 +206,23 @@ export function AdminRolesPage() {
                   <TableCell className="text-muted-foreground">
                     {formatDate(role.created_at)}
                   </TableCell>
-                  <TableCell>
-                    {!role.is_system && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setDeleteRoleId(role.id);
-                        }}
-                      >
-                        <Trash2 className="h-4 w-4 text-muted-foreground" />
-                      </Button>
-                    )}
-                  </TableCell>
+                  {roles.some((r) => !r.is_system) && (
+                    <TableCell>
+                      {!role.is_system && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteRoleId(role.id);
+                          }}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      )}
+                    </TableCell>
+                  )}
                 </TableRow>
               ))}
             </TableBody>
@@ -249,7 +247,7 @@ export function AdminRolesPage() {
               className="space-y-4"
             >
               {createForm.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                   {createForm.formState.errors.root.message}
                 </div>
               )}
@@ -334,7 +332,7 @@ export function AdminRolesPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={createMutation.isPending}>
+                <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!createForm.formState.isValid || createMutation.isPending}>
                   Create Role
                 </Button>
               </DialogFooter>

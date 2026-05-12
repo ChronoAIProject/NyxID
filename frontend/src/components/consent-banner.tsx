@@ -43,7 +43,7 @@ export function ConsentBanner() {
       className="fixed inset-x-0 bottom-0 z-50 border-t bg-background/95 backdrop-blur"
     >
       <div className="mx-auto flex max-w-5xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-sm text-muted-foreground">
+        <div className="text-[12px] text-muted-foreground">
           We collect anonymous usage telemetry to help us improve NyxID.
           We never capture credentials, form content, or the contents of
           your requests. This choice applies to this browser only — other
@@ -53,14 +53,12 @@ export function ConsentBanner() {
         <div className="flex shrink-0 items-center gap-2">
           <Button
             variant="ghost"
-            size="sm"
             onClick={() => setConsent(false)}
             aria-label="Decline telemetry"
           >
             No thanks
           </Button>
           <Button
-            size="sm"
             onClick={() => setConsent(true)}
             aria-label="Accept telemetry"
           >
