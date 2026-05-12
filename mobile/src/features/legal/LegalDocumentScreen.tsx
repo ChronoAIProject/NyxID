@@ -199,8 +199,7 @@ const createMarkdownStyles = (c: ThemeColors) => ({
   },
   code_inline: {
     color: c.textPrimary,
-    fontFamily: "Menlo",
-    fontSize: 13,
+    ...typeScale.mono,
     backgroundColor: c.cardSoft,
     paddingHorizontal: 4,
     borderRadius: 4,

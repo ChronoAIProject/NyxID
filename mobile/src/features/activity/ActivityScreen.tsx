@@ -767,13 +767,11 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     gap: 2,
   },
   title: {
-    fontSize: 26,
-    fontWeight: "700",
+    ...typeScale.h1,
     color: c.textPrimary,
-    fontFamily: "SpaceGrotesk_700Bold",
   },
   subtitle: {
-    fontSize: 13,
+    ...typeScale.body,
     color: c.textSecondary,
     marginBottom: spacing.md,
   },
@@ -847,10 +845,8 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
     borderBottomColor: c.borderSoft,
   },
   sheetTitle: {
-    fontSize: 18,
-    fontWeight: "700",
+    ...typeScale.h2,
     color: c.textPrimary,
-    fontFamily: "SpaceGrotesk_700Bold",
   },
   closeBtn: {
     width: 30,
@@ -863,8 +859,7 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
     justifyContent: "center",
   },
   closeBtnText: {
-    fontSize: 14,
-    fontWeight: "600",
+    ...typeScale.description,
     color: c.textMuted,
   },
   sheetBody: {
@@ -877,10 +872,9 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
     gap: spacing.lg,
   },
   orgContext: {
-    fontSize: 12,
-    fontWeight: "600",
+    ...typeScale.overline,
     color: c.textSecondary,
-    letterSpacing: 0.3,
+    letterSpacing: 0.6,
   },
   stateNotice: {
     borderRadius: radius.sm,
@@ -890,9 +884,8 @@ const createSheetStyles = (c: ThemeColors) => StyleSheet.create({
     padding: spacing.lg,
   },
   stateNoticeText: {
-    fontSize: 13,
+    ...typeScale.body,
     color: c.warning,
-    lineHeight: 20,
   },
   detailCard: {
     borderRadius: radius.md,

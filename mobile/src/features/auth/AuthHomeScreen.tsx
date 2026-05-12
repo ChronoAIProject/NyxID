@@ -524,20 +524,19 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.lg,
     color: c.textPrimary,
-    ...typeScale.body,
-    fontSize: 14,
+    ...typeScale.description,
   },
   signInButton: {
     backgroundColor: c.primary,
     borderRadius: radius.md,
     paddingVertical: spacing.lg,
+    minHeight: 44,
     alignItems: "center",
     justifyContent: "center",
   },
   signInButtonText: {
     color: c.onPrimary,
-    ...typeScale.bodyStrong,
-    fontSize: 14,
+    ...typeScale.label,
   },
   buttonDisabled: {
     opacity: 0.5,
@@ -571,8 +570,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   },
   dividerText: {
     color: c.textMuted,
-    ...typeScale.caption,
-    fontSize: 11,
+    ...typeScale.small,
     marginHorizontal: spacing.sm,
   },
   socialAuthButton: {
@@ -596,21 +594,17 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   },
   socialAuthText: {
     color: c.textPrimary,
-    ...typeScale.caption,
-    fontWeight: "600",
-    fontSize: 12,
+    ...typeScale.label,
   },
   legal: {
     color: c.textMuted,
-    ...typeScale.caption,
-    fontSize: 11,
+    ...typeScale.small,
     marginTop: spacing.sm,
     textAlign: "center",
   },
   legalLink: {
     color: c.textSecondary,
-    ...typeScale.caption,
-    fontSize: 11,
+    ...typeScale.small,
     textDecorationLine: "underline",
   },
 });
