@@ -1,3 +1,5 @@
+import { ApiError } from "@/lib/api-client";
+
 export function isTerminalAuthFailureStatus(
   status: string | undefined,
 ): boolean {
@@ -54,7 +56,23 @@ export async function pollOAuthKeyUntilActive({
         }
         return;
       }
-    } catch {
+    } catch (e) {
+      // 404 means the placeholder is gone (abandoned by another tab,
+      // hard-deleted, or never made it past the create response). Treat
+      // it as terminal so the wizard exits with a clear message instead
+      // of polling silently for 5 minutes (issue #653 stale-tab path).
+      // All other errors (network, 5xx, refresh-token churn) stay
+      // transient — keep polling.
+      if (e instanceof ApiError && e.status === 404) {
+        if (!isCancelled()) {
+          onTerminalFailure({
+            status: "failed",
+            error_message:
+              "Authorization placeholder no longer exists. Cancel and re-run the wizard to try again.",
+          });
+        }
+        return;
+      }
       // Transient; keep polling.
     }
   }

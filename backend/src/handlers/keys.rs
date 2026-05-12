@@ -821,6 +821,34 @@ pub async fn get_key(
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
     let access = resolve_key_read_owner(&state, &actor, &key_id).await?;
+
+    // Lazy reconciliation of pending_auth OAuth placeholders (issue #653).
+    // Wizard polling hits this handler every ~2s; treating each poll as a
+    // chance to converge the placeholder makes the wizard self-healing
+    // against silent OAuth-callback failures and abandoned flows. No-op for
+    // non-OAuth or already-terminal rows. Best-effort: errors are logged
+    // and swallowed so the read still proceeds.
+    if let Some(svc) = state
+        .db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! { "_id": &access.service_id })
+        .await?
+        && let Some(api_key_id) = svc.api_key_id.as_deref()
+        && let Err(e) = user_api_key_service::reconcile_pending_oauth_placeholder(
+            &state.db,
+            &access.owner_id,
+            api_key_id,
+        )
+        .await
+    {
+        tracing::warn!(
+            user_id = %access.owner_id,
+            api_key_id = %api_key_id,
+            error = %e,
+            "lazy reconcile of pending_auth placeholder failed"
+        );
+    }
+
     let mut view =
         unified_key_service::get_key(&state.db, &access.owner_id, &access.service_id).await?;
     // Override the placeholder Personal that get_key returns; the handler is

@@ -1,6 +1,7 @@
 import { render, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
+import { ApiError } from "@/lib/api-client";
 import {
   isTerminalAuthFailureStatus,
   pollOAuthKeyUntilActive,
@@ -176,6 +177,73 @@ describe("cli wizard auth flows", () => {
       sleepMs: vi.fn().mockResolvedValue(undefined),
     });
 
+    expect(completeWithKey).toHaveBeenCalledWith("key-1");
+    expect(onTerminalFailure).not.toHaveBeenCalled();
+    expect(onTimeout).not.toHaveBeenCalled();
+  });
+
+  // Issue #653 stale-tab path: a 404 means the placeholder no longer
+  // exists (abandoned by another tab, hard-deleted, never persisted).
+  // Treat as terminal so the wizard exits with a clear message instead
+  // of polling silently for the full 5-minute deadline.
+  it("treats a 404 from polling as a terminal failure", async () => {
+    const getKey = vi
+      .fn()
+      .mockRejectedValue(
+        new ApiError(404, {
+          error: "not_found",
+          error_code: 1004,
+          message: "Key not found",
+        }),
+      );
+    const completeWithKey = vi.fn();
+    const onTerminalFailure = vi.fn();
+    const onTimeout = vi.fn();
+
+    await pollOAuthKeyUntilActive({
+      keyId: "key-1",
+      getKey,
+      completeWithKey,
+      isCancelled: () => false,
+      onTerminalFailure,
+      onTimeout,
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(getKey).toHaveBeenCalledTimes(1);
+    expect(completeWithKey).not.toHaveBeenCalled();
+    expect(onTimeout).not.toHaveBeenCalled();
+    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+    const call = onTerminalFailure.mock.calls[0]?.[0] as {
+      status: string;
+      error_message?: string | null;
+    };
+    expect(call.status).toBe("failed");
+    expect(call.error_message).toMatch(/no longer exists/i);
+  });
+
+  // Non-404 fetch errors (transient network blips, 5xx, refresh-token
+  // churn) must remain transient — keep polling, not exit.
+  it("keeps polling on transient (non-404) fetch errors", async () => {
+    const getKey = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("network down"))
+      .mockResolvedValueOnce({ status: "active" });
+    const completeWithKey = vi.fn().mockResolvedValue(undefined);
+    const onTerminalFailure = vi.fn();
+    const onTimeout = vi.fn();
+
+    await pollOAuthKeyUntilActive({
+      keyId: "key-1",
+      getKey,
+      completeWithKey,
+      isCancelled: () => false,
+      onTerminalFailure,
+      onTimeout,
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(getKey).toHaveBeenCalledTimes(2);
     expect(completeWithKey).toHaveBeenCalledWith("key-1");
     expect(onTerminalFailure).not.toHaveBeenCalled();
     expect(onTimeout).not.toHaveBeenCalled();
