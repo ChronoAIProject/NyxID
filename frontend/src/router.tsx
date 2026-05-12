@@ -78,7 +78,7 @@ import {
 
 const rootRoute = createRootRoute({
   component: () => (
-    <TooltipProvider>
+    <TooltipProvider delayDuration={200}>
       <ChunkErrorBoundary>
         <Suspense>
           <Outlet />
