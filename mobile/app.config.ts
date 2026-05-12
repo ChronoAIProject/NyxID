@@ -74,7 +74,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
       adaptiveIcon: {
         foregroundImage: "./assets/adaptive-icon.png",
-        backgroundColor: "#10101A",
+        backgroundColor: "#07060e",
       },
       intentFilters: androidIntentFilters,
     },
@@ -84,7 +84,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         "expo-splash-screen",
         {
           image: "./assets/adaptive-icon.png",
-          backgroundColor: "#10101A",
+          backgroundColor: "#07060e",
           imageWidth: 220,
           resizeMode: "contain",
         },
@@ -94,7 +94,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         {
           enableBackgroundRemoteNotifications: true,
           icon: "./assets/notification-icon.png",
-          color: "#8B5CF6",
+          color: "#9775fa",
           androidMode: "default",
           defaultChannel: "approvals",
         },

@@ -260,7 +260,7 @@ export default function App() {
     return (
       <View style={appLoadingStyles.container}>
         <StatusBar style="light" />
-        <ActivityIndicator size="large" color="#8B5CF6" />
+        <ActivityIndicator size="large" color="#9775fa" />
         <Text style={appLoadingStyles.text}>Loading...</Text>
       </View>
     );
@@ -348,13 +348,13 @@ function ThemedAppShell({
 const appLoadingStyles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#10101A",
+    backgroundColor: "#07060e",
     justifyContent: "center",
     alignItems: "center",
     gap: 16,
   },
   text: {
-    color: "#F0EEFF",
+    color: "#e8e4f0",
     fontSize: 16,
   },
 });

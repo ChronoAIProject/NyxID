@@ -641,8 +641,8 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     height: 44,
     borderRadius: 22,
     // RN doesn't support linear-gradient natively on View bg.
-    // Use two overlapping halves to approximate gradient(135deg, #8B5CF6, #6D42D9).
-    backgroundColor: "#7A4FE3",
+    // Solid mid-tone of the brand gradient (DESIGN.md primary #9775fa → primaryDim #7c5ce0).
+    backgroundColor: "#8765e8",
     alignItems: "center",
     justifyContent: "center",
   },

@@ -27,13 +27,13 @@ export class AppErrorBoundary extends Component<Props, State> {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#10101A",
+    backgroundColor: "#07060e",
     justifyContent: "center",
     alignItems: "center",
     padding: 24,
   },
   title: {
-    color: "#F0EEFF",
+    color: "#e8e4f0",
     fontSize: 18,
     marginBottom: 8,
   },

@@ -32,7 +32,7 @@ const styles = StyleSheet.create({
   },
   arrow: {
     fontSize: 18,
-    color: "#F0EEFF",
+    color: "#e8e4f0",
     fontWeight: "600",
     marginTop: -1,
   },
