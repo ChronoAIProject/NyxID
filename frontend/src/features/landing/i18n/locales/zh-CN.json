@@ -1,11 +1,12 @@
 {
-  "nav.requestBeta": "申请内测",
+  "nav.register": "注册",
   "nav.login": "登录",
 
   "hero.eyebrow": "开源智能体连接网关",
   "hero.title": "将 Claude、Cursor 或你自己的智能体连接到公共、内部和本地 API — 并具备安全访问控制。",
   "hero.subtitle": "在手机上审批每一个连接。你的凭证永远不会离开 NyxID。",
-  "hero.cta": "抢先体验",
+  "hero.ctaRegister": "注册",
+  "hero.ctaEarlyAccess": "申请抢先体验",
   "hero.ctaSubtext": "Nyx 守护着大门 — Discord 持有钥匙",
 
   "install.heading": "安装 Nyx 技能",

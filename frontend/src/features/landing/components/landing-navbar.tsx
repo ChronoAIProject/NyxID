@@ -9,9 +9,10 @@ export function LandingNavbar() {
 
   useScroll((scrollY) => setScrolled(scrollY > 0));
 
-  const loginHref = `/login${
-    typeof window !== "undefined" ? window.location.search : ""
-  }`;
+  const search =
+    typeof window !== "undefined" ? window.location.search : "";
+  const loginHref = `/login${search}`;
+  const registerHref = `/register${search}`;
 
   return (
     <nav
@@ -35,10 +36,10 @@ export function LandingNavbar() {
             {t("nav.login")}
           </a>
           <a
-            href="#beta"
+            href={registerHref}
             className="hidden rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-void-400 md:inline-block"
           >
-            {t("nav.requestBeta")}
+            {t("nav.register")}
           </a>
         </div>
       </div>

@@ -1,11 +1,12 @@
 {
-  "nav.requestBeta": "Request Beta",
+  "nav.register": "Register",
   "nav.login": "Login",
 
   "hero.eyebrow": "Open-source Agent Connectivity Gateway",
   "hero.title": "Connect Claude, Cursor, or your own agents to public, internal, and localhost APIs — with secure access control.",
   "hero.subtitle": "Approve every connection from your phone. Your credentials never leave NyxID.",
-  "hero.cta": "Get Early Access",
+  "hero.ctaRegister": "Register",
+  "hero.ctaEarlyAccess": "Request Early Access",
   "hero.ctaSubtext": "Nyx guards the gate — Discord holds the key",
 
   "install.heading": "Install Nyx skills",

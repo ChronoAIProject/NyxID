@@ -1,11 +1,12 @@
 {
-  "nav.requestBeta": "申請內測",
+  "nav.register": "註冊",
   "nav.login": "登入",
 
   "hero.eyebrow": "開源智慧代理連接閘道",
   "hero.title": "將 Claude、Cursor 或你自己的代理連接到公共、內部和本地 API — 並具備安全存取控制。",
   "hero.subtitle": "在手機上審批每一個連接。你的憑證永遠不會離開 NyxID。",
-  "hero.cta": "搶先體驗",
+  "hero.ctaRegister": "註冊",
+  "hero.ctaEarlyAccess": "申請搶先體驗",
   "hero.ctaSubtext": "Nyx 守護著大門 — Discord 持有鑰匙",
 
   "install.heading": "安裝 Nyx 技能",
