@@ -16,7 +16,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
 use crate::services::{audit_service, auth_service, invite_code_service, token_service};
-use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
 // --- Request / Response types ---
 
@@ -125,6 +125,39 @@ pub(crate) fn extract_user_agent(headers: &HeaderMap) -> Option<String> {
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(String::from)
+}
+
+/// Lowercase domain portion of an email (everything after the last `@`).
+/// Returns `None` when the email is empty or has no `@`. Public so the
+/// signup telemetry path can populate `user.signed_up.email_domain`
+/// without leaking the full address through the egress scrubber.
+pub(crate) fn extract_email_domain(email: &str) -> Option<String> {
+    email
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.trim().to_lowercase())
+        .filter(|d| !d.is_empty())
+}
+
+/// Bare host portion of the HTTP `Referer` header. Strips scheme, path,
+/// query, and any port suffix so that referer URLs with PII in path or
+/// query never reach telemetry. Returns `None` when the header is
+/// missing, malformed, or carries no host.
+pub(crate) fn extract_referrer_domain(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::REFERER).and_then(|v| v.to_str().ok())?;
+    // Tolerate scheme-relative (`//host/...`) and bare-host references.
+    let after_scheme = raw
+        .find("://")
+        .map(|i| &raw[i + 3..])
+        .unwrap_or(raw.strip_prefix("//").unwrap_or(raw));
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .split('@')
+        .next_back()
+        .unwrap_or("");
+    let host = host.split(':').next().unwrap_or("").trim().to_lowercase();
+    if host.is_empty() { None } else { Some(host) }
 }
 
 fn resolve_cli_session_user_agent(
@@ -353,6 +386,11 @@ pub async fn register(
             }
             r
         }
+        // The two arms below silently no-op the invite-code accounting:
+        // `Ok(_)` is the email-enumeration-protection fake-success branch
+        // (no real user was created); `Err(_)` is a downstream failure.
+        // In both cases we release the reservation and do NOT emit
+        // `invite.code_redeemed` — only an actually-redeemed code counts.
         Ok(r) => {
             // Email already existed: the service returned a fake-success to
             // prevent enumeration. The invite code slot (if any) was never
@@ -404,16 +442,58 @@ pub async fn register(
             .get("x-nyxid-client-version")
             .and_then(|v| v.to_str().ok()),
     );
-    emit_event(
-        state.telemetry.as_deref(),
-        &result.user_id,
-        None,
-        &tele,
-        TelemetryEvent::UserSignedUp {
-            method: "email".to_string(),
-            invite_code_used: body.invite_code.is_some(),
-        },
-    );
+
+    // Skip telemetry on the fake-success enumeration-protection branch:
+    // `result.actually_created` is false there and no real user exists.
+    // Emitting would inflate signup counts with phantom users.
+    if result.actually_created {
+        let invite_code_id_hash = invite_code_id.as_deref().map(hash_short_id);
+        let source = if invite_code_id.is_some() {
+            "invite_code".to_string()
+        } else {
+            // Reached only when `INVITE_CODE_REQUIRED=false`. Once the
+            // public-launch flag is flipped, all email signups have a
+            // code and `invite_code` is the only `source` we emit.
+            "direct".to_string()
+        };
+        emit_event(
+            state.telemetry.as_deref(),
+            &result.user_id,
+            None,
+            &tele,
+            TelemetryEvent::UserSignedUp {
+                method: "email".to_string(),
+                source,
+                email_domain: extract_email_domain(&body.email),
+                invite_code_id: invite_code_id_hash,
+                referrer_domain: extract_referrer_domain(&headers),
+                via_org: None,
+                invite_code_used: invite_code_id.is_some(),
+            },
+        );
+
+        // Emit `invite.code_redeemed` after the user is actually created so
+        // the funnel (`invite.code_generated` → `invite.code_redeemed`)
+        // counts only successful conversions. Metadata is best-effort:
+        // a missing fetch result drops the event rather than fabricating
+        // placeholder ids.
+        if let Some(ref code_id) = invite_code_id
+            && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, code_id).await
+        {
+            let days = (chrono::Utc::now() - meta.created_at).num_days().max(0) as u64;
+            emit_event(
+                state.telemetry.as_deref(),
+                &result.user_id,
+                None,
+                &tele,
+                TelemetryEvent::InviteCodeRedeemed {
+                    code_id: hash_short_id(code_id),
+                    created_by_user_id: hash_short_id(&meta.created_by),
+                    days_to_redemption: days,
+                },
+            );
+        }
+    }
 
     Ok(Json(RegisterResponse {
         user_id: result.user_id,
@@ -1040,6 +1120,41 @@ pub struct CliTokenResponse {
 mod tests {
     use super::*;
     use axum::body::Bytes;
+
+    #[test]
+    fn email_domain_extracts_lowercased_host_portion() {
+        assert_eq!(
+            extract_email_domain("Alice@Example.COM"),
+            Some("example.com".into())
+        );
+        assert_eq!(extract_email_domain(""), None);
+        assert_eq!(extract_email_domain("no-at-sign"), None);
+        // Empty domain portion (`alice@`) must not produce an empty
+        // string in telemetry — egress would still send `""` as a value.
+        assert_eq!(extract_email_domain("alice@"), None);
+    }
+
+    #[test]
+    fn referrer_domain_strips_scheme_path_and_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::REFERER,
+            "https://example.com:443/path?leak=secret".parse().unwrap(),
+        );
+        assert_eq!(
+            extract_referrer_domain(&headers),
+            Some("example.com".into())
+        );
+
+        // Bare hostname (rare but allowed by RFC).
+        let mut h2 = HeaderMap::new();
+        h2.insert(header::REFERER, "twitter.com".parse().unwrap());
+        assert_eq!(extract_referrer_domain(&h2), Some("twitter.com".into()));
+
+        // Missing header → None (signup did not arrive from web).
+        let empty = HeaderMap::new();
+        assert_eq!(extract_referrer_domain(&empty), None);
+    }
 
     #[test]
     fn explicit_mobile_client_uses_token_mode() {

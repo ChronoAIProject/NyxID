@@ -242,6 +242,47 @@ pub async fn record_usage(db: &mongodb::Database, invite_code_id: &str, user_id:
     }
 }
 
+/// Minimal projection of an invite code used by the telemetry layer to
+/// enrich `invite.code_redeemed` events with the inviter user_id and
+/// time-to-redemption. Best-effort: emit sites must tolerate `None`,
+/// since invite codes may be deleted between reservation and the
+/// telemetry queue draining.
+#[derive(Clone, Debug)]
+pub struct InviteCodeTelemetryMeta {
+    pub created_by: String,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
+/// Best-effort lookup of the `(created_by, created_at)` pair for the
+/// given invite code id, returning `None` on any miss or DB error.
+/// Used only by the telemetry layer — never on the hot reservation
+/// path — so swallowing errors does not affect correctness of the
+/// signup flow.
+pub async fn fetch_telemetry_meta(
+    db: &mongodb::Database,
+    invite_code_id: &str,
+) -> Option<InviteCodeTelemetryMeta> {
+    match db
+        .collection::<InviteCode>(COLLECTION_NAME)
+        .find_one(doc! { "_id": invite_code_id })
+        .await
+    {
+        Ok(Some(invite)) => Some(InviteCodeTelemetryMeta {
+            created_by: invite.created_by,
+            created_at: invite.created_at,
+        }),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                invite_code_id = %invite_code_id,
+                "Failed to fetch invite code telemetry metadata"
+            );
+            None
+        }
+    }
+}
+
 /// Release a previously-reserved slot, decrementing `used_count`.
 ///
 /// Used to compensate when `reserve_invite_code` has succeeded but the

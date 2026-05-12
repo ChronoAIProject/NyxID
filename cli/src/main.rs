@@ -19,6 +19,11 @@ use crate::cli::{Cli, Commands};
 
 #[tokio::main]
 async fn main() {
+    // Pick a rustls CryptoProvider explicitly. With both `aws_lc_rs` and `ring`
+    // enabled via feature unification (sigstore vs quinn/etc.), rustls cannot
+    // auto-select and panics on first TLS use. See issue #696.
+    install_rustls_crypto_provider();
+
     // `--output` is flattened into many subcommands, so this best-effort
     // pre-parse only controls final error formatting. Clap remains the source
     // of truth for command parsing and success-path output.
@@ -101,6 +106,19 @@ async fn main() {
     if let Err(e) = result {
         eprintln!("{}", error_format::render_error(&e, json_output_from_argv));
         std::process::exit(1);
+    }
+}
+
+fn install_rustls_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        return;
+    }
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        // Another thread won the race. Either way, a default is now installed.
+        debug_assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
 }
 

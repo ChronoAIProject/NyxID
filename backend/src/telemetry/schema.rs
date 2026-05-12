@@ -19,7 +19,35 @@ use super::scrub;
 pub enum TelemetryEvent {
     // --- handlers/auth.rs -----------------------------------------------
     UserSignedUp {
+        /// `email` | `google` | `github` | `apple` — the auth method.
         method: String,
+        /// `direct` | `invite_code` | `social_oauth` — funnel attribution.
+        /// `direct` is reserved for public-launch (gate disabled) email
+        /// signups that did not carry an invite code.
+        source: String,
+        /// Lowercased email-domain only (e.g. `gmail.com`). Full email
+        /// would be scrubbed at egress; the domain remains usable for
+        /// cohort analysis (corporate vs. personal accounts).
+        email_domain: Option<String>,
+        /// SHA-256-prefix hash of the redeemed invite code's UUID, when
+        /// signup used one. Raw UUID would be scrubbed at egress; the
+        /// hash correlates this event with `invite.code_generated` /
+        /// `invite.code_redeemed`. `None` when no code was used.
+        invite_code_id: Option<String>,
+        /// Bare-domain portion of the HTTP `Referer` header (host only,
+        /// scheme/path stripped) when the signup arrived from the web.
+        /// Stored as domain — not the full URL — so a referer with PII
+        /// in the query string cannot leak through the scrubber. `None`
+        /// for non-web signups or when Referer is absent.
+        referrer_domain: Option<String>,
+        /// SHA-256-prefix hash of the inviting organization's user_id
+        /// when the invite code was issued by an org user. `None` for
+        /// personal invites or no invite. Hashed so the raw UUID is not
+        /// scrubbed away at egress.
+        via_org: Option<String>,
+        /// Convenience boolean: `true` iff an invite code was redeemed.
+        /// Redundant with `invite_code_id.is_some()` but kept so funnels
+        /// can split without HogQL `IS NOT NULL` checks.
         invite_code_used: bool,
     },
     UserEmailVerified,
@@ -40,6 +68,22 @@ pub enum TelemetryEvent {
     },
     InviteCodeGenerated {
         generated_by_role: String,
+    },
+    /// Emitted when a previously-generated invite code is consumed during
+    /// a successful signup. Pairs with `InviteCodeGenerated` to measure
+    /// per-code conversion (codes issued vs. codes redeemed) and
+    /// time-to-redemption distribution.
+    InviteCodeRedeemed {
+        /// SHA-256-prefix hash of the invite code's UUID. Raw UUID would
+        /// be redacted to `[UUID_REDACTED]` at egress.
+        code_id: String,
+        /// SHA-256-prefix hash of the creating admin/org user_id. Used
+        /// for "which inviter's codes convert best" cohort analysis.
+        created_by_user_id: String,
+        /// Days between `InviteCode.created_at` and redemption. Clamped
+        /// at zero so negative clock drift never produces a nonsensical
+        /// negative value.
+        days_to_redemption: u64,
     },
 
     // --- handlers/users.rs ----------------------------------------------
@@ -282,11 +326,33 @@ pub enum TelemetryEvent {
         slug: String,
     },
 
-    // --- handlers/proxy.rs (proxy.error only — proxy.request deferred) --
+    // --- handlers/proxy.rs ----------------------------------------------
     ProxyError {
         service_slug: String,
         error_code: u32,
         status: u16,
+    },
+    /// Emitted from `proxy_request` / `proxy_request_by_slug` when the
+    /// upstream response is 2xx. The companion to `ProxyError`: together
+    /// they let M1 reach be defined precisely as "≥1 `proxy.success` per
+    /// user in the window" rather than via proxy signals that approximate
+    /// it. See issue #714.
+    ProxySuccess {
+        /// Resolved `UserService` / `DownstreamService` slug. Never a
+        /// UUID from the route path — matches the `ProxyError` rule so
+        /// the two events join cleanly on `service_slug` for success-rate.
+        service_slug: String,
+        /// Upstream HTTP method (`GET` / `POST` / ...). Uppercase.
+        method: String,
+        /// Upstream HTTP status code (always 2xx here).
+        status: u16,
+        /// End-to-end proxy latency from handler entry to response,
+        /// including downstream wait and credential resolution.
+        latency_ms: u64,
+        /// Auth provenance: `session` | `access_token` | `relay` |
+        /// `api_key` | `service_account` | `delegated`. Lets HogQL split
+        /// reach by user-driven vs. agent-driven traffic.
+        auth_kind: &'static str,
     },
 
     // --- mw/rate_limit.rs ----------------------------------------------
@@ -312,6 +378,7 @@ impl TelemetryEvent {
             Self::AuthTokenExchanged { .. } => "auth.token_exchanged",
             Self::AuthDelegationRefreshed { .. } => "auth.delegation_refreshed",
             Self::InviteCodeGenerated { .. } => "invite.code_generated",
+            Self::InviteCodeRedeemed { .. } => "invite.code_redeemed",
             Self::UserDeleted { .. } => "user.deleted",
             Self::MfaEnrollmentStarted { .. } => "mfa.enrollment_started",
             Self::MfaEnrollmentCompleted { .. } => "mfa.enrollment_completed",
@@ -374,6 +441,7 @@ impl TelemetryEvent {
             Self::AdminServiceCreated { .. } => "admin.service_created",
             Self::AdminServiceUpdated { .. } => "admin.service_updated",
             Self::ProxyError { .. } => "proxy.error",
+            Self::ProxySuccess { .. } => "proxy.success",
             Self::ApiRateLimited { .. } => "api.rate_limited",
         }
     }
@@ -395,9 +463,19 @@ impl TelemetryEvent {
         match self {
             Self::UserSignedUp {
                 method,
+                source,
+                email_domain,
+                invite_code_id,
+                referrer_domain,
+                via_org,
                 invite_code_used,
             } => json!({
                 "method": method,
+                "source": source,
+                "email_domain": email_domain,
+                "invite_code_id": invite_code_id,
+                "referrer_domain": referrer_domain,
+                "via_org": via_org,
                 "invite_code_used": invite_code_used,
             }),
             Self::UserEmailVerified => json!({}),
@@ -422,6 +500,15 @@ impl TelemetryEvent {
             Self::AuthDelegationRefreshed { client_id } => json!({ "client_id": client_id }),
             Self::InviteCodeGenerated { generated_by_role } => json!({
                 "generated_by_role": generated_by_role,
+            }),
+            Self::InviteCodeRedeemed {
+                code_id,
+                created_by_user_id,
+                days_to_redemption,
+            } => json!({
+                "code_id": code_id,
+                "created_by_user_id": created_by_user_id,
+                "days_to_redemption": days_to_redemption,
             }),
             Self::UserDeleted { reason } => json!({ "reason": reason }),
             Self::MfaEnrollmentStarted { factor_type } => json!({ "factor_type": factor_type }),
@@ -666,6 +753,19 @@ impl TelemetryEvent {
                 "error_code": error_code,
                 "status": status,
             }),
+            Self::ProxySuccess {
+                service_slug,
+                method,
+                status,
+                latency_ms,
+                auth_kind,
+            } => json!({
+                "service_slug": service_slug,
+                "method": method,
+                "status": status,
+                "latency_ms": latency_ms,
+                "auth_kind": auth_kind,
+            }),
             Self::ApiRateLimited {
                 route,
                 limit_type,
@@ -706,6 +806,60 @@ mod tests {
         // then assert it comes out redacted.
         let v = e.properties();
         assert_eq!(v["error_code"], 8001);
+    }
+
+    #[test]
+    fn proxy_success_name_and_properties() {
+        let e = TelemetryEvent::ProxySuccess {
+            service_slug: "openai".into(),
+            method: "POST".into(),
+            status: 200,
+            latency_ms: 42,
+            auth_kind: "api_key",
+        };
+        assert_eq!(e.name(), "proxy.success");
+        let v = e.properties();
+        assert_eq!(v["service_slug"], "openai");
+        assert_eq!(v["method"], "POST");
+        assert_eq!(v["status"], 200);
+        assert_eq!(v["latency_ms"], 42);
+        assert_eq!(v["auth_kind"], "api_key");
+    }
+
+    #[test]
+    fn invite_code_redeemed_uses_pre_hashed_ids() {
+        // The schema scrubber redacts raw UUIDs at egress. Emit sites
+        // must pre-hash IDs so the values survive scrubbing intact —
+        // this test enforces that contract by feeding a hash-shaped
+        // value (hex, length 16) and asserting it passes through.
+        let e = TelemetryEvent::InviteCodeRedeemed {
+            code_id: "a1b2c3d4e5f60718".into(),
+            created_by_user_id: "0123456789abcdef".into(),
+            days_to_redemption: 3,
+        };
+        assert_eq!(e.name(), "invite.code_redeemed");
+        let v = e.properties();
+        assert_eq!(v["code_id"], "a1b2c3d4e5f60718");
+        assert_eq!(v["created_by_user_id"], "0123456789abcdef");
+        assert_eq!(v["days_to_redemption"], 3);
+    }
+
+    #[test]
+    fn user_signed_up_carries_funnel_attribution() {
+        let e = TelemetryEvent::UserSignedUp {
+            method: "email".into(),
+            source: "invite_code".into(),
+            email_domain: Some("example.com".into()),
+            invite_code_id: Some("deadbeefdeadbeef".into()),
+            referrer_domain: Some("twitter.com".into()),
+            via_org: None,
+            invite_code_used: true,
+        };
+        let v = e.properties();
+        assert_eq!(v["source"], "invite_code");
+        assert_eq!(v["email_domain"], "example.com");
+        assert_eq!(v["invite_code_used"], true);
+        assert_eq!(v["referrer_domain"], "twitter.com");
     }
 
     #[test]

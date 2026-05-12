@@ -3980,7 +3980,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid-cli"
-version = "0.5.2"
+version = "0.5.4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4008,6 +4008,7 @@ dependencies = [
  "rpassword",
  "russh",
  "rust-embed",
+ "rustls 0.23.37",
  "rustls-pki-types",
  "rustls-webpki 0.103.9",
  "self-replace",

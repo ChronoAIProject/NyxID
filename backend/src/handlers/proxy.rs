@@ -91,6 +91,61 @@ fn emit_proxy_error_telemetry(
     );
 }
 
+/// Stable string label for the auth method that issued this proxy request.
+/// Pairs with `TelemetryEvent::ProxySuccess.auth_kind`. The values are part
+/// of the public PostHog property contract — if you rename one, update the
+/// HogQL queries in `.claude/skills/daily/SKILL.md` and the strategy doc
+/// before merging.
+fn auth_kind_label(method: &crate::mw::auth::AuthMethod) -> &'static str {
+    use crate::mw::auth::AuthMethod::*;
+    match method {
+        Session => "session",
+        AccessToken => "access_token",
+        Relay => "relay",
+        ApiKey => "api_key",
+        ServiceAccount => "service_account",
+        Delegated => "delegated",
+    }
+}
+
+/// Fire-and-forget emission of `TelemetryEvent::ProxySuccess` from the
+/// outer proxy wrappers when the upstream returned 2xx. Mirror of
+/// `emit_proxy_error_telemetry`: `resolved_slug` MUST be the slug of the
+/// resolved service (populated by `execute_proxy_inner`), not the route
+/// path parameter, so success and error events join cleanly on
+/// `service_slug` for success-rate computation.
+///
+/// `started_at` is the handler entry timestamp; the difference is recorded
+/// as `latency_ms`. The status is the actual upstream status echoed back
+/// in the response we are about to return to the client. Any non-2xx
+/// status is the caller's signal NOT to call this helper — it returns Ok
+/// for any status to keep the emit-site call brief, and the caller is
+/// expected to gate on `response.status().is_success()`.
+fn emit_proxy_success_telemetry(
+    state: &AppState,
+    auth_user: &AuthUser,
+    tele: &TelemetryContext,
+    resolved_slug: &str,
+    method: &Method,
+    status: StatusCode,
+    started_at: std::time::Instant,
+) {
+    let latency_ms = started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        tele,
+        TelemetryEvent::ProxySuccess {
+            service_slug: resolved_slug.to_string(),
+            method: method.as_str().to_string(),
+            status: status.as_u16(),
+            latency_ms,
+            auth_kind: auth_kind_label(&auth_user.auth_method),
+        },
+    );
+}
+
 /// Response headers that are safe to forward back to the client.
 /// Uses an allowlist to prevent leaking internal headers from downstream services.
 /// NOTE: CORS headers (access-control-*) are intentionally excluded — the NyxID
@@ -369,6 +424,8 @@ pub async fn proxy_request(
     // inner function threads `resolved_slug` through so we can attach a
     // real slug (never a UUID from the route path) even when the error
     // happens after service resolution. See docs/TELEMETRY.md §5.1.
+    let started_at = std::time::Instant::now();
+    let method = request.method().clone();
     let mut resolved_slug = String::new();
     let result = proxy_request_inner(
         &state,
@@ -379,8 +436,27 @@ pub async fn proxy_request(
         &mut resolved_slug,
     )
     .await;
-    if let Err(ref err) = result {
-        emit_proxy_error_telemetry(&state, &auth_user, &tele, &resolved_slug, err);
+    match &result {
+        Ok(response) if response.status().is_success() => {
+            emit_proxy_success_telemetry(
+                &state,
+                &auth_user,
+                &tele,
+                &resolved_slug,
+                &method,
+                response.status(),
+                started_at,
+            );
+        }
+        Ok(_) => {
+            // Non-2xx Ok responses come from upstream-error passthrough
+            // (e.g. 4xx from the target service). They are neither a
+            // NyxID-side `proxy.error` nor a `proxy.success`; the proxy
+            // layer behaved correctly while the downstream rejected.
+            // Skip telemetry — counting upstream 4xx as either side
+            // distorts both signals.
+        }
+        Err(err) => emit_proxy_error_telemetry(&state, &auth_user, &tele, &resolved_slug, err),
     }
     result
 }
@@ -547,6 +623,8 @@ pub async fn proxy_request_by_slug(
     // intentionally do NOT seed with the path-param slug: telemetry §5.1
     // requires a resolved slug or empty, and the path param is unvalidated
     // user input until resolution succeeds.
+    let started_at = std::time::Instant::now();
+    let method = request.method().clone();
     let mut resolved_slug = String::new();
     let result = proxy_request_by_slug_inner(
         &state,
@@ -557,8 +635,25 @@ pub async fn proxy_request_by_slug(
         &mut resolved_slug,
     )
     .await;
-    if let Err(ref err) = result {
-        emit_proxy_error_telemetry(&state, &auth_user, &tele, &resolved_slug, err);
+    match &result {
+        Ok(response) if response.status().is_success() => {
+            emit_proxy_success_telemetry(
+                &state,
+                &auth_user,
+                &tele,
+                &resolved_slug,
+                &method,
+                response.status(),
+                started_at,
+            );
+        }
+        Ok(_) => {
+            // See `proxy_request` for the upstream-error passthrough
+            // rationale: a 4xx echoed from the downstream is not a
+            // NyxID-side success or error, so it is intentionally not
+            // emitted on either side.
+        }
+        Err(err) => emit_proxy_error_telemetry(&state, &auth_user, &tele, &resolved_slug, err),
     }
     result
 }
@@ -3635,9 +3730,9 @@ async fn bridge_websockets_via_node(
 mod tests {
     use super::{
         ALLOWED_FORWARD_HEADER_PREFIXES, ALLOWED_FORWARD_HEADERS, ALLOWED_WS_FORWARD_HEADERS,
-        WsPassthroughGuard, collect_forward_headers_with_prefixes, compose_pre_resolved_node_ids,
-        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
-        should_enforce_runtime_approval, validate_range_header,
+        WsPassthroughGuard, auth_kind_label, collect_forward_headers_with_prefixes,
+        compose_pre_resolved_node_ids, is_chat_completions_proxy_path, is_codex_transport_path,
+        is_ws_upgrade_request, should_enforce_runtime_approval, validate_range_header,
     };
     use crate::mw::auth::AuthMethod;
     use crate::services::proxy_service::validate_requested_proxy_path;
@@ -3657,6 +3752,23 @@ mod tests {
     use tower::ServiceExt;
 
     // ---- validate_range_header tests ----
+
+    #[test]
+    fn auth_kind_label_covers_every_method() {
+        // Exhaustive mapping check. If a new variant is added to
+        // `AuthMethod`, `auth_kind_label` will fail to compile (match
+        // is non-exhaustive) — this test exists to lock in the
+        // *string values* that the PostHog property contract depends on.
+        assert_eq!(auth_kind_label(&AuthMethod::Session), "session");
+        assert_eq!(auth_kind_label(&AuthMethod::AccessToken), "access_token");
+        assert_eq!(auth_kind_label(&AuthMethod::Relay), "relay");
+        assert_eq!(auth_kind_label(&AuthMethod::ApiKey), "api_key");
+        assert_eq!(
+            auth_kind_label(&AuthMethod::ServiceAccount),
+            "service_account"
+        );
+        assert_eq!(auth_kind_label(&AuthMethod::Delegated), "delegated");
+    }
 
     #[test]
     fn range_header_absent_is_ok() {

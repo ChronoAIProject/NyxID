@@ -270,7 +270,7 @@ impl TelemetryErasureService {
 
 | Handler file | Events |
 |---|---|
-| `handlers/auth.rs` | `auth.logged_in`, `auth.logged_out`, `auth.token_refreshed`, `auth.password_reset_requested`, `auth.password_reset_completed`, `user.signed_up` |
+| `handlers/auth.rs` | `auth.logged_in`, `auth.logged_out`, `auth.token_refreshed`, `auth.password_reset_requested`, `auth.password_reset_completed`, `user.signed_up`, `invite.code_redeemed` |
 | `handlers/users.rs` | `user.deleted` (emit, then enqueue erasure, then delete user) |
 | `handlers/mfa.rs` | `mfa.enrollment_completed`, `mfa.challenge_succeeded`, `mfa.challenge_failed` |
 | `handlers/keys.rs` | `key.created`, `key.deleted` |
@@ -287,7 +287,7 @@ impl TelemetryErasureService {
 | `handlers/oauth.rs` | `oauth.token_issued` |
 | `handlers/notifications.rs` | `notification.channel_linked`, `notification.channel_unlinked` |
 | `handlers/admin_*.rs` | `admin.user_suspended`, `admin.service_created`, etc. |
-| `handlers/proxy.rs` | `proxy.error` (100%). No `proxy.request` in M1 (cardinality risk; revisit when a specific question needs it). |
+| `handlers/proxy.rs` | `proxy.error` (100%), `proxy.success` (100%, HTTP 2xx only — upstream 4xx/5xx passthrough is intentionally neither side). Counted with `proxy.error`, `proxy.success` is the source of truth for M1 reach ("≥1 successful proxy per user in window"); see issue #714. |
 | `mw/rate_limit.rs` | `api.rate_limited` |
 
 ### 5.2 Frontend — autocapture + taxonomy-driven `ui.*`

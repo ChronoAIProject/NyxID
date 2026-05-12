@@ -15,7 +15,41 @@ import { BetaAccess } from "./components/beta-access";
 import { ScrollFab } from "./components/scroll-fab";
 import { LandingFooter } from "./components/landing-footer";
 
+// Stopgap: auto-applied for Reddit-referred users without an explicit ?code=.
+// Operator must keep a matching invite code active in admin UI with high max_uses.
+// Remove when proper attribution/campaign codes are wired up.
+const REDDIT_DEFAULT_INVITE_CODE = "NYX-QJGT6NHN";
+
+function injectRedditDefaultCode() {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("code")) return;
+
+  let referrerHost = "";
+  try {
+    referrerHost = new URL(document.referrer).hostname.toLowerCase();
+  } catch {
+    referrerHost = "";
+  }
+  const fromReddit =
+    /(^|\.)reddit\.com$|(^|\.)redd\.it$/.test(referrerHost) ||
+    params.get("utm_source")?.toLowerCase() === "reddit";
+
+  if (fromReddit) {
+    params.set("code", REDDIT_DEFAULT_INVITE_CODE);
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}?${params.toString()}`,
+    );
+  }
+}
+
 export function LandingPage() {
+  // Run synchronously before children render so LandingNavbar's loginHref
+  // (computed at render time) sees the injected ?code=.
+  injectRedditDefaultCode();
+
   useEffect(() => {
     const timer = setTimeout(() => {
       if (window.location.hash === "#beta") {

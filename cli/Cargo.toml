@@ -1,6 +1,6 @@
 [package]
 name = "nyxid-cli"
-version = "0.5.2"
+version = "0.5.4"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -57,6 +57,12 @@ libc = "0.2"
 nix = { version = "0.31.2", features = ["term", "process", "signal"] }
 tempfile = "3"
 const-oid = { version = "0.9", features = ["db"] }
+# Direct rustls dep so we can install a default CryptoProvider at startup.
+# Transitive deps (sigstore -> aws-lc-rs, quinn/ring -> ring) enable BOTH
+# rustls crypto providers via feature unification on Linux release builds,
+# which leaves auto-detection ambiguous and panics on first TLS use
+# (rustls/src/crypto/mod.rs:249). See issue #696.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging", "aws_lc_rs"] }
 pki-types = { package = "rustls-pki-types", version = "1.11" }
 self-replace = "1.5"
 self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls", "compression-flate2", "archive-tar", "archive-zip"] }

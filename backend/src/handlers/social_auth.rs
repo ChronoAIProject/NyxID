@@ -11,10 +11,11 @@ use crate::crypto::token::{constant_time_eq, generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::{
     apply_browser_session_cookies, build_cookie, build_cookie_with_same_site, clear_cookie,
-    clear_cookie_with_same_site, extract_ip, extract_user_agent,
+    clear_cookie_with_same_site, extract_email_domain, extract_ip, extract_referrer_domain,
+    extract_user_agent,
 };
 use crate::services::{audit_service, invite_code_service, social_auth_service, token_service};
-use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 use social_auth_service::SocialProfile;
 
 const SOCIAL_STATE_COOKIE: &str = "nyx_social_state";
@@ -406,27 +407,30 @@ pub async fn callback(
         (true, None)
     };
 
-    let user = social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "Social auth find_or_create_user failed");
-            // Release the reserved invite code on failure so it is not stuck.
-            if let Some(ref iid) = reserved_invite_id {
-                let db = state.db.clone();
-                let iid = iid.clone();
-                tokio::spawn(async move {
-                    let _ = invite_code_service::release_reservation(&db, &iid).await;
-                });
-            }
-            let error_key = match &e {
-                AppError::SocialAuthConflict => "social_auth_conflict",
-                AppError::SocialAuthNoEmail => "social_auth_no_email",
-                AppError::SocialAuthDeactivated => "social_auth_deactivated",
-                AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
-                _ => "social_auth_exchange",
-            };
-            redirect_with_error(&redirect_target, error_key, secure, domain)
-        })?;
+    let create_outcome =
+        social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "Social auth find_or_create_user failed");
+                // Release the reserved invite code on failure so it is not stuck.
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
+                let error_key = match &e {
+                    AppError::SocialAuthConflict => "social_auth_conflict",
+                    AppError::SocialAuthNoEmail => "social_auth_no_email",
+                    AppError::SocialAuthDeactivated => "social_auth_deactivated",
+                    AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
+                    _ => "social_auth_exchange",
+                };
+                redirect_with_error(&redirect_target, error_key, secure, domain)
+            })?;
+    let user = create_outcome.user;
+    let was_newly_created = create_outcome.was_newly_created;
 
     // Record invite code usage after successful user creation / lookup.
     if let Some(ref iid) = reserved_invite_id {
@@ -452,14 +456,50 @@ pub async fn callback(
         client_version: None,
     };
 
-    // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (user.signed_up social path).
-    // `social_auth_service::find_or_create_user` returns the `User` but does
-    // not signal whether the record was just created or already existed,
-    // so we cannot cleanly emit `user.signed_up` only on the new-user
-    // branch without a service refactor. Emitting on every successful
-    // social callback would double-count returning users against
-    // sign-up metrics, which violates the "clean over broad" telemetry
-    // rule.
+    // Telemetry: only the new-user branch of `find_or_create_user` emits
+    // `user.signed_up`; returning logins go through `AuthLoggedIn` instead
+    // (emitted below per redirect target). For new users that redeemed an
+    // invite code, also emit `invite.code_redeemed` so the funnel
+    // (`invite.code_generated` → `invite.code_redeemed`) counts conversions.
+    if was_newly_created {
+        let invite_code_id_hash = reserved_invite_id.as_deref().map(hash_short_id);
+        let source = if reserved_invite_id.is_some() {
+            "invite_code".to_string()
+        } else {
+            "social_oauth".to_string()
+        };
+        emit_event(
+            state.telemetry.as_deref(),
+            &user.id,
+            None,
+            &tele_social,
+            TelemetryEvent::UserSignedUp {
+                method: provider.as_str().to_string(),
+                source,
+                email_domain: extract_email_domain(&profile.email),
+                invite_code_id: invite_code_id_hash,
+                referrer_domain: extract_referrer_domain(&headers),
+                via_org: None,
+                invite_code_used: reserved_invite_id.is_some(),
+            },
+        );
+        if let Some(ref iid) = reserved_invite_id
+            && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, iid).await
+        {
+            let days = (chrono::Utc::now() - meta.created_at).num_days().max(0) as u64;
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::InviteCodeRedeemed {
+                    code_id: hash_short_id(iid),
+                    created_by_user_id: hash_short_id(&meta.created_by),
+                    days_to_redemption: days,
+                },
+            );
+        }
+    }
 
     match &redirect_target {
         SocialRedirectTarget::Web { .. } => {
@@ -775,26 +815,29 @@ pub async fn apple_callback(
         (true, None)
     };
 
-    let user = social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
-        .await
-        .map_err(|e| {
-            // Release the reserved invite code on failure.
-            if let Some(ref iid) = reserved_invite_id {
-                let db = state.db.clone();
-                let iid = iid.clone();
-                tokio::spawn(async move {
-                    let _ = invite_code_service::release_reservation(&db, &iid).await;
-                });
-            }
-            let error_key = match &e {
-                AppError::SocialAuthConflict => "social_auth_conflict",
-                AppError::SocialAuthNoEmail => "social_auth_no_email",
-                AppError::SocialAuthDeactivated => "social_auth_deactivated",
-                AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
-                _ => "social_auth_exchange",
-            };
-            redirect_with_error(&redirect_target, error_key, secure, domain)
-        })?;
+    let create_outcome =
+        social_auth_service::find_or_create_user(&state.db, &profile, allow_new_users)
+            .await
+            .map_err(|e| {
+                // Release the reserved invite code on failure.
+                if let Some(ref iid) = reserved_invite_id {
+                    let db = state.db.clone();
+                    let iid = iid.clone();
+                    tokio::spawn(async move {
+                        let _ = invite_code_service::release_reservation(&db, &iid).await;
+                    });
+                }
+                let error_key = match &e {
+                    AppError::SocialAuthConflict => "social_auth_conflict",
+                    AppError::SocialAuthNoEmail => "social_auth_no_email",
+                    AppError::SocialAuthDeactivated => "social_auth_deactivated",
+                    AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
+                    _ => "social_auth_exchange",
+                };
+                redirect_with_error(&redirect_target, error_key, secure, domain)
+            })?;
+    let user = create_outcome.user;
+    let was_newly_created = create_outcome.was_newly_created;
 
     // Record invite code usage after successful user creation / lookup.
     if let Some(ref iid) = reserved_invite_id {
@@ -819,11 +862,47 @@ pub async fn apple_callback(
         client_version: None,
     };
 
-    // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (user.signed_up social path).
-    // `social_auth_service::find_or_create_user` does not signal whether
-    // the returned `User` was just created, so we cannot emit
-    // `user.signed_up` only on the new-user branch without a service
-    // refactor. See callback() above for the same rationale.
+    // Telemetry: gate `user.signed_up` and `invite.code_redeemed` on the
+    // new-user branch, mirroring the Google/GitHub callback above.
+    if was_newly_created {
+        let invite_code_id_hash = reserved_invite_id.as_deref().map(hash_short_id);
+        let source = if reserved_invite_id.is_some() {
+            "invite_code".to_string()
+        } else {
+            "social_oauth".to_string()
+        };
+        emit_event(
+            state.telemetry.as_deref(),
+            &user.id,
+            None,
+            &tele_social,
+            TelemetryEvent::UserSignedUp {
+                method: "apple".to_string(),
+                source,
+                email_domain: extract_email_domain(&profile.email),
+                invite_code_id: invite_code_id_hash,
+                referrer_domain: extract_referrer_domain(&headers),
+                via_org: None,
+                invite_code_used: reserved_invite_id.is_some(),
+            },
+        );
+        if let Some(ref iid) = reserved_invite_id
+            && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, iid).await
+        {
+            let days = (chrono::Utc::now() - meta.created_at).num_days().max(0) as u64;
+            emit_event(
+                state.telemetry.as_deref(),
+                &user.id,
+                None,
+                &tele_social,
+                TelemetryEvent::InviteCodeRedeemed {
+                    code_id: hash_short_id(iid),
+                    created_by_user_id: hash_short_id(&meta.created_by),
+                    days_to_redemption: days,
+                },
+            );
+        }
+    }
 
     match &redirect_target {
         SocialRedirectTarget::Web { .. } => {

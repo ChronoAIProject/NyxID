@@ -1660,6 +1660,15 @@ async fn migrate_legacy_api_spec_url(db: &Database) -> Result<(), mongodb::error
     Ok(())
 }
 
+/// Return true if the given MongoDB error is an E11000 unique-index violation.
+fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
+    matches!(
+        e.kind.as_ref(),
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we))
+            if we.code == 11000
+    )
+}
+
 /// Migrate existing user data to the new unified collections.
 /// Idempotent: uses source + source_id to skip already-migrated records.
 pub async fn migrate_to_unified_collections(
@@ -1866,15 +1875,29 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
 
     let mut migrated = 0u64;
     for token in &tokens {
-        // Check idempotency: skip if already migrated
-        let existing = db
+        // Check idempotency: skip if already migrated. Both collections are
+        // checked because `cleanup_duplicate_migration_services` can delete a
+        // sibling `user_api_keys` row while leaving the matching
+        // `user_services` row in place, leaving stale state that would
+        // otherwise re-trigger the insert and hit the unique index.
+        let existing_api_key = db
             .collection::<UserApiKey>(USER_API_KEYS)
             .find_one(doc! {
                 "source": "migration_provider_token",
                 "source_id": &token.id,
             })
             .await?;
-        if existing.is_some() {
+        if existing_api_key.is_some() {
+            continue;
+        }
+        let existing_service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {
+                "source": "migration_provider_token",
+                "source_id": &token.id,
+            })
+            .await?;
+        if existing_service.is_some() {
             continue;
         }
 
@@ -2097,6 +2120,13 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
                 .collection::<UserApiKey>(USER_API_KEYS)
                 .delete_one(doc! { "_id": &api_key_id })
                 .await;
+            if is_duplicate_key_error(&e) {
+                tracing::warn!(
+                    source_id = %token.id,
+                    "Skipping provider token migration: user_service with this source_id already exists"
+                );
+                continue;
+            }
             return Err(e.into());
         }
 
@@ -2123,15 +2153,29 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
 
     let mut migrated = 0u64;
     for conn in &connections {
-        // Check idempotency
-        let existing = db
+        // Check idempotency. Both collections are checked because
+        // `cleanup_duplicate_migration_services` can delete a sibling
+        // `user_api_keys` row while leaving the matching `user_services` row
+        // in place, leaving stale state that would otherwise re-trigger the
+        // insert and hit the unique index.
+        let existing_api_key = db
             .collection::<UserApiKey>(USER_API_KEYS)
             .find_one(doc! {
                 "source": "migration_connection",
                 "source_id": &conn.id,
             })
             .await?;
-        if existing.is_some() {
+        if existing_api_key.is_some() {
+            continue;
+        }
+        let existing_service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {
+                "source": "migration_connection",
+                "source_id": &conn.id,
+            })
+            .await?;
+        if existing_service.is_some() {
             continue;
         }
 
@@ -2306,6 +2350,13 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
                 .collection::<UserApiKey>(USER_API_KEYS)
                 .delete_one(doc! { "_id": &api_key_id })
                 .await;
+            if is_duplicate_key_error(&e) {
+                tracing::warn!(
+                    source_id = %conn.id,
+                    "Skipping service connection migration: user_service with this source_id already exists"
+                );
+                continue;
+            }
             return Err(e.into());
         }
 

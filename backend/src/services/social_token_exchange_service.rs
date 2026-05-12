@@ -158,7 +158,9 @@ async fn exchange_social_token_inner(
     // Step 4: Find or create user. First-time social sign-ups are blocked
     // when the invite-code gate is enabled.
     let allow_new_users = !config.invite_code_required;
-    let user = social_auth_service::find_or_create_user(db, &profile, allow_new_users).await?;
+    let user = social_auth_service::find_or_create_user(db, &profile, allow_new_users)
+        .await?
+        .user;
 
     // Step 5: Issue full NyxID token set
     let tokens = token_service::create_session_and_issue_tokens(

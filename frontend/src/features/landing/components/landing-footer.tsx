@@ -1,11 +1,25 @@
+import { Link } from "@tanstack/react-router";
+
 export function LandingFooter() {
   return (
     <footer className="border-t border-landing-border-subtle px-6 py-6">
-      <div className="mx-auto flex max-w-6xl items-center justify-between">
+      <div className="mx-auto flex max-w-6xl flex-col items-center gap-3 sm:flex-row sm:justify-between">
         <p className="font-mono text-xs text-gray-500">
           &copy; {new Date().getFullYear()} Chrono AI. All rights reserved.
         </p>
         <div className="flex items-center gap-4">
+          <Link
+            to="/terms"
+            className="font-mono text-xs text-gray-500 transition-colors hover:text-white"
+          >
+            Terms of Use
+          </Link>
+          <Link
+            to="/privacy"
+            className="font-mono text-xs text-gray-500 transition-colors hover:text-white"
+          >
+            Privacy
+          </Link>
           <a
             href="https://discord.gg/QMvcs8UQBW"
             target="_blank"

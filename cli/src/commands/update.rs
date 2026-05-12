@@ -194,6 +194,23 @@ async fn update_cli_from_source() -> Result<()> {
 }
 
 async fn update_skills(base_url: &Option<String>) -> Result<()> {
+    // When invoked via the exec hand-off from `update_cli`, the running binary
+    // *is* the freshly-installed versioned binary -- which means we're
+    // executing inside the install versions root. That's our cue to clean up
+    // any legacy symlinks that older binaries (which lacked the in-process
+    // cleanup) left dangling at previous versions. Downgrade-safe via tag
+    // comparison, so a manual invocation against an older versioned binary
+    // can't accidentally move PATH symlinks backwards.
+    #[cfg(unix)]
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Ok(versions_root) = install_versions_root()
+        && let Ok(canonical_root) = versions_root.canonicalize()
+        && let Ok(canonical_exe) = current_exe.canonicalize()
+        && canonical_exe.starts_with(&canonical_root)
+    {
+        retarget_secondary_symlinks(&canonical_exe, Path::new(""));
+    }
+
     // Reuse the ai-setup update logic (updates all installed tools)
     super::ai_setup::run(crate::cli::AiSetupCommands::Update {
         tool: None,
@@ -360,6 +377,7 @@ fn install_release_binary(archive_path: &Path, tag: &str) -> Result<PathBuf> {
         let versioned_bin = extract_binary_to_version_dir(archive_path, tag)?;
         let active_path = active_binary_path()?;
         retarget_active_symlink(&active_path, &versioned_bin)?;
+        retarget_secondary_symlinks(&versioned_bin, &active_path);
         cleanup_old_versions(
             &install_versions_root()?,
             Some(&versioned_bin),
@@ -478,7 +496,7 @@ fn active_binary_path_with_current(current_exe: Option<&Path>) -> Result<PathBuf
         && current_exe.file_name().and_then(|name| name.to_str()) == Some(archive_binary_name())
         && let Some(parent) = current_exe.parent()
         && path_contains_dir(parent)
-        && !path_is_under(current_exe, &install_versions_root()?)
+        && !parent_dir_is_under(current_exe, &install_versions_root()?)
     {
         return Ok(current_exe.to_path_buf());
     }
@@ -505,11 +523,19 @@ pub(crate) fn path_contains_dir(dir: &Path) -> bool {
     std::env::split_paths(&path).any(|entry| paths_equivalent(&entry, dir))
 }
 
-fn path_is_under(path: &Path, parent: &Path) -> bool {
-    path.canonicalize()
+/// True when `path` is *located* inside `parent` (looking at where the file lives,
+/// not what it resolves to). A symlink at `~/.cargo/bin/nyxid` whose target is
+/// inside the versions root is NOT "under" the versions root for our purposes —
+/// it's the legacy PATH entry we want to keep retargeting.
+fn parent_dir_is_under(path: &Path, parent: &Path) -> bool {
+    let Some(path_parent) = path.parent() else {
+        return false;
+    };
+    path_parent
+        .canonicalize()
         .ok()
         .zip(parent.canonicalize().ok())
-        .is_some_and(|(path, parent)| path.starts_with(parent))
+        .is_some_and(|(p, root)| p.starts_with(root))
 }
 
 fn paths_equivalent(left: &Path, right: &Path) -> bool {
@@ -521,6 +547,99 @@ fn paths_equivalent(left: &Path, right: &Path) -> bool {
         .ok()
         .zip(right.canonicalize().ok())
         .is_some_and(|(left, right)| left == right)
+}
+
+/// Walk `$PATH` and retarget every `nyxid` symlink that points into our
+/// install versions root, except the primary one we just handled. This keeps
+/// legacy install locations (e.g. `~/.cargo/bin/nyxid` left behind from an
+/// initial `cargo install --path cli`) in sync with the active version
+/// instead of letting them rot at whichever release the legacy entry first
+/// pointed to.
+///
+/// Failures on individual entries are logged and skipped — a permission-denied
+/// PATH dir should never abort the update.
+#[cfg(unix)]
+fn retarget_secondary_symlinks(versioned_bin: &Path, primary: &Path) {
+    let Ok(versions_root) = install_versions_root() else {
+        return;
+    };
+    let Ok(canonical_versions) = versions_root.canonicalize() else {
+        return;
+    };
+    let Some(path_env) = std::env::var_os("PATH") else {
+        return;
+    };
+    let bin_name = archive_binary_name();
+
+    for dir in std::env::split_paths(&path_env) {
+        let candidate = dir.join(bin_name);
+
+        if paths_equivalent(&candidate, primary) {
+            continue;
+        }
+
+        let Ok(meta) = fs::symlink_metadata(&candidate) else {
+            continue;
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+
+        let Ok(target) = candidate.canonicalize() else {
+            continue;
+        };
+        if !target.starts_with(&canonical_versions) {
+            continue;
+        }
+
+        if paths_equivalent(&target, versioned_bin) {
+            continue;
+        }
+
+        // Downgrade guard: if the existing target points at a strictly newer
+        // version than the binary we'd retarget to, leave it alone. Otherwise
+        // a stray invocation of an older versioned binary (e.g.
+        // `versions/v0.5.2/.../nyxid update --skills-only`) could silently
+        // downgrade every legacy symlink in PATH.
+        let target_tag = tag_for_path_in_versions(&target, &canonical_versions);
+        let new_tag = versioned_bin
+            .canonicalize()
+            .ok()
+            .as_deref()
+            .and_then(|v| tag_for_path_in_versions(v, &canonical_versions))
+            .or_else(|| tag_for_path_in_versions(versioned_bin, &canonical_versions));
+        if let (Some(existing), Some(new_tag)) = (target_tag.as_deref(), new_tag.as_deref())
+            && matches!(
+                compare_release_tags(existing, new_tag),
+                Ok(Ordering::Greater)
+            )
+        {
+            continue;
+        }
+
+        match retarget_active_symlink(&candidate, versioned_bin) {
+            Ok(()) => eprintln!(
+                "Updated legacy symlink {} -> {}",
+                candidate.display(),
+                versioned_bin.display()
+            ),
+            Err(err) => eprintln!(
+                "Warning: failed to update legacy symlink {}: {err:#}",
+                candidate.display()
+            ),
+        }
+    }
+}
+
+/// Extract the version tag from a path inside the install versions root.
+/// `<versions_root>/v0.5.3/nyxid-cli-aarch64-apple-darwin/nyxid` -> `Some("v0.5.3")`.
+fn tag_for_path_in_versions(path: &Path, canonical_versions: &Path) -> Option<String> {
+    path.strip_prefix(canonical_versions)
+        .ok()?
+        .components()
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+        .map(|s| s.to_string())
 }
 
 #[cfg(unix)]
@@ -1321,6 +1440,164 @@ mod tests {
         let rolled_back = rollback_cli().unwrap();
         assert!(paths_equivalent(&rolled_back, &first));
         assert!(paths_equivalent(&fs::read_link(&active).unwrap(), &first));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_path_resolves_symlink_in_path_pointing_into_versions_root() {
+        use std::os::unix::fs::symlink;
+        let _lock = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let versions_root = tmp.path().join("versions");
+        let bin_dir = tmp.path().join("legacy-bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let versioned = write_version_binary(&versions_root, "v0.5.3");
+        let legacy_symlink = bin_dir.join(archive_binary_name());
+        symlink(&versioned, &legacy_symlink).unwrap();
+
+        let _install = EnvGuard::set(INSTALL_ROOT_ENV, versions_root.as_os_str());
+        let mut path_value = OsString::from(bin_dir.as_os_str());
+        if let Some(existing) = std::env::var_os("PATH") {
+            path_value.push(":");
+            path_value.push(&existing);
+        }
+        let _path = EnvGuard::set("PATH", &path_value);
+
+        let resolved = active_binary_path_with_current(Some(&legacy_symlink)).unwrap();
+        assert_eq!(resolved, legacy_symlink);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_path_skips_real_binary_inside_versions_root() {
+        let _lock = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let versions_root = tmp.path().join("versions");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let versioned = write_version_binary(&versions_root, "v0.5.3");
+
+        let _install = EnvGuard::set(INSTALL_ROOT_ENV, versions_root.as_os_str());
+        let _home = EnvGuard::set("HOME", home.as_os_str());
+
+        // Even though the versioned binary's parent is in PATH (we add it
+        // below), `parent_dir_is_under` should detect that it lives inside
+        // the versions root and fall through to the default install path.
+        let mut path_value = OsString::from(versioned.parent().unwrap().as_os_str());
+        if let Some(existing) = std::env::var_os("PATH") {
+            path_value.push(":");
+            path_value.push(&existing);
+        }
+        let _path = EnvGuard::set("PATH", &path_value);
+
+        let resolved = active_binary_path_with_current(Some(&versioned)).unwrap();
+        assert_eq!(
+            resolved,
+            home.join(".local").join("bin").join(archive_binary_name())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retarget_secondary_symlinks_updates_stale_legacy_symlinks() {
+        use std::os::unix::fs::symlink;
+        let _lock = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let versions_root = tmp.path().join("versions");
+        let old_bin = write_version_binary(&versions_root, "v0.5.2");
+        let new_bin = write_version_binary(&versions_root, "v0.5.3");
+
+        let primary_dir = tmp.path().join("primary-bin");
+        let legacy_dir = tmp.path().join("legacy-bin");
+        let other_dir = tmp.path().join("other-bin");
+        fs::create_dir_all(&primary_dir).unwrap();
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::create_dir_all(&other_dir).unwrap();
+
+        let primary = primary_dir.join(archive_binary_name());
+        let legacy = legacy_dir.join(archive_binary_name());
+        let outside_target = tmp.path().join("outside-target");
+        fs::write(&outside_target, b"other").unwrap();
+        let unrelated = other_dir.join(archive_binary_name());
+
+        // Primary already points to the new binary (post primary retarget).
+        symlink(&new_bin, &primary).unwrap();
+        // Legacy symlink still points at the previous version.
+        symlink(&old_bin, &legacy).unwrap();
+        // A nyxid symlink that points outside the versions root should be left
+        // alone -- it might be a deliberate dev-tree symlink, not ours.
+        symlink(&outside_target, &unrelated).unwrap();
+
+        let _install = EnvGuard::set(INSTALL_ROOT_ENV, versions_root.as_os_str());
+        let path_value = std::env::join_paths([&primary_dir, &legacy_dir, &other_dir]).unwrap();
+        let _path = EnvGuard::set("PATH", &path_value);
+
+        retarget_secondary_symlinks(&new_bin, &primary);
+
+        assert_eq!(fs::read_link(&primary).unwrap(), new_bin);
+        assert_eq!(fs::read_link(&legacy).unwrap(), new_bin);
+        assert_eq!(fs::read_link(&unrelated).unwrap(), outside_target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retarget_secondary_symlinks_refuses_to_downgrade() {
+        use std::os::unix::fs::symlink;
+        let _lock = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let versions_root = tmp.path().join("versions");
+        let older = write_version_binary(&versions_root, "v0.5.2");
+        let newer = write_version_binary(&versions_root, "v0.5.4");
+
+        let legacy_dir = tmp.path().join("legacy-bin");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy = legacy_dir.join(archive_binary_name());
+        // Legacy symlink already at the newer version.
+        symlink(&newer, &legacy).unwrap();
+
+        let _install = EnvGuard::set(INSTALL_ROOT_ENV, versions_root.as_os_str());
+        let _path = EnvGuard::set("PATH", legacy_dir.as_os_str());
+
+        // Simulate a stray hand-off from the older versioned binary --
+        // versioned_bin is the older path, primary is meaningless.
+        retarget_secondary_symlinks(&older, Path::new(""));
+
+        // Legacy symlink must still point at the newer binary.
+        assert_eq!(fs::read_link(&legacy).unwrap(), newer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retarget_secondary_symlinks_leaves_regular_files_alone() {
+        let _lock = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let versions_root = tmp.path().join("versions");
+        let new_bin = write_version_binary(&versions_root, "v0.5.3");
+
+        let path_dir = tmp.path().join("bin");
+        fs::create_dir_all(&path_dir).unwrap();
+        let regular = path_dir.join(archive_binary_name());
+        fs::write(&regular, b"some-other-tool").unwrap();
+
+        let _install = EnvGuard::set(INSTALL_ROOT_ENV, versions_root.as_os_str());
+        let _path = EnvGuard::set("PATH", path_dir.as_os_str());
+
+        let bogus_primary = tmp.path().join("nonexistent-primary");
+        retarget_secondary_symlinks(&new_bin, &bogus_primary);
+
+        let meta = fs::symlink_metadata(&regular).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(fs::read(&regular).unwrap(), b"some-other-tool");
     }
 
     #[cfg(unix)]

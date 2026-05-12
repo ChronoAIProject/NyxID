@@ -603,6 +603,22 @@ fn map_social_link_error(e: mongodb::error::Error) -> AppError {
     AppError::DatabaseError(e)
 }
 
+/// Outcome of [`find_or_create_user`]. Carries the resolved `User` plus a
+/// boolean indicating whether the social-auth call materialized a brand-new
+/// user row. The `was_newly_created` flag is the only honest way for the
+/// caller to distinguish first-time signup from returning login, since the
+/// underlying `User` model has no "created during this call" marker. The
+/// signup telemetry event (`user.signed_up`) is gated on this flag.
+#[derive(Clone, Debug)]
+pub struct FindOrCreateUserResult {
+    pub user: User,
+    /// `true` only on `SocialLoginOutcome::CreateNew` — both
+    /// `UpdateReturning` (same social identity returning) and
+    /// `LinkToExisting` (existing email picked up a social link) are
+    /// "returning" branches.
+    pub was_newly_created: bool,
+}
+
 /// Find an existing user by social identity or email, or create a new one.
 ///
 /// NOTE: The returned `User` struct reflects the state *before* the update.
@@ -616,7 +632,7 @@ pub async fn find_or_create_user(
     db: &mongodb::Database,
     profile: &SocialProfile,
     allow_new_users: bool,
-) -> AppResult<User> {
+) -> AppResult<FindOrCreateUserResult> {
     let users = db.collection::<User>(USERS);
 
     let existing_social = users
@@ -648,7 +664,10 @@ pub async fn find_or_create_user(
             users
                 .update_one(doc! { "_id": &user.id }, doc! { "$set": update })
                 .await?;
-            Ok(user.clone())
+            Ok(FindOrCreateUserResult {
+                user: user.clone(),
+                was_newly_created: false,
+            })
         }
         SocialLoginOutcome::LinkToExisting {
             ref user,
@@ -658,7 +677,10 @@ pub async fn find_or_create_user(
                 .update_one(doc! { "_id": &user.id }, doc! { "$set": update })
                 .await
                 .map_err(map_social_link_error)?;
-            Ok(user.clone())
+            Ok(FindOrCreateUserResult {
+                user: user.clone(),
+                was_newly_created: false,
+            })
         }
         SocialLoginOutcome::CreateNew(mut new_user) => {
             if !allow_new_users {
@@ -687,7 +709,10 @@ pub async fn find_or_create_user(
                 provider = %profile.provider.as_str(),
                 "Social user created"
             );
-            Ok(new_user)
+            Ok(FindOrCreateUserResult {
+                user: new_user,
+                was_newly_created: true,
+            })
         }
     }
 }
