@@ -23,7 +23,12 @@
     "release:prod": "pnpm release:ios && pnpm release:android",
     "bump:ios": "node scripts/bump-version.js ios prod",
     "bump:android": "node scripts/bump-version.js android prod",
-    "bump:both": "node scripts/bump-version.js both prod"
+    "bump:both": "node scripts/bump-version.js both prod",
+    "clean:ios": "node scripts/clean.js ios",
+    "clean:android": "node scripts/clean.js android",
+    "clean:caches": "node scripts/clean.js caches",
+    "clean": "node scripts/clean.js all",
+    "clean:full": "node scripts/clean.js full"
   },
   "expo": {
     "autolinking": {
