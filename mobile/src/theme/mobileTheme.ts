@@ -1,24 +1,33 @@
+// NyxID design system tokens — mobile adaptation.
+//
+// Source of truth: DESIGN.md at repo root.
+// Web (Tailwind/CSS) and mobile (StyleSheet) share the same hex values.
+// Layout-only tokens that don't apply to mobile (sidebar widths, top-bar
+// height, right-panel width) are intentionally not represented here.
+
 export type ThemeColors = {
-  bg: string;
-  card: string;
-  cardSoft: string;
-  border: string;
-  borderSoft: string;
-  textPrimary: string;
-  textSecondary: string;
-  textMuted: string;
-  success: string;
+  bg: string;            // main background (spec: base)
+  card: string;          // elevated content (spec: surface/card)
+  cardSoft: string;      // darkest layer (spec: sidebar)
+  border: string;        // default card borders + dividers
+  borderSoft: string;    // subtle dividers within cards
+  textPrimary: string;   // headings, important text (warm off-white)
+  textSecondary: string; // body text, descriptions
+  textMuted: string;     // supporting text, metadata
+  textTertiary: string;  // timestamps, disabled text, section labels
+  success: string;       // active services, healthy nodes, approved grants
   successSoft: string;
-  info: string;
+  info: string;          // informational badges, auth events
   infoSoft: string;
-  warning: string;
+  warning: string;       // expiring tokens, pending approvals
   warningSoft: string;
-  danger: string;
+  danger: string;        // expired, failed, denied
   dangerSoft: string;
   dangerSoftBg: string;
-  primary: string;
-  primaryDim: string;
-  primaryGlow: string;
+  primary: string;       // warm violet — identity + interaction only
+  primaryDim: string;    // pressed states, hover deep
+  primaryLight: string;  // logo wordmark tones, light text on accent
+  primaryGlow: string;   // subtle ambient accent (AI setup card, etc.)
   onPrimary: string;
   ghostBg: string;
   ghostText: string;
@@ -26,46 +35,65 @@ export type ThemeColors = {
   fabBorder: string;
   overlayBg: string;
   handleBg: string;
-  navActive: string;
+  navActive: string;     // active nav row background
   shadowColor: string;
   riskHigh: { bg: string; text: string; border: string };
   riskMedium: { bg: string; text: string; border: string };
   riskLow: { bg: string; text: string; border: string };
 };
 
+// ── Brand primaries (DESIGN.md §Color → Primary Accent) ──
+const PRIMARY = "#9775fa";        // warm violet (NOT the AI-default Tailwind violet-500)
+const PRIMARY_LIGHT = "#c4b5fd";  // logo wordmark, light text on accent
+const PRIMARY_DEEP = "#7c5ce0";   // pressed states
+
+// ── Semantic status (DESIGN.md §Color → Semantic Status) ──
+const SUCCESS = "#34d399";
+const WARNING = "#f59e0b";
+const DANGER = "#f87171";
+const INFO = "#60a5fa";
+
 export const darkColors: ThemeColors = {
-  bg: "#10101A",
-  card: "#171726",
-  cardSoft: "#121222",
-  border: "#2A2739",
-  borderSoft: "#1E1B2E",
-  textPrimary: "#F0EEFF",
-  textSecondary: "#A9A3BE",
-  textMuted: "#8F88AB",
-  success: "#34D399",
-  successSoft: "#34D39940",
-  info: "#60A5FA",
-  infoSoft: "#60A5FA40",
-  warning: "#F59E0B",
-  warningSoft: "#F59E0B40",
-  danger: "#EF4444",
-  dangerSoft: "#FCA5A5",
-  dangerSoftBg: "rgba(239,68,68,0.1)",
-  primary: "#8B5CF6",
-  primaryDim: "#6D42D9",
-  primaryGlow: "rgba(139, 92, 246, 0.12)",
+  // 3-layer depth — sidebar / base / surface
+  bg: "#07060e",
+  card: "#0c0b14",
+  cardSoft: "#06060b",
+  // Borders
+  border: "#1c1828",
+  borderSoft: "rgba(255, 255, 255, 0.05)",
+  // 4-level text hierarchy
+  textPrimary: "#e8e4f0",
+  textSecondary: "#9e96b0",
+  textMuted: "#7a7490",
+  textTertiary: "#4a4460",
+  // Semantic
+  success: SUCCESS,
+  successSoft: "rgba(52, 211, 153, 0.18)",
+  info: INFO,
+  infoSoft: "rgba(96, 165, 250, 0.18)",
+  warning: WARNING,
+  warningSoft: "rgba(245, 158, 11, 0.18)",
+  danger: DANGER,
+  dangerSoft: "#fca5a5",
+  dangerSoftBg: "rgba(248, 113, 113, 0.10)",
+  // Brand
+  primary: PRIMARY,
+  primaryDim: PRIMARY_DEEP,
+  primaryLight: PRIMARY_LIGHT,
+  primaryGlow: "rgba(151, 117, 250, 0.12)",
   onPrimary: "#FFFFFF",
-  ghostBg: "rgba(139,92,246,0.06)",
-  ghostText: "#F8F7FF",
-  fabBg: "rgba(16,16,26,1)",
-  fabBorder: "rgba(139,92,246,0.35)",
+  // Ghost / interactive chrome
+  ghostBg: "rgba(151, 117, 250, 0.06)",
+  ghostText: "#e8e4f0",
+  fabBg: "rgba(7, 6, 14, 1)",
+  fabBorder: "rgba(151, 117, 250, 0.35)",
   overlayBg: "#000",
-  handleBg: "rgba(255,255,255,0.15)",
-  navActive: "#232136",
+  handleBg: "rgba(255, 255, 255, 0.15)",
+  navActive: "rgba(255, 255, 255, 0.06)",
   shadowColor: "#000",
-  riskHigh: { bg: "#7F1D1D30", text: "#FCA5A5", border: "#F8717140" },
-  riskMedium: { bg: "#78350F30", text: "#FCD34D", border: "#F59E0B40" },
-  riskLow: { bg: "rgba(52,211,153,0.12)", text: "#6EE7B7", border: "rgba(52,211,153,0.2)" },
+  riskHigh: { bg: "rgba(248, 113, 113, 0.12)", text: "#fca5a5", border: "rgba(248, 113, 113, 0.30)" },
+  riskMedium: { bg: "rgba(245, 158, 11, 0.12)", text: "#fcd34d", border: "rgba(245, 158, 11, 0.30)" },
+  riskLow: { bg: "rgba(52, 211, 153, 0.12)", text: "#6ee7b7", border: "rgba(52, 211, 153, 0.30)" },
 };
 
 export const lightColors: ThemeColors = {
@@ -77,30 +105,32 @@ export const lightColors: ThemeColors = {
   textPrimary: "#1A1730",
   textSecondary: "#5E5875",
   textMuted: "#8F88AB",
+  textTertiary: "#A8A0BC",
   success: "#10B981",
-  successSoft: "rgba(16,185,129,0.2)",
+  successSoft: "rgba(16, 185, 129, 0.18)",
   info: "#3B82F6",
-  infoSoft: "rgba(59,130,246,0.2)",
+  infoSoft: "rgba(59, 130, 246, 0.18)",
   warning: "#D97706",
-  warningSoft: "rgba(217,119,6,0.2)",
+  warningSoft: "rgba(217, 119, 6, 0.18)",
   danger: "#DC2626",
   dangerSoft: "#DC2626",
-  dangerSoftBg: "rgba(220,38,38,0.06)",
-  primary: "#7C3AED",
-  primaryDim: "#6D28D9",
-  primaryGlow: "rgba(124, 58, 237, 0.06)",
+  dangerSoftBg: "rgba(220, 38, 38, 0.06)",
+  primary: PRIMARY,
+  primaryDim: PRIMARY_DEEP,
+  primaryLight: PRIMARY_LIGHT,
+  primaryGlow: "rgba(151, 117, 250, 0.08)",
   onPrimary: "#FFFFFF",
-  ghostBg: "rgba(124,58,237,0.04)",
-  ghostText: "#7C3AED",
-  fabBg: "rgba(80,78,93,1)",
-  fabBorder: "rgba(139,92,246,0.35)",
-  overlayBg: "rgba(0,0,0,0.3)",
-  handleBg: "rgba(0,0,0,0.12)",
+  ghostBg: "rgba(151, 117, 250, 0.05)",
+  ghostText: PRIMARY,
+  fabBg: "rgba(80, 78, 93, 1)",
+  fabBorder: "rgba(151, 117, 250, 0.35)",
+  overlayBg: "rgba(0, 0, 0, 0.3)",
+  handleBg: "rgba(0, 0, 0, 0.12)",
   navActive: "#EDEBF7",
-  shadowColor: "rgba(30,20,60,0.15)",
-  riskHigh: { bg: "rgba(220,38,38,0.08)", text: "#DC2626", border: "rgba(220,38,38,0.2)" },
-  riskMedium: { bg: "rgba(217,119,6,0.08)", text: "#D97706", border: "rgba(217,119,6,0.2)" },
-  riskLow: { bg: "rgba(16,185,129,0.08)", text: "#10B981", border: "rgba(16,185,129,0.2)" },
+  shadowColor: "rgba(30, 20, 60, 0.15)",
+  riskHigh: { bg: "rgba(220, 38, 38, 0.08)", text: "#DC2626", border: "rgba(220, 38, 38, 0.20)" },
+  riskMedium: { bg: "rgba(217, 119, 6, 0.08)", text: "#D97706", border: "rgba(217, 119, 6, 0.20)" },
+  riskLow: { bg: "rgba(16, 185, 129, 0.08)", text: "#10B981", border: "rgba(16, 185, 129, 0.20)" },
 };
 
 /** @deprecated Use `useTheme()` from ThemeContext instead. */
