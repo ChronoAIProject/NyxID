@@ -188,6 +188,37 @@ export async function postWizardCancel(): Promise<void> {
   }
 }
 
+/**
+ * Issue #653 Gap D: tell the CLI's wizard server we are about to
+ * navigate the wizard tab away to a provider's OAuth URL (popup-blocked
+ * fallback path). Two effects on the CLI side:
+ *   1. Heartbeat watchdog widens its dead-after window from ~20s to
+ *      ~5min, so it doesn't kill the wizard server while the user is
+ *      mid-OAuth on the provider's site.
+ *   2. `resolve_soft_failure_outcome` switches into "poll the backend
+ *      for pending placeholders before declaring cancellation" mode, so
+ *      a successful OAuth that lands while the wizard tab is gone
+ *      becomes a clean CLI success rather than a watchdog cancellation.
+ *
+ * Best-effort — even if this POST fails, navigation still proceeds and
+ * the CLI just falls back to its existing watchdog behaviour. The
+ * downside in that case is the CLI may exit as cancelled despite a
+ * successful OAuth; the user still has the active service in `nyxid
+ * status` and the frontend's `/keys/{id}` page shows it.
+ */
+export async function postOauthNavigate(): Promise<boolean> {
+  try {
+    const response = await fetch("/api/proxy/oauth-navigate", {
+      method: "POST",
+      headers: withCsrf({ "content-type": "application/json" }),
+      body: "{}",
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
 /** How often the browser pings the CLI's wizard server. */
 const HEARTBEAT_INTERVAL_MS = 1200
 /**
