@@ -144,6 +144,9 @@ export const OAuthErrorPage = lazy(() =>
 export const PrivacyPage = lazy(() =>
   import("@/pages/privacy").then((m) => ({ default: m.PrivacyPage })),
 );
+export const TermsPage = lazy(() =>
+  import("@/pages/terms").then((m) => ({ default: m.TermsPage })),
+);
 export const NotificationSettingsPage = lazy(() =>
   import("@/pages/notification-settings").then((m) => ({
     default: m.NotificationSettingsPage,

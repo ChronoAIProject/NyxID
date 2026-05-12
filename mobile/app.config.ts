@@ -107,6 +107,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       TELEMETRY_DSN: r.telemetryDsn,
       TELEMETRY_HOST: r.telemetryHost,
       NYXID_SHARE_ANALYTICS: r.shareAnalytics,
+      LEGAL_BASE_URL: r.legalBaseUrl,
     },
   };
 };
