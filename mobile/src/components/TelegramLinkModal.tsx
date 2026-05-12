@@ -42,9 +42,9 @@ function CopyIcon({ color }: { color: string }) {
   );
 }
 
-function CheckIcon() {
+function CheckIcon({ color }: { color: string }) {
   return (
-    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke="#34D399" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+    <Svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
       <Path d="M20 6L9 17l-5-5" />
     </Svg>
   );
@@ -191,7 +191,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
           {/* Connected state */}
           {connected && (
             <View style={styles.centerWrap}>
-              <CheckIcon />
+              <CheckIcon color={colors.success} />
               <Text style={styles.successText}>Telegram connected!</Text>
             </View>
           )}
@@ -226,7 +226,7 @@ export function TelegramLinkModal({ visible, onDismiss, onConnected }: TelegramL
               <View style={styles.codeRow}>
                 <Text style={styles.codeText} selectable>/start {linkInfo.link_code}</Text>
                 <Pressable style={styles.copyBtn} onPress={() => void handleCopy()}>
-                  {copied ? <CheckIcon /> : <CopyIcon color={colors.textSecondary} />}
+                  {copied ? <CheckIcon color={colors.success} /> : <CopyIcon color={colors.textSecondary} />}
                 </Pressable>
               </View>
 
@@ -261,7 +261,7 @@ const createStyles = (c: ThemeColors) =>
       backgroundColor: "rgba(0,0,0,0.65)",
       justifyContent: "center",
       alignItems: "center",
-      paddingHorizontal: 28,
+      paddingHorizontal: spacing.huge + spacing.xs,
     },
     card: {
       width: "100%",

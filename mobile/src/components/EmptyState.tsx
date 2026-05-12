@@ -75,7 +75,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   iconWrap: {
     width: 40,
     height: 40,
-    borderRadius: 20,
+    borderRadius: radius.full,
     borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",

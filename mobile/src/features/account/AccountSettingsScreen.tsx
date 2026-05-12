@@ -633,23 +633,21 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   identityHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
+    gap: spacing.lg,
     marginBottom: spacing.xxl,
   },
   avatarCircle: {
     width: 44,
     height: 44,
-    borderRadius: 22,
-    // RN doesn't support linear-gradient natively on View bg.
-    // Solid mid-tone of the brand gradient (DESIGN.md primary #9775fa → primaryDim #7c5ce0).
-    backgroundColor: "#8765e8",
+    borderRadius: radius.full,
+    backgroundColor: c.primary,
     alignItems: "center",
     justifyContent: "center",
   },
   avatarImage: {
     width: 44,
     height: 44,
-    borderRadius: 22,
+    borderRadius: radius.full,
   },
   avatarText: {
     ...typeScale.h2,
@@ -705,7 +703,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingVertical: 14,
+    paddingVertical: spacing.xl,
     borderBottomWidth: 1,
     borderBottomColor: c.borderSoft,
   },
@@ -732,7 +730,7 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   channelRowLeft: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: spacing.sm,
     flex: 1,
   },
   connectedPill: {
@@ -780,8 +778,8 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 6,
-    paddingVertical: 12,
+    gap: spacing.xs + spacing.xxs,
+    paddingVertical: spacing.lg,
   },
   themeToggleHalfActive: {
     backgroundColor: c.primaryGlow,

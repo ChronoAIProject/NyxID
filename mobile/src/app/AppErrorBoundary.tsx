@@ -24,6 +24,9 @@ export class AppErrorBoundary extends Component<Props, State> {
   }
 }
 
+// Class component can't use the theme hook, and the boundary must render
+// even if React tree state is broken — keep the styles inline. Values mirror
+// `darkColors` from mobileTheme.ts (kept in sync by hand).
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -31,14 +34,20 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     padding: 24,
+    gap: 8,
   },
   title: {
     color: "#e8e4f0",
+    fontFamily: "SpaceGrotesk_600SemiBold",
     fontSize: 18,
-    marginBottom: 8,
+    lineHeight: 24,
+    fontWeight: "600",
   },
   subtitle: {
-    color: "#6A6480",
+    color: "#7a7490",
+    fontFamily: "Manrope_400Regular",
     fontSize: 14,
+    lineHeight: 19,
+    fontWeight: "400",
   },
 });
