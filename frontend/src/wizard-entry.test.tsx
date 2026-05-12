@@ -71,7 +71,7 @@ describe("shouldShowDisconnectBanner", () => {
     },
   );
 
-  it.each(["done", "cancelled"] as const)(
+  it.each(["done", "cancelled", "wizard-lost"] as const)(
     "returns false for disconnected terminal phase %s",
     (phase) => {
       expect(shouldShowDisconnectBanner(phase, true)).toBe(false);

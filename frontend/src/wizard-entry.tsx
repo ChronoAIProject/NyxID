@@ -109,6 +109,23 @@ type ModeAPhase =
   | { readonly phase: "acking"; readonly result: AiKeyPairingSuccess }
   | { readonly phase: "done" }
   | { readonly phase: "cancelled" }
+  | { readonly phase: "wizard-lost" }
+
+/**
+ * After this many milliseconds of continuous disconnection (i.e. the
+ * heartbeat to the local CLI server has been failing), the wizard
+ * gives up waiting for the connection to recover and surfaces a
+ * terminal "wizard interrupted" state. Otherwise a stale browser tab
+ * left over from a CLI that already exited successfully would sit on
+ * "Waiting for provider authorization…" indefinitely (issue #653 —
+ * the wizard MUST reach a terminal state for every outcome).
+ *
+ * 20 s gives the CLI's heartbeat watchdog enough time to recover from
+ * a brief Docker / network blip without the user seeing an unnecessary
+ * terminal screen, while still bounding the "stuck on Waiting"
+ * window to under half a minute when the CLI is genuinely gone.
+ */
+const WIZARD_LOST_THRESHOLD_MS = 20_000
 
 const bootstrap = window.__WIZARD_BOOTSTRAP__
 
@@ -133,7 +150,9 @@ export function shouldShowDisconnectBanner(
   disconnected: boolean,
 ): boolean {
   if (!disconnected) return false
-  return phase !== "done" && phase !== "cancelled"
+  return (
+    phase !== "done" && phase !== "cancelled" && phase !== "wizard-lost"
+  )
 }
 
 function WizardApp() {
@@ -169,6 +188,40 @@ function WizardApp() {
       stopHeartbeat()
     }
   }, [])
+
+  // Issue #653 — wizard MUST reach a terminal state. If the heartbeat
+  // has been failing for `WIZARD_LOST_THRESHOLD_MS`, the CLI process
+  // has almost certainly exited (success path: it shut down cleanly
+  // after polling saw `active`; failure path: Docker / network died
+  // and the CLI's own watchdog cancelled). Either way, sitting on the
+  // disconnect banner forever is wrong — escalate to a terminal
+  // "wizard-lost" phase so the user sees an explicit success-uncertain
+  // outcome with a clear next step (`nyxid status`).
+  useEffect(() => {
+    if (!disconnected) return
+    if (
+      stage.phase === "done" ||
+      stage.phase === "cancelled" ||
+      stage.phase === "wizard-lost"
+    ) {
+      return
+    }
+    const timer = window.setTimeout(() => {
+      setStage((prev) => {
+        if (
+          prev.phase === "done" ||
+          prev.phase === "cancelled" ||
+          prev.phase === "wizard-lost"
+        ) {
+          return prev
+        }
+        return { phase: "wizard-lost" }
+      })
+    }, WIZARD_LOST_THRESHOLD_MS)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [disconnected, stage.phase])
 
   // `bootstrap` must be set before the app renders. The server always
   // injects it; if it's missing, the bundle was loaded outside the CLI.
@@ -233,6 +286,8 @@ function WizardApp() {
         />
       ) : stage.phase === "cancelled" ? (
         <CancelledPanel />
+      ) : stage.phase === "wizard-lost" ? (
+        <WizardLostPanel />
       ) : (
         <DonePanel />
       )}
@@ -290,8 +345,8 @@ function ackPayloadFor(result: ActionResult): Record<string, unknown> {
 
 function toWizardPhase(phase: ModeAPhase["phase"]): WizardPhase {
   // Mode A only uses a subset of the full WizardPhase union; the
-  // "cancelled" phase collapses to "done" for step-label purposes
-  // (nothing to track; the CLI is gone).
+  // "cancelled" and "wizard-lost" phases collapse to "done" for
+  // step-label purposes (nothing to track; the CLI is gone).
   if (phase === "claimed") return "claimed"
   if (phase === "secret") return "secret"
   if (phase === "acking") return "acking"
@@ -601,6 +656,40 @@ function CancelledPanel() {
         <p className="text-sm text-muted-foreground">
           Nothing was created. You can close this tab — your CLI should
           already be back at the prompt.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Issue #653 — terminal panel when the heartbeat to the local CLI
+ * server has been failing for `WIZARD_LOST_THRESHOLD_MS`. The CLI
+ * has almost certainly exited (commonly because polling already
+ * succeeded and it shut down cleanly). The browser tab is now an
+ * orphan and must NOT keep showing "Waiting for provider
+ * authorization…" indefinitely.
+ *
+ * Outcome is uncertain from the browser's perspective, so the copy
+ * directs the user to verify via the CLI rather than asserting
+ * success or failure.
+ */
+function WizardLostPanel() {
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h2 className="font-serif text-[28px] font-normal">
+          Wizard interrupted
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          Lost contact with the <code>nyxid</code> CLI. The CLI may have
+          finished and exited successfully, or the connection was
+          interrupted before the result reached this page.
+        </p>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Run <code>nyxid status</code> in your terminal to see whether
+          the service was created. If it&rsquo;s missing, re-run the
+          wizard command.
         </p>
       </div>
     </div>

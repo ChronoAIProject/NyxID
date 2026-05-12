@@ -249,6 +249,74 @@ describe("cli wizard auth flows", () => {
     expect(onTimeout).not.toHaveBeenCalled();
   });
 
+  // Issue #653 — the wizard MUST reach a terminal state for every
+  // outcome. After enough consecutive non-success polls (e.g. the
+  // wizard's local CLI server died, or backend is sustained-down), give
+  // up and surface a "lost contact" message so the user sees something
+  // actionable instead of "Waiting…" forever.
+  it("escalates to terminal failure after sustained polling errors", async () => {
+    const getKey = vi
+      .fn()
+      .mockRejectedValue(new Error("network down"));
+    const completeWithKey = vi.fn();
+    const onTerminalFailure = vi.fn();
+    const onTimeout = vi.fn();
+
+    await pollOAuthKeyUntilActive({
+      keyId: "key-1",
+      getKey,
+      completeWithKey,
+      isCancelled: () => false,
+      onTerminalFailure,
+      onTimeout,
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+      maxConsecutiveErrors: 3,
+    });
+
+    expect(getKey).toHaveBeenCalledTimes(3);
+    expect(completeWithKey).not.toHaveBeenCalled();
+    expect(onTimeout).not.toHaveBeenCalled();
+    expect(onTerminalFailure).toHaveBeenCalledTimes(1);
+    const call = onTerminalFailure.mock.calls[0]?.[0] as {
+      status: string;
+      error_message?: string | null;
+    };
+    expect(call.status).toBe("failed");
+    expect(call.error_message).toMatch(/lost contact|nyxid status/i);
+  });
+
+  // The consecutive-error counter must RESET on a successful poll —
+  // intermittent blips during a long OAuth flow shouldn't trip the
+  // escalation if interspersed with healthy responses.
+  it("resets the consecutive-error counter when a poll succeeds", async () => {
+    const getKey = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("blip 1"))
+      .mockRejectedValueOnce(new Error("blip 2"))
+      .mockResolvedValueOnce({ status: "pending_auth" })
+      .mockRejectedValueOnce(new Error("blip 3"))
+      .mockResolvedValueOnce({ status: "active" });
+    const completeWithKey = vi.fn().mockResolvedValue(undefined);
+    const onTerminalFailure = vi.fn();
+    const onTimeout = vi.fn();
+
+    await pollOAuthKeyUntilActive({
+      keyId: "key-1",
+      getKey,
+      completeWithKey,
+      isCancelled: () => false,
+      onTerminalFailure,
+      onTimeout,
+      sleepMs: vi.fn().mockResolvedValue(undefined),
+      maxConsecutiveErrors: 3,
+    });
+
+    expect(getKey).toHaveBeenCalledTimes(5);
+    expect(completeWithKey).toHaveBeenCalledWith("key-1");
+    expect(onTerminalFailure).not.toHaveBeenCalled();
+    expect(onTimeout).not.toHaveBeenCalled();
+  });
+
   it("posts target_org_id when creating an OAuth placeholder under an org", async () => {
     resetFlowMocks();
 
