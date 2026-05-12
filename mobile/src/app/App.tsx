@@ -19,9 +19,11 @@ import {
   Manrope_700Bold,
 } from "@expo-google-fonts/manrope";
 import {
+  SpaceGrotesk_500Medium,
   SpaceGrotesk_600SemiBold,
   SpaceGrotesk_700Bold,
 } from "@expo-google-fonts/space-grotesk";
+import { JetBrainsMono_400Regular } from "@expo-google-fonts/jetbrains-mono";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { AppNavigator, RootStackParamList } from "./AppNavigator";
 import { appLinking, extractChallengeIdFromNotificationResponse } from "./linking";
@@ -100,8 +102,10 @@ export default function App() {
     Manrope_500Medium,
     Manrope_600SemiBold,
     Manrope_700Bold,
+    SpaceGrotesk_500Medium,
     SpaceGrotesk_600SemiBold,
     SpaceGrotesk_700Bold,
+    JetBrainsMono_400Regular,
   });
   const [fontLoadTimeout, setFontLoadTimeout] = useState(false);
 
