@@ -56,10 +56,19 @@ const buildDir = path.join(MOBILE_ROOT, "ios", "build");
 const archivePath = path.join(buildDir, `${SCHEME}.xcarchive`);
 const ipaOutputDir = buildDir;
 
-if (fs.existsSync(buildDir)) {
-  fs.rmSync(buildDir, { recursive: true, force: true });
+// Do NOT wipe ios/build/ here — pod install just wrote React Native
+// codegen output to ios/build/generated/ that xcodebuild needs. Only
+// remove a stale .xcarchive from a previous run.
+if (fs.existsSync(archivePath)) {
+  fs.rmSync(archivePath, { recursive: true, force: true });
 }
 fs.mkdirSync(buildDir, { recursive: true });
+// Clean any previous .ipa export so we don't pick up a stale one later.
+for (const f of fs.readdirSync(buildDir)) {
+  if (f.endsWith(".ipa")) {
+    fs.rmSync(path.join(buildDir, f));
+  }
+}
 
 console.log("\n[build-ios] Step 3/4: xcodebuild archive");
 run(
