@@ -135,4 +135,4 @@ We may update this Privacy Policy from time to time to reflect changes in our pr
 
 ## 11. Contact Us
 
-If you have any questions about this Privacy Policy or your data, please contact us at: [privacy@chrono-ai.fun](mailto:privacy@chrono-ai.fun)
+If you have any questions about this Privacy Policy or your data, please contact us at: [contact@chrono-ai.fun](mailto:contact@chrono-ai.fun)
