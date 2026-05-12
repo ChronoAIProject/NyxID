@@ -581,6 +581,7 @@ pub async fn initiate_oauth_connect(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: redirect_path.map(String::from),
+        consumed: false,
         expires_at,
         created_at: now,
     };
@@ -848,6 +849,7 @@ pub async fn request_device_code(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: None,
+        consumed: false,
         expires_at,
         created_at: now,
     };
@@ -1246,15 +1248,36 @@ pub async fn handle_oauth_callback(
     code: &str,
     state: &str,
 ) -> AppResult<UserProviderToken> {
-    // Validate state (atomic claim -- delete to prevent replay)
+    // Atomic-claim the state: flip `consumed` from false→true, returning
+    // the document. A concurrent callback (replay) loses the race because
+    // the filter requires `consumed: { $ne: true }`.
+    //
+    // Critically, we do NOT delete the state here (as the previous
+    // implementation did). Deleting up-front opened a race window
+    // [state-deleted, token-inserted] of ~1+s during which
+    // `reconcile_pending_oauth_placeholder`'s "no live OAuth state ⇒
+    // abandoned ⇒ fail placeholder" inference would prematurely mark the
+    // pending placeholder as `failed` for an in-flight successful OAuth
+    // (issue #653 race regression caught in PR #723 review). Keeping the
+    // row alive (with `consumed=true`) closes that window. The state is
+    // deleted at the end of this function, after the new token is in.
     let now = Utc::now();
     let oauth_state = db
         .collection::<OAuthState>(OAUTH_STATES)
-        .find_one_and_delete(doc! { "_id": state })
+        .find_one_and_update(
+            doc! { "_id": state, "consumed": { "$ne": true } },
+            doc! { "$set": { "consumed": true } },
+        )
         .await?
         .ok_or_else(|| AppError::BadRequest("Invalid or expired OAuth state".to_string()))?;
 
     if oauth_state.expires_at < now {
+        // Best-effort cleanup of the just-claimed-but-expired state so it
+        // doesn't sit in the collection until natural expiry sweeps.
+        let _ = db
+            .collection::<OAuthState>(OAUTH_STATES)
+            .delete_one(doc! { "_id": state })
+            .await;
         return Err(AppError::BadRequest("OAuth state has expired".to_string()));
     }
 
@@ -1435,6 +1458,16 @@ pub async fn handle_oauth_callback(
     db.collection::<UserProviderToken>(COLLECTION_NAME)
         .insert_one(&token)
         .await?;
+
+    // Now that the new token is durable, delete the consumed OAuth state.
+    // Best-effort: an error here is harmless since `expires_at` will sweep
+    // it later. Done last so reconcile's "no live state ⇒ abandoned"
+    // inference can never observe the in-flight window where the new
+    // token isn't yet visible (issue #653 race fix).
+    let _ = db
+        .collection::<OAuthState>(OAUTH_STATES)
+        .delete_one(doc! { "_id": state })
+        .await;
 
     tracing::info!(
         user_id = %user_id,

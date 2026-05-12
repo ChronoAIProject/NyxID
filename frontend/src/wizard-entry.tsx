@@ -120,10 +120,14 @@ type ModeAPhase =
  * "Waiting for provider authorization…" indefinitely (issue #653 —
  * the wizard MUST reach a terminal state for every outcome).
  *
- * 20 s gives the CLI's heartbeat watchdog enough time to recover from
- * a brief Docker / network blip without the user seeing an unnecessary
- * terminal screen, while still bounding the "stuck on Waiting"
- * window to under half a minute when the CLI is genuinely gone.
+ * Total user-visible delay before escalation is approximately
+ * `(DISCONNECT_THRESHOLD × HEARTBEAT_INTERVAL_MS) + WIZARD_LOST_
+ * THRESHOLD_MS` ≈ 3 × 1.2 s + 20 s ≈ 23.6 s, since the timer here only
+ * starts after `setDisconnected(true)` fires.
+ *
+ * The 20 s window is large enough to ride out a brief network / Docker
+ * blip before declaring the local IPC dead, but bounded so a genuinely
+ * exited CLI doesn't leave the tab on "Waiting…" indefinitely.
  */
 const WIZARD_LOST_THRESHOLD_MS = 20_000
 

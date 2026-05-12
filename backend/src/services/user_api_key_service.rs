@@ -424,11 +424,22 @@ pub async fn reconcile_pending_oauth_placeholder(
     }
 
     // Pass 2: mark failed if the OAuth state is gone (abandoned flow).
+    //
+    // The `$or` on `user_id` / `target_user_id` is critical for org-scoped
+    // wizard flows. When an admin runs `nyxid service add --org X`, the
+    // placeholder lives under the org user_id, but `OAuthState.user_id` is
+    // the *actor* (admin) and the org user_id lives in
+    // `OAuthState.target_user_id`. Querying only by `user_id` would never
+    // find the live state for org flows, so Pass 2 would fire on the very
+    // first poll and fail every legitimate org-scoped placeholder.
     let now = bson::DateTime::from_chrono(Utc::now());
     let live_state_count = db
         .collection::<OAuthState>(OAUTH_STATES)
         .count_documents(doc! {
-            "user_id": user_id,
+            "$or": [
+                { "user_id": user_id },
+                { "target_user_id": user_id },
+            ],
             "provider_config_id": provider_config_id,
             "expires_at": { "$gt": &now },
         })
@@ -1225,18 +1236,31 @@ mod tests {
     }
 
     fn live_oauth_state(user_id: &str, provider_id: &str) -> OAuthState {
+        live_oauth_state_full(user_id, None, provider_id)
+    }
+
+    fn live_oauth_state_for_org(actor_id: &str, org_id: &str, provider_id: &str) -> OAuthState {
+        live_oauth_state_full(actor_id, Some(org_id), provider_id)
+    }
+
+    fn live_oauth_state_full(
+        actor_id: &str,
+        target_user_id: Option<&str>,
+        provider_id: &str,
+    ) -> OAuthState {
         let now = Utc::now();
         OAuthState {
             id: uuid::Uuid::new_v4().to_string(),
-            user_id: user_id.to_string(),
+            user_id: actor_id.to_string(),
             provider_config_id: provider_id.to_string(),
             code_verifier: None,
             device_code_encrypted: None,
             user_code_encrypted: None,
             poll_interval: None,
-            target_user_id: None,
+            target_user_id: target_user_id.map(str::to_string),
             credential_user_id: None,
             redirect_path: None,
+            consumed: false,
             expires_at: now + Duration::minutes(10),
             created_at: now,
         }
@@ -1476,6 +1500,110 @@ mod tests {
 
         let key = get_key(&db, &key_id).await;
         assert_eq!(key.status, "active");
+    }
+
+    /// Issue #653 PR #723 review — Critical #1: in-flight OAuth callback
+    /// race. After `handle_oauth_callback` atomically claims the OAuth
+    /// state (`consumed: true`) but before the token-exchange roundtrip
+    /// to the provider completes (~1+ s for Lark), reconcile must NOT
+    /// see the in-progress flow as "abandoned". The state row is still
+    /// present (with consumed=true and a live expires_at), so Pass 2's
+    /// "no live state" check should treat it as live.
+    #[tokio::test]
+    async fn reconcile_keeps_pending_when_oauth_state_is_consumed_but_not_yet_deleted() {
+        let Some(db) = connect_test_database("user_api_key_reconcile_in_flight_callback").await
+        else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(provider_key(
+                &key_id,
+                &user_id,
+                &provider_id,
+                "pending_auth",
+                "oauth2",
+            ))
+            .await
+            .unwrap();
+        // Simulate a callback that has atomically claimed the state but
+        // hasn't yet finished the token exchange + insert. The row is
+        // alive (not yet deleted by the cleanup at the end of
+        // `handle_oauth_callback`) and within `expires_at`.
+        let mut in_flight = live_oauth_state(&user_id, &provider_id);
+        in_flight.consumed = true;
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(in_flight)
+            .await
+            .unwrap();
+
+        reconcile_pending_oauth_placeholder(&db, &user_id, &key_id)
+            .await
+            .unwrap();
+
+        let key = get_key(&db, &key_id).await;
+        assert_eq!(
+            key.status, "pending_auth",
+            "in-flight callback (consumed state, no token yet) must not be reported as abandoned"
+        );
+    }
+
+    /// Issue #653 PR #723 review — Critical #2: org-scoped wizard flows.
+    /// `OAuthState.user_id` is the actor (admin); the org user_id lives
+    /// in `target_user_id`. The placeholder is owned by the org user.
+    /// Reconcile must match the live state via `target_user_id` so that
+    /// org-scoped placeholders aren't immediately failed on the first
+    /// poll.
+    #[tokio::test]
+    async fn reconcile_finds_live_state_for_org_scoped_placeholder() {
+        let Some(db) = connect_test_database("user_api_key_reconcile_org_scope_state_lookup").await
+        else {
+            eprintln!("skipping user_api_key_service integration test: no local MongoDB available");
+            return;
+        };
+
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let org_user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+
+        // Placeholder lives under the org user id (the row owner).
+        db.collection::<UserApiKey>(super::COLLECTION_NAME)
+            .insert_one(provider_key(
+                &key_id,
+                &org_user_id,
+                &provider_id,
+                "pending_auth",
+                "oauth2",
+            ))
+            .await
+            .unwrap();
+        // OAuth state is initiated by the admin actor on behalf of the
+        // org — admin id in `user_id`, org id in `target_user_id`.
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(live_oauth_state_for_org(
+                &admin_id,
+                &org_user_id,
+                &provider_id,
+            ))
+            .await
+            .unwrap();
+
+        // Reconcile is invoked with the row owner (the org user id).
+        reconcile_pending_oauth_placeholder(&db, &org_user_id, &key_id)
+            .await
+            .unwrap();
+
+        let key = get_key(&db, &key_id).await;
+        assert_eq!(
+            key.status, "pending_auth",
+            "org-scoped placeholder must not be failed when an OAuth state exists under an admin actor with target_user_id matching the row owner"
+        );
     }
 
     /// Direct-credential keys (no provider_config_id) aren't OAuth-flow rows;
