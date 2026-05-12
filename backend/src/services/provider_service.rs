@@ -2037,7 +2037,7 @@ const DEFAULT_PUBLIC_SERVICE_SEEDS: &[DefaultPublicServiceSeed] = &[
     DefaultPublicServiceSeed {
         service_slug: "arxiv-api",
         service_name: "arXiv API",
-        base_url: "http://export.arxiv.org/api",
+        base_url: "https://export.arxiv.org/api",
         description: "arXiv search and metadata API. Returns Atom XML feeds; no \
                       authentication required. Routing through NyxID provides \
                       centralised audit logging and a single place to manage \
@@ -3545,7 +3545,7 @@ mod tests {
             .find(|s| s.service_slug == "arxiv-api")
             .expect("arxiv-api seed should be in DEFAULT_PUBLIC_SERVICE_SEEDS");
 
-        assert_eq!(seed.base_url, "http://export.arxiv.org/api");
+        assert_eq!(seed.base_url, "https://export.arxiv.org/api");
         assert_eq!(seed.homepage_url, Some("https://arxiv.org"));
         assert!(
             !seed.description.is_empty(),

@@ -205,6 +205,21 @@ fn legacy_service_category_filter(categories: &[&str]) -> mongodb::bson::Documen
     }
 }
 
+fn user_addable_catalog_filter() -> mongodb::bson::Document {
+    doc! {
+        "$or": [
+            { "requires_user_credential": true },
+            { "requires_user_credential": { "$exists": false } },
+            { "provider_config_id": { "$ne": null } },
+            {
+                "auth_method": "none",
+                "service_category": "internal",
+                "provider_config_id": null,
+            },
+        ],
+    }
+}
+
 /// List catalog entries available for user key creation.
 /// Filters to connection-category + provider-linked services.
 ///
@@ -228,13 +243,7 @@ pub async fn list_catalog(
             "service_type": "http",
             "is_active": true,
             "$and": [
-                {
-                    "$or": [
-                        { "requires_user_credential": true },
-                        { "requires_user_credential": { "$exists": false } },
-                        { "provider_config_id": { "$ne": null } },
-                    ],
-                },
+                user_addable_catalog_filter(),
                 legacy_service_category_filter(&["connection", "internal"]),
                 visibility_filter(user_id),
             ],
@@ -585,10 +594,13 @@ pub(crate) fn any_org_service_reachable(
 
 #[cfg(test)]
 mod tests {
-    use super::{any_org_service_reachable, caller_may_read_catalog_entry};
+    use super::{
+        any_org_service_reachable, caller_may_read_catalog_entry, user_addable_catalog_filter,
+    };
     use crate::models::org_membership::OrgMembership;
     use crate::models::user_service::UserService;
     use chrono::Utc;
+    use mongodb::bson::Bson;
 
     // The visibility decision is the load-bearing piece of the
     // information-disclosure fix in NyxID#356: any path that broadens
@@ -650,6 +662,28 @@ mod tests {
         assert!(!caller_may_read_catalog_entry(
             "private", "alice", "bob", false, false,
         ));
+    }
+
+    #[test]
+    fn default_catalog_filter_includes_no_auth_internal_public_apis() {
+        let filter = user_addable_catalog_filter();
+        let clauses = filter
+            .get_array("$or")
+            .expect("user-addable catalog filter should be an $or");
+
+        assert_eq!(
+            clauses.len(),
+            4,
+            "keep the three existing catalog visibility arms plus the no-auth public API arm"
+        );
+        assert!(clauses.iter().any(|clause| {
+            let Some(doc) = clause.as_document() else {
+                return false;
+            };
+            doc.get_str("auth_method") == Ok("none")
+                && doc.get_str("service_category") == Ok("internal")
+                && matches!(doc.get("provider_config_id"), Some(Bson::Null))
+        }));
     }
 
     // ---- org visibility tests for any_org_service_reachable ----
