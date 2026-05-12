@@ -10,7 +10,7 @@ interface CopyableFieldProps {
   readonly size?: "sm" | "md";
 }
 
-/* ── VoidPortal Copyable Field ── */
+/* ── NyxID Copyable Field ── */
 export function CopyableField({
   label,
   value,
@@ -31,7 +31,7 @@ export function CopyableField({
 
   const textSize = size === "sm" ? "text-[10px]" : "text-xs";
   const labelSize = size === "sm" ? "text-[10px]" : "text-xs";
-  const btnSize = size === "sm" ? "h-6 w-6" : "h-7 w-7";
+  const btnSize = size === "sm" ? "h-7 w-7" : "h-8 w-8";
   const padding = size === "sm" ? "px-2 py-1" : "px-2 py-1.5";
 
   return (
@@ -41,7 +41,7 @@ export function CopyableField({
       </p>
       <div className="flex items-center gap-1">
         <code
-          className={`flex-1 rounded-md border border-border bg-muted font-mono ${padding} ${textSize} break-all text-foreground`}
+          className={`flex-1 rounded-lg border border-border bg-muted font-mono ${padding} ${textSize} break-all text-foreground`}
         >
           {value}
         </code>

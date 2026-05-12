@@ -153,19 +153,24 @@ export function ServiceListPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
+          <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
             Services
           </h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             Manage downstream services and their authentication.
           </p>
         </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogTrigger asChild>
-            <Button className="w-fit">
-              <Plus className="mr-2 h-4 w-4" />
+            <button
+              type="button"
+              className="flex h-10 items-center gap-2.5 rounded-xl border border-white/[0.08] px-3 text-[13px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
+            >
+              <span className="flex h-[22px] w-[22px] items-center justify-center rounded-[6px] border border-white/[0.08] bg-white/[0.04]">
+                <Plus className="h-3 w-3" />
+              </span>
               Create Service
-            </Button>
+            </button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
@@ -182,7 +187,7 @@ export function ServiceListPage() {
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}
@@ -247,7 +252,7 @@ export function ServiceListPage() {
                       <FormLabel>Description</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[60px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Optional description"
                           {...field}
                         />
@@ -297,10 +302,10 @@ export function ServiceListPage() {
                       />
                     </div>
 
-                    <div className="flex items-center justify-between rounded-[10px] border border-border p-3">
+                    <div className="flex items-center justify-between rounded-lg border border-border p-3">
                       <Label
                         htmlFor="create-ssh-cert-auth"
-                        className="text-sm font-normal"
+                        className="text-[12px] font-normal"
                       >
                         Enable short-lived SSH certificates
                       </Label>
@@ -543,7 +548,7 @@ export function ServiceListPage() {
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending}>
                     Create service
                   </Button>
                 </DialogFooter>
@@ -562,7 +567,7 @@ export function ServiceListPage() {
       ) : !services || services.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <Server className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No services yet. Add a service to get started.
           </p>
         </div>

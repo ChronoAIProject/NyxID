@@ -20,11 +20,6 @@ export function OrgServiceAccountDetailPage() {
     <ServiceAccountDetail
       saId={saId}
       backTo={{ to: orgPath, label: orgLabel }}
-      breadcrumbsPrefix={[
-        { label: "Organizations", to: "/orgs" },
-        { label: orgLabel, to: orgPath },
-        { label: "Service Accounts" },
-      ]}
       showProviderSections={false}
       canWrite={canWrite}
     />

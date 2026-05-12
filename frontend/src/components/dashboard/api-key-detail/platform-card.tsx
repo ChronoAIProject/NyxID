@@ -57,7 +57,7 @@ export function PlatformCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Monitor className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">Platform</CardTitle>
+          <CardTitle className="text-[15px]">Platform</CardTitle>
         </div>
         <CardDescription>
           Agent platform using this key
@@ -79,16 +79,8 @@ export function PlatformCard({
                 ))}
               </SelectContent>
             </Select>
-            <div className="flex gap-2">
+            <div className="flex justify-end gap-2">
               <Button
-                size="sm"
-                onClick={handleSave}
-                disabled={updateApiKey.isPending}
-              >
-                Save
-              </Button>
-              <Button
-                size="sm"
                 variant="outline"
                 onClick={() => {
                   setSelected(platform ?? NO_PLATFORM);
@@ -97,11 +89,18 @@ export function PlatformCard({
               >
                 Cancel
               </Button>
+              <Button
+                variant="primary"
+                onClick={handleSave}
+                disabled={updateApiKey.isPending || selected === (platform ?? NO_PLATFORM)}
+              >
+                Save
+              </Button>
             </div>
           </div>
         ) : (
           <div className="flex items-center justify-between">
-            <Badge variant={platform ? "secondary" : "outline"}>
+            <Badge variant={platform ? "secondary" : "secondary"}>
               {platform ?? "Not set"}
             </Badge>
             <Button

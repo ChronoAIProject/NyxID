@@ -96,6 +96,7 @@ export function CredentialDialog({
               Cancel
             </Button>
             <Button
+              variant="primary"
               type="submit"
               disabled={credential.trim().length === 0 || isPending}
             >

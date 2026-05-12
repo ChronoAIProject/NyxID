@@ -12,7 +12,7 @@ import { CredentialDialog } from "@/components/dashboard/credential-dialog";
 import type { DownstreamService } from "@/types/api";
 import { DetailSection } from "@/components/shared/detail-section";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   Table,
@@ -33,19 +33,9 @@ import { toast } from "sonner";
 
 interface SaConnectedServicesProps {
   readonly saId: string;
-  /// Whether the viewing user has admin write access. When false (i.e.
-  /// the user is platform `operator`), all connect / update / disconnect
-  /// controls are hidden so the panel reads as data-only. Defaults to
-  /// true so callers that pre-date this prop continue to render writes
-  /// (existing behavior). The admin SA detail page passes `false` for
-  /// operators.
-  readonly canWrite?: boolean;
 }
 
-export function SaConnectedServices({
-  saId,
-  canWrite = true,
-}: SaConnectedServicesProps) {
+export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
   const { data: saConnections, isLoading: connectionsLoading } =
     useSaConnections(saId);
   const { data: allServices } = useServices();
@@ -155,7 +145,7 @@ export function SaConnectedServices({
         {connectionsLoading ? (
           <Skeleton className="h-24 w-full" />
         ) : saConnections && saConnections.length > 0 ? (
-          <div className="rounded-md border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -165,7 +155,7 @@ export function SaConnectedServices({
                   <TableHead>Credential</TableHead>
                   <TableHead>Label</TableHead>
                   <TableHead>Connected</TableHead>
-                  <TableHead />
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -175,7 +165,7 @@ export function SaConnectedServices({
                       {conn.service_name}
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline">{conn.service_category}</Badge>
+                      <Badge variant="secondary">{conn.service_category}</Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {conn.auth_type ?? "-"}
@@ -194,36 +184,32 @@ export function SaConnectedServices({
                       {formatDate(conn.connected_at)}
                     </TableCell>
                     <TableCell>
-                      {canWrite && (
-                        <div className="flex gap-1">
-                          {conn.has_credential && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() =>
-                                handleUpdateServiceCredential(conn.service_id)
-                              }
-                              disabled={
-                                updateConnectionCredentialMutation.isPending
-                              }
-                            >
-                              <KeyRound className="mr-1 h-3 w-3" />
-                              Update
-                            </Button>
-                          )}
+                      <div className="flex justify-end gap-1">
+                        {conn.has_credential && (
                           <Button
                             variant="ghost"
-                            size="sm"
                             onClick={() =>
-                              void handleDisconnectService(conn.service_id)
+                              handleUpdateServiceCredential(conn.service_id)
                             }
-                            disabled={disconnectServiceMutation.isPending}
+                            disabled={
+                              updateConnectionCredentialMutation.isPending
+                            }
                           >
-                            <Unlink className="mr-1 h-3 w-3" />
-                            Disconnect
+                            <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>
+                            Update
                           </Button>
-                        </div>
-                      )}
+                        )}
+                        <Button
+                          variant="ghost"
+                          onClick={() =>
+                            void handleDisconnectService(conn.service_id)
+                          }
+                          disabled={disconnectServiceMutation.isPending}
+                        >
+                          <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
+                          Disconnect
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -231,12 +217,12 @@ export function SaConnectedServices({
             </Table>
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No services connected to this service account.
           </p>
         )}
 
-        {canWrite && availableServices.length > 0 && (
+        {availableServices.length > 0 && (
           <div className="mt-3">
             <ConnectServiceDropdown
               services={availableServices}
@@ -274,8 +260,8 @@ function ConnectServiceDropdown({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="sm">
-          <Plug className="mr-1 h-3 w-3" />
+        <Button variant="outline">
+          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>
           Connect Service
         </Button>
       </DropdownMenuTrigger>
@@ -286,7 +272,7 @@ function ConnectServiceDropdown({
             {s.requires_user_credential && (
               <KeyRound className="ml-1 h-3 w-3 text-muted-foreground" />
             )}
-            <Badge variant="outline" className="ml-auto text-xs">
+            <Badge variant="secondary" className="ml-auto text-xs">
               {s.service_category}
             </Badge>
           </DropdownMenuItem>

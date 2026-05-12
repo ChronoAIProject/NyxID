@@ -18,12 +18,11 @@
 // own the rest — placeholder creation, polling, and cleanup.
 
 import { useEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, api } from "@/lib/api-client";
 import { Copy, ExternalLink, Loader2 } from "lucide-react";
-import { TwitterOAuthGuidance } from "@/components/shared/twitter-oauth-guidance";
 import type { AiKeyPairingSuccess } from "./ai-key-confirm-panel";
 import {
   reservePairingAction,
@@ -35,13 +34,6 @@ interface FlowProps {
   readonly providerId: string;
   readonly slug: string;
   readonly label: string;
-  /**
-   * Display name of the provider (e.g. "Lark API (User OAuth)",
-   * "OpenAI Codex"). Used in the standardized waiting panel header
-   * so all OAuth-style flows render with consistent provider context.
-   * Falls back to `slug` if not provided.
-   */
-  readonly providerName?: string;
   readonly nodeId?: string;
   readonly targetOrgId?: string | null;
   /**
@@ -101,7 +93,6 @@ interface ActiveKeyResponse {
   readonly slug: string;
   readonly label: string;
   readonly status: string;
-  readonly error_message?: string | null;
 }
 
 interface InitiateOAuthResponse {
@@ -512,7 +503,6 @@ export function OAuthFlow({
   providerId,
   slug,
   label,
-  providerName,
   nodeId,
   targetOrgId,
   endpointUrl,
@@ -869,23 +859,19 @@ export function OAuthFlow({
           throw new Error("provider did not return an authorization_url");
         }
         setAuthUrl(initiate.authorization_url);
-        // Issue #653: do NOT auto `window.open` here. By the time we
-        // reach this line we've awaited at least three async calls
-        // (reservePairingAction, createPlaceholderKey, GET
-        // /providers/.../oauth) — the user-gesture context is gone and
-        // every modern browser blocks the popup. The block then either
-        //   (a) silently produces nothing and the user wonders why
-        //       no tab opened, or
-        //   (b) surfaces an alarming "Browser blocked popup" warning
-        //       that implies the user did something wrong.
-        // Both are bad UX and neither materially helps the small
-        // population of browsers/configurations that would have let
-        // the popup through. Instead, the standardized waiting panel
-        // (`ProviderWaitingPanel`) renders a prominent "Open {provider}
-        // sign-in" button whose onClick calls `window.open`
-        // synchronously from a fresh user gesture — browsers never
-        // block that path. Predictable single UX regardless of
-        // browser settings.
+        // New tab so the pair page stays alive to poll. Popups are
+        // blocked if not a user-initiated action; this effect runs on
+        // mount after the user clicked "Create service", which is
+        // enough gesture-context in every browser we support.
+        const w = window.open(initiate.authorization_url, "_blank", "noopener,noreferrer");
+        if (!w) {
+          setPhase("waiting");
+          setError(
+            "Browser blocked the popup. Use the button below to open the provider sign-in.",
+          );
+          await pollUntilActive(placeholder.id);
+          return;
+        }
         setPhase("waiting");
         await pollUntilActive(placeholder.id);
       } catch (e) {
@@ -903,39 +889,14 @@ export function OAuthFlow({
       }
     })();
     return () => {
-      // Local cancel flag aborts THIS async run if the effect re-fires
-      // (e.g. user retries via setPhase("starting") again).
-      //
-      // CRITICAL: do NOT set `cancelledRef.current = true` here.
-      // The async function above does `setPhase("waiting")` followed
-      // by `await pollUntilActive(...)`. setPhase triggers a re-render
-      // which fires this cleanup BEFORE pollUntilActive starts. If we
-      // set the shared cancelledRef = true here, polling sees it on
-      // its first iteration and exits immediately without making a
-      // single GET request — that's why the wizard never polls /keys
-      // and appears to hang on "Waiting for provider authorization…"
-      // (the fundamental piece of issue #653 that no other commit in
-      // this PR could have fixed). The component-unmount-only effect
-      // below is the correct place to flip cancelledRef for the
-      // "user closed the tab / navigated away" case.
       cancel = true;
+      cancelledRef.current = true;
     };
     // Runs when `phase` transitions to "starting" — i.e. either on
     // initial mount for `system` providers or after the user OAuth
     // credentials sub-step finishes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
-
-  // Component-unmount cleanup: this is the only place that should set
-  // `cancelledRef.current = true`. Empty-deps so it ONLY fires on
-  // unmount, never on phase change. Stops the polling loop and any
-  // in-flight `completeWithKey` from running their state-update
-  // callbacks after the component is gone.
-  useEffect(() => {
-    return () => {
-      cancelledRef.current = true;
-    };
-  }, []);
 
   async function pollUntilActive(keyId: string) {
     await pollOAuthKeyUntilActive({
@@ -944,11 +905,10 @@ export function OAuthFlow({
         api.get<ActiveKeyResponse>(`/keys/${encodeURIComponent(id)}`),
       completeWithKey,
       isCancelled: () => cancelledRef.current,
-      onTerminalFailure: (key) => {
+      onTerminalFailure: () => {
         setPhase("error");
         setError(
-          key.error_message?.trim() ||
-            "Authorization didn't complete (it may have been canceled or denied on the provider page). Cancel and re-run to try again.",
+          "Authorization didn't complete (it may have been canceled or denied on the provider page). Cancel and re-run to try again.",
         );
       },
       onTimeout: () => {
@@ -983,7 +943,7 @@ export function OAuthFlow({
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
           <h3 className="font-medium">Paste your OAuth app credentials</h3>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             This provider expects you to register your own OAuth app
             (Developer Settings → OAuth Apps) and paste the resulting
             Client ID and Client Secret below.
@@ -1000,8 +960,6 @@ export function OAuthFlow({
             </a>
           ) : null}
         </div>
-
-        <TwitterOAuthGuidance slug={slug} />
 
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">
@@ -1035,6 +993,7 @@ export function OAuthFlow({
         {error ? <ErrorLine message={error} /> : null}
 
         <Button
+          variant="primary"
           onClick={() => void saveUserCredentials()}
           disabled={saving || !clientId.trim() || !clientSecret.trim()}
         >
@@ -1051,51 +1010,52 @@ export function OAuthFlow({
     );
   }
 
-  // Standardized waiting panel (issue #653 alignment). Polling is
-  // handled by `pollUntilActive` regardless; this UI just gives the
-  // user a consistent "what's happening / what to do" surface across
-  // OAuth and device-code flows.
-  const displayName = providerName?.trim() || slug;
-
-  // Terminal failure → render the dedicated error panel instead of the
-  // waiting layout. Without this, the polling spinner + "Open … sign-
-  // in" button would still render alongside the error message and
-  // imply the wizard is still working when it isn't (issue #653 review).
-  if (phase === "error") {
-    return (
-      <ErrorTerminalPanel
-        providerName={displayName}
-        message={error ?? "Authorization didn't complete."}
-        onCancel={() => void cancelAndCleanup()}
-      />
-    );
-  }
-
-  const statusLine =
-    phase === "checking-credentials"
-      ? "Checking provider credentials…"
-      : phase === "starting"
-        ? "Setting up placeholder service…"
-        : "Waiting for provider authorization (polling every 2s)…";
-  const openProvider = authUrl
-    ? () => {
-        window.open(authUrl, "_blank", "noopener,noreferrer");
-      }
-    : null;
   return (
-    <ProviderWaitingPanel
-      providerName={displayName}
-      statusLine={statusLine}
-      instructions={[
-        `Click "Open ${displayName} sign-in" below to open the provider in a new tab.`,
-        "Approve the request on the provider page.",
-        "Return here — this page will finish automatically once the provider grants access.",
-      ]}
-      onOpenProvider={openProvider}
-      documentationUrl={documentationUrl}
-      onCancel={() => void cancelAndCleanup()}
-      error={error}
-    />
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h3 className="font-medium">Complete sign-in on the provider</h3>
+        <p className="text-[12px] text-muted-foreground">
+          We opened a new tab where you'll authorize NyxID. When it
+          completes, come back — this page will finish automatically.
+        </p>
+      </div>
+      {phase === "checking-credentials" ? (
+        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Checking provider credentials...
+        </div>
+      ) : phase === "starting" ? (
+        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Creating placeholder service...
+        </div>
+      ) : phase === "waiting" ? (
+        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Waiting for provider authorization...
+        </div>
+      ) : null}
+
+      {authUrl && phase === "waiting" ? (
+        <a
+          href={authUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center justify-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-[12px] hover:bg-muted"
+        >
+          Reopen provider sign-in
+          <ExternalLink className="h-4 w-4" />
+        </a>
+      ) : null}
+
+      {error ? <ErrorLine message={error} /> : null}
+
+      {phase !== "done" ? (
+        <Button variant="outline" onClick={() => void cancelAndCleanup()}>
+          Cancel
+        </Button>
+      ) : null}
+    </div>
   );
 }
 
@@ -1105,12 +1065,10 @@ export function DeviceCodeFlow({
   providerId,
   slug,
   label,
-  providerName,
   nodeId,
   targetOrgId,
   endpointUrl,
   pairingId,
-  documentationUrl,
   onSuccess,
   onCancel,
 }: FlowProps) {
@@ -1427,267 +1385,77 @@ export function DeviceCodeFlow({
     }
   }
 
-  // Standardized waiting panel (issue #653 alignment). Same surface
-  // as the OAuth flow; only the provider-specific block differs —
-  // device code shows the user_code + verification URL.
-  const displayName = providerName?.trim() || slug;
-
-  // Terminal failure → render the dedicated error panel. Without this
-  // gating, the polling spinner + "Open … sign-in" button would still
-  // render alongside the error message and imply the wizard is still
-  // working when it isn't (issue #653 review).
-  if (phase === "error") {
-    return (
-      <ErrorTerminalPanel
-        providerName={displayName}
-        message={error ?? "Device-code authorization didn't complete."}
-        onCancel={() => void cancelAndCleanup()}
-      />
-    );
-  }
-
-  if (phase === "expired") {
-    return (
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-1">
-          <h3 className="font-medium">Connecting to {displayName}</h3>
-          <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
-            The device code expired before authorization completed.
-          </p>
-        </div>
-        {error ? <ErrorLine message={error} /> : null}
-        <Button onClick={() => void startSession()}>Request a new code</Button>
-        <Button variant="outline" onClick={() => void cancelAndCleanup()}>
-          Cancel
-        </Button>
-      </div>
-    );
-  }
-
-  const statusLine =
-    phase === "starting"
-      ? "Requesting device code…"
-      : "Waiting for authorization (polling every few seconds)…";
-  const providerBlock =
-    phase === "waiting" && code && verifyUrl ? (
-      <div className="flex flex-col gap-3">
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Code
-          </span>
-          <div className="flex items-center gap-2">
-            <code className="rounded bg-background px-3 py-1.5 font-mono text-lg">
-              {code}
-            </code>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void handleCopy()}
-            >
-              <Copy className="mr-1.5 h-3.5 w-3.5" />
-              {copied ? "Copied" : "Copy"}
-            </Button>
-          </div>
-        </div>
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Verification URL
-          </span>
-          <a
-            href={verifyUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 text-sm underline-offset-2 hover:underline"
-          >
-            {verifyUrl}
-            <ExternalLink className="h-3.5 w-3.5" />
-          </a>
-        </div>
-      </div>
-    ) : undefined;
-  const openProvider = verifyUrl
-    ? () => {
-        window.open(verifyUrl, "_blank", "noopener,noreferrer");
-      }
-    : null;
-  return (
-    <ProviderWaitingPanel
-      providerName={displayName}
-      statusLine={statusLine}
-      providerBlock={providerBlock}
-      instructions={[
-        `Click "Open ${displayName} sign-in" below to open the verification page.`,
-        "Enter the code shown above on that page.",
-        "Approve the request — this page will finish automatically.",
-      ]}
-      onOpenProvider={openProvider}
-      documentationUrl={documentationUrl}
-      onCancel={() => void cancelAndCleanup()}
-      error={error}
-    />
-  );
-}
-
-// ── shared terminal-error panel ──────────────────────────────────────
-
-interface ErrorTerminalPanelProps {
-  readonly providerName: string;
-  readonly message: string;
-  readonly onCancel: () => void;
-}
-
-/**
- * Issue #653 — when the OAuth / device-code flow has reached a
- * terminal failure (placeholder marked failed, sustained polling
- * errors, popup-blocked tab abandoned, etc.), we must NOT keep
- * rendering the polling spinner or the "Open provider sign-in"
- * button. Both lie about the current state — the wizard isn't
- * waiting and there's nothing useful to open. This panel replaces
- * the waiting panel for `phase === "error"` so the user sees a
- * clear failure layout: title, error message, cancel.
- */
-function ErrorTerminalPanel({
-  providerName,
-  message,
-  onCancel,
-}: ErrorTerminalPanelProps) {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h3 className="font-medium">Connecting to {providerName}</h3>
-        <p className="text-sm text-muted-foreground">
-          The connection didn&rsquo;t complete. Cancel and re-run the
-          wizard to try again.
+        <h3 className="font-medium">Authorize via device code</h3>
+        <p className="text-[12px] text-muted-foreground">
+          Open the verification URL, enter the code, and complete
+          sign-in on the provider. This page will finish automatically.
         </p>
       </div>
-      <ErrorLine message={message} />
-      <Button variant="outline" onClick={onCancel}>
-        Cancel
-      </Button>
-    </div>
-  );
-}
 
-// ── shared provider-waiting panel ────────────────────────────────────
-
-interface ProviderWaitingPanelProps {
-  /**
-   * Display name for the upstream provider (e.g. "Lark API (User OAuth)").
-   * Drives the panel title and the primary-button label.
-   */
-  readonly providerName: string;
-  /**
-   * Steps the user needs to take in their own words. Rendered as a
-   * numbered list under the provider-specific block.
-   */
-  readonly instructions: readonly string[];
-  /**
-   * Optional provider-specific block rendered above the instructions
-   * (e.g. the device code + verification URL for device-code flows).
-   * OAuth flows leave this undefined — they don't need to surface
-   * anything beyond the open button.
-   */
-  readonly providerBlock?: React.ReactNode;
-  /**
-   * Primary button: opens the provider sign-in (OAuth: pops the
-   * authorization URL; device code: pops the verification URL). When
-   * `null`, the button is hidden — used while we're still requesting
-   * the URL from the backend.
-   */
-  readonly onOpenProvider: (() => void) | null;
-  /**
-   * Status line under the panel title (e.g.
-   * "Waiting for authorization…"). Always polling; this just describes
-   * what the polling is for.
-   */
-  readonly statusLine: string;
-  /**
-   * Optional docs link rendered below the primary button. When unset,
-   * the link is omitted.
-   */
-  readonly documentationUrl?: string | null;
-  readonly onCancel: () => void;
-  readonly error?: string | null;
-}
-
-/**
- * Standardized layout for every "the wizard is waiting for the
- * provider to grant access" screen — issue #653 alignment to a single
- * UX pattern across OAuth and device-code flows. Polling + heartbeat
- * mechanics live in the wrapping flow component (auth-flow-polling.ts +
- * the wizard server's heartbeat watchdog); this panel just renders the
- * agreed-on shape:
- *
- *   • Title: "Connecting to {provider}"
- *   • Status spinner: what we're waiting on
- *   • Provider-specific block (optional — e.g. device code)
- *   • Numbered "what to do" instructions
- *   • Prominent primary button: open provider sign-in
- *   • Optional docs link
- *   • Cancel
- *
- * Pure presentational. No side effects beyond invoking the prop
- * callbacks.
- */
-export function ProviderWaitingPanel({
-  providerName,
-  instructions,
-  providerBlock,
-  onOpenProvider,
-  statusLine,
-  documentationUrl,
-  onCancel,
-  error,
-}: ProviderWaitingPanelProps) {
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h3 className="font-medium">Connecting to {providerName}</h3>
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+      {phase === "starting" ? (
+        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
-          {statusLine}
+          Requesting device code...
         </div>
-      </div>
-
-      {providerBlock ? (
-        <div className="rounded-md border bg-muted/30 p-4">{providerBlock}</div>
+      ) : phase === "waiting" && code && verifyUrl ? (
+        <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-4">
+          <div className="flex flex-col gap-1">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground">
+              Code
+            </span>
+            <div className="flex items-center gap-2">
+              <code className="rounded bg-background px-3 py-1.5 font-mono text-lg">
+                {code}
+              </code>
+              <Button
+                variant="outline"
+                onClick={() => void handleCopy()}
+              >
+                <ButtonIcon><Copy className="h-3.5 w-3.5" /></ButtonIcon>
+                {copied ? "Copied" : "Copy"}
+              </Button>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground">
+              Visit
+            </span>
+            <a
+              href={verifyUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-[12px] underline-offset-2 hover:underline"
+            >
+              {verifyUrl}
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Waiting for authorization...
+          </div>
+        </div>
+      ) : phase === "expired" ? (
+        <div className="flex flex-col gap-2">
+          <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px]">
+            The device code expired before authorization completed.
+          </p>
+          <Button variant="primary" onClick={() => void startSession()}>
+            Request a new code
+          </Button>
+        </div>
       ) : null}
-
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          What to do
-        </span>
-        <ol className="ml-4 list-decimal text-sm text-muted-foreground">
-          {instructions.map((step) => (
-            <li key={step}>{step}</li>
-          ))}
-        </ol>
-      </div>
 
       {error ? <ErrorLine message={error} /> : null}
 
-      {onOpenProvider ? (
-        <Button onClick={onOpenProvider}>
-          Open {providerName} sign-in
-          <ExternalLink className="ml-1.5 h-4 w-4" />
+      {phase !== "done" ? (
+        <Button variant="outline" onClick={() => void cancelAndCleanup()}>
+          Cancel
         </Button>
       ) : null}
-
-      {documentationUrl ? (
-        <a
-          href={documentationUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 self-start text-xs text-muted-foreground underline-offset-2 hover:underline"
-        >
-          Learn more about this connection
-          <ExternalLink className="h-3 w-3" />
-        </a>
-      ) : null}
-
-      <Button variant="outline" onClick={onCancel}>
-        Cancel
-      </Button>
     </div>
   );
 }
@@ -1696,7 +1464,7 @@ export function ProviderWaitingPanel({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
       {message}
     </p>
   );

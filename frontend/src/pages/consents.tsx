@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMyConsents, useRevokeConsent } from "@/hooks/use-consents";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -26,7 +27,7 @@ import { KeyRound, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 export function ConsentsPage() {
-  const { data, isLoading, error } = useMyConsents();
+  const { data, isLoading, error, refetch } = useMyConsents();
   const revokeMutation = useRevokeConsent();
   const [revokeClientId, setRevokeClientId] = useState<string | null>(null);
 
@@ -65,21 +66,16 @@ export function ConsentsPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <KeyRound className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load consents. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load consents. Please try again." onRetry={refetch} />
       ) : consents.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <KeyRound className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No applications have been authorized.
           </p>
         </div>
       ) : (
-        <div className="rounded-xl border border-border">
+        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -87,7 +83,7 @@ export function ConsentsPage() {
                 <TableHead>Scopes</TableHead>
                 <TableHead>Granted</TableHead>
                 <TableHead>Expires</TableHead>
-                <TableHead className="w-[60px]" />
+                <TableHead className="w-[60px]">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -101,7 +97,7 @@ export function ConsentsPage() {
                       {consent.scopes.split(" ").map((scope) => (
                         <Badge
                           key={scope}
-                          variant="outline"
+                          variant="secondary"
                           className="text-xs"
                         >
                           {scope}
@@ -124,7 +120,7 @@ export function ConsentsPage() {
                       className="h-8 w-8"
                       onClick={() => setRevokeClientId(consent.client_id)}
                     >
-                      <Trash2 className="h-4 w-4 text-muted-foreground" />
+                      <Trash2 className="h-4 w-4 text-destructive" />
                     </Button>
                   </TableCell>
                 </TableRow>

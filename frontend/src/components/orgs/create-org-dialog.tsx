@@ -130,7 +130,7 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
             />
 
             {form.formState.errors.root && (
-              <p className="text-sm text-destructive">
+              <p className="text-[12px] text-destructive">
                 {form.formState.errors.root.message}
               </p>
             )}
@@ -144,7 +144,12 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
               >
                 Cancel
               </Button>
-              <Button type="submit" isLoading={createMutation.isPending}>
+              <Button
+                variant="primary"
+                type="submit"
+                isLoading={createMutation.isPending}
+                disabled={!form.watch("display_name").trim()}
+              >
                 Create organization
               </Button>
             </DialogFooter>

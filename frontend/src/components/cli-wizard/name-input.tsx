@@ -87,7 +87,7 @@ export function NameInput({
         aria-describedby={effectiveError ? errorId : hint ? hintId : undefined}
         className={
           effectiveError != null
-            ? "border-destructive focus-visible:border-destructive focus-visible:ring-destructive/40"
+            ? "border-destructive focus-visible:border-destructive"
             : undefined
         }
       />

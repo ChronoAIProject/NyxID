@@ -107,9 +107,20 @@ export function ServiceScopeCard({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <div className="flex items-center gap-2">
-          <Shield className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">Service Scope</CardTitle>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Shield className="h-4 w-4 text-primary" />
+            <CardTitle className="text-[15px]">Service Scope</CardTitle>
+          </div>
+          {!editing && (
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={() => setEditing(true)}
+            >
+              <Pencil className="h-4 w-4" />
+            </Button>
+          )}
         </div>
         <CardDescription>
           Which external services this key can access via proxy
@@ -124,7 +135,7 @@ export function ServiceScopeCard({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-services" className="text-sm">
+              <Label htmlFor="allow-all-services" className="text-[12px]">
                 Allow all services
               </Label>
             </div>
@@ -159,15 +170,15 @@ export function ServiceScopeCard({
               </div>
             )}
 
-            <div className="flex gap-2">
+            <div className="flex justify-end gap-2">
               <Button
-                size="sm"
+                variant="primary"
                 onClick={handleSave}
                 disabled={updateApiKey.isPending}
               >
                 Save
               </Button>
-              <Button size="sm" variant="outline" onClick={handleCancel}>
+              <Button variant="outline" onClick={handleCancel}>
                 Cancel
               </Button>
             </div>
@@ -175,7 +186,7 @@ export function ServiceScopeCard({
         ) : (
           <div className="space-y-2">
             {allowAllServices ? (
-              <Badge variant="outline">All services</Badge>
+              <Badge variant="secondary">All services</Badge>
             ) : allowedServices.length > 0 ? (
               <div className="flex flex-wrap gap-1">
                 {allowedServices.map((s) => (
@@ -187,16 +198,6 @@ export function ServiceScopeCard({
             ) : (
               <Badge variant="destructive">No services (auth-only)</Badge>
             )}
-            <div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setEditing(true)}
-              >
-                <Pencil className="mr-2 h-3 w-3" />
-                Edit Scope
-              </Button>
-            </div>
           </div>
         )}
       </CardContent>

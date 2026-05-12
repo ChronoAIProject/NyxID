@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Plus, Trash2, Info } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
@@ -103,11 +103,11 @@ export function DefaultHeadersEditor({
   return (
     <div className="space-y-2">
       {value.length === 0 ? (
-        <div className="rounded-[10px] border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+        <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
           No default headers configured.
         </div>
       ) : (
-        <div className="rounded-[10px] border border-border">
+        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -125,7 +125,7 @@ export function DefaultHeadersEditor({
                     hint="Redact the value in API responses. v1 stores values plaintext — do not use for real secrets. Use the service auth method instead."
                   />
                 </TableHead>
-                <TableHead className="w-[10%] text-right" />
+                <TableHead className="w-[10%] text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -194,7 +194,7 @@ export function DefaultHeadersEditor({
                         disabled={disabled}
                         aria-label={`Remove header ${String(idx + 1)}`}
                       >
-                        <Trash2 className="h-4 w-4" />
+                        <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -213,11 +213,10 @@ export function DefaultHeadersEditor({
         <Button
           type="button"
           variant="outline"
-          size="sm"
           onClick={addRow}
           disabled={!canAdd}
         >
-          <Plus className="mr-1 h-3 w-3" />
+          <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>
           Add header
         </Button>
       </div>
@@ -239,7 +238,7 @@ function FlagHeader({
         <TooltipTrigger asChild>
           <button
             type="button"
-            className="inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground"
+            className="inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground transition-colors duration-300 hover:text-foreground"
             aria-label={`${label} info`}
           >
             <Info className="h-3 w-3" />
@@ -274,7 +273,7 @@ function ReadOnlyHeadersList({
     );
   }
   return (
-    <div className="rounded-[10px] border border-border">
+    <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
       <Table>
         <TableHeader>
           <TableRow>
@@ -296,12 +295,12 @@ function ReadOnlyHeadersList({
               </TableCell>
               <TableCell className="space-x-1">
                 {row.overridable && (
-                  <Badge variant="outline" className="text-[10px]">
+                  <Badge variant="secondary" className="text-[10px]">
                     overridable
                   </Badge>
                 )}
                 {row.sensitive && (
-                  <Badge variant="outline" className="text-[10px]">
+                  <Badge variant="secondary" className="text-[10px]">
                     sensitive
                   </Badge>
                 )}

@@ -83,13 +83,13 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
   return (
     <div className="space-y-6">
       <div className="flex flex-col items-center space-y-2 text-center">
-        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+        <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
           <ShieldCheck className="h-6 w-6 text-primary" aria-hidden="true" />
         </div>
-        <h1 className="font-display text-[28px] font-normal tracking-tight">
+        <h1 className="text-[28px] font-normal tracking-tight">
           Two-factor authentication
         </h1>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Enter the 6-digit code from your authenticator app
         </p>
       </div>
@@ -99,7 +99,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
           {form.formState.errors.root && (
             <div
               role="alert"
-              className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+              className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
             >
               {form.formState.errors.root.message}
             </div>
@@ -130,6 +130,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
 
           <div className="flex flex-col gap-2">
             <Button
+              variant="primary"
               type="submit"
               className="w-full"
               isLoading={verifyMutation.isPending}

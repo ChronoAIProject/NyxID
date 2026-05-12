@@ -21,7 +21,7 @@ interface ServiceCardProps {
   readonly isDeleting: boolean;
 }
 
-/* ── Service Card (VoidPortal) ── */
+/* ── Service Card (NyxID) ── */
 export function ServiceCard({
   service,
   onDelete,
@@ -47,7 +47,7 @@ export function ServiceCard({
 
   return (
     <div
-      className="group relative flex cursor-pointer flex-col gap-4 rounded-[10px] border border-border bg-transparent p-6 transition-colors hover:border-border/80"
+      className="group relative flex cursor-pointer flex-col gap-4 rounded-xl border border-border/50 bg-transparent p-4 transition-colors duration-300 hover:border-white/[0.15]"
       onClick={() =>
         void navigate({
           to: "/services/$serviceId",
@@ -66,13 +66,13 @@ export function ServiceCard({
         }}
         disabled={isDeleting}
       >
-        <Trash2 className="h-3.5 w-3.5" />
+        <Trash2 className="h-3.5 w-3.5 text-destructive" />
         <span className="sr-only">Delete service</span>
       </Button>
 
       {/* Title + Badges row */}
       <div className="flex items-start justify-between gap-3">
-        <h3 className="font-display text-lg font-normal text-foreground">
+        <h3 className="text-lg font-normal text-foreground">
           {service.name}
         </h3>
         <div className="flex shrink-0 items-center gap-1.5">
@@ -80,7 +80,7 @@ export function ServiceCard({
             {SERVICE_TYPE_LABELS[service.service_type] ?? service.service_type}
           </Badge>
           {service.visibility === "private" && (
-            <Badge variant="outline">
+            <Badge variant="secondary">
               <Lock className="mr-1 h-2.5 w-2.5" />
               Private
             </Badge>
@@ -94,7 +94,7 @@ export function ServiceCard({
 
       {/* Description (if exists) */}
       {service.description && (
-        <p className="text-[13px] text-muted-foreground line-clamp-2">
+        <p className="text-[12px] text-muted-foreground line-clamp-2">
           {service.description}
         </p>
       )}
@@ -108,7 +108,7 @@ export function ServiceCard({
               {/* asChild + span keeps Radix happy without nesting buttons. */}
               <span className="inline-flex">
                 <Badge
-                  variant={node?.status === "online" ? "default" : "outline"}
+                  variant={node?.status === "online" ? "default" : "secondary"}
                   className="gap-1"
                 >
                   <Router className="h-2.5 w-2.5" />

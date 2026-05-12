@@ -3,16 +3,23 @@ import { useParams, useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
-  Building2,
+  Camera,
   Check,
   Copy,
   Globe,
   KeyRound,
-  Plus,
   Trash2,
+  X,
 } from "lucide-react";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -100,7 +107,7 @@ export function OrgDetailPage() {
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
 
-  const { data: org, isLoading, error } = useOrg(orgId);
+  const { data: org, isLoading, error, refetch } = useOrg(orgId);
   const { data: members, isLoading: membersLoading } = useOrgMembers(orgId);
   const { data: invites, isLoading: invitesLoading } = useOrgInvites(orgId);
 
@@ -115,6 +122,9 @@ export function OrgDetailPage() {
   const [scopeTarget, setScopeTarget] = useState<MemberResponse | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [copiedInviteId, setCopiedInviteId] = useState<string | null>(null);
+  const [avatarPopoverOpen, setAvatarPopoverOpen] = useState(false);
+  const [avatarUrlInput, setAvatarUrlInput] = useState("");
+  const avatarUpdateMutation = useUpdateOrg();
 
   if (isLoading) {
     return (
@@ -127,25 +137,19 @@ export function OrgDetailPage() {
 
   if (error || !org) {
     return (
-      <Card>
-        <CardContent className="flex flex-col items-center gap-4 py-16">
-          <Building2 className="h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load organization. It may have been deleted or you no
-            longer have access.
-          </p>
-          <Button
-            variant="outline"
-            onClick={() => void navigate({ to: "/orgs" })}
-          >
-            Back to organizations
-          </Button>
-        </CardContent>
-      </Card>
+      <div className="space-y-4">
+        <ErrorBanner message="Failed to load organization. It may have been deleted or you no longer have access." onRetry={refetch} />
+        <Button
+          variant="outline"
+          onClick={() => void navigate({ to: "/orgs" })}
+        >
+          Back to organizations
+        </Button>
+      </div>
     );
   }
 
-  const isAdmin = org.your_role === "admin";
+  const isAdmin = org.your_role === "admin" || org.your_role === "owner";
   const orgName = org.display_name ?? "Untitled org";
   const activeAdminCount = (members ?? []).filter(
     (member) => member.role === "admin" && member.revoked_at === null,
@@ -237,10 +241,6 @@ export function OrgDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Organizations", to: "/orgs" },
-          { label: org.display_name ?? "Untitled org" },
-        ]}
         title={org.display_name ?? "Untitled org"}
         description={
           org.contact_email
@@ -248,11 +248,68 @@ export function OrgDetailPage() {
             : `${String(org.member_count)} member${org.member_count === 1 ? "" : "s"}`
         }
         leading={
-          <OrgAvatar
-            avatarUrl={org.avatar_url}
-            displayName={org.display_name}
-            className="h-14 w-14"
-          />
+          isAdmin ? (
+            <Popover open={avatarPopoverOpen} onOpenChange={(open) => {
+              setAvatarPopoverOpen(open);
+              if (open) setAvatarUrlInput(org.avatar_url ?? "");
+            }}>
+              <PopoverTrigger asChild>
+                <button type="button" className="group relative rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50">
+                  <OrgAvatar avatarUrl={org.avatar_url} displayName={org.display_name} className="h-14 w-14" />
+                  <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/50 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                    <Camera className="h-5 w-5 text-white" />
+                  </div>
+                </button>
+              </PopoverTrigger>
+              <PopoverContent side="bottom" align="start" className="w-[280px] p-3 space-y-3">
+                <p className="text-[12px] font-medium text-foreground">Change avatar</p>
+                <div className="flex gap-2">
+                  <Input
+                    value={avatarUrlInput}
+                    onChange={(e) => setAvatarUrlInput(e.target.value)}
+                    placeholder="https://..."
+                    className="flex-1"
+                  />
+                  <Button
+                    variant="primary"
+                    disabled={avatarUrlInput === (org.avatar_url ?? "")}
+                    isLoading={avatarUpdateMutation.isPending}
+                    onClick={async () => {
+                      try {
+                        await avatarUpdateMutation.mutateAsync({ orgId, body: { avatar_url: avatarUrlInput } });
+                        toast.success("Avatar updated");
+                        setAvatarPopoverOpen(false);
+                      } catch {
+                        toast.error("Failed to update avatar");
+                      }
+                    }}
+                  >
+                    Save
+                  </Button>
+                </div>
+                {org.avatar_url && (
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 text-[11px] text-destructive hover:underline"
+                    onClick={async () => {
+                      try {
+                        await avatarUpdateMutation.mutateAsync({ orgId, body: { avatar_url: "" } });
+                        toast.success("Avatar removed");
+                        setAvatarPopoverOpen(false);
+                      } catch {
+                        toast.error("Failed to remove avatar");
+                      }
+                    }}
+                  >
+                    <X className="h-3 w-3" />
+                    Remove avatar
+                  </button>
+                )}
+              </PopoverContent>
+            </Popover>
+          ) : (
+            <OrgAvatar avatarUrl={org.avatar_url} displayName={org.display_name} className="h-14 w-14" />
+          )
         }
         actions={<RoleBadge role={org.your_role} />}
       />
@@ -275,10 +332,7 @@ export function OrgDetailPage() {
         <TabsContent value="members" className="mt-6 space-y-4">
           {isAdmin && (
             <div className="flex justify-end">
-              <Button size="sm" onClick={() => setInviteOpen(true)}>
-                <Plus className="mr-2 h-4 w-4" />
-                Invite member
-              </Button>
+              <AddCtaButton label="Invite member" onClick={() => setInviteOpen(true)} />
             </div>
           )}
 
@@ -286,12 +340,12 @@ export function OrgDetailPage() {
             <Skeleton className="h-40 w-full" />
           ) : !members || members.length === 0 ? (
             <Card>
-              <CardContent className="py-8 text-center text-sm text-muted-foreground">
+              <CardContent className="py-8 text-center text-[12px] text-muted-foreground">
                 No members yet.
               </CardContent>
             </Card>
           ) : (
-            <div className="rounded-xl border border-border">
+            <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -299,9 +353,11 @@ export function OrgDetailPage() {
                     <TableHead>Role</TableHead>
                     <TableHead>Services</TableHead>
                     <TableHead>Joined</TableHead>
-                    <TableHead className="w-[100px] text-right">
-                      <span className="sr-only">Actions</span>
-                    </TableHead>
+                    {isAdmin && (
+                      <TableHead className="w-[100px] text-right">
+                        Actions
+                      </TableHead>
+                    )}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -341,7 +397,7 @@ export function OrgDetailPage() {
             <RolePermissionsPanel orgId={orgId} />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-sm text-muted-foreground">
+              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
                 Only admins can manage role permissions.
               </CardContent>
             </Card>
@@ -351,14 +407,11 @@ export function OrgDetailPage() {
         <TabsContent value="invites" className="mt-6 space-y-4">
           {isAdmin ? (
             <div className="flex justify-end">
-              <Button size="sm" onClick={() => setInviteOpen(true)}>
-                <Plus className="mr-2 h-4 w-4" />
-                Create invite
-              </Button>
+              <AddCtaButton label="Create invite" onClick={() => setInviteOpen(true)} />
             </div>
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-sm text-muted-foreground">
+              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
                 Only admins can manage invites.
               </CardContent>
             </Card>
@@ -370,12 +423,12 @@ export function OrgDetailPage() {
                 <Skeleton className="h-40 w-full" />
               ) : !invites || invites.length === 0 ? (
                 <Card>
-                  <CardContent className="py-8 text-center text-sm text-muted-foreground">
+                  <CardContent className="py-8 text-center text-[12px] text-muted-foreground">
                     No pending invites.
                   </CardContent>
                 </Card>
               ) : (
-                <div className="rounded-xl border border-border">
+                <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -384,7 +437,9 @@ export function OrgDetailPage() {
                         <TableHead>Status</TableHead>
                         <TableHead>Used by</TableHead>
                         <TableHead>Timeline</TableHead>
-                        <TableHead className="w-[112px]" />
+                        {invites.some((inv) => inv.redeemed_at === null && new Date(inv.expires_at).getTime() >= Date.now()) && (
+                          <TableHead className="w-[112px]">Actions</TableHead>
+                        )}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -420,7 +475,7 @@ export function OrgDetailPage() {
                         return (
                           <TableRow key={invite.id}>
                             <TableCell>
-                              <span className="break-all font-mono text-xs text-foreground">
+                              <span className="break-all text-xs text-foreground">
                                 {invite.nonce}
                               </span>
                             </TableCell>
@@ -445,42 +500,44 @@ export function OrgDetailPage() {
                             >
                               {timeline}
                             </TableCell>
-                            <TableCell>
-                              {!isRedeemed && !isExpired && (
-                                <div className="flex items-center justify-end gap-1">
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                                    onClick={() =>
-                                      void handleCopyInviteLink(
-                                        invite.id,
-                                        invite.nonce,
-                                      )
-                                    }
-                                    aria-label={`Copy invite link ${invite.nonce}`}
-                                    title="Copy invite link"
-                                  >
-                                    {copiedInviteId === invite.id ? (
-                                      <Check className="h-4 w-4 text-success" />
-                                    ) : (
-                                      <Copy className="h-4 w-4" />
-                                    )}
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                                    onClick={() =>
-                                      void handleCancelInvite(invite.id)
-                                    }
-                                    aria-label="Cancel invite"
-                                  >
-                                    <Trash2 className="h-4 w-4" />
-                                  </Button>
-                                </div>
-                              )}
-                            </TableCell>
+                            {invites.some((inv) => inv.redeemed_at === null && new Date(inv.expires_at).getTime() >= Date.now()) && (
+                              <TableCell>
+                                {!isRedeemed && !isExpired && (
+                                  <div className="flex items-center justify-end gap-1">
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                      onClick={() =>
+                                        void handleCopyInviteLink(
+                                          invite.id,
+                                          invite.nonce,
+                                        )
+                                      }
+                                      aria-label={`Copy invite link ${invite.nonce}`}
+                                      title="Copy invite link"
+                                    >
+                                      {copiedInviteId === invite.id ? (
+                                        <Check className="h-4 w-4 text-success" />
+                                      ) : (
+                                        <Copy className="h-4 w-4" />
+                                      )}
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                      onClick={() =>
+                                        void handleCancelInvite(invite.id)
+                                      }
+                                      aria-label="Cancel invite"
+                                    >
+                                      <Trash2 className="h-4 w-4 text-destructive" />
+                                    </Button>
+                                  </div>
+                                )}
+                              </TableCell>
+                            )}
                           </TableRow>
                         );
                       })}
@@ -497,7 +554,7 @@ export function OrgDetailPage() {
             <OrgApprovalConfigs orgId={orgId} />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-sm text-muted-foreground">
+              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
                 Only admins can manage org approval policies.
               </CardContent>
             </Card>
@@ -528,7 +585,7 @@ export function OrgDetailPage() {
             />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-sm text-muted-foreground">
+              <CardContent className="py-6 text-center text-[12px] text-muted-foreground">
                 Only admins can edit organization settings.
               </CardContent>
             </Card>
@@ -738,10 +795,10 @@ function RolePermissionCard({
 
   return (
     <Card>
-      <CardContent className="space-y-4 p-5">
+      <CardContent className="space-y-4 p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-sm font-semibold text-foreground">
+            <p className="text-[13px] font-semibold text-foreground">
               {roleLabel(role)}
             </p>
             <p className="text-xs text-muted-foreground">
@@ -758,7 +815,7 @@ function RolePermissionCard({
         <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
           <Label
             htmlFor={`role-scope-full-${role}`}
-            className="text-sm font-medium"
+            className="text-[12px] font-medium"
           >
             Full access
           </Label>
@@ -801,7 +858,7 @@ function RolePermissionCard({
                       htmlFor={id}
                       className="flex-1 cursor-pointer space-y-0.5"
                     >
-                      <span className="block text-sm font-medium text-foreground">
+                      <span className="block text-[12px] font-medium text-foreground">
                         {service.label}
                       </span>
                       <span className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -810,7 +867,7 @@ function RolePermissionCard({
                         ) : (
                           <Globe className="h-3 w-3" aria-hidden />
                         )}
-                        <span className="font-mono">{service.slug}</span>
+                        <span>{service.slug}</span>
                       </span>
                     </Label>
                   </div>
@@ -823,14 +880,13 @@ function RolePermissionCard({
         <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
           <Button
             variant="ghost"
-            size="sm"
             onClick={reset}
             disabled={!dirty || pending}
           >
             Reset
           </Button>
           <Button
-            size="sm"
+            variant="primary"
             onClick={save}
             disabled={!dirty}
             isLoading={pending}
@@ -997,13 +1053,13 @@ function SettingsPanel({
               />
 
               {form.formState.errors.root && (
-                <p className="text-sm text-destructive">
+                <p className="text-[12px] text-destructive">
                   {form.formState.errors.root.message}
                 </p>
               )}
 
               <div className="flex justify-end">
-                <Button type="submit" isLoading={updateMutation.isPending}>
+                <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
                   Save changes
                 </Button>
               </div>
@@ -1013,9 +1069,9 @@ function SettingsPanel({
       </Card>
 
       <Card>
-        <CardContent className="flex flex-col gap-4 p-6">
+        <CardContent className="flex flex-col gap-4 p-4">
           <div>
-            <p className="text-sm font-medium text-foreground">Danger zone</p>
+            <p className="text-[12px] font-medium text-foreground">Danger zone</p>
             <p className="text-xs text-muted-foreground">
               Deleting the organization removes memberships and invites. Shared
               services stay in place so admins can rescue credentials.
@@ -1023,7 +1079,7 @@ function SettingsPanel({
           </div>
           <div className="flex justify-end">
             <Button variant="destructive" onClick={onDelete}>
-              <Trash2 className="mr-2 h-4 w-4" />
+              <ButtonIcon variant="destructive"><Trash2 className="h-4 w-4 text-destructive" /></ButtonIcon>
               Delete organization
             </Button>
           </div>

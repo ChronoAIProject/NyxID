@@ -14,11 +14,6 @@ export function OrgDeveloperAppDetailPage() {
     <DeveloperAppDetail
       clientId={clientId}
       backTo={{ to: orgPath, label: orgLabel }}
-      breadcrumbsPrefix={[
-        { label: "Organizations", to: "/orgs" },
-        { label: orgLabel, to: orgPath },
-        { label: "Developer Apps" },
-      ]}
     />
   );
 }

@@ -388,7 +388,7 @@ export function SshWebTerminal({
           <button
             type="button"
             onClick={connect}
-            className="ml-auto rounded px-2 py-0.5 text-xs text-slate-300 transition-colors hover:bg-slate-700 hover:text-white"
+            className="ml-auto rounded px-2 py-0.5 text-xs text-slate-300 transition-colors duration-300 hover:bg-slate-700 hover:text-white"
           >
             Reconnect
           </button>

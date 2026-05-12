@@ -17,6 +17,7 @@ import {
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -48,7 +49,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Bot, Check, Copy, Cpu, Plus, Trash2 } from "lucide-react";
+import { Bot, Check, Copy, Cpu, Trash2 } from "lucide-react";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 import type {
   ChannelBotItem,
@@ -103,19 +105,19 @@ function BotRow({
 
   return (
     <TableRow
-      className="cursor-pointer"
+      className="cursor-pointer hover:bg-white/[0.03]"
       onClick={() => void navigate({ to: "/channel-bots/$botId", params: { botId: bot.id } })}
     >
       <TableCell>
-        <Badge variant="outline">{platformLabel(bot.platform)}</Badge>
+        <Badge variant="secondary">{platformLabel(bot.platform)}</Badge>
       </TableCell>
-      <TableCell className="font-mono text-xs">
+      <TableCell className="text-xs">
         {bot.platform_bot_username || "-"}
       </TableCell>
       <TableCell className="font-medium">{bot.label}</TableCell>
       <TableCell>
         <Badge variant={statusBadgeVariant(bot.status)}>
-          {bot.status}
+          {bot.status.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}
         </Badge>
       </TableCell>
       <TableCell>
@@ -141,7 +143,7 @@ function BotRow({
             onDelete(bot.id);
           }}
         >
-          <Trash2 className="h-4 w-4 text-muted-foreground" />
+          <Trash2 className="h-4 w-4 text-destructive" />
         </Button>
       </TableCell>
     </TableRow>
@@ -156,7 +158,7 @@ function BotsTable({
   readonly onDelete: (id: string) => void;
 }) {
   return (
-    <div className="rounded-xl border border-border">
+    <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
       <Table>
         <TableHeader>
           <TableRow>
@@ -166,7 +168,7 @@ function BotsTable({
             <TableHead>Status</TableHead>
             <TableHead>Webhook</TableHead>
             <TableHead>Created</TableHead>
-            <TableHead className="w-[60px]" />
+            <TableHead className="w-[60px]">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -183,19 +185,16 @@ function EmptyState({ onAdd }: { readonly onAdd: () => void }) {
   return (
     <Card>
       <CardContent className="flex flex-col items-center gap-4 py-16">
-        <div className="flex h-14 w-14 items-center justify-center rounded-full border border-border">
+        <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
           <Bot className="h-6 w-6 text-muted-foreground" />
         </div>
         <div className="text-center">
-          <p className="text-sm font-medium">No channel bots yet</p>
+          <p className="text-[12px] font-medium">No channel bots yet</p>
           <p className="text-xs text-muted-foreground">
             Add a messaging platform bot to relay conversations to your AI agents.
           </p>
         </div>
-        <Button size="sm" onClick={onAdd}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add Bot
-        </Button>
+        <AddCtaButton label="Add Bot" onClick={onAdd} />
       </CardContent>
     </Card>
   );
@@ -392,7 +391,7 @@ function CreateBotDialog({
               </div>
               <div className="rounded-lg border border-border/70 bg-muted/30 p-4">
                 <div className="space-y-1">
-                  <p className="text-sm font-medium">Lark webhook verification</p>
+                  <p className="text-[12px] font-medium">Lark webhook verification</p>
                   <p className="text-xs text-muted-foreground">
                     In Lark/Feishu Event Subscriptions, copy the
                     Verification Token from Security settings. Encrypt Key is
@@ -488,7 +487,7 @@ function CreateBotDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={createBot.isPending}>
+            <Button variant="primary" type="submit" disabled={createBot.isPending}>
               {createBot.isPending ? "Creating..." : "Add Bot"}
             </Button>
           </DialogFooter>
@@ -741,7 +740,7 @@ function CreateDeviceChannelDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={createDevice.isPending}>
+            <Button variant="primary" type="submit" disabled={createDevice.isPending}>
               {createDevice.isPending ? "Creating..." : "Create Device Channel"}
             </Button>
           </DialogFooter>
@@ -788,18 +787,18 @@ function DeviceChannelRow({
           </Button>
         </div>
       </TableCell>
-      <TableCell className="font-mono text-xs">
+      <TableCell className="text-xs">
         {conversation.platform_conversation_id}
       </TableCell>
       <TableCell>
-        <Badge variant="outline">{conversation.platform_conversation_type}</Badge>
+        <Badge variant="secondary">{conversation.platform_conversation_type}</Badge>
       </TableCell>
-      <TableCell className="font-mono text-xs text-muted-foreground">
+      <TableCell className="text-xs text-muted-foreground">
         {conversation.agent_api_key_id.slice(0, 8)}…
       </TableCell>
       <TableCell>
         <Badge variant={conversation.is_active ? "success" : "secondary"}>
-          {conversation.is_active ? "active" : "inactive"}
+          {conversation.is_active ? "Active" : "Inactive"}
         </Badge>
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">
@@ -812,7 +811,7 @@ function DeviceChannelRow({
           className="h-8 w-8"
           onClick={() => onDelete(conversation.id)}
         >
-          <Trash2 className="h-4 w-4 text-muted-foreground" />
+          <Trash2 className="h-4 w-4 text-destructive" />
         </Button>
       </TableCell>
     </TableRow>
@@ -852,15 +851,12 @@ function DeviceChannelsSection({
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold">Device Channels</h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             HTTP Event Gateway channels for analyzers, sensors, and other
             non-bot event sources.
           </p>
         </div>
-        <Button size="sm" variant="outline" onClick={onAdd}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add Device Channel
-        </Button>
+        <AddCtaButton label="Add Device Channel" onClick={onAdd} />
       </div>
 
       {isLoading ? (
@@ -868,10 +864,10 @@ function DeviceChannelsSection({
       ) : devices.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center gap-3 py-10">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full border border-border">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-border">
               <Cpu className="h-5 w-5 text-muted-foreground" />
             </div>
-            <p className="text-sm font-medium">No device channels yet</p>
+            <p className="text-[12px] font-medium">No device channels yet</p>
             <p className="text-xs text-muted-foreground">
               Create one to let devices push events into the channel relay
               pipeline.
@@ -879,7 +875,7 @@ function DeviceChannelsSection({
           </CardContent>
         </Card>
       ) : (
-        <div className="rounded-xl border border-border">
+        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
@@ -891,7 +887,7 @@ function DeviceChannelsSection({
                 <TableHead>Agent Key</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Created</TableHead>
-                <TableHead className="w-[60px]" />
+                <TableHead className="w-[60px]">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -912,7 +908,7 @@ function DeviceChannelsSection({
 
 export function ChannelBotsPage() {
   const [scopeOrgId, setScopeOrgId] = useState<string | null>(null);
-  const { data: bots, isLoading, error } = useChannelBots({ orgId: scopeOrgId });
+  const { data: bots, isLoading, error, refetch } = useChannelBots({ orgId: scopeOrgId });
   const [createOpen, setCreateOpen] = useState(false);
   const [createDeviceOpen, setCreateDeviceOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
@@ -923,30 +919,20 @@ export function ChannelBotsPage() {
         title="Channel Bots"
         description="Manage messaging platform bots for agent relay."
         actions={
-          <Button size="sm" onClick={() => setCreateOpen(true)}>
-            <Plus className="mr-2 h-4 w-4" />
-            Add Bot
-          </Button>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-muted-foreground">Scope</span>
+            <div className="w-48">
+              <OrgScopeSelect value={scopeOrgId} onChange={setScopeOrgId} />
+            </div>
+            <AddCtaButton label="Add Bot" onClick={() => setCreateOpen(true)} />
+          </div>
         }
       />
-
-      <div className="flex items-center gap-3">
-        <Label htmlFor="bots-scope" className="text-sm font-medium">
-          Scope
-        </Label>
-        <div className="w-60">
-          <OrgScopeSelect value={scopeOrgId} onChange={setScopeOrgId} />
-        </div>
-      </div>
 
       {isLoading ? (
         <LoadingSkeleton />
       ) : error ? (
-        <Card>
-          <CardContent className="py-8 text-center text-sm text-destructive">
-            Failed to load channel bots. Please try again.
-          </CardContent>
-        </Card>
+        <ErrorBanner message="Failed to load channel bots. Please try again." onRetry={refetch} />
       ) : !bots || bots.length === 0 ? (
         <EmptyState onAdd={() => setCreateOpen(true)} />
       ) : (

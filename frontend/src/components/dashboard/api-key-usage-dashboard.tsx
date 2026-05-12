@@ -1,42 +1,25 @@
 import { Link } from "@tanstack/react-router";
-import { useAllAdminedApiKeysUsage } from "@/hooks/use-api-keys";
+import { Area, AreaChart } from "recharts";
+import { useApiKeysUsage } from "@/hooks/use-api-keys";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { formatRelativeTime } from "@/lib/utils";
-import { formatBucketLabel } from "@/lib/usage-bucket";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Activity } from "lucide-react";
-import { OrgAvatar } from "@/components/orgs/org-avatar";
-import type { CredentialSource } from "@/schemas/orgs";
+import {
+  type ChartConfig,
+  ChartContainer,
+} from "@/components/ui/chart";
 
-function OwnerBadge({ source }: { readonly source?: CredentialSource }) {
-  if (source?.type === "org") {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
-        <OrgAvatar
-          avatarUrl={source.avatar_url ?? null}
-          displayName={source.org_name}
-          className="h-4 w-4 text-[0.5rem]"
-        />
-        <span className="truncate font-medium text-foreground">
-          {source.org_name}
-        </span>
-      </span>
-    );
-  }
-  return (
-    <span className="text-[11px] text-muted-foreground">Personal</span>
-  );
-}
+const miniChartConfig = {
+  requests: { label: "Requests", color: "#A672FB" },
+} satisfies ChartConfig;
 
-function UsageBars({
+function MiniLineChart({
   buckets,
 }: {
   readonly buckets: readonly {
@@ -53,147 +36,112 @@ function UsageBars({
     );
   }
 
-  const maxCount = Math.max(...buckets.map((bucket) => bucket.request_count), 1);
+  const chartData = buckets.map((b) => ({
+    date: b.date,
+    requests: b.request_count,
+  }));
 
   return (
-    <div className="flex items-end gap-1.5">
-      {buckets.map((bucket) => {
-        const label = formatBucketLabel(bucket);
-        return (
-          <Tooltip key={bucket.date}>
-            <TooltipTrigger asChild>
-              <div
-                role="img"
-                aria-label={label}
-                className="flex min-w-0 flex-1 flex-col items-center gap-0.5 rounded outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <span className="h-3.5 text-[10px] font-medium leading-none text-foreground tabular-nums">
-                  {bucket.request_count > 0 ? bucket.request_count : ""}
-                </span>
-                <div className="flex h-10 w-full items-end rounded bg-muted/40 px-0.5">
-                  <div
-                    className="w-full rounded-sm bg-primary/80"
-                    style={{
-                      height: `${Math.max((bucket.request_count / maxCount) * 100, bucket.request_count > 0 ? 10 : 2)}%`,
-                    }}
-                  />
-                </div>
-                <span className="text-[10px] text-muted-foreground">
-                  {bucket.date.slice(8)}
-                </span>
-              </div>
-            </TooltipTrigger>
-            <TooltipContent side="top">{label}</TooltipContent>
-          </Tooltip>
-        );
-      })}
-    </div>
+    <ChartContainer config={miniChartConfig} className="h-[48px] w-full aspect-auto" style={{ pointerEvents: "none" }}>
+      <AreaChart data={chartData} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+        <defs>
+          <linearGradient id="miniFillRequests" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#A672FB" stopOpacity={0.25} />
+            <stop offset="100%" stopColor="#A672FB" stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <Area
+          dataKey="requests"
+          type="natural"
+          stroke="#A672FB"
+          strokeWidth={1.5}
+          fill="url(#miniFillRequests)"
+          dot={false}
+        />
+      </AreaChart>
+    </ChartContainer>
   );
 }
 
 export function ApiKeyUsageDashboard() {
-  const { data, isLoading, error } = useAllAdminedApiKeysUsage(7);
+  const { data, isLoading, error, refetch } = useApiKeysUsage(7);
+
+  if (isLoading) {
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <Activity className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-[13px] font-semibold text-foreground">Agent Activity</h3>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 3 }, (_, index) => (
+            <Skeleton key={index} className="h-44 rounded-xl" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <Activity className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-[13px] font-semibold text-foreground">Agent Activity</h3>
+        </div>
+        <ErrorBanner message="Failed to load agent activity." onRetry={refetch} />
+      </div>
+    );
+  }
+
+  if (!data || data.length === 0) {
+    return null;
+  }
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-center gap-2">
-          <Activity className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">Agent Usage Dashboard</CardTitle>
-        </div>
-        <CardDescription>
-          Request volume, provider-reported tokens, reported cost, and top services for the last 7 days.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        {isLoading ? (
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {Array.from({ length: 3 }, (_, index) => (
-              <Skeleton key={index} className="h-44 w-full" />
-            ))}
-          </div>
-        ) : error ? (
-          <p className="text-sm text-muted-foreground">
-            Failed to load agent usage data.
-          </p>
-        ) : data && data.length > 0 ? (
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {data.map((usage) => (
-              <Link
-                key={usage.api_key_id}
-                to="/keys/api-key/$keyId"
-                params={{ keyId: usage.api_key_id }}
-              >
-                <Card className="h-full transition-colors hover:border-primary/30 hover:bg-accent/30">
-                  <CardContent className="space-y-4 p-5">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0 space-y-0.5">
-                        <p className="truncate text-sm font-medium text-foreground">
-                          {usage.api_key_name}
-                        </p>
-                        <OwnerBadge source={usage.credential_source} />
-                        <p className="text-xs text-muted-foreground">
-                          Last used{" "}
-                          {usage.last_used_at
-                            ? formatRelativeTime(usage.last_used_at)
-                            : "never"}
-                        </p>
-                      </div>
-                      <Badge variant={usage.platform ? "secondary" : "outline"}>
-                        {usage.platform ?? "agent"}
-                      </Badge>
-                    </div>
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <Activity className="h-4 w-4 text-muted-foreground" />
+        <h3 className="text-[13px] font-semibold text-foreground">Agent Activity</h3>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {data.map((usage) => (
+          <Link
+            key={usage.api_key_id}
+            to="/keys/api-key/$keyId"
+            params={{ keyId: usage.api_key_id }}
+          >
+            <Card className="h-full transition-colors duration-300 hover:border-white/[0.15] hover:bg-accent/30">
+              <CardContent className="space-y-3 p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="truncate text-[12px] font-medium text-foreground">
+                    {usage.api_key_name}
+                  </p>
+                  <Badge variant={usage.platform ? "secondary" : "secondary"}>
+                    {usage.platform ?? "agent"}
+                  </Badge>
+                </div>
 
-                    <div className="grid grid-cols-3 gap-2 text-xs">
-                      <div className="rounded-lg border border-border p-2">
-                        <p className="text-muted-foreground">Requests</p>
-                        <p className="mt-1 text-sm font-semibold">{usage.request_count}</p>
-                      </div>
-                      <div className="rounded-lg border border-border p-2">
-                        <p className="text-muted-foreground">Errors</p>
-                        <p className="mt-1 text-sm font-semibold">{usage.error_count}</p>
-                      </div>
-                      <div className="rounded-lg border border-border p-2">
-                        <p className="text-muted-foreground">Error Rate</p>
-                        <p className="mt-1 text-sm font-semibold">
-                          {(usage.error_rate * 100).toFixed(1)}%
-                        </p>
-                      </div>
-                    </div>
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-[24px] font-bold leading-none text-foreground">
+                    {usage.request_count}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground">requests</span>
+                </div>
 
-                    <UsageBars buckets={usage.daily_buckets} />
+                <MiniLineChart buckets={usage.daily_buckets} />
 
-                    <div className="space-y-1.5">
-                      <p className="text-xs font-medium text-foreground">Top Services</p>
-                      {usage.top_services.length > 0 ? (
-                        <div className="flex flex-wrap gap-1.5">
-                          {usage.top_services.slice(0, 3).map((service) => (
-                            <Badge
-                              key={`${usage.api_key_id}-${service.service_slug}`}
-                              variant="secondary"
-                              className="text-[11px]"
-                            >
-                              {service.service_label} ({service.request_count})
-                            </Badge>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="text-xs text-muted-foreground">
-                          No service usage yet.
-                        </p>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              </Link>
-            ))}
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">
-            No agent usage recorded yet.
-          </p>
-        )}
-      </CardContent>
-    </Card>
+                <p className="text-[11px] text-muted-foreground">
+                  Last used{" "}
+                  {usage.last_used_at
+                    ? formatRelativeTime(usage.last_used_at)
+                    : "never"}
+                </p>
+              </CardContent>
+            </Card>
+          </Link>
+        ))}
+      </div>
+    </div>
   );
 }

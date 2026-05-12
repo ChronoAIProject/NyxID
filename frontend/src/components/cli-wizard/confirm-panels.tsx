@@ -193,7 +193,7 @@ export function ApiKeyCreateConfirm({
         <h2 className="font-serif text-[28px] font-normal">
           Create an API key
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Review the details your CLI sent and confirm to mint the key.
         </p>
       </div>
@@ -218,7 +218,7 @@ export function ApiKeyCreateConfirm({
                   <button
                     type="button"
                     aria-label="About platform tags"
-                    className="text-muted-foreground transition-colors hover:text-foreground"
+                    className="text-muted-foreground transition-colors duration-300 hover:text-foreground"
                   >
                     <Info className="h-3.5 w-3.5" />
                   </button>
@@ -288,7 +288,7 @@ export function ApiKeyCreateConfirm({
               onChange={(e) => {
                 setOwnerId(e.target.value);
               }}
-              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-[13px] text-foreground transition-colors duration-300 focus-visible:outline-none"
             >
               <option value="">Personal (your account)</option>
               {orgs.data?.map((org) => (
@@ -307,7 +307,7 @@ export function ApiKeyCreateConfirm({
         <AccessScopeCard value={access} onChange={setAccess} />
       </div>
       {error ? <ErrorLine message={error} /> : null}
-      <Button onClick={() => void submit()} disabled={submitDisabled}>
+      <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
         {loading ? "Creating..." : "Create key"}
       </Button>
     </div>
@@ -369,13 +369,13 @@ export function ApiKeyRotateConfirm({
         <h2 className="font-serif text-[28px] font-normal">
           Rotate API key
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Rotating <strong>{prefill.display_name}</strong> will issue a
           new key and immediately revoke the previous one.
         </p>
       </div>
       {error ? <ErrorLine message={error} /> : null}
-      <Button onClick={() => void submit()} disabled={loading}>
+      <Button variant="primary" onClick={() => void submit()} disabled={loading}>
         {loading ? "Rotating..." : "Rotate key"}
       </Button>
     </div>
@@ -453,7 +453,7 @@ export function NodeRegisterConfirm({
         <h2 className="font-serif text-[28px] font-normal">
           Generate node registration token
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Use this token with <code>nyxid node register</code> to
           connect a new node.
         </p>
@@ -471,7 +471,7 @@ export function NodeRegisterConfirm({
         autoFocus
       />
       {error ? <ErrorLine message={error} /> : null}
-      <Button onClick={() => void submit()} disabled={loading || !nameValid}>
+      <Button variant="primary" onClick={() => void submit()} disabled={loading || !nameValid}>
         {loading ? "Generating..." : "Generate token"}
       </Button>
     </div>
@@ -535,13 +535,13 @@ export function NodeRotateConfirm({
         <h2 className="font-serif text-[28px] font-normal">
           Rotate node token
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Rotating <strong>{prefill.display_name}</strong> issues a new
           auth token + signing secret and revokes the previous pair.
         </p>
       </div>
       {error ? <ErrorLine message={error} /> : null}
-      <Button onClick={() => void submit()} disabled={loading}>
+      <Button variant="primary" onClick={() => void submit()} disabled={loading}>
         {loading ? "Rotating..." : "Rotate token"}
       </Button>
     </div>
@@ -1328,7 +1328,7 @@ function Field({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
       {message}
     </p>
   );

@@ -6,8 +6,9 @@ import {
   useDeveloperApps,
 } from "@/hooks/use-developer-apps";
 import { parseRedirectUris } from "@/lib/oauth";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -33,10 +34,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ClientSecretDialog } from "@/components/shared/client-secret-dialog";
 import { ApiError } from "@/lib/api-client";
-import { Code, Plus, Shield, ShieldCheck } from "lucide-react";
+import { Code, ExternalLink, Plus, Shield, ShieldCheck } from "lucide-react";
 
 const OIDC_SCOPES = [
   { id: "openid", label: "openid", required: true },
@@ -75,11 +77,11 @@ function StatCard({
 }) {
   return (
     <Card>
-      <CardContent className="flex items-start justify-between p-6">
+      <CardContent className="flex items-start justify-between p-4">
         <div className="space-y-1">
-          <p className="text-sm text-muted-foreground">{title}</p>
+          <p className="text-[12px] text-muted-foreground">{title}</p>
           <p className="text-2xl font-semibold text-foreground">{value}</p>
-          <p className="text-xs text-text-tertiary">{description}</p>
+          <p className="text-[11px] text-text-tertiary">{description}</p>
         </div>
         <Icon className="h-5 w-5 text-primary" />
       </CardContent>
@@ -89,7 +91,7 @@ function StatCard({
 
 export function DeveloperAppsPage() {
   const navigate = useNavigate();
-  const { data, isLoading, error } = useDeveloperApps();
+  const { data, isLoading, error, refetch } = useDeveloperApps();
   const createMutation = useCreateDeveloperApp();
   const [createOpen, setCreateOpen] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
@@ -158,27 +160,35 @@ export function DeveloperAppsPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="font-display text-3xl font-normal tracking-tight md:text-5xl">
+          <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
             Developer Apps
           </h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             Register and manage OAuth applications for your products.
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => setShowInactive((current) => !current)}
-          >
-            {showInactive ? "Hide inactive" : "Show inactive"}
-          </Button>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="show-inactive"
+              checked={showInactive}
+              onCheckedChange={setShowInactive}
+            />
+            <label htmlFor="show-inactive" className="text-[12px] text-muted-foreground cursor-pointer">
+              Show inactive
+            </label>
+          </div>
           <Dialog open={createOpen} onOpenChange={setCreateOpen}>
             <DialogTrigger asChild>
-              <Button>
-                <Plus className="mr-2 h-4 w-4" />
+              <button
+                type="button"
+                className="flex h-8 items-center gap-2 rounded-lg border border-white/[0.08] px-3 text-[12px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
+              >
+                <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-white/[0.08] bg-white/[0.04]">
+                  <Plus className="h-3 w-3" />
+                </span>
                 New Application
-              </Button>
+              </button>
             </DialogTrigger>
             <DialogContent>
               <DialogHeader>
@@ -189,7 +199,7 @@ export function DeveloperAppsPage() {
               </DialogHeader>
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium" htmlFor="app-name">
+                  <label className="text-[12px] font-medium" htmlFor="app-name">
                     Application Name
                   </label>
                   <Input
@@ -201,7 +211,7 @@ export function DeveloperAppsPage() {
                 </div>
                 <div className="space-y-2">
                   <label
-                    className="text-sm font-medium"
+                    className="text-[12px] font-medium"
                     htmlFor="redirect-uris"
                   >
                     Redirect URIs (one per line)
@@ -215,11 +225,11 @@ export function DeveloperAppsPage() {
                     placeholder={
                       "https://app.example.com/oauth/callback\nmyapp://oauth/callback"
                     }
-                    className="flex min-h-[120px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none"
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Client Type</label>
+                  <label className="text-[12px] font-medium">Client Type</label>
                   <Select
                     value={clientType}
                     onValueChange={(value: "public" | "confidential") =>
@@ -236,7 +246,7 @@ export function DeveloperAppsPage() {
                   </Select>
                 </div>
                 <div className="space-y-3">
-                  <label className="text-sm font-medium">Allowed Scopes</label>
+                  <label className="text-[12px] font-medium">Allowed Scopes</label>
                   <p className="text-xs text-muted-foreground">
                     OIDC scopes this app can request. Determines what user data
                     and NyxID capabilities are included in tokens.
@@ -259,7 +269,7 @@ export function DeveloperAppsPage() {
                         <div className="grid gap-0.5 leading-none">
                           <label
                             htmlFor={`scope-create-${scope.id}`}
-                            className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                            className="text-[12px] font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                           >
                             {scope.label}
                             {scope.required && (
@@ -288,6 +298,7 @@ export function DeveloperAppsPage() {
                   Cancel
                 </Button>
                 <Button
+                  variant="primary"
                   onClick={() => void handleCreate()}
                   isLoading={createMutation.isPending}
                 >
@@ -328,13 +339,9 @@ export function DeveloperAppsPage() {
 
       <div className="grid gap-4 xl:grid-cols-2">
         {!isLoading && error && (
-          <Card className="xl:col-span-2">
-            <CardContent className="p-8 text-center">
-              <p className="text-sm text-muted-foreground">
-                Failed to load developer apps. Please refresh and try again.
-              </p>
-            </CardContent>
-          </Card>
+          <div className="xl:col-span-2">
+            <ErrorBanner message="Failed to load developer apps. Please refresh and try again." onRetry={refetch} />
+          </div>
         )}
 
         {isLoading &&
@@ -357,22 +364,22 @@ export function DeveloperAppsPage() {
             <Card key={app.id}>
               <CardHeader className="space-y-2">
                 <div className="flex items-center justify-between gap-3">
-                  <CardTitle className="text-base">{app.client_name}</CardTitle>
+                  <CardTitle>{app.client_name}</CardTitle>
                   <Badge variant={app.is_active ? "success" : "secondary"}>
-                    {app.is_active ? "active" : "inactive"}
+                    {app.is_active ? "Active" : "Inactive"}
                   </Badge>
                 </div>
                 <CardDescription className="break-all">
                   Client ID:{" "}
-                  <span className="font-mono text-xs text-foreground">
+                  <span className="text-xs text-foreground">
                     {app.id}
                   </span>
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="outline">{app.client_type}</Badge>
-                  <Badge variant="outline">
+                  <Badge variant="secondary">{app.client_type}</Badge>
+                  <Badge variant="secondary">
                     {app.redirect_uris.length} redirect URIs
                   </Badge>
                 </div>
@@ -390,10 +397,9 @@ export function DeveloperAppsPage() {
                       </Badge>
                     ))}
                 </div>
-                <div className="flex gap-2">
+                <div className="flex justify-end">
                   <Button
                     variant="outline"
-                    size="sm"
                     onClick={() =>
                       void navigate({
                         to: "/developer/apps/$clientId",
@@ -401,19 +407,8 @@ export function DeveloperAppsPage() {
                       })
                     }
                   >
+                    <ButtonIcon><ExternalLink className="h-3 w-3" /></ButtonIcon>
                     View Details
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() =>
-                      void navigate({
-                        to: "/developer/apps/$clientId",
-                        params: { clientId: app.id },
-                      })
-                    }
-                  >
-                    Manage Credentials
                   </Button>
                 </div>
               </CardContent>
@@ -422,8 +417,8 @@ export function DeveloperAppsPage() {
 
         {!isLoading && visibleApps.length === 0 && (
           <Card className="xl:col-span-2">
-            <CardContent className="p-8 text-center">
-              <p className="text-sm text-muted-foreground">
+            <CardContent className="p-4 text-center">
+              <p className="text-[12px] text-muted-foreground">
                 {apps.length === 0
                   ? "No developer apps yet. Create your first application."
                   : "No active applications. Enable 'Show inactive' to view deactivated apps."}

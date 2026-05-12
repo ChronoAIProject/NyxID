@@ -30,7 +30,7 @@ export function ArticleMeta({
   return (
     <div className="border-landing-border-subtle flex flex-wrap items-center gap-x-6 gap-y-3 border-y py-5">
       <div className="flex items-center gap-3">
-        <span className="from-void-300 to-void-700 grid h-9 w-9 place-items-center rounded-full bg-gradient-to-br text-xs font-semibold text-white">
+        <span className="from-nyx-200 to-nyx-700 grid h-9 w-9 place-items-center rounded-full bg-gradient-to-br text-xs font-semibold text-white">
           {authorInitials(author)}
         </span>
         <div className="leading-tight">

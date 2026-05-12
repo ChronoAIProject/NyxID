@@ -1,6 +1,5 @@
 import { Link, Outlet } from "@tanstack/react-router";
 
-/* ── VoidPortal Auth Layout ── */
 export function AuthLayout() {
   return (
     <div
@@ -13,24 +12,24 @@ export function AuthLayout() {
       }}
     >
       <div className="flex w-full max-w-[420px] flex-col items-center gap-8">
-        {/* ── Logo (NyxID wordmark lockup) ── */}
+        {/* Logo */}
         <div className="flex items-center">
-          <img src="/nyxid-wordmark.svg" alt="NyxID" className="h-9 w-auto" />
+          <img src="/nyxid-coloured-logo.svg" alt="NyxID" className="h-10 w-auto" />
         </div>
 
-        {/* ── Auth Card ── */}
-        <div className="w-full rounded-[10px] border border-border bg-card p-8">
+        {/* Auth Card */}
+        <div className="w-full rounded-xl border border-border bg-card p-8">
           <Outlet />
         </div>
 
-        {/* ── Footer ── */}
+        {/* Footer */}
         <div className="flex flex-col items-center gap-1.5">
           <p className="text-center text-[11px] text-text-tertiary">
             Secure identity and access management by NyxID
           </p>
           <Link
             to="/privacy"
-            className="text-[11px] text-violet-400 underline-offset-2 hover:text-violet-300 hover:underline"
+            className="text-[11px] text-nyx-secondary-400 underline-offset-2 hover:text-nyx-300 hover:underline"
           >
             Privacy Policy
           </Link>

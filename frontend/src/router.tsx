@@ -74,13 +74,14 @@ import {
   BlogIndexPage,
   BlogDetailPage,
   BlogPreviewPage,
+  DesignSystemPage,
 } from "@/pages/lazy";
 
 // ── Route tree ──
 
 const rootRoute = createRootRoute({
   component: () => (
-    <TooltipProvider>
+    <TooltipProvider delayDuration={200}>
       <ChunkErrorBoundary>
         <Suspense>
           <Outlet />
@@ -226,7 +227,17 @@ const sshTerminalRoute = createRoute({
 const dashboardLayout = createRoute({
   id: "dashboard",
   getParentRoute: () => rootRoute,
-  beforeLoad: () => {
+  beforeLoad: async () => {
+    if (import.meta.env.DEV) {
+      const { isMockMode, getMockUser } = await import("./lib/mock-data");
+      if (isMockMode()) {
+        const store = useAuthStore.getState();
+        if (!store.user) {
+          store.setUser(getMockUser() as import("./types/api").User);
+        }
+        return;
+      }
+    }
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (!isAuthenticated && !isLoading) {
       // Preserve the deep link (e.g. `/orgs/join/<nonce>`) so sign-in can
@@ -252,6 +263,9 @@ const landingRoute = createRoute({
   path: "/",
   getParentRoute: () => rootRoute,
   beforeLoad: () => {
+    if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock")) {
+      throw redirect({ to: "/dashboard", search: { mock: "" } });
+    }
     const { isAuthenticated, isLoading } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
       throw redirect({ to: "/dashboard" });
@@ -408,6 +422,12 @@ const aiSetupRoute = createRoute({
   path: "/ai-setup",
   getParentRoute: () => dashboardLayout,
   component: AiSetupPage,
+});
+
+const designSystemRoute = createRoute({
+  path: "/design-system",
+  getParentRoute: () => rootRoute,
+  component: DesignSystemPage,
 });
 
 const notificationSettingsRoute = createRoute({
@@ -617,6 +637,7 @@ const routeTree = rootRoute.addChildren([
   cliAuthRoute,
   cliPairRoute,
   sshTerminalRoute,
+  designSystemRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
     apiKeysRedirectRoute,

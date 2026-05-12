@@ -8,40 +8,31 @@ interface DetailRowProps {
   readonly label: string;
   readonly value: string;
   readonly copyable?: boolean;
-  readonly mono?: boolean;
   readonly badge?: boolean;
   readonly badgeVariant?:
     | "default"
     | "secondary"
     | "destructive"
-    | "outline"
     | "success"
     | "warning";
 }
 
-/* ── VoidPortal Detail Row ── */
+/* ── NyxID Detail Row ── */
 export function DetailRow({
   label,
   value,
   copyable = false,
-  mono = false,
   badge = false,
   badgeVariant = "secondary",
 }: DetailRowProps) {
   return (
-    <div className="flex items-center justify-between border-b border-border py-2 text-sm last:border-b-0">
-      <span className="text-text-tertiary">{label}</span>
-      <div className="flex items-center gap-1">
+    <div className="flex items-center justify-between px-4 py-2.5 text-[12px]">
+      <span className="text-muted-foreground">{label}</span>
+      <div className="flex items-center gap-1.5">
         {badge ? (
           <Badge variant={badgeVariant}>{value}</Badge>
         ) : (
-          <span
-            className={
-              mono ? "font-mono text-xs text-foreground" : "text-foreground"
-            }
-          >
-            {value}
-          </span>
+          <span className="font-medium text-foreground">{value}</span>
         )}
         {copyable && (
           <Button

@@ -239,3 +239,6 @@ export const BlogDetailPage = lazy(() =>
 export const BlogPreviewPage = lazy(() =>
   import("@/pages/blog-preview").then((m) => ({ default: m.BlogPreviewPage })),
 );
+export const DesignSystemPage = lazy(() =>
+  import("@/pages/design-system").then((m) => ({ default: m.DesignSystemPage })),
+);

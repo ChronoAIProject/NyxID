@@ -70,7 +70,7 @@ function DashboardCard() {
             className="rounded-lg border border-landing-border-subtle bg-landing-surface p-3"
           >
             <div className="font-mono text-xs text-gray-500">{m.l}</div>
-            <div className="mt-1 text-lg font-semibold text-void-400">
+            <div className="mt-1 text-lg font-semibold text-nyx-secondary-400">
               {m.v}
             </div>
           </div>
@@ -81,7 +81,7 @@ function DashboardCard() {
           (a) => (
             <span
               key={a}
-              className="rounded-lg bg-primary/10 px-2.5 py-1 font-mono text-xs text-void-400"
+              className="rounded-lg bg-primary/10 px-2.5 py-1 font-mono text-xs text-nyx-secondary-400"
             >
               {a}
             </span>
@@ -142,7 +142,7 @@ function AuditCard() {
     <BrowserFrame url="app.nyxid.io/audit">
       <div className="mb-3 flex items-center justify-between">
         <div className="font-serif text-base text-white">Audit Trail</div>
-        <span className="rounded bg-primary/10 px-2 py-0.5 font-mono text-xs text-void-400">
+        <span className="rounded bg-primary/10 px-2 py-0.5 font-mono text-xs text-nyx-secondary-400">
           Live
         </span>
       </div>
@@ -263,7 +263,7 @@ function ApiKeysCard() {
     <BrowserFrame url="app.nyxid.io/keys">
       <div className="mb-3 flex items-center justify-between">
         <div className="font-serif text-base text-white">API Keys</div>
-        <span className="rounded-lg bg-primary/10 px-2.5 py-1 font-mono text-xs text-void-400">
+        <span className="rounded-lg bg-primary/10 px-2.5 py-1 font-mono text-xs text-nyx-secondary-400">
           + Create
         </span>
       </div>
@@ -284,7 +284,7 @@ function ApiKeysCard() {
               {k.scopes.map((s) => (
                 <span
                   key={s}
-                  className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-xs text-void-400"
+                  className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-xs text-nyx-secondary-400"
                 >
                   {s}
                 </span>
@@ -309,7 +309,7 @@ function RbacCard() {
         <div className="font-serif text-base text-white">
           Roles & Permissions
         </div>
-        <span className="rounded-lg bg-primary/10 px-2.5 py-1 font-mono text-xs text-void-400">
+        <span className="rounded-lg bg-primary/10 px-2.5 py-1 font-mono text-xs text-nyx-secondary-400">
           + New Role
         </span>
       </div>
@@ -331,7 +331,7 @@ function RbacCard() {
               {r.p.map((p) => (
                 <span
                   key={p}
-                  className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-xs text-void-400"
+                  className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-xs text-nyx-secondary-400"
                 >
                   {p}
                 </span>
@@ -376,7 +376,7 @@ function ActiveGrantsCard() {
           >
             <div className="mb-1 flex items-center justify-between">
               <span className="text-sm font-medium text-white">{g.r}</span>
-              <span className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-xs text-void-400">
+              <span className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-xs text-nyx-secondary-400">
                 {g.t}
               </span>
             </div>

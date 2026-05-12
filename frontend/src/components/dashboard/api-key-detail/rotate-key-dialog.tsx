@@ -78,7 +78,7 @@ export function RotateKeyDialog({
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded-md bg-muted p-3 font-mono text-sm break-all select-all">
+              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-[12px] break-all select-all">
                 {newKeyValue}
               </code>
               <Button
@@ -94,7 +94,7 @@ export function RotateKeyDialog({
               </Button>
             </div>
             <DialogFooter>
-              <Button onClick={handleClose}>Done</Button>
+              <Button variant="primary" onClick={handleClose}>Done</Button>
             </DialogFooter>
           </>
         ) : (
@@ -111,6 +111,7 @@ export function RotateKeyDialog({
                 Cancel
               </Button>
               <Button
+                variant="primary"
                 onClick={() => void handleRotate()}
                 disabled={rotateMutation.isPending}
               >

@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "@tanstack/react-router";
 import { useChannelMessages } from "@/hooks/use-channel-messages";
 import { useChannelBot } from "@/hooks/use-channel-bots";
 import { cn } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -125,11 +126,11 @@ function MessageCard({
 
         {/* Content type only — message bodies are no longer stored per ADR-013 */}
         <div className="mb-1">
-          <Badge variant="outline" className="text-[9px]">
+          <Badge variant="secondary" className="text-[9px]">
             {contentTypeLabel(message.content_type)}
           </Badge>
         </div>
-        <p className="text-sm italic text-muted-foreground">
+        <p className="text-[12px] italic text-muted-foreground">
           Content is not stored in NyxID. Ask the agent for the message body.
         </p>
 
@@ -141,7 +142,7 @@ function MessageCard({
               variant={deliveryBadgeVariant(message.callback_status)}
               className="text-[9px]"
             >
-              {message.callback_status}
+              {message.callback_status.charAt(0).toUpperCase() + message.callback_status.slice(1)}
             </Badge>
           )}
         </div>
@@ -163,7 +164,7 @@ export function ChannelConversationDetailPage() {
   const perPage = 50;
 
   const { data: bot } = useChannelBot(botId);
-  const { data, isLoading, error } = useChannelMessages(
+  const { data, isLoading, error, refetch } = useChannelMessages(
     conversationId,
     page,
     perPage,
@@ -172,8 +173,6 @@ export function ChannelConversationDetailPage() {
   const messages = data?.messages ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
-
-  const botLabel = bot?.label ?? "Bot";
 
   if (isLoading) {
     return (
@@ -197,17 +196,11 @@ export function ChannelConversationDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Channel Bots", to: "/channel-bots" },
-          { label: botLabel, to: `/channel-bots/${botId}` },
-          { label: "Messages" },
-        ]}
         title="Messages"
         description={`Conversation ${conversationId.slice(0, 12)}... -- ${String(total)} message${total === 1 ? "" : "s"}`}
         actions={
           <Button
             variant="outline"
-            size="sm"
             onClick={() =>
               void navigate({ to: `/channel-bots/${botId}` as string })
             }
@@ -219,8 +212,8 @@ export function ChannelConversationDetailPage() {
 
       {/* Conversation metadata */}
       {bot && (
-        <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-          <Badge variant="outline">{bot.platform}</Badge>
+        <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+          <Badge variant="secondary">{bot.platform}</Badge>
           <span>Conversation ID:</span>
           <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
             {conversationId.slice(0, 16)}
@@ -230,16 +223,11 @@ export function ChannelConversationDetailPage() {
 
       {/* Message list */}
       {error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <MessageSquare className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load messages. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load messages. Please try again." onRetry={refetch} />
       ) : messages.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12 text-center">
           <MessageSquare className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
+          <p className="text-[12px] text-muted-foreground">
             No messages in this conversation yet.
           </p>
         </div>
@@ -254,25 +242,23 @@ export function ChannelConversationDetailPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-sm text-muted-foreground">
+              <p className="text-[12px] text-muted-foreground">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
-                  size="sm"
                   disabled={page <= 1}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
-                <span className="text-sm">
+                <span className="text-[12px]">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button
                   variant="outline"
-                  size="sm"
                   disabled={page >= totalPages}
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 >

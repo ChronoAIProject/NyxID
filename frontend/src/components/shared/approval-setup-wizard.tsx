@@ -51,7 +51,7 @@ export function ApprovalSetupWizard({
       <div className="flex items-start gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
         <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-500" />
         <div className="space-y-0.5">
-          <p className="text-sm font-medium">
+          <p className="text-[12px] font-medium">
             Approval protection is active
           </p>
           <p className="text-xs text-muted-foreground">
@@ -74,7 +74,9 @@ export function ApprovalSetupWizard({
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
-          <Info className="h-5 w-5 text-blue-500" aria-hidden="true" />
+          <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-white/[0.08] bg-white/[0.04]">
+            <Info className="h-4 w-4 text-blue-500" aria-hidden="true" />
+          </span>
           Set up approval protection
         </CardTitle>
         <CardDescription>
@@ -105,8 +107,8 @@ export function ApprovalSetupWizard({
                 <p
                   className={
                     step.done
-                      ? "text-sm text-muted-foreground line-through"
-                      : "text-sm font-medium"
+                      ? "text-[12px] text-muted-foreground line-through"
+                      : "text-[12px] font-medium"
                   }
                 >
                   Step {String(idx + 1)}: {step.label}

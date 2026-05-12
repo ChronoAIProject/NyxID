@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useApprovalGrants, useRevokeGrant } from "@/hooks/use-approvals";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -30,7 +31,7 @@ export function ApprovalGrantsPage() {
   const [revokeGrantId, setRevokeGrantId] = useState<string | null>(null);
 
   const perPage = 20;
-  const { data, isLoading, error } = useApprovalGrants(page, perPage);
+  const { data, isLoading, error, refetch } = useApprovalGrants(page, perPage);
   const revokeMutation = useRevokeGrant();
 
   const grants = data?.grants ?? [];
@@ -73,26 +74,23 @@ export function ApprovalGrantsPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ShieldCheck className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load grants. Please try again.
-          </p>
-        </div>
+        <ErrorBanner message="Failed to load grants. Please try again." onRetry={refetch} />
       ) : grants.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ShieldCheck className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            No active approval grants.
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Services using per-request approval do not create grants. Only
-            services set to time-based grant mode will appear here.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <ShieldCheck className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="max-w-md space-y-1">
+            <p className="text-[12px] font-medium">No Active Grants</p>
+            <p className="text-[12px] text-muted-foreground">
+              Services using per-request approval do not create grants. Only
+              services set to time-based grant mode will appear here.
+            </p>
+          </div>
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border">
+          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -100,7 +98,7 @@ export function ApprovalGrantsPage() {
                   <TableHead>Requester</TableHead>
                   <TableHead>Granted</TableHead>
                   <TableHead>Expires</TableHead>
-                  <TableHead className="w-[60px]" />
+                  <TableHead className="w-[60px]">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -110,11 +108,11 @@ export function ApprovalGrantsPage() {
                       {grant.service_name}
                     </TableCell>
                     <TableCell>
-                      <div className="flex flex-col">
-                        <span className="text-sm">
+                      <div className="flex flex-col gap-0.5">
+                        <span>
                           {grant.requester_label ?? grant.requester_type}
                         </span>
-                        <span className="text-xs text-muted-foreground">
+                        <span className="text-[11px] text-muted-foreground">
                           {grant.requester_type}
                         </span>
                       </div>
@@ -141,7 +139,7 @@ export function ApprovalGrantsPage() {
                         className="h-8 w-8"
                         onClick={() => setRevokeGrantId(grant.id)}
                       >
-                        <Trash2 className="h-4 w-4 text-muted-foreground" />
+                        <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
                     </TableCell>
                   </TableRow>
@@ -153,25 +151,23 @@ export function ApprovalGrantsPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-sm text-muted-foreground">
+              <p className="text-[12px] text-muted-foreground">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
-                  size="sm"
                   disabled={page <= 1}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
-                <span className="text-sm">
+                <span className="text-[12px]">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button
                   variant="outline"
-                  size="sm"
                   disabled={page >= totalPages}
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                 >

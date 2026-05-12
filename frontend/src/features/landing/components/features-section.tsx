@@ -83,7 +83,7 @@ export function FeaturesSection() {
           {featureKeys.map((key, i) => (
             <div
               key={key}
-              className={`group rounded-2xl border border-landing-border-subtle bg-landing-surface p-8 transition-colors hover:border-primary/30 ${
+              className={`group rounded-2xl border border-landing-border-subtle bg-landing-surface p-8 transition-colors hover:border-white/[0.15] ${
                 inView ? "animate-fade-up" : "opacity-0"
               }`}
               style={{ animationDelay: `${i * 100}ms` }}

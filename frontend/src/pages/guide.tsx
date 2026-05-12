@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import {
   Card,
   CardContent,
@@ -6,8 +7,11 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Copy } from "lucide-react";
+import { toast } from "sonner";
 import { usePublicConfig } from "@/hooks/use-public-config";
 
 function CodeBlock({
@@ -17,18 +21,36 @@ function CodeBlock({
   readonly children: string;
   readonly label?: string;
 }) {
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(children);
+      toast.success("Copied to clipboard");
+    } catch {
+      toast.error("Failed to copy");
+    }
+  }, [children]);
+
   return (
-    <div className="relative">
+    <div className="space-y-2">
       {label && (
-        <div className="mb-1 flex items-center gap-2">
-          <Badge variant="outline" className="text-[10px]">
-            {label}
-          </Badge>
-        </div>
+        <Badge variant="secondary" className="text-[10px]">
+          {label}
+        </Badge>
       )}
-      <pre className="rounded-lg border border-border bg-muted px-4 py-3 font-mono text-xs overflow-x-auto leading-relaxed">
-        {children}
-      </pre>
+      <div className="relative">
+        <pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-xs overflow-x-auto leading-relaxed">
+          {children}
+        </pre>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="absolute right-2 top-2 h-8 w-8 text-text-tertiary hover:text-foreground"
+          onClick={() => void handleCopy()}
+          aria-label="Copy"
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+      </div>
     </div>
   );
 }
@@ -45,7 +67,7 @@ function Section({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg">{title}</CardTitle>
+        <CardTitle>{title}</CardTitle>
         {description && <CardDescription>{description}</CardDescription>}
       </CardHeader>
       <CardContent className="space-y-4">{children}</CardContent>
@@ -97,17 +119,17 @@ export function GuidePage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">
+        <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
           Guide
         </h2>
-        <p className="text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Learn how to set up and use NyxID for identity management and MCP
           proxy access.
         </p>
       </div>
 
       <Section title="Overview" description="What NyxID does and how it works">
-        <p className="text-sm text-muted-foreground leading-relaxed">
+        <p className="text-[12px] text-muted-foreground leading-relaxed">
           NyxID is an identity and access management platform that also acts as
           an MCP (Model Context Protocol) proxy. It lets you manage
           authentication for services and expose their API endpoints as MCP
@@ -115,11 +137,11 @@ export function GuidePage() {
           directly.
         </p>
         <div className="space-y-2">
-          <h4 className="text-sm font-medium">Service Types</h4>
+          <h4 className="text-[12px] font-medium">Service Types</h4>
           <div className="grid gap-3 sm:grid-cols-3">
             <div className="rounded-lg border p-3">
               <div className="mb-1 flex items-center gap-2">
-                <Badge variant="secondary" className="text-xs">
+                <Badge className="text-xs">
                   SSO Provider
                 </Badge>
               </div>
@@ -130,7 +152,7 @@ export function GuidePage() {
             </div>
             <div className="rounded-lg border p-3">
               <div className="mb-1 flex items-center gap-2">
-                <Badge variant="secondary" className="text-xs">
+                <Badge className="text-xs">
                   External Service
                 </Badge>
               </div>
@@ -141,7 +163,7 @@ export function GuidePage() {
             </div>
             <div className="rounded-lg border p-3">
               <div className="mb-1 flex items-center gap-2">
-                <Badge variant="secondary" className="text-xs">
+                <Badge className="text-xs">
                   Internal Service
                 </Badge>
               </div>
@@ -160,8 +182,8 @@ export function GuidePage() {
       >
         <div className="space-y-3">
           <div>
-            <h4 className="text-sm font-medium mb-1">SSO Provider</h4>
-            <p className="text-sm text-muted-foreground leading-relaxed">
+            <h4 className="text-[12px] font-medium mb-1">SSO Provider</h4>
+            <p className="text-[12px] text-muted-foreground leading-relaxed">
               Select the OIDC auth type when creating a service. Configure the
               redirect URIs for the provider's OAuth flow, then share the client
               ID and secret with the users or downstream applications that need
@@ -170,8 +192,8 @@ export function GuidePage() {
           </div>
           <Separator />
           <div>
-            <h4 className="text-sm font-medium mb-1">External Service</h4>
-            <p className="text-sm text-muted-foreground leading-relaxed">
+            <h4 className="text-[12px] font-medium mb-1">External Service</h4>
+            <p className="text-[12px] text-muted-foreground leading-relaxed">
               Select API Key, Bearer Token, or Basic auth type. Each user who
               connects to this service will provide their own credential. This
               is ideal for services where users have individual accounts (e.g.,
@@ -180,8 +202,8 @@ export function GuidePage() {
           </div>
           <Separator />
           <div>
-            <h4 className="text-sm font-medium mb-1">Internal Service</h4>
-            <p className="text-sm text-muted-foreground leading-relaxed">
+            <h4 className="text-[12px] font-medium mb-1">Internal Service</h4>
+            <p className="text-[12px] text-muted-foreground leading-relaxed">
               Admin configures a single shared credential during service setup.
               Users only need to enable access -- NyxID injects the shared
               credential on their behalf when proxying requests.
@@ -189,8 +211,8 @@ export function GuidePage() {
           </div>
           <Separator />
           <div>
-            <h4 className="text-sm font-medium mb-1">Adding API Endpoints</h4>
-            <p className="text-sm text-muted-foreground leading-relaxed">
+            <h4 className="text-[12px] font-medium mb-1">Adding API Endpoints</h4>
+            <p className="text-[12px] text-muted-foreground leading-relaxed">
               After creating a service, add the API endpoints that should be
               exposed as MCP tools. You can define them manually or
               auto-discover them by providing an OpenAPI specification URL.
@@ -203,7 +225,7 @@ export function GuidePage() {
         title="Connecting to Services"
         description="How users connect their accounts to available services"
       >
-        <ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground leading-relaxed">
+        <ol className="list-decimal list-inside space-y-2 text-[12px] text-muted-foreground leading-relaxed">
           <li>
             Navigate to the{" "}
             <strong className="text-foreground">Connections</strong> page from
@@ -232,7 +254,7 @@ export function GuidePage() {
         description="Connect Cursor, Claude Code, or Codex to services via the MCP proxy"
       >
         <div className="rounded-lg border border-primary/20 bg-primary/5 p-4">
-          <p className="text-sm text-muted-foreground leading-relaxed">
+          <p className="text-[12px] text-muted-foreground leading-relaxed">
             NyxID exposes a single MCP endpoint at{" "}
             <code className="rounded bg-muted px-1.5 py-0.5 text-xs">/mcp</code>{" "}
             that serves tools from all your connected services. You only need to
@@ -245,8 +267,8 @@ export function GuidePage() {
 
         <div className="space-y-4">
           <div>
-            <h4 className="text-sm font-medium mb-2">Cursor</h4>
-            <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground leading-relaxed mb-3">
+            <h4 className="text-[12px] font-medium mb-2">Cursor</h4>
+            <ol className="list-decimal list-inside space-y-1 text-[12px] text-muted-foreground leading-relaxed mb-3">
               <li>
                 Create or edit{" "}
                 <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
@@ -265,8 +287,8 @@ export function GuidePage() {
           <Separator />
 
           <div>
-            <h4 className="text-sm font-medium mb-2">Claude Code</h4>
-            <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground leading-relaxed mb-3">
+            <h4 className="text-[12px] font-medium mb-2">Claude Code</h4>
+            <ol className="list-decimal list-inside space-y-1 text-[12px] text-muted-foreground leading-relaxed mb-3">
               <li>
                 Edit{" "}
                 <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
@@ -291,8 +313,8 @@ export function GuidePage() {
           <Separator />
 
           <div>
-            <h4 className="text-sm font-medium mb-2">Codex</h4>
-            <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground leading-relaxed mb-3">
+            <h4 className="text-[12px] font-medium mb-2">Codex</h4>
+            <ol className="list-decimal list-inside space-y-1 text-[12px] text-muted-foreground leading-relaxed mb-3">
               <li>
                 Edit{" "}
                 <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
@@ -314,7 +336,7 @@ export function GuidePage() {
         title="How the MCP Proxy Works"
         description="What happens behind the scenes when an MCP client makes a tool call"
       >
-        <ol className="list-decimal list-inside space-y-2 text-sm text-muted-foreground leading-relaxed">
+        <ol className="list-decimal list-inside space-y-2 text-[12px] text-muted-foreground leading-relaxed">
           <li>
             <strong className="text-foreground">Authentication</strong> -- NyxID
             authenticates the MCP client via an OAuth flow in the browser.
@@ -341,8 +363,8 @@ export function GuidePage() {
           </li>
         </ol>
         <div className="mt-2 space-y-2">
-          <div className="flex items-start gap-2 rounded-lg border p-3">
-            <Badge variant="secondary" className="mt-0.5 shrink-0 text-xs">
+          <div className="flex items-center gap-2 rounded-lg border p-3">
+            <Badge variant="secondary" className="shrink-0 text-xs">
               External
             </Badge>
             <p className="text-xs text-muted-foreground">
@@ -350,8 +372,8 @@ export function GuidePage() {
               token, or basic auth).
             </p>
           </div>
-          <div className="flex items-start gap-2 rounded-lg border p-3">
-            <Badge variant="secondary" className="mt-0.5 shrink-0 text-xs">
+          <div className="flex items-center gap-2 rounded-lg border p-3">
+            <Badge variant="secondary" className="shrink-0 text-xs">
               Internal
             </Badge>
             <p className="text-xs text-muted-foreground">

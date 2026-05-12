@@ -28,7 +28,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ClientSecretDialog } from "@/components/shared/client-secret-dialog";
 import { PageHeader } from "@/components/shared/page-header";
-import type { BreadcrumbItem } from "@/components/shared/breadcrumb";
 import { parseRedirectUris } from "@/lib/oauth";
 import { ApiError } from "@/lib/api-client";
 import { toast } from "sonner";
@@ -60,18 +59,11 @@ const OIDC_SCOPES = [
 interface DeveloperAppDetailProps {
   readonly clientId: string;
   readonly backTo: { readonly to: string; readonly label: string };
-  /**
-   * Breadcrumb chain leading up to (but not including) the developer app
-   * itself. The current app's name is appended as the final crumb. When
-   * omitted, defaults to a single crumb derived from `backTo`.
-   */
-  readonly breadcrumbsPrefix?: readonly BreadcrumbItem[];
 }
 
 export function DeveloperAppDetail({
   clientId,
   backTo,
-  breadcrumbsPrefix,
 }: DeveloperAppDetailProps) {
   const navigate = useNavigate();
   const { data: app, isLoading } = useDeveloperApp(clientId);
@@ -163,7 +155,7 @@ export function DeveloperAppDetail({
   if (!app) {
     return (
       <div className="space-y-4">
-        <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight">
+        <h2 className="text-3xl md:text-5xl font-normal tracking-tight">
           Developer App
         </h2>
         <p className="text-muted-foreground">
@@ -182,20 +174,10 @@ export function DeveloperAppDetail({
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          ...(breadcrumbsPrefix ?? [{ label: backTo.label, to: backTo.to }]),
-          { label: app.client_name },
-        ]}
         title={app.client_name}
         description="Client details, redirect URIs, and OAuth metadata."
         actions={
           <>
-            <Button
-              variant="outline"
-              onClick={() => void navigate({ to: backTo.to })}
-            >
-              Back
-            </Button>
             <Button variant="outline" onClick={openEditDialog}>
               Edit
             </Button>
@@ -223,16 +205,16 @@ export function DeveloperAppDetail({
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-wrap gap-2">
-            <Badge variant="outline">{app.client_type}</Badge>
+            <Badge variant="secondary">{app.client_type}</Badge>
             <Badge variant={app.is_active ? "success" : "secondary"}>
-              {app.is_active ? "active" : "inactive"}
+              {app.is_active ? "Active" : "Inactive"}
             </Badge>
           </div>
           <div className="space-y-1">
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
               Client ID
             </p>
-            <p className="break-all font-mono text-sm text-foreground">
+            <p className="break-all font-mono text-[12px] text-foreground">
               {app.id}
             </p>
           </div>
@@ -240,7 +222,7 @@ export function DeveloperAppDetail({
             <p className="text-xs uppercase tracking-wide text-text-tertiary">
               Created At
             </p>
-            <p className="text-sm text-foreground">
+            <p className="text-[12px] text-foreground">
               {new Date(app.created_at).toLocaleString()}
             </p>
           </div>
@@ -258,13 +240,13 @@ export function DeveloperAppDetail({
           {app.redirect_uris.map((uri) => (
             <div
               key={uri}
-              className="break-all rounded-md border border-border bg-muted px-3 py-2 font-mono text-xs"
+              className="break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-xs"
             >
               {uri}
             </div>
           ))}
           {app.redirect_uris.length === 0 && (
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[12px] text-muted-foreground">
               No redirect URIs configured.
             </p>
           )}
@@ -303,7 +285,7 @@ export function DeveloperAppDetail({
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="edit-app-name">
+              <label className="text-[12px] font-medium" htmlFor="edit-app-name">
                 Application Name
               </label>
               <Input
@@ -314,7 +296,7 @@ export function DeveloperAppDetail({
             </div>
             <div className="space-y-2">
               <label
-                className="text-sm font-medium"
+                className="text-[12px] font-medium"
                 htmlFor="edit-redirect-uris"
               >
                 Redirect URIs (one per line)
@@ -323,11 +305,11 @@ export function DeveloperAppDetail({
                 id="edit-redirect-uris"
                 value={redirectUrisText}
                 onChange={(event) => setRedirectUrisText(event.target.value)}
-                className="flex min-h-[120px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none"
               />
             </div>
             <div className="space-y-3">
-              <label className="text-sm font-medium">Allowed Scopes</label>
+              <label className="text-[12px] font-medium">Allowed Scopes</label>
               <div className="space-y-2">
                 {OIDC_SCOPES.map((scope) => (
                   <div key={scope.id} className="flex items-start gap-2">
@@ -346,7 +328,7 @@ export function DeveloperAppDetail({
                     <div className="grid gap-0.5 leading-none">
                       <label
                         htmlFor={`scope-edit-${scope.id}`}
-                        className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                        className="text-[12px] font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                       >
                         {scope.label}
                         {scope.required && (
@@ -371,6 +353,7 @@ export function DeveloperAppDetail({
               Cancel
             </Button>
             <Button
+              variant="primary"
               onClick={() => void handleSave()}
               isLoading={updateMutation.isPending}
             >

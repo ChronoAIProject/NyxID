@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -74,7 +74,7 @@ export function RateLimitCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Gauge className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">Rate Limits</CardTitle>
+          <CardTitle className="text-[15px]">Rate Limits</CardTitle>
         </div>
         <CardDescription>
           Per-agent request rate limits (overrides user-level defaults)
@@ -103,16 +103,16 @@ export function RateLimitCard({
                 placeholder="Use user default"
               />
             </div>
-            <div className="flex gap-2">
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={handleCancel}>
+                Cancel
+              </Button>
               <Button
-                size="sm"
+                variant="primary"
                 onClick={handleSave}
-                disabled={updateApiKey.isPending}
+                disabled={updateApiKey.isPending || (rps === (rateLimitPerSecond?.toString() ?? "") && burst === (rateLimitBurst?.toString() ?? ""))}
               >
                 Save
-              </Button>
-              <Button size="sm" variant="outline" onClick={handleCancel}>
-                Cancel
               </Button>
             </div>
           </div>
@@ -133,11 +133,10 @@ export function RateLimitCard({
               </div>
             </div>
             <Button
-              size="sm"
               variant="outline"
               onClick={() => setEditing(true)}
             >
-              <Pencil className="mr-2 h-3 w-3" />
+              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
               Edit Limits
             </Button>
           </div>

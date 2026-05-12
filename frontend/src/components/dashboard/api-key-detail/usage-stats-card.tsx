@@ -1,6 +1,8 @@
+import { useState } from "react";
+import { Area, AreaChart, XAxis, YAxis } from "recharts";
 import { useApiKeyUsage } from "@/hooks/use-api-keys";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { formatRelativeTime } from "@/lib/utils";
-import { formatBucketLabel } from "@/lib/usage-bucket";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Card,
@@ -10,10 +12,27 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Activity } from "lucide-react";
+import {
+  type ChartConfig,
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+} from "@/components/ui/chart";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
-function ActivityBars({
+const chartConfig = {
+  requests: { label: "Requests", color: "#A672FB" },
+  errors: { label: "Errors", color: "var(--color-destructive)" },
+} satisfies ChartConfig;
+
+function ActivityChart({
   buckets,
 }: {
   readonly buckets: readonly {
@@ -30,42 +49,69 @@ function ActivityBars({
     );
   }
 
-  const maxCount = Math.max(...buckets.map((bucket) => bucket.request_count), 1);
+  const chartData = buckets.map((b) => ({
+    date: b.date,
+    requests: b.request_count,
+    errors: b.error_count,
+  }));
 
   return (
-    <div className="flex items-end gap-2">
-      {buckets.map((bucket) => {
-        const label = formatBucketLabel(bucket);
-        return (
-          <Tooltip key={bucket.date}>
-            <TooltipTrigger asChild>
-              <div
-                tabIndex={0}
-                role="img"
-                aria-label={label}
-                className="flex min-w-0 flex-1 cursor-default flex-col items-center gap-1 rounded outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <span className="h-3.5 text-[10px] font-medium leading-none text-foreground tabular-nums">
-                  {bucket.request_count > 0 ? bucket.request_count : ""}
-                </span>
-                <div className="flex h-16 w-full items-end rounded bg-muted/40 px-1">
-                  <div
-                    className="w-full rounded-sm bg-primary/80"
-                    style={{
-                      height: `${Math.max((bucket.request_count / maxCount) * 100, bucket.request_count > 0 ? 10 : 2)}%`,
-                    }}
-                  />
-                </div>
-                <span className="text-[10px] text-muted-foreground">
-                  {bucket.date.slice(5)}
-                </span>
-              </div>
-            </TooltipTrigger>
-            <TooltipContent side="top">{label}</TooltipContent>
-          </Tooltip>
-        );
-      })}
-    </div>
+    <ChartContainer config={chartConfig} className="h-[120px] w-full aspect-auto">
+      <AreaChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 8 }}>
+        <defs>
+          <linearGradient id="fillRequests" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#A672FB" stopOpacity={0.25} />
+            <stop offset="100%" stopColor="#A672FB" stopOpacity={0} />
+          </linearGradient>
+          <linearGradient id="fillErrors" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--color-destructive)" stopOpacity={0.2} />
+            <stop offset="100%" stopColor="var(--color-destructive)" stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <XAxis
+          dataKey="date"
+          tickLine={false}
+          axisLine={false}
+          tickFormatter={(value: string) =>
+            new Date(value + "T00:00:00").toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+            })
+          }
+          tick={{ fontSize: 10 }}
+          interval="preserveStartEnd"
+        />
+        <YAxis hide />
+        <ChartTooltip
+          content={
+            <ChartTooltipContent
+              labelFormatter={(value) =>
+                new Date(value + "T00:00:00").toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                })
+              }
+            />
+          }
+        />
+        <Area
+          dataKey="requests"
+          type="natural"
+          stroke="#A672FB"
+          strokeWidth={1.5}
+          fill="url(#fillRequests)"
+          dot={false}
+        />
+        <Area
+          dataKey="errors"
+          type="natural"
+          stroke="var(--color-destructive)"
+          strokeWidth={1.5}
+          fill="url(#fillErrors)"
+          dot={false}
+        />
+      </AreaChart>
+    </ChartContainer>
   );
 }
 
@@ -74,17 +120,30 @@ export function UsageStatsCard({
 }: {
   readonly keyId: string;
 }) {
-  const { data, isLoading, error } = useApiKeyUsage(keyId, 7);
+  const [days, setDays] = useState(7);
+  const { data, isLoading, error, refetch } = useApiKeyUsage(keyId, days);
 
   return (
     <Card className="md:col-span-2">
       <CardHeader className="pb-3">
-        <div className="flex items-center gap-2">
-          <Activity className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">Usage</CardTitle>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-primary" />
+            <CardTitle className="text-[15px]">Usage</CardTitle>
+          </div>
+          <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
+            <SelectTrigger className="h-8 w-[160px] text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="7">Last 7 Days</SelectItem>
+              <SelectItem value="30">Last 30 Days</SelectItem>
+              <SelectItem value="90">Last 3 Months</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         <CardDescription>
-          Agent-attributed requests, provider-reported tokens, and reported cost for the last 7 days.
+          Agent-attributed requests, provider-reported tokens, and reported cost.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -94,32 +153,30 @@ export function UsageStatsCard({
             <Skeleton className="h-24 w-full" />
           </div>
         ) : error || !data ? (
-          <p className="text-xs text-muted-foreground">
-            Failed to load usage stats.
-          </p>
+          <ErrorBanner message="Failed to load usage stats." onRetry={refetch} />
         ) : (
           <>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Requests
                 </p>
                 <p className="mt-1 text-lg font-semibold">{data.request_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Successes
                 </p>
                 <p className="mt-1 text-lg font-semibold">{data.success_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Errors
                 </p>
                 <p className="mt-1 text-lg font-semibold">{data.error_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                <p className="text-[11px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Error Rate
                 </p>
                 <p className="mt-1 text-lg font-semibold">
@@ -136,7 +193,7 @@ export function UsageStatsCard({
                   {data.last_used_at ? formatRelativeTime(data.last_used_at) : "never"}
                 </span>
               </div>
-              <ActivityBars buckets={data.daily_buckets} />
+              <ActivityChart buckets={data.daily_buckets} />
             </div>
 
             <div className="space-y-2">

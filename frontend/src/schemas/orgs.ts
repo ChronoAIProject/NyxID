@@ -10,7 +10,7 @@ import { z } from "zod";
  * - member: use org services via the proxy
  * - viewer: see org services exist but cannot proxy through them
  */
-export const ORG_ROLES = ["admin", "member", "viewer"] as const;
+export const ORG_ROLES = ["owner", "admin", "member", "viewer"] as const;
 
 export const orgRoleSchema = z.enum(ORG_ROLES);
 export type OrgRole = z.infer<typeof orgRoleSchema>;

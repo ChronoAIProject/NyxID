@@ -60,10 +60,10 @@ export function SshTerminalPage() {
     return (
       <div className="flex h-dvh flex-col items-center justify-center bg-background">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
+        <h3 className="mb-2 text-lg font-semibold">
           Service not found
         </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
+        <p className="mb-4 text-[12px] text-muted-foreground">
           The service you are looking for does not exist or has been deleted.
         </p>
         <Button variant="outline" onClick={handleBack}>
@@ -77,10 +77,10 @@ export function SshTerminalPage() {
     return (
       <div className="flex h-dvh flex-col items-center justify-center bg-background">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
+        <h3 className="mb-2 text-lg font-semibold">
           Terminal not available
         </h3>
-        <p className="mb-4 max-w-md text-center text-sm text-muted-foreground">
+        <p className="mb-4 max-w-md text-center text-[12px] text-muted-foreground">
           {!isSshService
             ? "This service is not an SSH service. The web terminal is only available for SSH services."
             : "Certificate authentication is not enabled for this SSH service. Enable it to use the web terminal."}
@@ -107,7 +107,7 @@ export function SshTerminalPage() {
 
         <div className="flex items-center gap-2">
           <Terminal className="h-4 w-4 text-slate-400" />
-          <span className="text-sm font-medium text-slate-200">
+          <span className="text-[12px] font-medium text-slate-200">
             {service.name}
           </span>
           {targetHost !== null && (
@@ -123,7 +123,6 @@ export function SshTerminalPage() {
 
         <Button
           variant="ghost"
-          size="sm"
           onClick={handleBack}
           className="h-7 gap-1 text-xs text-slate-400 hover:text-slate-200"
         >

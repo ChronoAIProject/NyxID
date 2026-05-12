@@ -19,7 +19,7 @@ export function ArticleCard({ article }: { readonly article: BlogArticle }) {
     <Link
       to="/blog/$slug"
       params={{ slug: article.slug }}
-      className="group border-landing-border-subtle bg-landing-surface flex flex-col overflow-hidden rounded-2xl border transition-colors hover:border-primary/30"
+      className="group border-landing-border-subtle bg-landing-surface flex flex-col overflow-hidden rounded-2xl border transition-colors hover:border-white/[0.15]"
     >
       {article.hero_image ? (
         <div className="bg-landing-surface-raised aspect-[16/9] overflow-hidden">
@@ -34,7 +34,7 @@ export function ArticleCard({ article }: { readonly article: BlogArticle }) {
 
       <div className="flex flex-1 flex-col gap-3 p-6">
         {primaryTag ? (
-          <span className="font-mono text-[10px] tracking-widest text-primary uppercase">
+          <span className="font-mono text-[11px] tracking-[1.5px] text-primary uppercase">
             {primaryTag}
           </span>
         ) : null}

@@ -1,7 +1,7 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-/* ── VoidPortal Table ── */
+/* ── NyxID Table ── */
 const Table = React.forwardRef<
   HTMLTableElement,
   React.HTMLAttributes<HTMLTableElement>
@@ -58,7 +58,7 @@ const TableRow = React.forwardRef<
   <tr
     ref={ref}
     className={cn(
-      "border-b border-border transition-colors hover:bg-accent data-[state=selected]:bg-muted",
+      "border-b border-border transition-colors duration-300 data-[state=selected]:bg-muted",
       className,
     )}
     {...props}
@@ -73,7 +73,7 @@ const TableHead = React.forwardRef<
   <th
     ref={ref}
     className={cn(
-      "h-12 px-4 text-left align-middle font-medium text-void-400 [&:has([role=checkbox])]:pr-0",
+      "h-8 px-3 text-left align-middle text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary [&:has([role=checkbox])]:pr-0",
       className,
     )}
     {...props}
@@ -88,7 +88,7 @@ const TableCell = React.forwardRef<
   <td
     ref={ref}
     className={cn(
-      "p-4 align-middle text-foreground [&:has([role=checkbox])]:pr-0",
+      "px-3 py-2.5 align-middle text-[12px] text-foreground [&:has([role=checkbox])]:pr-0",
       className,
     )}
     {...props}

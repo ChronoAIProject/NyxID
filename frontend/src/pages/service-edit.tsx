@@ -2,24 +2,14 @@ import { useEffect } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import {
-  useService,
-  useUpdateService,
-  useUpdateSshAuthMode,
-} from "@/hooks/use-services";
+import { useService, useUpdateService } from "@/hooks/use-services";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import {
   updateServiceSchema,
   type UpdateServiceFormData,
   VISIBILITY_OPTIONS,
   type WsFrameInjection,
-  type SshAuthMode,
 } from "@/schemas/services";
-import {
-  SSH_AUTH_MODE_LABELS,
-  getSshAuthModeChangeWarning,
-  inferSshAuthMode,
-} from "@/lib/ssh-auth-mode";
 import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
 import { WsFrameInjectionsEditor } from "@/components/shared/ws-frame-injections-editor";
@@ -57,15 +47,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
-import { AlertCircle } from "lucide-react";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { toast } from "sonner";
 
 export function ServiceEditPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const navigate = useNavigate();
-  const { data: service, isLoading, error } = useService(serviceId);
+  const { data: service, isLoading, error, refetch } = useService(serviceId);
   const updateMutation = useUpdateService();
-  const updateSshAuthModeMutation = useUpdateSshAuthMode();
   const user = useAuthStore((s) => s.user);
   const { data: appsData } = useDeveloperApps();
   const developerApps = appsData?.clients?.filter((c) => c.is_active) ?? [];
@@ -278,32 +267,6 @@ export function ServiceEditPage() {
     }
   }
 
-  async function handleSshAuthModeChange(mode: SshAuthMode) {
-    if (!service?.your_user_service_id) {
-      toast.error("Create or select a user service binding before changing SSH auth mode");
-      return;
-    }
-    const currentMode = inferSshAuthMode(
-      service.ssh_config?.ssh_auth_mode,
-      service.ssh_config?.certificate_auth_enabled,
-    );
-    const warning = getSshAuthModeChangeWarning(currentMode, mode);
-    if (warning !== null && !window.confirm(warning)) {
-      return;
-    }
-    try {
-      await updateSshAuthModeMutation.mutateAsync({
-        userServiceId: service.your_user_service_id,
-        mode,
-      });
-      toast.success("SSH auth mode updated");
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Failed to update SSH auth mode";
-      toast.error(message);
-    }
-  }
-
   if (isLoading) {
     return (
       <div className="space-y-6">
@@ -315,20 +278,12 @@ export function ServiceEditPage() {
 
   if (error || !service) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
-          Service not found
-        </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The service you are trying to edit does not exist or has been deleted.
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => void navigate({ to: "/services" })}
-        >
-          Back to Services
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="Service Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "The service you are trying to edit does not exist or has been deleted."}
+          onRetry={refetch}
+        />
       </div>
     );
   }
@@ -344,14 +299,6 @@ export function ServiceEditPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Services", to: "/services" },
-          {
-            label: service.name,
-            to: `/services/${serviceId}`,
-          },
-          { label: "Edit" },
-        ]}
         title={`Edit ${service.name}`}
       />
 
@@ -359,7 +306,7 @@ export function ServiceEditPage() {
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             {form.formState.errors.root && (
-              <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -369,7 +316,7 @@ export function ServiceEditPage() {
                 {SERVICE_TYPE_LABELS[service.service_type] ??
                   service.service_type}
               </Badge>
-              <Badge variant="outline">
+              <Badge variant="secondary">
                 {SERVICE_CATEGORY_LABELS[service.service_category] ??
                   service.service_category}
               </Badge>
@@ -397,7 +344,7 @@ export function ServiceEditPage() {
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-[10px] border border-input bg-transparent px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] placeholder:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -442,7 +389,7 @@ export function ServiceEditPage() {
               user?.is_admin &&
               developerApps.length > 0 && (
                 <div className="space-y-2">
-                  <p className="text-sm font-medium">Developer App Scoping</p>
+                  <p className="text-[12px] font-medium">Developer App Scoping</p>
                   <p className="text-xs text-muted-foreground">
                     Select which developer apps grant access to this service.
                     Users who log in through a selected app will have this
@@ -456,7 +403,7 @@ export function ServiceEditPage() {
                       return (
                         <div
                           key={app.id}
-                          className="flex items-center gap-2 rounded-[10px] border border-border p-2"
+                          className="flex items-center gap-2 rounded-lg border border-border p-2"
                         >
                           <Checkbox
                             id={`app-${app.id}`}
@@ -474,11 +421,11 @@ export function ServiceEditPage() {
                           />
                           <Label
                             htmlFor={`app-${app.id}`}
-                            className="text-sm font-normal"
+                            className="text-[12px] font-normal"
                           >
                             {app.client_name}
                           </Label>
-                          <Badge variant="outline" className="ml-auto text-xs">
+                          <Badge variant="secondary" className="ml-auto text-xs">
                             {app.client_type}
                           </Badge>
                         </div>
@@ -523,39 +470,10 @@ export function ServiceEditPage() {
                   />
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="edit-ssh-auth-mode">SSH auth mode</Label>
-                  <Select
-                    value={
-                      service.ssh_config?.ssh_auth_mode ??
-                      (service.ssh_config?.certificate_auth_enabled
-                        ? "cert"
-                        : "proxy_only")
-                    }
-                    onValueChange={(value) =>
-                      void handleSshAuthModeChange(value as SshAuthMode)
-                    }
-                    disabled={updateSshAuthModeMutation.isPending}
-                  >
-                    <SelectTrigger id="edit-ssh-auth-mode">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {Object.entries(SSH_AUTH_MODE_LABELS).map(
-                        ([value, label]) => (
-                          <SelectItem key={value} value={value}>
-                            {label}
-                          </SelectItem>
-                        ),
-                      )}
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="flex items-center justify-between rounded-[10px] border border-border p-3">
+                <div className="flex items-center justify-between rounded-lg border border-border p-3">
                   <Label
                     htmlFor="edit-ssh-cert-auth"
-                    className="text-sm font-normal"
+                    className="text-[12px] font-normal"
                   >
                     Enable short-lived SSH certificates
                   </Label>
@@ -676,7 +594,7 @@ export function ServiceEditPage() {
                 />
 
                 <div>
-                  <p className="mb-1 text-sm font-medium">Auth Type</p>
+                  <p className="mb-1 text-[12px] font-medium">Auth Type</p>
                   <Badge variant="secondary">{getAuthTypeLabel(service)}</Badge>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Auth type cannot be changed after creation.
@@ -687,7 +605,7 @@ export function ServiceEditPage() {
                   <>
                     <Separator className="my-2" />
                     <div className="space-y-2">
-                      <h3 className="text-sm font-semibold">
+                      <h3 className="text-[13px] font-semibold">
                         Identity Propagation
                       </h3>
                       <p className="text-xs text-muted-foreground">
@@ -730,7 +648,7 @@ export function ServiceEditPage() {
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-sm font-semibold">
+                        <h3 className="text-[13px] font-semibold">
                           Service Metadata
                         </h3>
                         <p className="text-xs text-muted-foreground">
@@ -886,7 +804,7 @@ export function ServiceEditPage() {
                       <Separator className="my-2" />
                       <div className="space-y-2">
                         <div className="space-y-1">
-                          <p className="text-sm font-medium">
+                          <p className="text-[12px] font-medium">
                             Default request headers
                           </p>
                           <p className="text-xs text-muted-foreground">
@@ -958,7 +876,7 @@ export function ServiceEditPage() {
                       </div>
 
                       <div className="space-y-2">
-                        <p className="text-sm font-medium">Capabilities</p>
+                        <p className="text-[12px] font-medium">Capabilities</p>
                         <p className="text-xs text-muted-foreground">
                           Flags describing what this service supports through
                           NyxID proxy.
@@ -977,7 +895,7 @@ export function ServiceEditPage() {
                           ).map(([key, label]) => (
                             <div
                               key={key}
-                              className="flex items-center justify-between rounded-[10px] border border-border p-2"
+                              className="flex items-center justify-between rounded-lg border border-border p-2"
                             >
                               <Label
                                 htmlFor={`cap-${key}`}
@@ -1001,7 +919,7 @@ export function ServiceEditPage() {
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-sm font-semibold">
+                        <h3 className="text-[13px] font-semibold">
                           Forward Access Token
                         </h3>
                         <p className="text-xs text-muted-foreground">
@@ -1010,10 +928,10 @@ export function ServiceEditPage() {
                         </p>
                       </div>
 
-                      <div className="flex items-center justify-between rounded-[10px] border border-border p-3">
+                      <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="forward-access-token"
-                          className="text-sm font-normal"
+                          className="text-[12px] font-normal"
                         >
                           Forward Access Token
                         </Label>
@@ -1032,7 +950,7 @@ export function ServiceEditPage() {
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-sm font-semibold">
+                        <h3 className="text-[13px] font-semibold">
                           Delegation Token Injection
                         </h3>
                         <p className="text-xs text-muted-foreground">
@@ -1044,10 +962,10 @@ export function ServiceEditPage() {
                         </p>
                       </div>
 
-                      <div className="flex items-center justify-between rounded-[10px] border border-border p-3">
+                      <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="inject-delegation-token"
-                          className="text-sm font-normal"
+                          className="text-[12px] font-normal"
                         >
                           Inject delegation token
                         </Label>
@@ -1089,7 +1007,7 @@ export function ServiceEditPage() {
             )}
 
             <div className="flex items-center gap-3 pt-4">
-              <Button type="submit" isLoading={updateMutation.isPending}>
+              <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
                 Save changes
               </Button>
               <Button

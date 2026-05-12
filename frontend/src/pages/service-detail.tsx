@@ -32,12 +32,13 @@ import { useMyProviderTokens } from "@/hooks/use-providers";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { ErrorBanner } from "@/components/shared/error-banner";
+import { ApiError } from "@/lib/api-client";
 import {
   Pencil,
   Trash2,
-  AlertCircle,
   Terminal,
   Router,
   ExternalLink,
@@ -61,7 +62,7 @@ const PROPAGATION_MODE_LABELS: Readonly<Record<string, string>> = {
 export function ServiceDetailPage() {
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const navigate = useNavigate();
-  const { data: service, isLoading, error } = useService(serviceId);
+  const { data: service, isLoading, error, refetch } = useService(serviceId);
   const deleteMutation = useDeleteService();
   const testSshMutation = useTestSshConnection();
   const { data: tokens } = useMyProviderTokens();
@@ -106,20 +107,12 @@ export function ServiceDetailPage() {
 
   if (error || !service) {
     return (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
-          Service not found
-        </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The service you are looking for does not exist or has been deleted.
-        </p>
-        <Button
-          variant="outline"
-          onClick={() => void navigate({ to: "/services" })}
-        >
-          Back to Services
-        </Button>
+      <div className="space-y-8">
+        <PageHeader title="Service Not Found" />
+        <ErrorBanner
+          message={error instanceof ApiError ? error.message : "The service you are looking for does not exist or has been deleted."}
+          onRetry={refetch}
+        />
       </div>
     );
   }
@@ -139,10 +132,6 @@ export function ServiceDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Services", to: "/services" },
-          { label: service.name },
-        ]}
         title={service.name}
         description={service.description ?? undefined}
         actions={
@@ -150,7 +139,6 @@ export function ServiceDetailPage() {
             {terminalSupported && (
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() =>
                   void navigate({
                     to: "/ssh/$serviceId/terminal",
@@ -161,13 +149,12 @@ export function ServiceDetailPage() {
                   })
                 }
               >
-                <Terminal className="mr-1 h-3 w-3" />
+                <ButtonIcon><Terminal className="h-3 w-3" /></ButtonIcon>
                 Terminal
               </Button>
             )}
             <Button
               variant="outline"
-              size="sm"
               onClick={() =>
                 void navigate({
                   to: "/services/$serviceId/edit",
@@ -175,16 +162,15 @@ export function ServiceDetailPage() {
                 })
               }
             >
-              <Pencil className="mr-1 h-3 w-3" />
+              <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
               Edit
             </Button>
             <Button
               variant="destructive"
-              size="sm"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
             >
-              <Trash2 className="mr-1 h-3 w-3" />
+              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
               Delete
             </Button>
           </>
@@ -217,13 +203,13 @@ export function ServiceDetailPage() {
           }
           badge
           badgeVariant={
-            service.visibility === "private" ? "outline" : "secondary"
+            service.visibility === "private" ? "secondary" : "secondary"
           }
         />
         {service.developer_app_ids &&
           service.developer_app_ids.length > 0 && (
             <div className="space-y-1 py-2">
-              <p className="text-sm text-muted-foreground">
+              <p className="text-[12px] text-muted-foreground">
                 Developer App Scoping
               </p>
               <div className="flex flex-wrap gap-1.5">
@@ -289,7 +275,6 @@ export function ServiceDetailPage() {
                   label="Target"
                   value={`${service.ssh_config.host}:${String(service.ssh_config.port)}`}
                   copyable
-                  mono
                 />
                 <DetailRow
                   label="SSH Auth Mode"
@@ -328,7 +313,6 @@ export function ServiceDetailPage() {
                   <CopyableField
                     label="SSH CA Public Key"
                     value={service.ssh_config.ca_public_key}
-                    size="sm"
                   />
                 )}
                 {(service.ssh_config.ssh_auth_mode ?? "proxy_only") ===
@@ -346,7 +330,7 @@ export function ServiceDetailPage() {
                 )}
               </>
             ) : (
-              <p className="text-sm text-muted-foreground">
+              <p className="text-[12px] text-muted-foreground">
                 SSH configuration is missing for this service.
               </p>
             )}
@@ -476,7 +460,6 @@ export function ServiceDetailPage() {
                 <DetailRow
                   label="Token Scope"
                   value={service.delegation_token_scope || "llm:proxy"}
-                  mono
                 />
               </DetailSection>
             </>
@@ -536,7 +519,6 @@ export function ServiceDetailPage() {
                     <DetailRow
                       label="Required Permissions"
                       value={service.required_permissions.join(", ")}
-                      mono
                     />
                   )}
                 {service.recommended_skills &&
@@ -544,12 +526,11 @@ export function ServiceDetailPage() {
                     <DetailRow
                       label="Recommended Skills"
                       value={service.recommended_skills.join(", ")}
-                      mono
                     />
                   )}
                 {service.capabilities && (
                   <div className="space-y-1 py-2">
-                    <p className="text-sm text-muted-foreground">
+                    <p className="text-[12px] text-muted-foreground">
                       Capabilities
                     </p>
                     <div className="flex flex-wrap gap-1.5">
@@ -593,7 +574,7 @@ export function ServiceDetailPage() {
                 />
               </div>
             ) : (
-              <p className="text-sm text-muted-foreground">
+              <p className="text-[12px] text-muted-foreground">
                 No default headers configured for this service.
               </p>
             )}
@@ -657,9 +638,15 @@ function YourRoutingSection({
   return (
     <Card>
       <CardHeader className="pb-3">
-        <div className="flex items-center gap-2">
-          <Router className="h-4 w-4 text-primary" />
-          <CardTitle className="text-sm">Your Routing</CardTitle>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Router className="h-4 w-4 text-primary" />
+            <CardTitle className="text-[15px]">Your Routing</CardTitle>
+          </div>
+          <Button variant="outline" onClick={onBindClick}>
+            {count === 0 ? "Bind in AI Services" : "Manage in AI Services"}
+            <ButtonIcon><ExternalLink className="h-3 w-3" /></ButtonIcon>
+          </Button>
         </div>
         <CardDescription>
           Your personal routing for this service. Other users have their own.
@@ -667,27 +654,15 @@ function YourRoutingSection({
       </CardHeader>
       <CardContent className="space-y-3">
         {count === 0 ? (
-          <>
-            <p className="text-xs text-muted-foreground">
-              You haven't bound this service to your account yet, so there's
-              no routing to configure here.
-            </p>
-            <Button size="sm" variant="outline" onClick={onBindClick}>
-              Bind in AI Services
-              <ExternalLink className="ml-1 h-3 w-3" />
-            </Button>
-          </>
+          <p className="text-xs text-muted-foreground">
+            You haven't bound this service to your account yet, so there's
+            no routing to configure here.
+          </p>
         ) : (
-          <>
-            <p className="text-xs text-muted-foreground">
-              You have {String(count)} personal bindings for this service.
-              Manage each one's routing in AI Services.
-            </p>
-            <Button size="sm" variant="outline" onClick={onBindClick}>
-              Manage in AI Services
-              <ExternalLink className="ml-1 h-3 w-3" />
-            </Button>
-          </>
+          <p className="text-xs text-muted-foreground">
+            You have {String(count)} personal bindings for this service.
+            Manage each one's routing in AI Services.
+          </p>
         )}
       </CardContent>
     </Card>

@@ -134,7 +134,7 @@ export function TelegramLoginDialog({
         {step === "loading" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[12px] text-muted-foreground">
               Loading Telegram login widget...
             </p>
           </div>
@@ -160,7 +160,7 @@ export function TelegramLoginDialog({
         {step === "submitting" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[12px] text-muted-foreground">
               Verifying your Telegram identity...
             </p>
           </div>
@@ -169,13 +169,13 @@ export function TelegramLoginDialog({
         {step === "success" && (
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
-              <CheckCircle2 className="h-10 w-10 text-success" />
-              <p className="text-sm text-muted-foreground text-center">
+              <CheckCircle2 className="h-8 w-8 text-success" />
+              <p className="text-[12px] text-muted-foreground text-center">
                 Your Telegram account has been connected successfully.
               </p>
             </div>
             <DialogFooter>
-              <Button type="button" onClick={onClose}>
+              <Button variant="primary" type="button" onClick={onClose}>
                 Done
               </Button>
             </DialogFooter>
@@ -185,8 +185,8 @@ export function TelegramLoginDialog({
         {step === "error" && (
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
-              <AlertCircle className="h-10 w-10 text-destructive" />
-              <p className="text-sm text-destructive text-center">
+              <AlertCircle className="h-8 w-8 text-destructive" />
+              <p className="text-[12px] text-destructive text-center">
                 {errorMessage}
               </p>
             </div>

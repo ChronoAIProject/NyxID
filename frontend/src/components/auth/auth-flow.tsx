@@ -43,7 +43,7 @@ function getPasswordStrength(password: string): {
 
   if (score <= 2) return { score, label: "Weak", color: "bg-destructive" };
   if (score <= 4) return { score, label: "Fair", color: "bg-amber-400" };
-  return { score, label: "Strong", color: "bg-emerald-400" };
+  return { score, label: "Strong", color: "bg-success" };
 }
 
 const INVITE_PATTERN = /^NYX-[A-Z0-9]{8,}$/;
@@ -309,7 +309,7 @@ export function AuthFlow({
 
   return (
     <div
-      className="-m-8 overflow-hidden rounded-[10px]"
+      className="-m-8 overflow-hidden rounded-xl"
       style={{
         opacity: fadeOpacity,
         transition: `opacity ${FADE_MS}ms ease-in-out`,
@@ -321,18 +321,10 @@ export function AuthFlow({
            ================================================================ */
         <div className="px-7 pt-8 pb-7">
           <div className="mb-7 text-center">
-            <h1
-              className="font-display text-2xl font-semibold tracking-tight"
-              style={{
-                background: "linear-gradient(180deg, #fff 30%, #a0a0a8 100%)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                backgroundClip: "text",
-              }}
-            >
+            <h1 className="text-2xl font-bold tracking-tight nyx-gradient-text">
               Welcome back
             </h1>
-            <p className="mt-1.5 text-[13px] text-text-tertiary">
+            <p className="mt-1.5 text-[13px] text-muted-foreground">
               Sign in to your NyxID account
             </p>
           </div>
@@ -341,7 +333,7 @@ export function AuthFlow({
             <div
               role="alert"
               data-testid="social-error"
-              className="mb-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+              className="mb-4 rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
             >
               {SOCIAL_ERROR_MESSAGES[socialError] ??
                 "Social sign-in failed. Please try again."}
@@ -358,7 +350,7 @@ export function AuthFlow({
                   {loginForm.formState.errors.root && (
                     <div
                       role="alert"
-                      className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+                      className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
                     >
                       {loginForm.formState.errors.root.message}
                     </div>
@@ -398,7 +390,7 @@ export function AuthFlow({
                           <FormLabel>Password</FormLabel>
                           <Link
                             to={"/forgot-password" as string}
-                            className="text-xs font-medium text-violet-400 hover:text-violet-300"
+                            className="text-xs font-medium text-nyx-secondary-400 hover:text-nyx-300"
                           >
                             Forgot password?
                           </Link>
@@ -418,7 +410,7 @@ export function AuthFlow({
 
                   <Button
                     type="submit"
-                    className="h-11 w-full bg-gradient-to-br from-violet-400 via-violet-500 to-violet-600 text-sm font-medium shadow-[0_2px_12px_rgba(139,92,246,0.2)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(139,92,246,0.3)]"
+                    className="h-11 w-full nyx-gradient-vivid text-[12px] font-medium shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                     isLoading={loginMutation.isPending}
                   >
                     Sign In
@@ -448,13 +440,13 @@ export function AuthFlow({
                   const url = `${window.location.origin}/api/v1/auth/social/${encodeURIComponent(provider.id)}${qs ? `?${qs}` : ""}`;
                   void openExternal(url);
                 }}
-                className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
+                className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors duration-300 hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
               >
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/[0.06]">
+                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-white/[0.06]">
                   {provider.icon}
                 </span>
                 {provider.label}
-                <span className="ml-auto text-sm text-muted-foreground">
+                <span className="ml-auto text-[12px] text-muted-foreground">
                   &rsaquo;
                 </span>
               </button>
@@ -467,7 +459,7 @@ export function AuthFlow({
             <button
               type="button"
               onClick={() => slideToPanel(1)}
-              className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
+              className="cursor-pointer font-medium text-nyx-secondary-400 hover:text-nyx-300"
             >
               Create account
             </button>
@@ -485,18 +477,10 @@ export function AuthFlow({
         {/* Register Panel 1 — Method Selection */}
         <div className="w-1/2 shrink-0 px-7 pt-8 pb-7">
           <div className="mb-7 text-center">
-            <h1
-              className="font-display text-2xl font-semibold tracking-tight"
-              style={{
-                background: "linear-gradient(180deg, #fff 30%, #a0a0a8 100%)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                backgroundClip: "text",
-              }}
-            >
+            <h1 className="text-2xl font-bold tracking-tight nyx-gradient-text">
               Create your account
             </h1>
-            <p className="mt-1.5 text-[13px] text-text-tertiary">
+            <p className="mt-1.5 text-[13px] text-muted-foreground">
               Start securing your digital identity
             </p>
           </div>
@@ -505,12 +489,12 @@ export function AuthFlow({
           {inviteRequired && (
           <Form {...registerForm}>
             <div className="relative mb-6 pl-9">
-              <div className="absolute left-[11px] top-7 bottom-[-12px] w-px bg-gradient-to-b from-violet-500/10 to-transparent" />
+              <div className="absolute left-[11px] top-7 bottom-[-12px] w-px bg-gradient-to-b from-nyx-500/10 to-transparent" />
               <div
-                className={`absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold transition-colors ${
+                className={`absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border text-[11px] font-semibold transition-colors duration-300 ${
                   isInviteValid
-                    ? "border-transparent bg-gradient-to-br from-violet-400 via-violet-500 to-violet-600 text-white"
-                    : "border-violet-500/15 bg-violet-500/10 text-violet-400"
+                    ? "border-transparent nyx-gradient-vivid text-white"
+                    : "border-nyx-500/15 bg-nyx-500/10 text-nyx-secondary-400"
                 }`}
               >
                 {isInviteValid ? (
@@ -547,7 +531,7 @@ export function AuthFlow({
                         spellCheck={false}
                         className={`h-12 font-mono text-base tracking-wider ${
                           isInviteValid
-                            ? "border-emerald-400/40 shadow-[0_0_0_3px_rgba(52,211,153,0.08)]"
+                            ? "border-success/40 shadow-[0_0_0_3px_rgba(52,211,153,0.08)]"
                             : ""
                         }`}
                         {...field}
@@ -578,7 +562,7 @@ export function AuthFlow({
                   href="https://discord.gg/QMvcs8UQBW"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
+                  className="cursor-pointer font-medium text-nyx-secondary-400 hover:text-nyx-300"
                 >
                   Join our Discord
                 </a>{" "}
@@ -591,7 +575,7 @@ export function AuthFlow({
           {/* Step 2: Choose Method (becomes Step 1 when invite not required) */}
           <div className={`relative ${inviteRequired ? "pl-9" : ""}`}>
             {inviteRequired && (
-            <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-violet-500/15 bg-violet-500/10 text-[11px] font-semibold text-violet-400">
+            <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-nyx-500/15 bg-nyx-500/10 text-[11px] font-semibold text-nyx-secondary-400">
               2
             </div>
             )}
@@ -605,13 +589,13 @@ export function AuthFlow({
                   key={provider.id}
                   type="button"
                   onClick={() => handleRegisterSocialLogin(provider.id)}
-                  className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
+                  className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors duration-300 hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
                 >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/[0.06]">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-white/[0.06]">
                     {provider.icon}
                   </span>
                   {provider.label}
-                  <span className="ml-auto text-sm text-muted-foreground">
+                  <span className="ml-auto text-[12px] text-muted-foreground">
                     &rsaquo;
                   </span>
                 </button>
@@ -621,11 +605,11 @@ export function AuthFlow({
                 <button
                   type="button"
                   onClick={() => { if (requireInviteCode()) slideToPanel(2); }}
-                  className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
+                  className="flex h-[46px] cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors duration-300 hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
                 >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-violet-500/10">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-nyx-500/10">
                     <svg
-                      className="h-4 w-4 text-violet-400"
+                      className="h-4 w-4 text-nyx-secondary-400"
                       viewBox="0 0 24 24"
                       fill="none"
                       stroke="currentColor"
@@ -638,7 +622,7 @@ export function AuthFlow({
                     </svg>
                   </span>
                   Continue with Email
-                  <span className="ml-auto text-sm text-muted-foreground">
+                  <span className="ml-auto text-[12px] text-muted-foreground">
                     &rsaquo;
                   </span>
                 </button>
@@ -652,7 +636,7 @@ export function AuthFlow({
             <button
               type="button"
               onClick={() => slideToPanel(0)}
-              className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
+              className="cursor-pointer font-medium text-nyx-secondary-400 hover:text-nyx-300"
             >
               Sign in
             </button>
@@ -671,7 +655,7 @@ export function AuthFlow({
             <button
               type="button"
               onClick={() => slideToPanel(1)}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-transparent text-muted-foreground transition-colors hover:border-border/80 hover:bg-white/[0.03] hover:text-foreground"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-transparent text-muted-foreground transition-colors duration-300 hover:border-border/80 hover:bg-white/[0.03] hover:text-foreground"
               aria-label="Back to sign-up methods"
             >
               <svg
@@ -698,9 +682,9 @@ export function AuthFlow({
 
           {/* Invite code mirror (only when invite gate is enabled) */}
           {inviteRequired && (
-          <div className="mb-5 flex items-center gap-2.5 rounded-lg border border-violet-500/10 bg-violet-500/10 px-3.5 py-2.5">
+          <div className="mb-5 flex items-center gap-2.5 rounded-lg border border-nyx-500/10 bg-nyx-500/10 px-3.5 py-2.5">
             <svg
-              className="h-3.5 w-3.5 shrink-0 text-violet-400"
+              className="h-3.5 w-3.5 shrink-0 text-nyx-secondary-400"
               viewBox="0 0 16 16"
               fill="none"
               stroke="currentColor"
@@ -711,13 +695,13 @@ export function AuthFlow({
               <rect x="3" y="7" width="10" height="7" rx="1.5" />
               <path d="M5 7V5a3 3 0 016 0v2" />
             </svg>
-            <span className="font-mono text-[13px] font-medium tracking-wider text-violet-400">
+            <span className="font-mono text-[13px] font-medium tracking-wider text-nyx-secondary-400">
               {inviteCode.trim().toUpperCase() || "NYX-XXXXXXXX"}
             </span>
             <button
               type="button"
               onClick={() => slideToPanel(1)}
-              className="ml-auto border-0 bg-transparent text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+              className="ml-auto border-0 bg-transparent text-[11px] font-medium text-muted-foreground transition-colors duration-300 hover:text-foreground"
             >
               Edit
             </button>
@@ -733,7 +717,7 @@ export function AuthFlow({
               {registerForm.formState.errors.root && (
                 <div
                   role="alert"
-                  className="rounded-md bg-destructive/10 p-3 text-sm text-destructive"
+                  className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive"
                 >
                   {registerForm.formState.errors.root.message}
                 </div>
@@ -854,7 +838,7 @@ export function AuthFlow({
 
               <Button
                 type="submit"
-                className="mt-0.5 h-11 w-full bg-gradient-to-br from-violet-400 via-violet-500 to-violet-600 text-sm font-medium shadow-[0_2px_12px_rgba(139,92,246,0.2)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(139,92,246,0.3)]"
+                className="mt-0.5 h-11 w-full nyx-gradient-vivid text-[12px] font-medium shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                 isLoading={registerMutation.isPending}
               >
                 Create Account
@@ -868,7 +852,7 @@ export function AuthFlow({
             <button
               type="button"
               onClick={() => slideToPanel(0)}
-              className="cursor-pointer font-medium text-violet-400 hover:text-violet-300"
+              className="cursor-pointer font-medium text-nyx-secondary-400 hover:text-nyx-300"
             >
               Sign in
             </button>

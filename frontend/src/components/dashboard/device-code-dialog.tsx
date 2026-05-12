@@ -12,7 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   ExternalLink,
   CheckCircle2,
@@ -232,7 +232,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
         {step === "requesting" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[12px] text-muted-foreground">
               Requesting code from {provider.name}...
             </p>
           </div>
@@ -252,7 +252,6 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
                 <Button
                   type="button"
                   variant="ghost"
-                  size="sm"
                   onClick={handleCopyCode}
                   className="h-8 w-8 p-0"
                   title="Copy code"
@@ -270,14 +269,14 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  <ExternalLink className="mr-2 h-4 w-4" />
+                  <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>
                   Open {provider.name} Authentication
                 </a>
               </Button>
             </div>
 
             {/* Instructions */}
-            <div className="rounded-md bg-muted p-3 text-sm text-muted-foreground">
+            <div className="rounded-lg bg-muted p-3 text-[12px] text-muted-foreground">
               <ol className="list-decimal list-inside space-y-1">
                 <li>Click the link above to open the authentication page</li>
                 <li>Enter the code shown above</li>
@@ -307,14 +306,14 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
         {step === "success" && (
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
-              <CheckCircle2 className="h-10 w-10 text-success" />
-              <p className="text-sm text-muted-foreground text-center">
+              <CheckCircle2 className="h-8 w-8 text-success" />
+              <p className="text-[12px] text-muted-foreground text-center">
                 Your {provider.name} account has been connected successfully.
                 Tokens are encrypted and stored securely.
               </p>
             </div>
             <DialogFooter>
-              <Button type="button" onClick={handleClose}>
+              <Button variant="primary" type="button" onClick={handleClose}>
                 Done
               </Button>
             </DialogFooter>
@@ -324,8 +323,8 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
         {step === "error" && (
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
-              <AlertCircle className="h-10 w-10 text-destructive" />
-              <p className="text-sm text-destructive text-center">
+              <AlertCircle className="h-8 w-8 text-destructive" />
+              <p className="text-[12px] text-destructive text-center">
                 {errorMessage}
               </p>
             </div>
@@ -333,7 +332,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
               <Button type="button" variant="outline" onClick={handleClose}>
                 Cancel
               </Button>
-              <Button type="button" onClick={handleRetry}>
+              <Button variant="primary" type="button" onClick={handleRetry}>
                 Try Again
               </Button>
             </DialogFooter>

@@ -83,7 +83,23 @@ function Root() {
     useAuthStore
       .getState()
       .checkAuth()
-      .finally(() => setReady(true));
+      .finally(() => {
+        // DEV ONLY: seed a mock user so the dashboard renders without a backend
+        if (import.meta.env.DEV && !useAuthStore.getState().isAuthenticated) {
+          useAuthStore.getState().setUser({
+            id: "dev-mock-user",
+            email: "dev@nyxid.dev",
+            display_name: "Dannick Young",
+            avatar_url: null,
+            email_verified: true,
+            mfa_enabled: true,
+            is_admin: true,
+            is_active: true,
+            created_at: "2025-01-15T00:00:00Z",
+          });
+        }
+        setReady(true);
+      });
   }, []);
 
   // Initialize telemetry once:

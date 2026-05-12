@@ -644,7 +644,7 @@ function EnterCodeForm({
 
   return (
     <form className="flex flex-col gap-4" onSubmit={(e) => void submit(e)}>
-      <p className="text-sm text-muted-foreground">
+      <p className="text-[12px] text-muted-foreground">
         {prefilled
           ? "We've filled in the code from the URL. Confirm to continue."
           : "Enter the pairing code shown in your terminal. The CLI running on your remote box is waiting for you to complete the wizard here."}
@@ -667,11 +667,11 @@ function EnterCodeForm({
         />
       </div>
       {error ? (
-        <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
           {error}
         </p>
       ) : null}
-      <Button type="submit" disabled={loading || !code.trim()} autoFocus={prefilled}>
+      <Button variant="primary" type="submit" disabled={loading || !code.trim()} autoFocus={prefilled}>
         {loading ? "Verifying..." : "Continue"}
       </Button>
     </form>
@@ -862,16 +862,16 @@ function ResumedCreateWarningPanel({
 
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="font-display text-xl font-semibold">
+      <h2 className="text-xl font-semibold">
         This pairing was already started
       </h2>
-      <p className="text-sm text-muted-foreground">
+      <p className="text-[12px] text-muted-foreground">
         Another tab or window began the {labelForKind(claim.kind)}{" "}
         flow for this code. We can't safely replay it from here —
         that first tab may still be finishing, or it may have
         already created the resource.
       </p>
-      <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-muted-foreground">
+      <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-muted-foreground">
         Check your {manageLabel} first — if a new entry is there,
         the first tab succeeded and you can close this tab. If
         nothing shows up after a minute, use "Cancel pairing"
@@ -880,7 +880,7 @@ function ResumedCreateWarningPanel({
       <div className="flex flex-col gap-2 sm:flex-row">
         <a
           href={manageHref}
-          className="inline-flex flex-1 items-center justify-center rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          className="inline-flex flex-1 items-center justify-center rounded-lg bg-primary px-3 py-2 text-[12px] font-medium text-primary-foreground hover:bg-primary/90"
         >
           Open {manageLabel}
         </a>
@@ -1000,10 +1000,10 @@ function NotifyingCliPanel({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-display text-xl font-semibold">
+        <h2 className="text-xl font-semibold">
           Notifying CLI...
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           Your {describeResultKind(result.kind)} is ready on the
           server. Once the CLI acknowledges, we'll show the secret
           here to copy. If this page closes before then, the CLI
@@ -1012,7 +1012,7 @@ function NotifyingCliPanel({
       </div>
       {completeError ? (
         <>
-          <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
             Couldn't notify CLI: {completeError}. The server-side
             action succeeded; retry to receive the secret, or run
             the CLI command again for a fresh pairing.
@@ -1020,7 +1020,7 @@ function NotifyingCliPanel({
           <button
             type="button"
             onClick={onRetry}
-            className="rounded-md border bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+            className="rounded-lg border bg-primary px-4 py-2 text-[12px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
           >
             Retry
           </button>
@@ -1204,20 +1204,20 @@ function AiKeyAckPanel({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-display text-xl font-semibold">
+        <h2 className="text-xl font-semibold">
           Service created
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           <strong>{result.label}</strong> is now connected. Check your
           terminal — the CLI is printing the proxy URL and next steps.
         </p>
       </div>
       {completeError ? (
         <>
-          <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
             Couldn't notify CLI: {completeError}
           </p>
-          <Button onClick={onRetry}>Retry</Button>
+          <Button variant="primary" onClick={onRetry}>Retry</Button>
         </>
       ) : (
         <Skeleton className="h-9 w-full" />
@@ -1248,16 +1248,16 @@ function ResumedRotationChoicePanel({
 }) {
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="font-display text-xl font-semibold">
+      <h2 className="text-xl font-semibold">
         This pairing was already started
       </h2>
-      <p className="text-sm text-muted-foreground">
+      <p className="text-[12px] text-muted-foreground">
         Another tab or window began the {labelForKind(kind)} flow
         for this code but never finished notifying the CLI. We
         need to know what happened there so we don't tell the CLI
         something false:
       </p>
-      <ul className="ml-4 list-disc text-sm text-muted-foreground">
+      <ul className="ml-4 list-disc text-[12px] text-muted-foreground">
         <li>
           If the other tab <strong>showed you a new secret you
           saved</strong> (the rotation succeeded), click "Notify
@@ -1270,7 +1270,7 @@ function ResumedRotationChoicePanel({
         </li>
       </ul>
       <div className="flex flex-col gap-2 sm:flex-row">
-        <Button onClick={onConfirmSuccess} className="flex-1">
+        <Button variant="primary" onClick={onConfirmSuccess} className="flex-1">
           Notify CLI
         </Button>
         <Button
@@ -1306,10 +1306,10 @@ function ResendingAckPanel({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-display text-xl font-semibold">
+        <h2 className="text-xl font-semibold">
           Notifying CLI...
         </h2>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-[12px] text-muted-foreground">
           This {labelForKind(kind)} was already completed on
           another tab. We couldn't find the secret here, but we
           can still tell the CLI so it stops waiting. The new
@@ -1319,10 +1319,10 @@ function ResendingAckPanel({
       </div>
       {completeError ? (
         <>
-          <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
             Couldn't notify CLI: {completeError}
           </p>
-          <Button onClick={onRetry}>Retry</Button>
+          <Button variant="primary" onClick={onRetry}>Retry</Button>
         </>
       ) : (
         <Skeleton className="h-9 w-full" />
@@ -1336,10 +1336,10 @@ function ResendingAckPanel({
 function DonePanel() {
   return (
     <div className="flex flex-col gap-3 text-center">
-      <h2 className="font-display text-xl font-semibold">
+      <h2 className="text-xl font-semibold">
         Pairing complete
       </h2>
-      <p className="text-sm text-muted-foreground">
+      <p className="text-[12px] text-muted-foreground">
         You can close this tab. Your CLI should now show a success
         message in the terminal.
       </p>
