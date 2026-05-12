@@ -471,7 +471,7 @@ export function AuthHomeScreen({ navigation }: Props) {
                   Registration is invite-only.{" "}
                   <Text
                     style={styles.errorLink}
-                    onPress={() => void Linking.openURL("https://nyx.chrono-ai.fun/#waitlist")}
+                    onPress={() => void Linking.openURL("https://nyx.chrono-ai.fun")}
                   >
                     Join the waitlist
                   </Text>
