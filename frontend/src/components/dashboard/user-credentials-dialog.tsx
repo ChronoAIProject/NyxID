@@ -106,7 +106,7 @@ export function UserCredentialsDialog({
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>
             {hasExisting ? "Manage" : "Setup"} OAuth App for {provider.name}
@@ -209,7 +209,7 @@ export function UserCredentialsDialog({
                   )}
                 />
 
-                <DialogFooter className="flex-col gap-2 sm:flex-row">
+                <DialogFooter>
                   {hasExisting && !confirmDelete && (
                     <Button
                       type="button"

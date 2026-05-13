@@ -45,7 +45,7 @@ export function MemberScopeDialog({
 }: MemberScopeDialogProps) {
   return (
     <Dialog open={member !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent>
         {member && (
           // Key by membership id so reopening the dialog for a different
           // member fully resets the local form state. This avoids the

@@ -200,13 +200,20 @@ export function OrgServiceAccountsTab({
           <ErrorBanner message={`Failed to load service accounts owned by ${orgName}.`} onRetry={refetch} />
         </div>
       ) : accounts.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Bot className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-[12px] text-muted-foreground">
-            {search
-              ? `No service accounts owned by ${orgName} match your search.`
-              : `No service accounts owned by ${orgName}.`}
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <Bot className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">
+              {search ? "No Results" : "No Service Accounts"}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {search
+                ? `No service accounts owned by ${orgName} match your search.`
+                : `No service accounts owned by ${orgName}.`}
+            </p>
+          </div>
         </div>
       ) : (
         <>

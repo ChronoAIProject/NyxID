@@ -305,81 +305,123 @@ export function NodesPage() {
           </div>
         </div>
       ) : (
-        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Owner</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Last Heartbeat</TableHead>
-                <TableHead>Created</TableHead>
-                {nodes.some((n) => canManageNode(n, currentUserId, adminOrgIds)) && (
-                  <TableHead className="w-[80px]">Actions</TableHead>
-                )}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {nodes.map((node) => (
-                <TableRow
-                  key={node.id}
-                  className="cursor-pointer hover:bg-white/[0.03]"
-                  onClick={() => void navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id } })}
-                >
-                  <TableCell>
-                    <span className="font-medium">
-                      {node.name}
-                    </span>
-                    {node.metadata?.agent_version && (
-                      <span className="ml-2 text-xs text-muted-foreground">
-                        v{node.metadata.agent_version}
-                      </span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={
-                        node.owner.kind === "org" ? "secondary" : "secondary"
-                      }
+        <>
+          {/* Mobile card view */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {nodes.map((node) => (
+              <div
+                key={node.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => void navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id } })}
+                onKeyDown={(e) => { if (e.key === "Enter") void navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id } }); }}
+                className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+              >
+                {canManageNode(node, currentUserId, adminOrgIds) && (
+                  <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => setDeleteTarget({ id: node.id, name: node.name })}
                     >
-                      {nodeOwnerLabel(node.owner, currentUserId)}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <NodeStatusBadge
-                      status={node.status}
-                      isConnected={node.is_connected}
-                    />
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {formatRelativeTime(node.last_heartbeat_at) ?? "Never"}
-                  </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {formatRelativeTime(node.created_at)}
-                  </TableCell>
+                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                    </Button>
+                  </div>
+                )}
+                <p className="pr-10 text-[13px] font-semibold text-foreground truncate">
+                  {node.name}
+                  {node.metadata?.agent_version && (
+                    <span className="ml-2 text-[11px] font-normal text-muted-foreground">
+                      v{node.metadata.agent_version}
+                    </span>
+                  )}
+                </p>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
+                  <Badge variant="secondary">{nodeOwnerLabel(node.owner, currentUserId)}</Badge>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                  <span>{formatRelativeTime(node.last_heartbeat_at) ?? "No heartbeat"}</span>
+                  <span>Created {formatRelativeTime(node.created_at)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Desktop table view */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Owner</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Last Heartbeat</TableHead>
+                  <TableHead>Created</TableHead>
                   {nodes.some((n) => canManageNode(n, currentUserId, adminOrgIds)) && (
-                    <TableCell>
-                      {canManageNode(node, currentUserId, adminOrgIds) && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDeleteTarget({ id: node.id, name: node.name });
-                          }}
-                        >
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                          <span className="sr-only">Delete {node.name}</span>
-                        </Button>
-                      )}
-                    </TableCell>
+                    <TableHead className="w-[80px]">Actions</TableHead>
                   )}
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+              </TableHeader>
+              <TableBody>
+                {nodes.map((node) => (
+                  <TableRow
+                    key={node.id}
+                    className="cursor-pointer hover:bg-white/[0.03]"
+                    onClick={() => void navigate({ to: "/nodes/$nodeId", params: { nodeId: node.id } })}
+                  >
+                    <TableCell>
+                      <span className="font-medium">
+                        {node.name}
+                      </span>
+                      {node.metadata?.agent_version && (
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          v{node.metadata.agent_version}
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="secondary">
+                        {nodeOwnerLabel(node.owner, currentUserId)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <NodeStatusBadge
+                        status={node.status}
+                        isConnected={node.is_connected}
+                      />
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatRelativeTime(node.last_heartbeat_at) ?? "Never"}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {formatRelativeTime(node.created_at)}
+                    </TableCell>
+                    {nodes.some((n) => canManageNode(n, currentUserId, adminOrgIds)) && (
+                      <TableCell>
+                        {canManageNode(node, currentUserId, adminOrgIds) && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeleteTarget({ id: node.id, name: node.name });
+                            }}
+                          >
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                            <span className="sr-only">Delete {node.name}</span>
+                          </Button>
+                        )}
+                      </TableCell>
+                    )}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </>
       )}
 
       {/* Delete Confirmation Dialog */}

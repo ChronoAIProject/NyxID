@@ -565,11 +565,16 @@ export function ServiceListPage() {
           ))}
         </div>
       ) : !services || services.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Server className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-[12px] text-muted-foreground">
-            No services yet. Add a service to get started.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <Server className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">No services yet</p>
+            <p className="text-xs text-muted-foreground">
+              Add a service to get started.
+            </p>
+          </div>
         </div>
       ) : (
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">

@@ -243,14 +243,16 @@ function ConversationsSection({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h3 className="text-lg font-medium">Conversation Routes</h3>
           <p className="text-[12px] text-muted-foreground">
             Map conversations to AI agents for message relay.
           </p>
         </div>
-        <AddCtaButton label="Add Route" onClick={() => setAddOpen(true)} />
+        <div className="shrink-0">
+          <AddCtaButton label="Add Route" onClick={() => setAddOpen(true)} />
+        </div>
       </div>
 
       {isLoading ? (
@@ -268,32 +270,77 @@ function ConversationsSection({
           </p>
         </div>
       ) : (
-        <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Conversation ID</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Agent</TableHead>
-                <TableHead>Default</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Last Message</TableHead>
-                <TableHead className="w-10">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {conversations.map((conv) => (
-                <ConversationRow
-                  key={conv.id}
-                  conversation={conv}
-                  apiKeyNames={apiKeyNames}
-                  botId={botId}
-                  onDelete={setDeleteTarget}
-                />
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+        <>
+          {/* Mobile card view */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {conversations.map((conv) => {
+              const agentName = apiKeyNames.get(conv.agent_api_key_id) ?? conv.agent_api_key_id.slice(0, 8);
+              return (
+                <div key={conv.id} className="relative rounded-xl border border-border/50 bg-card p-4">
+                  <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon" className="h-7 w-7">
+                          <MoreHorizontal className="h-3.5 w-3.5" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem asChild>
+                          <Link to={`/channel-bots/${botId}/conversations/${conv.id}` as string}>
+                            <MessageSquare className="mr-2 h-4 w-4" /> View messages
+                          </Link>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setDeleteTarget(conv.id)} className="text-destructive focus:text-destructive">
+                          <Trash2 className="mr-2 h-4 w-4 text-destructive" /> Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                  <p className="pr-10 text-[13px] font-semibold text-foreground truncate">
+                    {conv.platform_conversation_id || conv.platform_sender_id || "—"}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">Agent: {agentName}</p>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <Badge variant="secondary">{conversationTypeLabel(conv.platform_conversation_type)}</Badge>
+                    {conv.is_active ? <Badge variant="success">Active</Badge> : <Badge variant="secondary">Inactive</Badge>}
+                    {conv.default_agent && <Badge variant="info">Default</Badge>}
+                  </div>
+                  <div className="mt-3 text-[11px] text-muted-foreground">
+                    {conv.last_message_at ? `Last message ${formatRelativeTime(conv.last_message_at)}` : "No messages"}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Desktop table view */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Conversation ID</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Agent</TableHead>
+                  <TableHead>Default</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Last Message</TableHead>
+                  <TableHead className="w-10">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {conversations.map((conv) => (
+                  <ConversationRow
+                    key={conv.id}
+                    conversation={conv}
+                    apiKeyNames={apiKeyNames}
+                    botId={botId}
+                    onDelete={setDeleteTarget}
+                  />
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </>
       )}
 
       <AddRouteDialog
@@ -379,7 +426,7 @@ function AddRouteDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>Add Conversation Route</DialogTitle>
           <DialogDescription>
@@ -524,7 +571,7 @@ function DeleteRouteDialog({
 
   return (
     <Dialog open={routeId !== null} onOpenChange={() => onClose()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>Remove Conversation Route</DialogTitle>
           <DialogDescription>
@@ -562,7 +609,7 @@ function DeleteBotDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>Delete Channel Bot</DialogTitle>
           <DialogDescription>

@@ -140,7 +140,7 @@ export function ApiKeyCreateDialog({
           <AddCtaButton label="Create API Key" onClick={() => {}} />
         </DialogTrigger>
       )}
-      <DialogContent className="max-h-[85vh] overflow-y-auto">
+      <DialogContent>
         {createdKey ? (
           <>
             <DialogHeader>

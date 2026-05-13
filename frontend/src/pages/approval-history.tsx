@@ -163,7 +163,80 @@ export function ApprovalHistoryPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+          {/* Mobile card view */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {requests.map((request) => (
+              <div key={request.id} className="relative rounded-xl border border-border/50 bg-card p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    {isToolApproval(request) ? (
+                      <div className="flex items-center gap-1.5">
+                        <Wrench className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <p className="text-[13px] font-semibold text-foreground truncate">{request.tool_name}</p>
+                      </div>
+                    ) : (
+                      <p className="text-[13px] font-semibold text-foreground truncate">{request.service_name}</p>
+                    )}
+                    <p className="text-[11px] text-muted-foreground truncate">
+                      {request.requester_label ?? request.requester_type}
+                    </p>
+                  </div>
+                  {getStatusBadge(request.status)}
+                </div>
+                <p className="mt-1.5 text-[11px] text-muted-foreground line-clamp-2">
+                  {isToolApproval(request)
+                    ? request.tool_arguments ?? "Tool execution approval"
+                    : request.action_description ?? request.operation_summary}
+                </p>
+                {request.is_destructive && (
+                  <Badge variant="destructive" className="mt-1.5">Destructive</Badge>
+                )}
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                  <span>{formatDate(request.created_at)}</span>
+                  {request.decided_at && <span>Decided {formatDate(request.decided_at)}</span>}
+                </div>
+                {request.status === "pending" && (
+                  <div className="mt-3 flex gap-2 border-t border-border/40 pt-3">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 h-8 text-xs"
+                      onClick={() =>
+                        setDecideTarget({
+                          id: request.id,
+                          service: request.service_name,
+                          approvalMode: request.approval_mode,
+                          action: "approve",
+                        })
+                      }
+                    >
+                      <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>
+                      Approve
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 h-8 text-xs"
+                      onClick={() =>
+                        setDecideTarget({
+                          id: request.id,
+                          service: request.service_name,
+                          approvalMode: request.approval_mode,
+                          action: "reject",
+                        })
+                      }
+                    >
+                      <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>
+                      Reject
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Desktop table view */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>

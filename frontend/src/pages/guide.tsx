@@ -120,7 +120,7 @@ export function GuidePage() {
     <div className="space-y-8">
       <div>
         <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-          Guide
+          Setup Guide
         </h2>
         <p className="text-[12px] text-muted-foreground">
           Learn how to set up and use NyxID for identity management and MCP

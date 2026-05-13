@@ -198,15 +198,20 @@ export function ProviderGrid() {
     return (
       <>
         {scopeSelector}
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <KeyRound className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-[12px] text-muted-foreground">
-            {targetOrgId
-              ? selectedOrgName
-                ? `No provider tokens for ${selectedOrgName}.`
-                : "No org provider tokens connected."
-              : "No providers available. An admin needs to configure providers first."}
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <KeyRound className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">No Provider Tokens</p>
+            <p className="text-xs text-muted-foreground">
+              {targetOrgId
+                ? selectedOrgName
+                  ? `No provider tokens for ${selectedOrgName}.`
+                  : "No org provider tokens connected."
+                : "No providers available. An admin needs to configure providers first."}
+            </p>
+          </div>
         </div>
       </>
     );

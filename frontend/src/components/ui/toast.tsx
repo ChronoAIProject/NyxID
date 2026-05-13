@@ -1,11 +1,29 @@
+import { useSyncExternalStore } from "react";
 import { Toaster as SonnerToaster } from "sonner";
+
+const mql =
+  typeof window !== "undefined"
+    ? window.matchMedia("(max-width: 767px)")
+    : null;
+
+function useIsMobile() {
+  return useSyncExternalStore(
+    (cb) => {
+      mql?.addEventListener("change", cb);
+      return () => mql?.removeEventListener("change", cb);
+    },
+    () => mql?.matches ?? false,
+    () => false,
+  );
+}
 
 /* ── NyxID Toast ── */
 export function Toaster() {
+  const mobile = useIsMobile();
   return (
     <SonnerToaster
       theme="dark"
-      position="bottom-right"
+      position={mobile ? "top-center" : "bottom-right"}
       gap={8}
       toastOptions={{
         classNames: {

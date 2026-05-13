@@ -33,7 +33,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { MoreHorizontal, RefreshCw, Trash2, Copy, Check } from "lucide-react";
+import { MoreHorizontal, RefreshCw, Trash2, Copy, Check, KeyRound } from "lucide-react";
 import { toast } from "sonner";
 
 function parseScopesString(scopes: string): readonly string[] {
@@ -110,17 +110,76 @@ export function ApiKeyTable() {
 
   if (!apiKeys || apiKeys.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-center">
-        <p className="text-[12px] text-muted-foreground">
-          No API keys yet. Create one to get started.
-        </p>
+      <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+        <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+          <KeyRound className="h-6 w-6 text-muted-foreground" />
+        </div>
+        <div className="space-y-1">
+          <p className="text-[12px] font-medium">No API keys yet</p>
+          <p className="text-xs text-muted-foreground">
+            Create one to get started.
+          </p>
+        </div>
       </div>
     );
   }
 
   return (
     <>
-      <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+      {/* Mobile card view */}
+      <div className="flex flex-col gap-3 md:hidden">
+        {apiKeys.map((key) => {
+          const scopesList = parseScopesString(key.scopes);
+          const source = key.credential_source;
+          const isOrg = source?.type === "org";
+          return (
+            <div
+              key={key.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => void navigate({ to: "/keys/api-key/$keyId", params: { keyId: key.id } })}
+              onKeyDown={(e) => { if (e.key === "Enter") void navigate({ to: "/keys/api-key/$keyId", params: { keyId: key.id } }); }}
+              className="relative rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+            >
+              <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-7 w-7">
+                      <MoreHorizontal className="h-3.5 w-3.5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onClick={() => void handleRotate(key)} disabled={!key.is_active}>
+                      <RefreshCw className="mr-2 h-4 w-4" /> Rotate
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setDeleteTarget(key)} className="text-destructive focus:text-destructive" disabled={!key.is_active}>
+                      <Trash2 className="mr-2 h-4 w-4 text-destructive" /> Revoke
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+              <p className="pr-10 text-[13px] font-semibold text-foreground truncate">{key.name}</p>
+              <code className="text-[11px] font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
+              <div className="mt-2 flex flex-wrap gap-1">
+                {key.platform && <Badge variant="secondary">{key.platform}</Badge>}
+                {scopesList.map((scope) => (
+                  <Badge key={scope} variant={scopeBadgeVariant(scope)}>
+                    {scope.charAt(0).toUpperCase() + scope.slice(1)}
+                  </Badge>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                <span>{isOrg ? source.org_name : "Personal"}</span>
+                <span>{servicesSummary(key)}</span>
+                <span>{key.last_used_at ? `Used ${formatRelativeTime(key.last_used_at)}` : "Never used"}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Desktop table view */}
+      <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
         <Table>
           <TableHeader>
             <TableRow className="border-border/50 hover:bg-transparent">

@@ -41,7 +41,6 @@ import {
   AdminGroupDetailPage,
   AdminServiceAccountsPage,
   AdminServiceAccountDetailPage,
-  AuthorizationsPage,
   ConsentsPage,
   DeveloperAppsPage,
   DeveloperAppDetailPage,
@@ -380,6 +379,9 @@ const settingsRoute = createRoute({
   path: "/settings",
   getParentRoute: () => dashboardLayout,
   component: SettingsPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    tab: typeof search.tab === "string" ? search.tab : undefined,
+  }),
 });
 
 const guideRoute = createRoute({
@@ -392,12 +394,17 @@ const consentsRoute = createRoute({
   path: "/settings/consents",
   getParentRoute: () => dashboardLayout,
   component: ConsentsPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    tab: typeof search.tab === "string" ? search.tab : undefined,
+  }),
 });
 
-const authorizationsRoute = createRoute({
+const authorizationsRedirectRoute = createRoute({
   path: "/settings/authorizations",
   getParentRoute: () => dashboardLayout,
-  component: AuthorizationsPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/settings/consents", search: { tab: "authorizations" } });
+  },
 });
 
 const developerAppsRoute = createRoute({
@@ -656,7 +663,7 @@ const routeTree = rootRoute.addChildren([
     ]),
     settingsRoute,
     consentsRoute,
-    authorizationsRoute,
+    authorizationsRedirectRoute,
     guideRoute,
     developerAppsRoute,
     developerAppDetailRoute,

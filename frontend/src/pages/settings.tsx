@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -75,18 +75,22 @@ interface DeleteAccountResponse {
 }
 
 export function SettingsPage() {
+  const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
+  const tabParam = typeof searchParams.tab === "string" ? searchParams.tab : undefined;
+  const defaultTab = tabParam && ["profile", "security", "sessions", "mcp", "privacy"].includes(tabParam) ? tabParam : "profile";
+
   return (
     <div className="space-y-8">
       <div>
         <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-          Settings
+          Account Settings
         </h2>
         <p className="text-[12px] text-muted-foreground">
           Manage your account settings and preferences.
         </p>
       </div>
 
-      <Tabs defaultValue="profile" className="space-y-6">
+      <Tabs defaultValue={defaultTab} className="space-y-6">
         <TabsList>
           <TabsTrigger value="profile">Profile</TabsTrigger>
           <TabsTrigger value="security">Security</TabsTrigger>
@@ -518,7 +522,7 @@ function SecurityTab() {
       </Card>
 
       <Card className="border-destructive/40">
-        <CardHeader className="flex-row items-center justify-between gap-4">
+        <CardHeader className="flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="space-y-1.5">
             <CardTitle className="text-destructive">Delete Account</CardTitle>
             <CardDescription className="text-destructive/70">
@@ -860,7 +864,40 @@ function SessionsTab() {
             </p>
           </div>
         ) : (
-          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+          <>
+          {/* Mobile card view */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {sessions.map((session) => (
+              <div
+                key={session.id}
+                className="rounded-xl border border-border/50 bg-card p-4"
+              >
+                <div className="flex items-center gap-2">
+                  {getDeviceIcon(session.user_agent)}
+                  <p className="min-w-0 flex-1 truncate text-[13px] font-bold">
+                    {session.user_agent}
+                  </p>
+                </div>
+                <div className="mt-3 space-y-1">
+                  <p className="text-[11px] text-muted-foreground">
+                    <span className="font-medium">IP Address:</span>{" "}
+                    {session.ip_address}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    <span className="font-medium">Created:</span>{" "}
+                    {formatDate(session.created_at)}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    <span className="font-medium">Expires:</span>{" "}
+                    {formatDate(session.expires_at)}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Desktop table view */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -895,6 +932,7 @@ function SessionsTab() {
               </TableBody>
             </Table>
           </div>
+          </>
         )}
       </CardContent>
     </Card>

@@ -417,12 +417,20 @@ export function DeveloperAppsPage() {
 
         {!isLoading && visibleApps.length === 0 && (
           <Card className="xl:col-span-2">
-            <CardContent className="p-4 text-center">
-              <p className="text-[12px] text-muted-foreground">
-                {apps.length === 0
-                  ? "No developer apps yet. Create your first application."
-                  : "No active applications. Enable 'Show inactive' to view deactivated apps."}
-              </p>
+            <CardContent className="flex flex-col items-center gap-4 py-12 text-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+                <Code className="h-6 w-6 text-muted-foreground" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-[12px] font-medium">
+                  {apps.length === 0 ? "No Developer Apps" : "No Active Apps"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {apps.length === 0
+                    ? "Create your first application."
+                    : "Enable 'Show inactive' to view deactivated apps."}
+                </p>
+              </div>
             </CardContent>
           </Card>
         )}

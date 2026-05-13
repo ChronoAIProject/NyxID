@@ -151,7 +151,7 @@ export function EndpointFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>
             {isEditing ? "Edit Endpoint" : "Add Endpoint"}

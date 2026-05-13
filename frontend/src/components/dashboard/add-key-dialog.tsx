@@ -21,6 +21,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -261,7 +262,7 @@ function CatalogGrid({
         />
       </div>
 
-      <div className="grid max-h-[380px] grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-3 md:max-h-[380px] md:overflow-y-auto md:pr-1 sm:grid-cols-3">
         <button
           type="button"
           onClick={onCustom}
@@ -726,19 +727,21 @@ function KeyForm({
         )}
       </div>
 
-      <Button
-        variant="primary"
-        className="w-full"
-        onClick={onSubmit}
-        disabled={
-          isPending ||
-          !form.label.trim() ||
-          (requiresCredential && !form.credential.trim()) ||
-          (requiresEndpoint && !form.endpointUrl.trim())
-        }
-      >
-        {isPending ? "Creating..." : "Create Service"}
-      </Button>
+      <DialogFooter>
+        <Button
+          variant="primary"
+          className="w-full"
+          onClick={onSubmit}
+          disabled={
+            isPending ||
+            !form.label.trim() ||
+            (requiresCredential && !form.credential.trim()) ||
+            (requiresEndpoint && !form.endpointUrl.trim())
+          }
+        >
+          {isPending ? "Creating..." : "Create Service"}
+        </Button>
+      </DialogFooter>
     </div>
   );
 }
@@ -995,21 +998,23 @@ function NodeSetupStep({
         )}
       </div>
 
-      <Button
-        variant="primary"
-        className="w-full"
-        onClick={onSubmit}
-        disabled={
-          isPending ||
-          !form.label.trim() ||
-          (isCustom &&
-            isSsh &&
-            form.sshCertificateAuth &&
-            !form.sshPrincipals.trim())
-        }
-      >
-        {isPending ? "Creating..." : "Create Service"}
-      </Button>
+      <DialogFooter>
+        <Button
+          variant="primary"
+          className="w-full"
+          onClick={onSubmit}
+          disabled={
+            isPending ||
+            !form.label.trim() ||
+            (isCustom &&
+              isSsh &&
+              form.sshCertificateAuth &&
+              !form.sshPrincipals.trim())
+          }
+        >
+          {isPending ? "Creating..." : "Create Service"}
+        </Button>
+      </DialogFooter>
     </div>
   );
 }
@@ -2058,7 +2063,7 @@ export function AddKeyDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-lg">
+      <DialogContent>
         <DialogHeader>
           <DialogTitle>{dialogTitle()}</DialogTitle>
           <DialogDescription>{dialogDescription()}</DialogDescription>

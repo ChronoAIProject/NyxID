@@ -20,7 +20,7 @@ const TabsList = React.forwardRef<
       const listRect = list.getBoundingClientRect();
       const activeRect = active.getBoundingClientRect();
       setIndicator({
-        left: activeRect.left - listRect.left,
+        left: activeRect.left - listRect.left + list.scrollLeft,
         width: activeRect.width,
       });
       setHasActive(true);
@@ -33,7 +33,11 @@ const TabsList = React.forwardRef<
     if (!list) return;
     const observer = new MutationObserver(updateIndicator);
     observer.observe(list, { attributes: true, subtree: true, attributeFilter: ["data-state"] });
-    return () => observer.disconnect();
+    list.addEventListener("scroll", updateIndicator);
+    return () => {
+      observer.disconnect();
+      list.removeEventListener("scroll", updateIndicator);
+    };
   }, [updateIndicator]);
 
   return (
@@ -44,7 +48,7 @@ const TabsList = React.forwardRef<
         else if (ref) ref.current = node;
       }}
       className={cn(
-        "relative inline-flex h-8 items-center justify-center gap-1 border-b border-border bg-transparent p-0 text-muted-foreground",
+        "relative flex h-8 items-center gap-1 border-b border-border bg-transparent p-0 text-muted-foreground overflow-x-auto scrollbar-none",
         className,
       )}
       {...props}
@@ -68,7 +72,7 @@ const TabsTrigger = React.forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      "inline-flex items-center justify-center whitespace-nowrap px-3 py-2 text-[12px] font-normal text-text-tertiary transition-colors duration-300 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 -mb-px data-[state=active]:text-foreground data-[state=active]:font-medium",
+      "inline-flex shrink-0 items-center justify-center whitespace-nowrap px-3 py-2 text-[12px] font-normal text-text-tertiary transition-colors duration-300 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 -mb-px data-[state=active]:text-foreground data-[state=active]:font-medium",
       className,
     )}
     {...props}

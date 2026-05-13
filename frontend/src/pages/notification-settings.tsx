@@ -662,7 +662,7 @@ export function NotificationSettingsPage() {
           {/* Per-Service Approval Overrides */}
           <Card>
             <CardHeader>
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <CardTitle>Per-Service Approval Overrides</CardTitle>
                   <CardDescription>
@@ -674,6 +674,7 @@ export function NotificationSettingsPage() {
                 </div>
                 <Button
                   variant="outline"
+                  className="shrink-0 self-start sm:self-center"
                   onClick={() => setAddServiceDialogOpen(true)}
                   disabled={
                     isServiceConfigsLoading ||

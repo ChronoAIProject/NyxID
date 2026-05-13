@@ -556,17 +556,17 @@ export function KeysPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="AI Services"
+        title="Services & Credentials"
         description="Manage your AI service credentials and agent keys."
       />
 
       <Tabs value={tab} onValueChange={setTab}>
-        <div className="flex items-center justify-between">
-          <TabsList>
+        <div className="flex items-end justify-between gap-4">
+          <TabsList className="min-w-0">
             <TabsTrigger value="services">External Services</TabsTrigger>
             <TabsTrigger value="nyxid">Agent Keys</TabsTrigger>
           </TabsList>
-          <div className="flex items-center gap-4">
+          <div className="flex shrink-0 items-center gap-4 pb-1">
             {tab === "services" && (
               <AutoConnectedToggle
                 checked={showAutoConnected}

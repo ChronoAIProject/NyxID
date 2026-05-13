@@ -9,6 +9,7 @@ import {
   Globe,
   KeyRound,
   Trash2,
+  Users,
   X,
 } from "lucide-react";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -340,55 +341,106 @@ export function OrgDetailPage() {
             <Skeleton className="h-40 w-full" />
           ) : !members || members.length === 0 ? (
             <Card>
-              <CardContent className="py-8 text-center text-[12px] text-muted-foreground">
-                No members yet.
+              <CardContent className="flex flex-col items-center gap-4 py-12 text-center">
+                <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+                  <Users className="h-6 w-6 text-muted-foreground" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-[12px] font-medium">No Members</p>
+                  <p className="text-xs text-muted-foreground">No members yet.</p>
+                </div>
               </CardContent>
             </Card>
           ) : (
-            <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Member</TableHead>
-                    <TableHead>Role</TableHead>
-                    <TableHead>Services</TableHead>
-                    <TableHead>Joined</TableHead>
-                    {isAdmin && (
-                      <TableHead className="w-[100px] text-right">
-                        Actions
-                      </TableHead>
-                    )}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {members.map((member) => (
-                    <MemberRow
-                      key={member.membership_id}
-                      member={member}
-                      canManage={isAdmin}
-                      isSelf={member.user_id === currentUser?.id}
-                      isLastAdmin={
-                        member.role === "admin" &&
-                        member.revoked_at === null &&
-                        activeAdminCount <= 1
-                      }
-                      isUpdating={
-                        updateMemberMutation.isPending ||
-                        removeMemberMutation.isPending
-                      }
-                      onChangeRole={(id, role) =>
-                        void handleChangeRole(id, role)
-                      }
-                      onRevoke={(target) => setRevokeTarget(target)}
-                      onEditScope={(target) => setScopeTarget(target)}
-                      onResetScope={(target) =>
-                        void handleResetMemberScope(target)
-                      }
-                    />
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+            <>
+              {/* Mobile card view */}
+              <div className="flex flex-col gap-3 md:hidden">
+                {members.map((member) => {
+                  const displayName = member.display_name ?? member.email ?? member.user_id;
+                  const isSelf = member.user_id === currentUser?.id;
+                  const scopeList = member.effective_allowed_service_ids;
+                  const scopeLabel = scopeList == null ? "All services" : scopeList.length === 0 ? "No services" : `${String(scopeList.length)} service${scopeList.length === 1 ? "" : "s"}`;
+                  return (
+                    <div key={member.membership_id} className="relative rounded-xl border border-border/50 bg-card p-4">
+                      {isAdmin && (
+                        <div className="absolute right-3 top-3">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => setRevokeTarget(member)}
+                            disabled={member.role === "admin" && member.revoked_at === null && activeAdminCount <= 1}
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                          </Button>
+                        </div>
+                      )}
+                      <p className="pr-10 text-[13px] font-semibold text-foreground truncate">
+                        {displayName}
+                        {isSelf && <span className="ml-1 text-[11px] font-normal text-muted-foreground">(you)</span>}
+                      </p>
+                      {member.email && member.display_name && (
+                        <p className="text-[11px] text-muted-foreground truncate">{member.email}</p>
+                      )}
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        <RoleBadge role={member.role} />
+                        <Badge variant={scopeList != null ? "info" : "secondary"} className="text-xs">{scopeLabel}</Badge>
+                        {member.scope_source === "override" && <Badge variant="info" className="text-xs">Custom scope</Badge>}
+                      </div>
+                      <div className="mt-3 text-[11px] text-muted-foreground">
+                        Joined {formatRelativeTime(member.created_at) ?? "—"}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Desktop table view */}
+              <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Member</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Services</TableHead>
+                      <TableHead>Joined</TableHead>
+                      {isAdmin && (
+                        <TableHead className="w-[100px] text-right">
+                          Actions
+                        </TableHead>
+                      )}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {members.map((member) => (
+                      <MemberRow
+                        key={member.membership_id}
+                        member={member}
+                        canManage={isAdmin}
+                        isSelf={member.user_id === currentUser?.id}
+                        isLastAdmin={
+                          member.role === "admin" &&
+                          member.revoked_at === null &&
+                          activeAdminCount <= 1
+                        }
+                        isUpdating={
+                          updateMemberMutation.isPending ||
+                          removeMemberMutation.isPending
+                        }
+                        onChangeRole={(id, role) =>
+                          void handleChangeRole(id, role)
+                        }
+                        onRevoke={(target) => setRevokeTarget(target)}
+                        onEditScope={(target) => setScopeTarget(target)}
+                        onResetScope={(target) =>
+                          void handleResetMemberScope(target)
+                        }
+                      />
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
           )}
         </TabsContent>
 
@@ -428,122 +480,157 @@ export function OrgDetailPage() {
                   </CardContent>
                 </Card>
               ) : (
-                <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Nonce</TableHead>
-                        <TableHead>Role</TableHead>
-                        <TableHead>Status</TableHead>
-                        <TableHead>Used by</TableHead>
-                        <TableHead>Timeline</TableHead>
-                        {invites.some((inv) => inv.redeemed_at === null && new Date(inv.expires_at).getTime() >= Date.now()) && (
-                          <TableHead className="w-[112px]">Actions</TableHead>
-                        )}
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {invites.map((invite) => {
-                        const isRedeemed = invite.redeemed_at !== null;
-                        const isExpired =
-                          !isRedeemed &&
-                          new Date(invite.expires_at).getTime() < Date.now();
-                        // For redeemed rows, show the user that consumed the
-                        // invite (issue #409). Prefer email because that's
-                        // the primary auth identifier; fall back to display
-                        // name, then raw user id, then a dash.
-                        const usedBy = isRedeemed
-                          ? (invite.redeemed_by_email ??
-                            invite.redeemed_by_display_name ??
-                            invite.redeemed_by ??
-                            "-")
-                          : "-";
-                        // Status-aware timeline text (issue #408): pending
-                        // rows count down to expiry, expired/redeemed rows
-                        // count up from the lifecycle event that actually
-                        // ended the invite's usefulness.
-                        let timeline: string;
-                        let timelineTooltip: string | undefined;
-                        if (isRedeemed && invite.redeemed_at) {
-                          timeline = `Redeemed ${formatRelativeTime(invite.redeemed_at)}`;
-                          timelineTooltip = `Original expiry ${formatDate(invite.expires_at)}`;
-                        } else if (isExpired) {
-                          timeline = `Expired ${formatRelativeTime(invite.expires_at)}`;
-                        } else {
-                          timeline = `Expires ${formatTimeDistance(invite.expires_at)}`;
-                        }
-                        return (
-                          <TableRow key={invite.id}>
-                            <TableCell>
-                              <span className="break-all text-xs text-foreground">
-                                {invite.nonce}
-                              </span>
-                            </TableCell>
-                            <TableCell>
-                              <RoleBadge role={invite.role} />
-                            </TableCell>
-                            <TableCell>
-                              {isRedeemed ? (
-                                <Badge variant="success">Redeemed</Badge>
-                              ) : isExpired ? (
-                                <Badge variant="warning">Expired</Badge>
-                              ) : (
-                                <Badge variant="info">Pending</Badge>
-                              )}
-                            </TableCell>
-                            <TableCell className="break-all text-xs text-muted-foreground">
-                              {usedBy}
-                            </TableCell>
-                            <TableCell
-                              className="text-muted-foreground"
-                              title={timelineTooltip}
-                            >
-                              {timeline}
-                            </TableCell>
-                            {invites.some((inv) => inv.redeemed_at === null && new Date(inv.expires_at).getTime() >= Date.now()) && (
+                <>
+                  {/* Mobile card view */}
+                  <div className="flex flex-col gap-3 md:hidden">
+                    {invites.map((invite) => {
+                      const isRedeemed = invite.redeemed_at !== null;
+                      const isExpired = !isRedeemed && new Date(invite.expires_at).getTime() < Date.now();
+                      const usedBy = isRedeemed ? (invite.redeemed_by_email ?? invite.redeemed_by_display_name ?? invite.redeemed_by ?? "—") : null;
+                      let timeline: string;
+                      if (isRedeemed && invite.redeemed_at) {
+                        timeline = `Redeemed ${formatRelativeTime(invite.redeemed_at)}`;
+                      } else if (isExpired) {
+                        timeline = `Expired ${formatRelativeTime(invite.expires_at)}`;
+                      } else {
+                        timeline = `Expires ${formatTimeDistance(invite.expires_at)}`;
+                      }
+                      return (
+                        <div key={invite.id} className="relative rounded-xl border border-border/50 bg-card p-4">
+                          {!isRedeemed && !isExpired && (
+                            <div className="absolute right-3 top-3 flex gap-1">
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleCopyInviteLink(invite.id, invite.nonce)} title="Copy invite link">
+                                {copiedInviteId === invite.id ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
+                              </Button>
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleCancelInvite(invite.id)}>
+                                <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                              </Button>
+                            </div>
+                          )}
+                          <p className="pr-20 text-[12px] font-mono text-foreground break-all">{invite.nonce}</p>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            <RoleBadge role={invite.role} />
+                            {isRedeemed ? <Badge variant="success">Redeemed</Badge> : isExpired ? <Badge variant="warning">Expired</Badge> : <Badge variant="info">Pending</Badge>}
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                            <span>{timeline}</span>
+                            {usedBy && <span>Used by {usedBy}</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Desktop table view */}
+                  <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Nonce</TableHead>
+                          <TableHead>Role</TableHead>
+                          <TableHead>Status</TableHead>
+                          <TableHead>Used by</TableHead>
+                          <TableHead>Timeline</TableHead>
+                          {invites.some((inv) => inv.redeemed_at === null && new Date(inv.expires_at).getTime() >= Date.now()) && (
+                            <TableHead className="w-[112px]">Actions</TableHead>
+                          )}
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {invites.map((invite) => {
+                          const isRedeemed = invite.redeemed_at !== null;
+                          const isExpired =
+                            !isRedeemed &&
+                            new Date(invite.expires_at).getTime() < Date.now();
+                          const usedBy = isRedeemed
+                            ? (invite.redeemed_by_email ??
+                              invite.redeemed_by_display_name ??
+                              invite.redeemed_by ??
+                              "-")
+                            : "-";
+                          let timeline: string;
+                          let timelineTooltip: string | undefined;
+                          if (isRedeemed && invite.redeemed_at) {
+                            timeline = `Redeemed ${formatRelativeTime(invite.redeemed_at)}`;
+                            timelineTooltip = `Original expiry ${formatDate(invite.expires_at)}`;
+                          } else if (isExpired) {
+                            timeline = `Expired ${formatRelativeTime(invite.expires_at)}`;
+                          } else {
+                            timeline = `Expires ${formatTimeDistance(invite.expires_at)}`;
+                          }
+                          return (
+                            <TableRow key={invite.id}>
                               <TableCell>
-                                {!isRedeemed && !isExpired && (
-                                  <div className="flex items-center justify-end gap-1">
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                                      onClick={() =>
-                                        void handleCopyInviteLink(
-                                          invite.id,
-                                          invite.nonce,
-                                        )
-                                      }
-                                      aria-label={`Copy invite link ${invite.nonce}`}
-                                      title="Copy invite link"
-                                    >
-                                      {copiedInviteId === invite.id ? (
-                                        <Check className="h-4 w-4 text-success" />
-                                      ) : (
-                                        <Copy className="h-4 w-4" />
-                                      )}
-                                    </Button>
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                                      onClick={() =>
-                                        void handleCancelInvite(invite.id)
-                                      }
-                                      aria-label="Cancel invite"
-                                    >
-                                      <Trash2 className="h-4 w-4 text-destructive" />
-                                    </Button>
-                                  </div>
+                                <span className="break-all text-xs text-foreground">
+                                  {invite.nonce}
+                                </span>
+                              </TableCell>
+                              <TableCell>
+                                <RoleBadge role={invite.role} />
+                              </TableCell>
+                              <TableCell>
+                                {isRedeemed ? (
+                                  <Badge variant="success">Redeemed</Badge>
+                                ) : isExpired ? (
+                                  <Badge variant="warning">Expired</Badge>
+                                ) : (
+                                  <Badge variant="info">Pending</Badge>
                                 )}
                               </TableCell>
-                            )}
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
-                </div>
+                              <TableCell className="break-all text-xs text-muted-foreground">
+                                {usedBy}
+                              </TableCell>
+                              <TableCell
+                                className="text-muted-foreground"
+                                title={timelineTooltip}
+                              >
+                                {timeline}
+                              </TableCell>
+                              {invites.some((inv) => inv.redeemed_at === null && new Date(inv.expires_at).getTime() >= Date.now()) && (
+                                <TableCell>
+                                  {!isRedeemed && !isExpired && (
+                                    <div className="flex items-center justify-end gap-1">
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                        onClick={() =>
+                                          void handleCopyInviteLink(
+                                            invite.id,
+                                            invite.nonce,
+                                          )
+                                        }
+                                        aria-label={`Copy invite link ${invite.nonce}`}
+                                        title="Copy invite link"
+                                      >
+                                        {copiedInviteId === invite.id ? (
+                                          <Check className="h-4 w-4 text-success" />
+                                        ) : (
+                                          <Copy className="h-4 w-4" />
+                                        )}
+                                      </Button>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon"
+                                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                        onClick={() =>
+                                          void handleCancelInvite(invite.id)
+                                        }
+                                        aria-label="Cancel invite"
+                                      >
+                                        <Trash2 className="h-4 w-4 text-destructive" />
+                                      </Button>
+                                    </div>
+                                  )}
+                                </TableCell>
+                              )}
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </>
               )}
             </>
           )}

@@ -10,6 +10,7 @@ import {
   scopeRiskClass,
   scopeRiskLabel,
 } from "@/lib/constants";
+import { PageHeader } from "@/components/shared/page-header";
 
 function CodeBlock({
   label,
@@ -33,7 +34,7 @@ function CodeBlock({
         {label}
       </Badge>
       <div className="relative">
-        <pre className="overflow-x-auto rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-xs leading-relaxed text-foreground">
+        <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-xs leading-relaxed text-foreground">
           {code}
         </pre>
         <Button
@@ -130,15 +131,10 @@ Authorization: Bearer ACCESS_TOKEN`;
 export function IntegrationGuidePage() {
   return (
     <div className="space-y-8">
-      <div className="space-y-1">
-        <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-          Integration Guide
-        </h2>
-        <p className="text-[12px] text-muted-foreground">
-          Use the official React or Core SDK (recommended), or integrate with
-          raw OAuth endpoints for custom flows.
-        </p>
-      </div>
+      <PageHeader
+        title="Integration & SDK Guide"
+        description="Use the official React or Core SDK (recommended), or integrate with raw OAuth endpoints for custom flows."
+      />
 
       <Tabs defaultValue="react" className="space-y-6">
         <TabsList>
@@ -195,7 +191,7 @@ export function IntegrationGuidePage() {
               className="flex items-center gap-4 rounded-lg border border-border bg-muted/50 px-3 py-2.5"
             >
               <div className="min-w-0 flex-1">
-                <p className="text-[12px] text-foreground">{scope}</p>
+                <p className="text-[12px] text-foreground break-all">{scope}</p>
                 <p className="text-[11px] text-muted-foreground">
                   <span className="font-medium text-foreground">
                     {meta.title}

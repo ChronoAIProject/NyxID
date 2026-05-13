@@ -131,11 +131,16 @@ export function ConnectionGrid() {
 
   if (connectableServices.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-center">
-        <Server className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <p className="text-[12px] text-muted-foreground">
-          No connectable services available. Create a service first.
-        </p>
+      <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+        <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+          <Server className="h-6 w-6 text-muted-foreground" />
+        </div>
+        <div className="space-y-1">
+          <p className="text-[12px] font-medium">No Services</p>
+          <p className="text-xs text-muted-foreground">
+            No connectable services available. Create a service first.
+          </p>
+        </div>
       </div>
     );
   }

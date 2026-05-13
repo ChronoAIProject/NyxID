@@ -4,13 +4,16 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useApiKeys } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
-import { useRightPanel } from "@/components/layout/dashboard-layout";
+import { useRightPanel, useOnboarding } from "@/components/layout/dashboard-layout";
+import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   ArrowRight,
   ArrowUpRight,
   Building2,
+  Cable,
+  Check,
   KeyRound,
   Mail,
   MailCheck,
@@ -28,6 +31,8 @@ import {
 import { cn } from "@/lib/utils";
 
 const AI_SETUP_DISMISSED_KEY = "nyxid:ai-setup-dismissed";
+const ONBOARDING_DISMISSED_KEY = "nyxid:onboarding-dismissed";
+
 const MOBILE_APP_LINK = "https://nyxid.onelink.me/REzJ/dql9w8fx";
 
 export function DashboardPage() {
@@ -36,11 +41,27 @@ export function DashboardPage() {
   const { data: services, isLoading: servicesLoading } = useKeys();
   const { data: nodes, isLoading: nodesLoading } = useNodes();
   const { setRightPanel } = useRightPanel();
+  const { setOnboarding } = useOnboarding();
 
   const activeKeys = apiKeys?.filter((k) => k.is_active).length ?? 0;
   const serviceCount = services?.length ?? 0;
   const onlineNodes = nodes?.filter((n) => n.status === "Online").length ?? 0;
   const totalNodes = nodes?.length ?? 0;
+
+  const [onboardingComplete, setOnboardingComplete] = useState(
+    () => localStorage.getItem("nyxid:onboarding-complete") === "true",
+  );
+  const completeOnboarding = useCallback(() => {
+    localStorage.setItem("nyxid:onboarding-complete", "true");
+    setOnboardingComplete(true);
+  }, []);
+
+  const isFirstTime = !servicesLoading && serviceCount === 0 && !onboardingComplete;
+
+  useEffect(() => {
+    setOnboarding(isFirstTime);
+    return () => setOnboarding(false);
+  }, [isFirstTime, setOnboarding]);
 
   const [aiDismissed, setAiDismissed] = useState(
     () => localStorage.getItem(AI_SETUP_DISMISSED_KEY) === "true",
@@ -50,7 +71,16 @@ export function DashboardPage() {
     setAiDismissed(true);
   }, []);
 
+  const [onboardingDismissed, setOnboardingDismissed] = useState(
+    () => localStorage.getItem(ONBOARDING_DISMISSED_KEY) === "true",
+  );
+  const dismissOnboarding = useCallback(() => {
+    localStorage.setItem(ONBOARDING_DISMISSED_KEY, "true");
+    setOnboardingDismissed(true);
+  }, []);
+
   useEffect(() => {
+    if (isFirstTime) return;
     setRightPanel(
       <>
         {!aiDismissed && <AiSetupCard onDismiss={dismissAi} />}
@@ -58,17 +88,45 @@ export function DashboardPage() {
       </>,
     );
     return () => setRightPanel(null);
-  }, [setRightPanel, aiDismissed, dismissAi]);
+  }, [setRightPanel, aiDismissed, dismissAi, isFirstTime]);
+
+  if (servicesLoading) {
+    return (
+      <div className="flex flex-col gap-8 px-4 pt-8 sm:px-6 md:px-8 lg:px-10">
+        <Skeleton className="h-8 w-48" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Skeleton className="h-16 w-full rounded-xl" />
+          <Skeleton className="h-16 w-full rounded-xl" />
+          <Skeleton className="h-16 w-full rounded-xl" />
+          <Skeleton className="h-16 w-full rounded-xl" />
+        </div>
+      </div>
+    );
+  }
+
+  if (isFirstTime) {
+    return <OnboardingTakeover userName={user?.display_name ?? "there"} onComplete={completeOnboarding} />;
+  }
 
   const emailVerified = !!user?.email_verified;
   const mfaEnabled = !!user?.mfa_enabled;
 
   return (
     <div className="flex flex-col gap-8">
+      {/* Onboarding checklist — guides remaining steps after first service */}
+      {!onboardingDismissed && activeKeys === 0 && (
+        <OnboardingChecklist
+          serviceConnected={serviceCount > 0 || onboardingComplete}
+          activeKeys={activeKeys}
+          loading={keysLoading}
+          onDismiss={dismissOnboarding}
+        />
+      )}
+
       {/* Greeting */}
       <div>
         <h1
-          className="text-[28px] font-bold leading-[1.1]"
+          className="text-[22px] sm:text-[28px] font-bold leading-[1.1]"
           style={{ letterSpacing: "-0.03em" }}
         >
           Welcome back, {user?.display_name ?? "there"}
@@ -79,9 +137,9 @@ export function DashboardPage() {
       </div>
 
       {/* Status grid + account card */}
-      <div className="flex gap-4">
-        {/* Left: 2x3 status grid */}
-        <div className="flex-1 grid grid-cols-2 gap-3">
+      <div className="flex flex-col md:flex-row gap-4">
+        {/* Left: status grid */}
+        <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3">
           <StatusCell
             icon={
               emailVerified ? (
@@ -108,7 +166,7 @@ export function DashboardPage() {
             label="MFA"
             value={mfaEnabled ? "Enabled" : "Disabled"}
             loading={false}
-            href="/settings"
+            href="/settings?tab=security"
           />
           <StatusCell
             icon={<Server className="h-4 w-4" />}
@@ -164,10 +222,10 @@ export function DashboardPage() {
         />
       </div>
 
-      {/* Get started */}
+      {/* Shortcuts */}
       <div>
         <h2 className="text-[15px] font-semibold text-foreground mb-3">
-          Get started
+          Shortcuts
         </h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
           <QuickActionCard
@@ -202,6 +260,277 @@ export function DashboardPage() {
           />
         </div>
       </div>
+
+      {/* Right panel content — inline on mobile/tablet, hidden on lg+ (shown in sidebar) */}
+      <div className="flex flex-col gap-4 lg:hidden">
+        {!aiDismissed && <AiSetupCard onDismiss={dismissAi} />}
+        <ApprovalsCard />
+        <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            Quick Links
+          </p>
+          <div className="flex flex-col gap-1.5">
+            <QuickLink to="/guide" label="Documentation" />
+            <QuickLink to="/ai-setup" label="AI Setup Guide" />
+            <QuickLink to="/integration-guide" label="Integration Guide" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────── First-time onboarding takeover ─────────────── */
+
+function OnboardingTakeover({
+  userName,
+  onComplete,
+}: {
+  readonly userName: string;
+  readonly onComplete: () => void;
+}) {
+  const [addServiceOpen, setAddServiceOpen] = useState(false);
+
+  function handleCta() {
+    onComplete();
+    setAddServiceOpen(true);
+  }
+
+  return (
+    <div className="flex h-full flex-col items-center justify-start px-6 pt-[12vh] pb-12">
+      <div className="flex w-full max-w-md flex-col items-center gap-8 text-center">
+        {/* Brand mark */}
+        <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-nyx-500/30 bg-nyx-500/10">
+          <Cable className="h-7 w-7 text-nyx-secondary-400" />
+        </div>
+
+        {/* Copy */}
+        <div className="space-y-3">
+          <h1
+            className="text-[28px] font-bold leading-[1.1] text-foreground"
+            style={{ letterSpacing: "-0.03em" }}
+          >
+            Welcome, {userName}
+          </h1>
+          <p className="text-[14px] leading-relaxed text-muted-foreground">
+            Connect your first AI service to get started with NyxID.
+            Your agents will proxy requests through NyxID so credentials
+            never leave your control.
+          </p>
+        </div>
+
+        {/* CTA */}
+        <Button
+          variant="primary"
+          size="lg"
+          className="w-full max-w-xs"
+          onClick={handleCta}
+        >
+          <ButtonIcon variant="primary">
+            <ArrowRight className="h-4 w-4" />
+          </ButtonIcon>
+          Connect a service
+        </Button>
+
+        {/* Trust signals */}
+        <div className="flex items-center gap-6 text-[11px] text-text-tertiary">
+          <span className="flex items-center gap-1.5">
+            <ShieldCheck className="h-3.5 w-3.5" />
+            End-to-end encrypted
+          </span>
+          <span className="flex items-center gap-1.5">
+            <KeyRound className="h-3.5 w-3.5" />
+            Zero credential exposure
+          </span>
+        </div>
+      </div>
+
+      <AddKeyDialog
+        open={addServiceOpen}
+        onOpenChange={setAddServiceOpen}
+      />
+    </div>
+  );
+}
+
+/* ─────────────── Onboarding checklist ─────────────── */
+
+function OnboardingChecklist({
+  serviceConnected,
+  activeKeys,
+  loading,
+  onDismiss,
+}: {
+  readonly serviceConnected: boolean;
+  readonly activeKeys: number;
+  readonly loading: boolean;
+  readonly onDismiss: () => void;
+}) {
+  const steps = [
+    {
+      done: serviceConnected,
+      title: "Connect a service",
+      description: "Add an API service to proxy through NyxID.",
+      icon: <Cable className="h-4 w-4" />,
+      href: "/keys?action=add-service",
+      cta: "Add service",
+    },
+    {
+      done: activeKeys > 0,
+      title: "Create an Agent Key",
+      description: "Generate a scoped key for your AI agent.",
+      icon: <KeyRound className="h-4 w-4" />,
+      href: "/keys?tab=nyxid&action=create-key",
+      cta: "Create key",
+    },
+    {
+      done: false,
+      title: "Make first proxy call",
+      description: "Use your agent key to route a request through NyxID.",
+      icon: <Wifi className="h-4 w-4" />,
+      href: "/keys",
+      cta: "Make a call",
+    },
+  ];
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-[15px] font-semibold text-foreground">
+            Getting started
+          </h2>
+          <p className="text-[11px] text-muted-foreground mt-0.5">
+            {steps.filter((s) => s.done).length} of {steps.length} complete
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary/40 hover:text-foreground transition-colors"
+          aria-label="Dismiss"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="flex flex-col gap-4 md:grid md:grid-cols-3">
+          <Skeleton className="h-24 w-full rounded-xl" />
+          <Skeleton className="h-24 w-full rounded-xl" />
+          <Skeleton className="h-24 w-full rounded-xl" />
+        </div>
+      ) : (
+        <>
+          {/* ── Mobile: left-aligned timeline ── */}
+          <div className="flex flex-col md:hidden">
+            {steps.map((step, i) => (
+              <div key={i}>
+                {/* Connector line between icons */}
+                {i > 0 && (
+                  <div className="flex">
+                    <div className="flex w-[36px] shrink-0 justify-center py-0">
+                      <div className={cn("w-[2px] h-10 -my-3.5", steps[i - 1].done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
+                    </div>
+                  </div>
+                )}
+
+                {/* Row: icon + card */}
+                <div className="flex items-center gap-4">
+                  <div
+                    className={cn(
+                      "flex h-[36px] w-[36px] shrink-0 items-center justify-center rounded-lg border transition-all duration-200",
+                      step.done || i === 0 || steps[i - 1].done
+                        ? "border-nyx-secondary-400 bg-nyx-500/15 text-nyx-secondary-400"
+                        : "border-border/60 bg-card text-text-tertiary",
+                    )}
+                  >
+                    {step.icon}
+                  </div>
+
+                  <Link to={step.href} className="group flex-1">
+                    <div
+                      className={cn(
+                        "rounded-xl border px-4 py-3.5 transition-all duration-200",
+                        step.done
+                          ? "border-nyx-500/30 bg-nyx-500/[0.06]"
+                          : "border-border/50 bg-card group-active:bg-white/[0.03]",
+                      )}
+                    >
+                      <p className={cn("text-[13px] font-semibold", step.done ? "text-foreground/50" : "text-foreground")}>
+                        {step.title}
+                      </p>
+                      <p className={cn("text-[11px] mt-0.5 leading-relaxed", step.done ? "text-muted-foreground/50" : "text-muted-foreground")}>
+                        {step.description}
+                      </p>
+                      {step.done ? (
+                        <span className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-success/70">
+                          <Check className="h-3 w-3" />
+                          Completed
+                        </span>
+                      ) : (
+                        <span className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-nyx-secondary-400">
+                          {step.cta}
+                          <ArrowRight className="h-3 w-3" />
+                        </span>
+                      )}
+                    </div>
+                  </Link>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* ── Desktop: horizontal cards ── */}
+          <div className="relative hidden md:block">
+            <div className="absolute top-[19px] left-[calc(16.67%+27px)] right-[calc(16.67%+27px)] flex items-center gap-[54px] z-0">
+              <div className={cn("h-[2px] flex-1", steps[0].done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
+              <div className={cn("h-[2px] flex-1", steps[1].done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
+            </div>
+
+            <div className="relative z-10 grid grid-cols-3 gap-4">
+              {steps.map((step, i) => (
+                <Link key={i} to={step.href} className="group flex flex-col items-center">
+                  <div
+                    className={cn(
+                      "flex h-[38px] w-[38px] items-center justify-center rounded-lg border transition-all duration-200",
+                      step.done || i === 0 || steps[i - 1].done
+                        ? "border-nyx-secondary-400 bg-nyx-500/15 text-nyx-secondary-400 group-hover:bg-nyx-500/25 group-hover:shadow-md group-hover:shadow-nyx-500/10"
+                        : "border-border/60 bg-card text-text-tertiary",
+                    )}
+                  >
+                    {step.icon}
+                  </div>
+                  <div
+                    className={cn(
+                      "relative mt-3 w-full flex flex-col items-center rounded-xl border px-4 py-4 min-h-[120px] text-center transition-all duration-200",
+                      step.done
+                        ? "border-nyx-500/30 bg-nyx-500/[0.06]"
+                        : "border-border/50 bg-card group-hover:border-white/[0.15] group-hover:bg-white/[0.03]",
+                    )}
+                  >
+                    <p className={cn("text-[13px] font-semibold", step.done ? "text-foreground/50" : "text-foreground")}>
+                      {step.title}
+                    </p>
+                    <p className={cn("text-[11px] mt-1 leading-relaxed", step.done ? "text-muted-foreground/50" : "text-muted-foreground")}>{step.description}</p>
+                    {step.done ? (
+                      <span className="mt-3 inline-flex items-center gap-1.5 text-[11px] font-medium text-success/70">
+                        <Check className="h-3 w-3" />
+                        Completed
+                      </span>
+                    ) : (
+                      <span className="mt-3 inline-flex items-center gap-1.5 text-[11px] font-semibold text-nyx-secondary-400 group-hover:gap-2 transition-all">
+                        {step.cta}
+                        <ArrowRight className="h-3 w-3" />
+                      </span>
+                    )}
+                  </div>
+                </Link>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

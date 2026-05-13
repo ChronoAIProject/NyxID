@@ -150,12 +150,12 @@ export function OAuthConsentPage() {
                     key={`meta-${item}`}
                     className="rounded-lg border border-border bg-muted/50 px-3 py-2"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-xs text-foreground">
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="min-w-0 break-words text-xs text-foreground pt-0.5">
                         {item}
                       </p>
                       <span
-                        className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${scopeRiskClass(meta.risk)}`}
+                        className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${scopeRiskClass(meta.risk)}`}
                       >
                         {scopeRiskLabel(meta.risk)}
                       </span>

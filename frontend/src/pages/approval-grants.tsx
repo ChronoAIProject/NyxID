@@ -90,7 +90,32 @@ export function ApprovalGrantsPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
+          {/* Mobile card view */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {grants.map((grant) => (
+              <div key={grant.id} className="relative rounded-xl border border-border/50 bg-card p-4">
+                <div className="absolute right-3 top-3">
+                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setRevokeGrantId(grant.id)}>
+                    <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                  </Button>
+                </div>
+                <p className="pr-10 text-[13px] font-semibold text-foreground truncate">{grant.service_name}</p>
+                <p className="text-[11px] text-muted-foreground">{grant.requester_label ?? grant.requester_type}</p>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {isExpiringSoon(grant.expires_at) && (
+                    <Badge variant="warning">Expiring soon</Badge>
+                  )}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                  <span>Granted {formatDate(grant.granted_at)}</span>
+                  <span>Expires {formatDate(grant.expires_at)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Desktop table view */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>

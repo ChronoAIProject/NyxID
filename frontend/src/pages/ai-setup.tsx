@@ -47,7 +47,7 @@ function CodeBlock({
         {label}
       </Badge>
       <div className="relative">
-        <pre className="overflow-x-auto rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-xs leading-relaxed text-foreground">
+        <pre className="whitespace-pre-wrap break-words rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-xs leading-relaxed text-foreground">
           {code}
         </pre>
         <Button
@@ -146,7 +146,7 @@ function AiSkillSetupCard({
             <TabsContent key={id} value={id}>
               <div className="space-y-4">
                 <div className="relative">
-                  <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg border border-border bg-muted p-4 font-mono text-xs leading-relaxed">
+                  <pre className="whitespace-pre-wrap break-words rounded-lg border border-border bg-muted p-4 pr-10 font-mono text-xs leading-relaxed">
                     {setupPrompt}
                   </pre>
                   <Button
@@ -262,7 +262,7 @@ export function AiSetupPage() {
     <div className="space-y-8">
       <div>
         <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-          AI Setup
+          AI Setup Guide
         </h2>
         <p className="text-[12px] text-muted-foreground">
           Configure your AI coding assistant to work with NyxID. Pick a tool and
