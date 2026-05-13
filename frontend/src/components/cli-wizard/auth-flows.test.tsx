@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import {
   isTerminalAuthFailureStatus,
@@ -477,5 +477,52 @@ describe("ProviderWaitingPanel", () => {
     expect(
       screen.getByText(/Authorization timed out — please retry\./i),
     ).toBeTruthy();
+  });
+});
+
+// Issue #653 review (PR #723 second-round adversarial review): when
+// the OAuth or device-code flow has reached a terminal error, the
+// wizard MUST render a dedicated error layout — not the polling
+// waiting panel with its spinner and "Open provider sign-in" button
+// still active. Showing the spinner would lie about the flow still
+// being in progress; showing the open button would invite the user
+// to retry an authorization URL the backend has already abandoned.
+describe("OAuthFlow error phase", () => {
+  beforeEach(() => {
+    resetFlowMocks();
+  });
+
+  it("renders the error layout (no spinner, no open button) when phase is error", async () => {
+    // Force the flow into the error phase by making placeholder
+    // creation fail — the catch block sets phase = "error" and
+    // surfaces the message.
+    mockPost.mockReset();
+    mockPost.mockRejectedValueOnce(
+      new Error("backend rejected the placeholder create"),
+    );
+    renderOAuthFlow();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/backend rejected the placeholder create/i),
+      ).toBeTruthy();
+    });
+
+    // Polling spinner copy (from the waiting panel) must NOT be shown.
+    expect(
+      screen.queryByText(/Waiting for provider authorization/i),
+    ).toBeNull();
+    expect(
+      screen.queryByText(/Setting up placeholder service/i),
+    ).toBeNull();
+    expect(screen.queryByText(/Checking provider credentials/i)).toBeNull();
+
+    // The "Open … sign-in" button must NOT be rendered — there's
+    // nothing useful to open at this point.
+    expect(
+      screen.queryByRole("button", { name: /Open .* sign-in/i }),
+    ).toBeNull();
+
+    // Cancel button stays available so the user can exit cleanly.
+    expect(screen.getByRole("button", { name: /^Cancel$/ })).toBeTruthy();
   });
 });

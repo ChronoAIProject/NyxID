@@ -1026,7 +1026,22 @@ export function OAuthFlow({
   // handled by `pollUntilActive` regardless; this UI just gives the
   // user a consistent "what's happening / what to do" surface across
   // OAuth and device-code flows.
-  const displayName = providerName ?? slug;
+  const displayName = providerName?.trim() || slug;
+
+  // Terminal failure → render the dedicated error panel instead of the
+  // waiting layout. Without this, the polling spinner + "Open … sign-
+  // in" button would still render alongside the error message and
+  // imply the wizard is still working when it isn't (issue #653 review).
+  if (phase === "error") {
+    return (
+      <ErrorTerminalPanel
+        providerName={displayName}
+        message={error ?? "Authorization didn't complete."}
+        onCancel={() => void cancelAndCleanup()}
+      />
+    );
+  }
+
   const statusLine =
     phase === "checking-credentials"
       ? "Checking provider credentials…"
@@ -1386,7 +1401,21 @@ export function DeviceCodeFlow({
   // Standardized waiting panel (issue #653 alignment). Same surface
   // as the OAuth flow; only the provider-specific block differs —
   // device code shows the user_code + verification URL.
-  const displayName = providerName ?? slug;
+  const displayName = providerName?.trim() || slug;
+
+  // Terminal failure → render the dedicated error panel. Without this
+  // gating, the polling spinner + "Open … sign-in" button would still
+  // render alongside the error message and imply the wizard is still
+  // working when it isn't (issue #653 review).
+  if (phase === "error") {
+    return (
+      <ErrorTerminalPanel
+        providerName={displayName}
+        message={error ?? "Device-code authorization didn't complete."}
+        onCancel={() => void cancelAndCleanup()}
+      />
+    );
+  }
 
   if (phase === "expired") {
     return (
@@ -1467,6 +1496,46 @@ export function DeviceCodeFlow({
       onCancel={() => void cancelAndCleanup()}
       error={error}
     />
+  );
+}
+
+// ── shared terminal-error panel ──────────────────────────────────────
+
+interface ErrorTerminalPanelProps {
+  readonly providerName: string;
+  readonly message: string;
+  readonly onCancel: () => void;
+}
+
+/**
+ * Issue #653 — when the OAuth / device-code flow has reached a
+ * terminal failure (placeholder marked failed, sustained polling
+ * errors, popup-blocked tab abandoned, etc.), we must NOT keep
+ * rendering the polling spinner or the "Open provider sign-in"
+ * button. Both lie about the current state — the wizard isn't
+ * waiting and there's nothing useful to open. This panel replaces
+ * the waiting panel for `phase === "error"` so the user sees a
+ * clear failure layout: title, error message, cancel.
+ */
+function ErrorTerminalPanel({
+  providerName,
+  message,
+  onCancel,
+}: ErrorTerminalPanelProps) {
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h3 className="font-medium">Connecting to {providerName}</h3>
+        <p className="text-sm text-muted-foreground">
+          The connection didn&rsquo;t complete. Cancel and re-run the
+          wizard to try again.
+        </p>
+      </div>
+      <ErrorLine message={message} />
+      <Button variant="outline" onClick={onCancel}>
+        Cancel
+      </Button>
+    </div>
   );
 }
 
