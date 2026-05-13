@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { Alert, Image, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import { Alert, Image, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import Svg, { Circle, Path } from "react-native-svg";
 import { RootStackParamList } from "../../app/AppNavigator";
 
@@ -23,6 +23,19 @@ import { BOTTOM_NAV_CLEARANCE, radius, spacing, typeScale } from "../../theme/de
 import { useEffect, useMemo, useState } from "react";
 
 type Props = NativeStackScreenProps<RootStackParamList, "AccountSettings">;
+
+// Push-register failure modes are surfaced as a tagged error so the
+// caller can branch on `reason` (e.g. iOS denial → Alert + Linking
+// to system Settings) instead of brittle string-matching the message.
+class PushRegisterError extends Error {
+  constructor(
+    public readonly reason: "permission_denied" | "token_unavailable" | "register_failed",
+    message: string,
+  ) {
+    super(message);
+    this.name = "PushRegisterError";
+  }
+}
 
 function resolveDeleteAccountError(error: unknown): {
   message: string;
@@ -178,20 +191,28 @@ export function AccountSettingsScreen({ navigation }: Props) {
   // Manual re-registration when the device isn't on the user's account
   // (permission denied at first launch, token fetch failed, or original
   // post-login registration silently failed). Surfaces the actual reason
-  // so the user can act — open Settings to flip permissions, or retry.
+  // so the user can act — `permission_denied` lifts them to OS settings,
+  // others fall back to a toast with a hint.
   const pushRegisterMutation = useMutation({
     mutationFn: async () => {
       const result = await activatePushAfterLogin({ forceRegister: true });
       if (!result.registered) {
         if (result.reason === "permission_denied") {
-          throw new Error(
-            "Notification permission is off. Enable it in Settings → NyxID → Notifications."
+          throw new PushRegisterError(
+            "permission_denied",
+            "Notification permission is off for NyxID.",
           );
         }
         if (result.reason === "token_unavailable") {
-          throw new Error("This device can't get a push token. Try a real device or reinstall.");
+          throw new PushRegisterError(
+            "token_unavailable",
+            "This device can't get a push token. Try a real device or reinstall.",
+          );
         }
-        throw new Error("Couldn't register this device. Check your connection and try again.");
+        throw new PushRegisterError(
+          "register_failed",
+          "Couldn't register this device. Check your connection and try again.",
+        );
       }
       return result;
     },
@@ -200,6 +221,27 @@ export function AccountSettingsScreen({ navigation }: Props) {
       showToast("Push enabled on this device", "success");
     },
     onError: (error) => {
+      if (error instanceof PushRegisterError && error.reason === "permission_denied") {
+        // Linking.openSettings() opens this app's settings page directly
+        // on iOS (and Android). Guarded by an Alert so the user opts in
+        // instead of being yanked out of the app on a tap.
+        Alert.alert(
+          "Enable Notifications",
+          "Push notifications are off for NyxID. Open Settings to enable them?",
+          [
+            { text: "Not now", style: "cancel" },
+            {
+              text: "Open Settings",
+              onPress: () => {
+                Linking.openSettings().catch(() => {
+                  showToast("Couldn't open Settings — open it manually.", "error");
+                });
+              },
+            },
+          ],
+        );
+        return;
+      }
       showToast(resolveErrorMessage(error), "error");
     },
   });
