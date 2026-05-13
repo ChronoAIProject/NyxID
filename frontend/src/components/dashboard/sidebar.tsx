@@ -1,6 +1,9 @@
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouterState, Link } from "@tanstack/react-router";
 import {
   LayoutDashboard,
+  Cable,
+  HardDrive,
   Server,
   Plug,
   Settings,
@@ -10,24 +13,32 @@ import {
   Users,
   ShieldCheck,
   UsersRound,
-  KeyRound,
-  Link2,
-  Bot,
   Bell,
   ClipboardList,
   Lock,
-  HardDrive,
   Sparkles,
-  Cable,
-  Radio,
-  Ticket,
   Building2,
+  Radio,
+  KeyRound,
+  Link2,
+  Bot,
+  Ticket,
+  PanelLeftClose,
+  PanelLeft,
+  Circle,
 } from "lucide-react";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 
-/* ── Navigation Config ── */
+type SidebarMode = "expanded" | "collapsed" | "hover";
+const STORAGE_KEY = "nyxid:sidebar-mode";
+
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/keys", icon: Cable, label: "AI Services" },
@@ -35,7 +46,7 @@ export const MAIN_NAV = [
   { to: "/nodes", icon: HardDrive, label: "Nodes" },
   { to: "/channel-bots", icon: Radio, label: "Channel Bots" },
   { to: "/settings", icon: Settings, label: "Settings" },
-  { to: "/settings/consents", icon: KeyRound, label: "Authorized Apps" },
+  { to: "/settings/consents", icon: KeyRound, label: "Access & Auth" },
   { to: "/settings/authorizations", icon: Link2, label: "Authorizations" },
   { to: "/guide", icon: BookOpen, label: "Guide" },
 ] as const;
@@ -49,7 +60,7 @@ export const APPROVALS_NAV = [
 export const DEVELOPER_NAV = [
   { to: "/developer/apps", icon: Code, label: "Developer Apps" },
   { to: "/ai-setup", icon: Sparkles, label: "AI Setup" },
-  { to: "/integration-guide", icon: BookMarked, label: "Integration Guide" },
+  { to: "/integration-guide", icon: BookMarked, label: "Integration" },
 ] as const;
 
 const ADMIN_NAV = [
@@ -64,13 +75,18 @@ const ADMIN_NAV = [
   { to: "/providers", icon: Plug, label: "Providers" },
 ] as const;
 
-/** Check if a nav item is the best (most specific) match for the current path. */
+export type NavItemDef = {
+  readonly to: string;
+  readonly icon: React.ComponentType<{ className?: string }>;
+  readonly label: string;
+};
+
 export function isNavActive(
   itemTo: string,
   currentPath: string,
-  allItems: readonly { readonly to: string }[],
+  allItems: readonly NavItemDef[],
 ): boolean {
-  if (itemTo === "/") return currentPath === "/";
+  if (itemTo === "/dashboard") return currentPath === "/dashboard";
   const matches =
     currentPath === itemTo || currentPath.startsWith(itemTo + "/");
   if (!matches) return false;
@@ -82,156 +98,312 @@ export function isNavActive(
   );
 }
 
-/* ── Shared nav link renderer ── */
-function NavLink({
+function NavItem({
   item,
-  isActive,
+  active,
+  collapsed,
   onClick,
 }: {
-  readonly item: {
-    readonly to: string;
-    readonly icon: React.ComponentType<{ className?: string }>;
-    readonly label: string;
-  };
-  readonly isActive: boolean;
+  readonly item: NavItemDef;
+  readonly active: boolean;
+  readonly collapsed: boolean;
   readonly onClick?: () => void;
 }) {
   return (
     <Link
       to={item.to}
       onClick={onClick}
+      title={collapsed ? item.label : undefined}
       className={cn(
-        "relative flex w-full items-center gap-[14px] rounded-[10px] px-4 py-3.5 text-sm transition-colors",
-        isActive
-          ? "bg-primary/[0.15] font-medium text-foreground"
-          : "font-normal text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+        "group/nav flex items-center rounded-lg py-2 text-[13px] overflow-hidden",
+        "transition-[padding,gap,background-color,color] duration-300 ease-in-out",
+        collapsed ? "justify-center px-0 gap-0" : "gap-3 px-3",
+        active
+          ? "bg-white/[0.06] font-medium text-foreground"
+          : "text-muted-foreground hover:bg-white/[0.03] hover:text-foreground",
       )}
-      style={
-        isActive
-          ? { boxShadow: "inset 2px 0 0 0 var(--color-primary)" }
-          : undefined
-      }
     >
       <item.icon
         className={cn(
-          "h-[18px] w-[18px] shrink-0",
-          isActive ? "text-primary" : "text-text-tertiary",
+          "h-[16px] w-[16px] shrink-0",
+          active ? "text-nyx-secondary-400" : "text-text-tertiary",
         )}
       />
-      {item.label}
+      <span
+        className={cn(
+          "truncate whitespace-nowrap transition-[opacity,max-width] duration-300 ease-in-out",
+          collapsed ? "max-w-0 opacity-0" : "max-w-[160px] opacity-100",
+        )}
+      >
+        {item.label}
+      </span>
     </Link>
   );
 }
 
-/* ── VoidPortal Sidebar ── */
+function readMode(): SidebarMode {
+  try {
+    const v = localStorage.getItem(STORAGE_KEY);
+    if (v === "expanded" || v === "collapsed" || v === "hover") return v;
+  } catch {
+    // ignore
+  }
+  return "expanded";
+}
+
+function writeMode(mode: SidebarMode) {
+  try {
+    localStorage.setItem(STORAGE_KEY, mode);
+  } catch {
+    // ignore
+  }
+}
+
 export function Sidebar({
   onNavigate,
-}: { readonly onNavigate?: () => void } = {}) {
+  mobile = false,
+}: { readonly onNavigate?: () => void; readonly mobile?: boolean } = {}) {
   const routerState = useRouterState();
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
 
-  /* Initials from user name or email */
-  const initials = user?.display_name
-    ? user.display_name
-        .split(" ")
-        .map((w) => w[0])
-        .join("")
-        .slice(0, 2)
-        .toUpperCase()
-    : (user?.email?.slice(0, 2).toUpperCase() ?? "U");
+  const [mode, setMode] = useState<SidebarMode>(readMode);
+  const [hovered, setHovered] = useState(false);
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const changeMode = useCallback((next: SidebarMode) => {
+    setMode(next);
+    writeMode(next);
+    setHovered(false);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    };
+  }, []);
+
+  const isVisuallyExpanded =
+    mobile || mode === "expanded" || (mode === "hover" && hovered);
+  const isCollapsed = !isVisuallyExpanded;
+
+  useEffect(() => {
+    const width = mode === "expanded" ? "200px" : "52px";
+    document.documentElement.style.setProperty("--sidebar-width", width);
+  }, [mode]);
+
+  function handleMouseEnter() {
+    if (mode !== "hover") return;
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = setTimeout(() => setHovered(true), 120);
+  }
+
+  function handleMouseLeave() {
+    if (mode !== "hover") return;
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = setTimeout(() => setHovered(false), 250);
+  }
+
+  const allItems = [...MAIN_NAV, ...APPROVALS_NAV, ...DEVELOPER_NAV];
+
+  const sidebarContent = (
+    <>
+      <nav className="flex-1 overflow-y-auto scrollbar-none px-2 pt-2 pb-4">
+        <div className="flex flex-col gap-[2px]">
+          {MAIN_NAV.map((item) => (
+            <NavItem
+              key={item.to}
+              item={item}
+              active={isNavActive(item.to, currentPath, allItems)}
+              collapsed={isCollapsed}
+              onClick={onNavigate}
+            />
+          ))}
+        </div>
+
+        <div className="px-3 my-2 flex items-center">
+          {isCollapsed ? (
+            <div className="mx-auto w-3 border-t border-border/40" />
+          ) : (
+            <span className="text-[9px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+              Approvals
+            </span>
+          )}
+        </div>
+        <div className="flex flex-col gap-[2px]">
+          {APPROVALS_NAV.map((item) => (
+            <NavItem
+              key={item.to}
+              item={item}
+              active={isNavActive(item.to, currentPath, allItems)}
+              collapsed={isCollapsed}
+              onClick={onNavigate}
+            />
+          ))}
+        </div>
+
+        <div className="px-3 my-2 flex items-center">
+          {isCollapsed ? (
+            <div className="mx-auto w-3 border-t border-border/40" />
+          ) : (
+            <span className="text-[9px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+              Developer
+            </span>
+          )}
+        </div>
+        <div className="flex flex-col gap-[2px]">
+          {DEVELOPER_NAV.map((item) => (
+            <NavItem
+              key={item.to}
+              item={item}
+              active={isNavActive(item.to, currentPath, allItems)}
+              collapsed={isCollapsed}
+              onClick={onNavigate}
+            />
+          ))}
+        </div>
+
+        {hasAdminRead(user) && (
+          <>
+            <div className="px-3 my-2 flex items-center">
+              {isCollapsed ? (
+                <div className="mx-auto w-3 border-t border-border/40" />
+              ) : (
+                <span className="text-[9px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+                  Admin
+                </span>
+              )}
+            </div>
+            <div className="flex flex-col gap-[2px]">
+              {ADMIN_NAV.map((item) => (
+                <NavItem
+                  key={item.to}
+                  item={item}
+                  active={isNavActive(item.to, currentPath, allItems)}
+                  collapsed={isCollapsed}
+                  onClick={onNavigate}
+                />
+              ))}
+            </div>
+          </>
+        )}
+      </nav>
+
+      {!mobile && (
+        <div className="border-t border-border/60 px-2 py-2">
+          <Popover>
+            <PopoverTrigger asChild>
+              <button
+                className="flex h-[28px] w-[28px] items-center justify-center rounded-[6px] border border-white/[0.08] bg-white/[0.04] text-text-tertiary transition-colors duration-200 hover:border-white/[0.15] hover:text-foreground"
+                title="Sidebar control"
+              >
+                {isCollapsed ? (
+                  <PanelLeft className="h-[14px] w-[14px]" />
+                ) : (
+                  <PanelLeftClose className="h-[14px] w-[14px]" />
+                )}
+              </button>
+            </PopoverTrigger>
+            <PopoverContent
+              side="top"
+              align="start"
+              className="w-[200px] rounded-xl border border-border/50 bg-card p-0 shadow-lg"
+              sideOffset={8}
+            >
+              <div className="px-4 py-2.5 border-b border-border/50">
+                <p className="text-[13px] font-medium text-foreground">
+                  Sidebar control
+                </p>
+              </div>
+              <div className="p-1.5">
+                <SidebarModeOption
+                  label="Expanded"
+                  active={mode === "expanded"}
+                  onClick={() => changeMode("expanded")}
+                />
+                <SidebarModeOption
+                  label="Collapsed"
+                  active={mode === "collapsed"}
+                  onClick={() => changeMode("collapsed")}
+                />
+                <SidebarModeOption
+                  label="Expand on hover"
+                  active={mode === "hover"}
+                  onClick={() => changeMode("hover")}
+                />
+              </div>
+            </PopoverContent>
+          </Popover>
+        </div>
+      )}
+    </>
+  );
+
+  if (mobile) {
+    return (
+      <aside className="flex h-full w-[240px] flex-col bg-background overflow-hidden">
+        {sidebarContent}
+      </aside>
+    );
+  }
+
+  if (mode === "hover") {
+    return (
+      <aside
+        className="relative h-full w-[52px] shrink-0"
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+      >
+        <div
+          className={cn(
+            "absolute inset-y-0 left-0 z-30 flex flex-col border-r border-border/60 bg-background overflow-hidden",
+            "transition-[width,box-shadow] duration-200 ease-out",
+            hovered ? "w-[200px] shadow-xl shadow-black/20" : "w-[52px]",
+          )}
+        >
+          {sidebarContent}
+        </div>
+      </aside>
+    );
+  }
 
   return (
-    <aside className="flex h-full w-[280px] flex-col overflow-y-auto border-r border-border bg-sidebar px-7 py-10">
-      {/* ── Navigation ── */}
-      <div className="flex flex-1 flex-col gap-6">
-        {/* Logo */}
-        <div className="mb-6 flex items-center">
-          <img
-            src="/nyxid-wordmark.svg"
-            alt="NyxID"
-            className="h-9 w-auto"
-          />
-        </div>
-
-        {/* Main Nav */}
-        <nav className="flex flex-col gap-1">
-          {MAIN_NAV.map((item) => (
-            <NavLink
-              key={item.to}
-              item={item}
-              isActive={isNavActive(item.to, currentPath, MAIN_NAV)}
-              onClick={onNavigate}
-            />
-          ))}
-        </nav>
-
-        {/* Approvals section */}
-        <div className="flex flex-col gap-1">
-          <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
-            Approvals
-          </p>
-          {APPROVALS_NAV.map((item) => (
-            <NavLink
-              key={item.to}
-              item={item}
-              isActive={isNavActive(item.to, currentPath, APPROVALS_NAV)}
-              onClick={onNavigate}
-            />
-          ))}
-        </div>
-
-        {/* Developer section */}
-        <div className="flex flex-col gap-1">
-          <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
-            Developer
-          </p>
-          {DEVELOPER_NAV.map((item) => (
-            <NavLink
-              key={item.to}
-              item={item}
-              isActive={isNavActive(item.to, currentPath, DEVELOPER_NAV)}
-              onClick={onNavigate}
-            />
-          ))}
-        </div>
-
-        {/* Admin section — visible to admins (read+write) and operators
-            (read-only). Per-action write controls are gated separately
-            inside individual admin pages. */}
-        {hasAdminRead(user) && (
-          <div className="flex flex-col gap-1">
-            <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
-              Admin
-            </p>
-            {ADMIN_NAV.map((item) => (
-              <NavLink
-                key={item.to}
-                item={item}
-                isActive={isNavActive(item.to, currentPath, ADMIN_NAV)}
-                onClick={onNavigate}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* ── Account ── */}
-      <div className="flex items-center gap-3 border-t border-border mt-6 pt-4">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-primary">
-          <span className="text-xs font-semibold text-void-400">
-            {initials}
-          </span>
-        </div>
-        <div className="flex min-w-0 flex-col gap-0.5">
-          <span className="truncate text-[13px] font-medium text-foreground">
-            {user?.display_name ?? "User"}
-          </span>
-          <span className="truncate text-[11px] text-text-tertiary">
-            {user?.email ?? ""}
-          </span>
-        </div>
-      </div>
+    <aside
+      className={cn(
+        "flex h-full flex-col border-r border-border/60 overflow-hidden transition-[width] duration-300 ease-in-out",
+        mode === "collapsed" ? "w-[52px]" : "w-[200px]",
+      )}
+    >
+      {sidebarContent}
     </aside>
+  );
+}
+
+function SidebarModeOption({
+  label,
+  active,
+  onClick,
+}: {
+  readonly label: string;
+  readonly active: boolean;
+  readonly onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] transition-colors duration-200 hover:bg-white/[0.04]",
+        active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+      )}
+    >
+      <Circle
+        className={cn(
+          "h-2 w-2 shrink-0",
+          active ? "fill-nyx-secondary-400 text-nyx-secondary-400" : "fill-transparent text-muted-foreground/30",
+        )}
+      />
+      {label}
+    </button>
   );
 }

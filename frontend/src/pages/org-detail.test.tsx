@@ -267,7 +267,10 @@ describe("OrgDetailPage", () => {
     renderOrgDetailPage();
 
     await user.click(screen.getByRole("tab", { name: "Invites" }));
-    await user.click(screen.getByRole("button", { name: /copy invite link/i }));
+    // Both mobile and desktop views render a copy button for the pending
+    // invite, so pick the first visible one.
+    const copyButtons = screen.getAllByRole("button", { name: /copy invite link/i });
+    await user.click(copyButtons[0]!);
 
     await waitFor(() => {
       expect(mockCopyToClipboard).toHaveBeenCalledWith(
@@ -284,9 +287,11 @@ describe("OrgDetailPage", () => {
 
     await user.click(screen.getByRole("tab", { name: "Invites" }));
 
+    // Both mobile and desktop views render a copy button for the single
+    // pending invite, so expect 2 (one per responsive breakpoint).
     expect(
       screen.getAllByRole("button", { name: /copy invite link/i }),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
     expect(
       screen.queryByRole("button", {
         name: new RegExp(redeemedInvite.nonce, "i"),
