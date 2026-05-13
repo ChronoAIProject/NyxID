@@ -480,6 +480,94 @@ describe("ProviderWaitingPanel", () => {
   });
 });
 
+// Issue #653 — root-cause regression test for the polling-doesn't-fire
+// bug. PR #723's third-round review caught that OAuthFlow's main
+// useEffect had `[phase]` deps and its cleanup set `cancelledRef.
+// current = true`. When the async function inside calls
+// `setPhase("waiting")` then `await pollUntilActive(...)`, React fires
+// the cleanup during the polling loop's first sleep — which flips
+// cancelledRef and makes the polling loop bail before its first GET.
+// Result: zero `/keys/<id>` requests in the network tab, wizard hangs
+// on "Waiting for provider authorization…" indefinitely.
+//
+// Pre-fix this test fails (mockGet for /keys/key-1 is never called).
+// Post-fix it passes (cleanup no longer flips the shared
+// cancelledRef on phase change).
+//
+// Existing OAuth integration tests didn't catch this because their
+// `mockPost` returned `status: "active"` immediately, hitting the
+// short-circuit at auth-flows.tsx:857 that bypasses pollUntilActive
+// entirely. This test deliberately starts with `pending_auth` so the
+// polling loop is the path that has to work.
+describe("OAuthFlow polling integration", () => {
+  beforeEach(() => {
+    resetFlowMocks();
+  });
+
+  it(
+    "actually fires GET /keys/<id> while the placeholder is pending_auth (issue #653 root cause)",
+    async () => {
+      // Override defaults: POST /keys returns pending_auth so the
+      // active short-circuit doesn't fire; GET /keys/key-1 also
+      // returns pending_auth so the polling has to keep going for
+      // multiple ticks (we only assert the first GET fires; the
+      // wizard's done transition isn't what's being tested here).
+      mockPost.mockImplementation(async (path: string) => {
+        if (path === "/keys") {
+          return {
+            id: "key-1",
+            status: "pending_auth",
+            slug: "llm-openai",
+            label: "OpenAI",
+          };
+        }
+        throw new Error(`unexpected POST ${path}`);
+      });
+      mockGet.mockImplementation(async (path: string) => {
+        if (
+          path.startsWith("/providers/") &&
+          path.endsWith("/oauth?redirect_path=%2Fkeys%2Fkey-1")
+        ) {
+          return { authorization_url: "https://example.com/oauth" };
+        }
+        if (path === "/keys/key-1") {
+          return {
+            id: "key-1",
+            status: "pending_auth",
+            slug: "llm-openai",
+            label: "OpenAI",
+          };
+        }
+        throw new Error(`unexpected GET ${path}`);
+      });
+
+      // Stub window.open so the wizard goes through the popup-opened
+      // happy path (not popup-blocked); both branches funnel into
+      // pollUntilActive, but we want to test the most-common one.
+      const originalOpen = window.open;
+      window.open = vi.fn().mockReturnValue({
+        closed: false,
+      } as Window);
+
+      try {
+        renderOAuthFlow();
+
+        // Wait for the polling loop to fire its first GET. Default
+        // polling interval is 2s; allow generous slack for CI.
+        await waitFor(
+          () => {
+            expect(mockGet).toHaveBeenCalledWith("/keys/key-1");
+          },
+          { timeout: 5000 },
+        );
+      } finally {
+        window.open = originalOpen;
+      }
+    },
+    10_000,
+  );
+});
+
 // Issue #653 review (PR #723 second-round adversarial review): when
 // the OAuth or device-code flow has reached a terminal error, the
 // wizard MUST render a dedicated error layout — not the polling
