@@ -3,7 +3,7 @@ import FontAwesome from "@expo/vector-icons/FontAwesome";
 import * as WebBrowser from "expo-web-browser";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import Svg, { Path, Defs, LinearGradient, Stop, Circle as SvgCircle } from "react-native-svg";
+import Svg, { Path, Defs, LinearGradient, Stop } from "react-native-svg";
 import type { RootStackParamList } from "../../app/AppNavigator";
 
 import { ScreenContainer } from "../../components/ScreenContainer";
@@ -103,43 +103,6 @@ function parseSocialCallback(url: string): SocialCallback | null {
       error: e instanceof Error ? e.message : "social_auth_unknown",
     };
   }
-}
-
-// Ambient backdrop for the auth hero: three concentric rings with
-// rotating linear-gradient strokes (re-using the brand orbital motif
-// from NyxFAB) plus a soft purple wash. Pure decoration — sits behind
-// the logo, ignores touches.
-function PortalAmbient({ size = 380 }: { size?: number }) {
-  return (
-    <Svg
-      width={size}
-      height={size}
-      viewBox={`0 0 ${size} ${size}`}
-      pointerEvents="none"
-    >
-      <Defs>
-        <LinearGradient id="amb-ring1" gradientUnits="userSpaceOnUse" x1="0" y1={size / 2} x2={size} y2={size / 2}>
-          <Stop offset="0" stopColor="#A78BFA" stopOpacity={0.55} />
-          <Stop offset="0.5" stopColor="#A78BFA" stopOpacity={0} />
-        </LinearGradient>
-        <LinearGradient id="amb-ring2" gradientUnits="userSpaceOnUse" x1="0" y1={size / 2} x2={size} y2={size / 2} gradientTransform={`rotate(120 ${size / 2} ${size / 2})`}>
-          <Stop offset="0" stopColor="#C4B5FD" stopOpacity={0.4} />
-          <Stop offset="0.5" stopColor="#C4B5FD" stopOpacity={0} />
-        </LinearGradient>
-        <LinearGradient id="amb-ring3" gradientUnits="userSpaceOnUse" x1="0" y1={size / 2} x2={size} y2={size / 2} gradientTransform={`rotate(240 ${size / 2} ${size / 2})`}>
-          <Stop offset="0" stopColor="#DDD6FE" stopOpacity={0.3} />
-          <Stop offset="0.5" stopColor="#DDD6FE" stopOpacity={0} />
-        </LinearGradient>
-      </Defs>
-      <SvgCircle cx={size / 2} cy={size / 2} r={size / 2 - 4} fill="none" stroke="url(#amb-ring1)" strokeWidth={1} />
-      <SvgCircle cx={size / 2} cy={size / 2} r={size / 2 - 60} fill="none" stroke="url(#amb-ring2)" strokeWidth={1} />
-      <SvgCircle cx={size / 2} cy={size / 2} r={size / 2 - 110} fill="none" stroke="url(#amb-ring3)" strokeWidth={0.8} />
-      <SvgCircle cx={size * 0.18} cy={size * 0.32} r={2} fill="#C4B5FD" opacity={0.5} />
-      <SvgCircle cx={size * 0.84} cy={size * 0.58} r={1.5} fill="#C4B5FD" opacity={0.4} />
-      <SvgCircle cx={size * 0.72} cy={size * 0.22} r={1} fill="#C4B5FD" opacity={0.6} />
-      <SvgCircle cx={size * 0.28} cy={size * 0.78} r={1} fill="#C4B5FD" opacity={0.35} />
-    </Svg>
-  );
 }
 
 // Inline render of mobile/assets/sources/app_icon.svg
@@ -406,10 +369,6 @@ export function AuthHomeScreen({ navigation }: Props) {
       >
         {/* Hero branding */}
         <View style={styles.heroWrap}>
-          <View style={styles.heroAmbient} pointerEvents="none">
-            <View style={styles.heroGlow} />
-            <PortalAmbient />
-          </View>
           <PortalMarkLogo />
           <Text style={styles.heroTitle}>NyxID</Text>
           <Text style={styles.heroTagline}>Your companion for approvals and notifications</Text>
@@ -546,23 +505,6 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     gap: spacing.sm,
     marginBottom: spacing.sm,
     paddingTop: spacing.huge,
-    position: "relative",
-  },
-  heroAmbient: {
-    position: "absolute",
-    top: -40,
-    width: 380,
-    height: 380,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  heroGlow: {
-    position: "absolute",
-    width: 240,
-    height: 240,
-    borderRadius: radius.full,
-    backgroundColor: c.primaryGlow,
-    opacity: 0.9,
   },
   heroTitle: {
     ...typeScale.h1,
