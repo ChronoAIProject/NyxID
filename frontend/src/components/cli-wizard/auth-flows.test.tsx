@@ -541,28 +541,21 @@ describe("OAuthFlow polling integration", () => {
         throw new Error(`unexpected GET ${path}`);
       });
 
-      // Stub window.open so the wizard goes through the popup-opened
-      // happy path (not popup-blocked); both branches funnel into
-      // pollUntilActive, but we want to test the most-common one.
-      const originalOpen = window.open;
-      window.open = vi.fn().mockReturnValue({
-        closed: false,
-      } as Window);
+      // Note: no need to stub `window.open` — issue #653 Option A
+      // removed the auto-window.open from the wizard's effect. The
+      // OAuth URL is rendered as the prominent "Open {provider} sign-
+      // in" button instead, and polling fires regardless of whether
+      // that button has been clicked.
+      renderOAuthFlow();
 
-      try {
-        renderOAuthFlow();
-
-        // Wait for the polling loop to fire its first GET. Default
-        // polling interval is 2s; allow generous slack for CI.
-        await waitFor(
-          () => {
-            expect(mockGet).toHaveBeenCalledWith("/keys/key-1");
-          },
-          { timeout: 5000 },
-        );
-      } finally {
-        window.open = originalOpen;
-      }
+      // Wait for the polling loop to fire its first GET. Default
+      // polling interval is 2s; allow generous slack for CI.
+      await waitFor(
+        () => {
+          expect(mockGet).toHaveBeenCalledWith("/keys/key-1");
+        },
+        { timeout: 5000 },
+      );
     },
     10_000,
   );

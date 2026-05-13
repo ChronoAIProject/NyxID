@@ -869,19 +869,23 @@ export function OAuthFlow({
           throw new Error("provider did not return an authorization_url");
         }
         setAuthUrl(initiate.authorization_url);
-        // New tab so the pair page stays alive to poll. Popups are
-        // blocked if not a user-initiated action; this effect runs on
-        // mount after the user clicked "Create service", which is
-        // enough gesture-context in every browser we support.
-        const w = window.open(initiate.authorization_url, "_blank", "noopener,noreferrer");
-        if (!w) {
-          setPhase("waiting");
-          setError(
-            "Browser blocked the popup. Use the button below to open the provider sign-in.",
-          );
-          await pollUntilActive(placeholder.id);
-          return;
-        }
+        // Issue #653: do NOT auto `window.open` here. By the time we
+        // reach this line we've awaited at least three async calls
+        // (reservePairingAction, createPlaceholderKey, GET
+        // /providers/.../oauth) — the user-gesture context is gone and
+        // every modern browser blocks the popup. The block then either
+        //   (a) silently produces nothing and the user wonders why
+        //       no tab opened, or
+        //   (b) surfaces an alarming "Browser blocked popup" warning
+        //       that implies the user did something wrong.
+        // Both are bad UX and neither materially helps the small
+        // population of browsers/configurations that would have let
+        // the popup through. Instead, the standardized waiting panel
+        // (`ProviderWaitingPanel`) renders a prominent "Open {provider}
+        // sign-in" button whose onClick calls `window.open`
+        // synchronously from a fresh user gesture — browsers never
+        // block that path. Predictable single UX regardless of
+        // browser settings.
         setPhase("waiting");
         await pollUntilActive(placeholder.id);
       } catch (e) {
