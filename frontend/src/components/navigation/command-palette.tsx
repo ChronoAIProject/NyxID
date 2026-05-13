@@ -65,8 +65,13 @@ export function CommandPalette({
   readonly onOpenChange: (open: boolean) => void;
 }) {
   const navigate = useNavigate();
-  const [query, setQuery] = useState("");
+  const [query, setQueryRaw] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+
+  const setQuery = useCallback((q: string) => {
+    setQueryRaw(q);
+    setSelectedIndex(0);
+  }, []);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return ALL_ITEMS.slice(0, 8);
@@ -82,15 +87,10 @@ export function CommandPalette({
     (to: string) => {
       onOpenChange(false);
       setQuery("");
-      setSelectedIndex(0);
       void navigate({ to: to as string });
     },
-    [navigate, onOpenChange],
+    [navigate, onOpenChange, setQuery],
   );
-
-  useEffect(() => {
-    setSelectedIndex(0);
-  }, [query]);
 
   useEffect(() => {
     if (!open) return;
@@ -100,7 +100,6 @@ export function CommandPalette({
         e.preventDefault();
         onOpenChange(false);
         setQuery("");
-        setSelectedIndex(0);
       }
       if (e.key === "ArrowDown") {
         e.preventDefault();

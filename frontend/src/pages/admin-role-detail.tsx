@@ -169,10 +169,6 @@ export function AdminRoleDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Role Management", to: "/admin/roles" },
-          { label: role.name },
-        ]}
         title={role.name}
         description={role.description ?? undefined}
         actions={
@@ -206,14 +202,14 @@ export function AdminRoleDetailPage() {
       />
 
       <DetailSection title="Role Information">
-        <DetailRow label="ID" value={role.id} copyable mono />
+        <DetailRow label="ID" value={role.id} copyable />
         <DetailRow label="Name" value={role.name} />
-        <DetailRow label="Slug" value={role.slug} copyable mono />
+        <DetailRow label="Slug" value={role.slug} copyable />
         <DetailRow
           label="Type"
           value={role.is_system ? "System" : "Custom"}
           badge
-          badgeVariant={role.is_system ? "secondary" : "outline"}
+          badgeVariant={role.is_system ? "secondary" : "default"}
         />
         <DetailRow
           label="Default"
@@ -222,7 +218,7 @@ export function AdminRoleDetailPage() {
           badgeVariant={role.is_default ? "success" : "secondary"}
         />
         {role.client_id && (
-          <DetailRow label="Client ID" value={role.client_id} copyable mono />
+          <DetailRow label="Client ID" value={role.client_id} copyable />
         )}
         <DetailRow label="Created" value={formatDate(role.created_at)} />
         <DetailRow label="Updated" value={formatDate(role.updated_at)} />
@@ -238,7 +234,7 @@ export function AdminRoleDetailPage() {
         ) : (
           <div className="flex flex-wrap gap-2">
             {role.permissions.map((perm) => (
-              <Badge key={perm} variant="outline" className="font-mono text-xs">
+              <Badge key={perm} variant="secondary" className="font-mono text-xs">
                 {perm}
               </Badge>
             ))}

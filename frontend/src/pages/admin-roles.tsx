@@ -203,7 +203,7 @@ export function AdminRolesPage() {
                     {role.is_system ? (
                       <Badge variant="secondary">System</Badge>
                     ) : (
-                      <Badge variant="outline">Custom</Badge>
+                      <Badge variant="secondary">Custom</Badge>
                     )}
                   </TableCell>
                   <TableCell>

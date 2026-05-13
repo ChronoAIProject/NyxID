@@ -295,10 +295,6 @@ export function AdminUserDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "User Management", to: "/admin/users" },
-          { label: user.email },
-        ]}
         title={user.display_name ?? user.email}
         description={user.display_name ? user.email : undefined}
         actions={
@@ -324,7 +320,7 @@ export function AdminUserDetailPage() {
       />
 
       <DetailSection title="User Information">
-        <DetailRow label="ID" value={user.id} copyable mono />
+        <DetailRow label="ID" value={user.id} copyable />
         <DetailRow label="Email" value={user.email} copyable />
         <DetailRow
           label="Display Name"
@@ -799,7 +795,7 @@ function UserRolesSection({
           </p>
           <div className="flex flex-wrap gap-1">
             {effectivePermissions.map((perm) => (
-              <Badge key={perm} variant="outline" className="font-mono text-xs">
+              <Badge key={perm} variant="secondary" className="font-mono text-xs">
                 {perm}
               </Badge>
             ))}
@@ -873,7 +869,7 @@ function UserGroupsSection({ userId }: { readonly userId: string }) {
       ) : (
         <div className="flex flex-wrap gap-2">
           {groups.map((group) => (
-            <Badge key={group.id} variant="outline">
+            <Badge key={group.id} variant="secondary">
               {group.name}
               {group.roles.length > 0 && (
                 <span className="ml-1 text-muted-foreground">

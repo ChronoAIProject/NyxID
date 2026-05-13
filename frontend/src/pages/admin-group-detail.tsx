@@ -206,10 +206,6 @@ export function AdminGroupDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        breadcrumbs={[
-          { label: "Group Management", to: "/admin/groups" },
-          { label: group.name },
-        ]}
         title={group.name}
         description={group.description ?? undefined}
         actions={
@@ -233,16 +229,15 @@ export function AdminGroupDetailPage() {
       />
 
       <DetailSection title="Group Information">
-        <DetailRow label="ID" value={group.id} copyable mono />
+        <DetailRow label="ID" value={group.id} copyable />
         <DetailRow label="Name" value={group.name} />
-        <DetailRow label="Slug" value={group.slug} copyable mono />
+        <DetailRow label="Slug" value={group.slug} copyable />
         <DetailRow label="Members" value={String(group.member_count)} />
         {group.parent_group_id && (
           <DetailRow
             label="Parent Group"
             value={group.parent_group_id}
             copyable
-            mono
           />
         )}
         <DetailRow label="Created" value={formatDate(group.created_at)} />
@@ -259,7 +254,7 @@ export function AdminGroupDetailPage() {
         ) : (
           <div className="flex flex-wrap gap-2">
             {group.roles.map((role) => (
-              <Badge key={role.id} variant="outline">
+              <Badge key={role.id} variant="secondary">
                 {role.name}
               </Badge>
             ))}

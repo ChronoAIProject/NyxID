@@ -28,7 +28,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { hasAdminRead } from "@/types/api";
 
 /* ── Navigation Config ── */
-const NAV_ITEMS = [
+export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/keys", icon: Cable, label: "AI Services" },
   { to: "/orgs", icon: Building2, label: "Organizations" },
@@ -40,19 +40,19 @@ const NAV_ITEMS = [
   { to: "/guide", icon: BookOpen, label: "Guide" },
 ] as const;
 
-const APPROVAL_NAV_ITEMS = [
+export const APPROVALS_NAV = [
   { to: "/approvals/settings", icon: Bell, label: "Notifications" },
   { to: "/approvals/history", icon: ClipboardList, label: "Approval History" },
   { to: "/approvals/grants", icon: Lock, label: "Active Grants" },
 ] as const;
 
-const DEVELOPER_NAV_ITEMS = [
+export const DEVELOPER_NAV = [
   { to: "/developer/apps", icon: Code, label: "Developer Apps" },
   { to: "/ai-setup", icon: Sparkles, label: "AI Setup" },
   { to: "/integration-guide", icon: BookMarked, label: "Integration Guide" },
 ] as const;
 
-const ADMIN_NAV_ITEMS = [
+const ADMIN_NAV = [
   { to: "/admin/users", icon: Users, label: "Users" },
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
@@ -65,7 +65,7 @@ const ADMIN_NAV_ITEMS = [
 ] as const;
 
 /** Check if a nav item is the best (most specific) match for the current path. */
-function isNavActive(
+export function isNavActive(
   itemTo: string,
   currentPath: string,
   allItems: readonly { readonly to: string }[],
@@ -156,11 +156,11 @@ export function Sidebar({
 
         {/* Main Nav */}
         <nav className="flex flex-col gap-1">
-          {NAV_ITEMS.map((item) => (
+          {MAIN_NAV.map((item) => (
             <NavLink
               key={item.to}
               item={item}
-              isActive={isNavActive(item.to, currentPath, NAV_ITEMS)}
+              isActive={isNavActive(item.to, currentPath, MAIN_NAV)}
               onClick={onNavigate}
             />
           ))}
@@ -171,11 +171,11 @@ export function Sidebar({
           <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
             Approvals
           </p>
-          {APPROVAL_NAV_ITEMS.map((item) => (
+          {APPROVALS_NAV.map((item) => (
             <NavLink
               key={item.to}
               item={item}
-              isActive={isNavActive(item.to, currentPath, APPROVAL_NAV_ITEMS)}
+              isActive={isNavActive(item.to, currentPath, APPROVALS_NAV)}
               onClick={onNavigate}
             />
           ))}
@@ -186,11 +186,11 @@ export function Sidebar({
           <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
             Developer
           </p>
-          {DEVELOPER_NAV_ITEMS.map((item) => (
+          {DEVELOPER_NAV.map((item) => (
             <NavLink
               key={item.to}
               item={item}
-              isActive={isNavActive(item.to, currentPath, DEVELOPER_NAV_ITEMS)}
+              isActive={isNavActive(item.to, currentPath, DEVELOPER_NAV)}
               onClick={onNavigate}
             />
           ))}
@@ -204,11 +204,11 @@ export function Sidebar({
             <p className="mb-1 px-4 text-[11px] font-semibold uppercase tracking-[1px] text-text-tertiary">
               Admin
             </p>
-            {ADMIN_NAV_ITEMS.map((item) => (
+            {ADMIN_NAV.map((item) => (
               <NavLink
                 key={item.to}
                 item={item}
-                isActive={isNavActive(item.to, currentPath, ADMIN_NAV_ITEMS)}
+                isActive={isNavActive(item.to, currentPath, ADMIN_NAV)}
                 onClick={onNavigate}
               />
             ))}

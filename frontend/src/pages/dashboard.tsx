@@ -430,7 +430,7 @@ function OnboardingChecklist({
                 {i > 0 && (
                   <div className="flex">
                     <div className="flex w-[36px] shrink-0 justify-center py-0">
-                      <div className={cn("w-[2px] h-10 -my-3.5", steps[i - 1].done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
+                      <div className={cn("w-[2px] h-10 -my-3.5", steps[i - 1]?.done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
                     </div>
                   </div>
                 )}
@@ -440,7 +440,7 @@ function OnboardingChecklist({
                   <div
                     className={cn(
                       "flex h-[36px] w-[36px] shrink-0 items-center justify-center rounded-lg border transition-all duration-200",
-                      step.done || i === 0 || steps[i - 1].done
+                      step.done || i === 0 || steps[i - 1]?.done
                         ? "border-nyx-secondary-400 bg-nyx-500/15 text-nyx-secondary-400"
                         : "border-border/60 bg-card text-text-tertiary",
                     )}
@@ -484,8 +484,8 @@ function OnboardingChecklist({
           {/* ── Desktop: horizontal cards ── */}
           <div className="relative hidden md:block">
             <div className="absolute top-[19px] left-[calc(16.67%+27px)] right-[calc(16.67%+27px)] flex items-center gap-[54px] z-0">
-              <div className={cn("h-[2px] flex-1", steps[0].done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
-              <div className={cn("h-[2px] flex-1", steps[1].done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
+              <div className={cn("h-[2px] flex-1", steps[0]?.done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
+              <div className={cn("h-[2px] flex-1", steps[1]?.done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
             </div>
 
             <div className="relative z-10 grid grid-cols-3 gap-4">
@@ -494,7 +494,7 @@ function OnboardingChecklist({
                   <div
                     className={cn(
                       "flex h-[38px] w-[38px] items-center justify-center rounded-lg border transition-all duration-200",
-                      step.done || i === 0 || steps[i - 1].done
+                      step.done || i === 0 || steps[i - 1]?.done
                         ? "border-nyx-secondary-400 bg-nyx-500/15 text-nyx-secondary-400 group-hover:bg-nyx-500/25 group-hover:shadow-md group-hover:shadow-nyx-500/10"
                         : "border-border/60 bg-card text-text-tertiary",
                     )}

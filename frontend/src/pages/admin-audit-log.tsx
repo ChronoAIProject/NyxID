@@ -25,12 +25,12 @@ function responseStatus(entry: { readonly event_data: Record<string, unknown> | 
 
 function statusVariant(
   status: number | null,
-): "default" | "secondary" | "destructive" | "outline" {
-  if (status === null) return "outline";
+): "default" | "secondary" | "destructive" {
+  if (status === null) return "secondary";
   if (status >= 500) return "destructive";
   if (status >= 400) return "secondary";
   if (status >= 200) return "default";
-  return "outline";
+  return "secondary";
 }
 
 export function AdminAuditLogPage() {

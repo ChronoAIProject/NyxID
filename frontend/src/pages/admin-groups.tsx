@@ -205,7 +205,7 @@ export function AdminGroupsPage() {
                         group.roles.map((role) => (
                           <Badge
                             key={role.id}
-                            variant="outline"
+                            variant="secondary"
                             className="text-xs"
                           >
                             {role.name}

@@ -1810,7 +1810,7 @@ export function AddKeyDialog({
     if (!match) return;
     appliedPrefillRef.current = prefillSlug;
     handleSelectCatalog(match);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- handleSelectCatalog is stable via the ref guard
   }, [open, prefillSlug, catalogEntries]);
 
   function handleSelectCustom() {

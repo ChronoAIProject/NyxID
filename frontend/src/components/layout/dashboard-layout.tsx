@@ -166,13 +166,14 @@ function TopBarBreadcrumbs() {
 
   const crumbs: { label: string; to?: string }[] = [];
   for (const [i, segment] of segments.entries()) {
-    const segPath = accPaths[i];
+    const segPath = accPaths[i]!;
     if (UUID_RE.test(segment)) continue;
     if (SKIP_SEGMENTS.has(segment)) continue;
     if (SKIP_BREADCRUMB_SEGMENTS.has(segment)) {
       const override = PARENT_LINK_OVERRIDES[segment];
-      if (override && crumbs.length > 0) {
-        crumbs[crumbs.length - 1].to = override;
+      const last = crumbs[crumbs.length - 1];
+      if (override && last) {
+        last.to = override;
       }
       continue;
     }
