@@ -136,15 +136,6 @@ const HEARTBEAT_DEAD_AFTER: Duration = Duration::from_secs(20);
 /// DisplayOnce flows render a one-time secret. Keep a separately named window
 /// so those flows can tolerate a longer alt-tab into a password manager.
 const HEARTBEAT_DEAD_AFTER_ROTATION: Duration = Duration::from_secs(60);
-/// Issue #653 Gap D: when the browser navigates the wizard tab away to a
-/// provider OAuth URL (popup-blocked fallback path), the heartbeat to the
-/// local CLI server stops for the duration of the OAuth flow on the
-/// provider's site. Without an extended window the watchdog would
-/// prematurely cancel the wizard before the user finishes consenting on
-/// e.g. Lark. 5 minutes is the same ceiling as the OAuth state TTL halved
-/// — long enough for slow providers, short enough that a truly walked-
-/// away tab doesn't hold the CLI hostage.
-const HEARTBEAT_DEAD_AFTER_OAUTH_NAVIGATION: Duration = Duration::from_secs(300);
 /// How often the CLI checks the last-heartbeat timestamp. 500 ms is
 /// tight enough that a watchdog-triggered exit fires promptly after the
 /// current timeout window expires.
@@ -566,15 +557,6 @@ struct ServerState {
     /// other flows still require the explicit ack so display-once
     /// secrets are not accidentally surfaced.
     completed_ai_key: Arc<tokio::sync::Mutex<Option<serde_json::Value>>>,
-    /// Issue #653 Gap D: set true when the browser POSTs to
-    /// `/api/proxy/oauth-navigate` immediately before navigating the
-    /// wizard tab away to a provider's OAuth URL (popup-blocked fallback
-    /// path). While this flag is set, the heartbeat watchdog uses
-    /// `HEARTBEAT_DEAD_AFTER_OAUTH_NAVIGATION` instead of the normal
-    /// 20s window, AND `resolve_soft_failure_outcome` polls the backend
-    /// for any `pending_keys` to check if OAuth completed asynchronously
-    /// before falling back to "cancelled".
-    oauth_navigation_in_progress: Arc<std::sync::atomic::AtomicBool>,
     /// JSON-serialized prefill for the flow. Baked into
     /// `window.__WIZARD_BOOTSTRAP__.prefill` so the React bundle can
     /// render the right confirm panel with the right values on mount.
@@ -1126,31 +1108,6 @@ async fn handle_heartbeat(State(state): State<ServerState>, headers: HeaderMap) 
     (StatusCode::NO_CONTENT, base_security_headers()).into_response()
 }
 
-/// Issue #653 Gap D: browser tells the CLI it is about to navigate the
-/// wizard tab away to the provider's OAuth URL (popup-blocked fallback
-/// path). The watchdog widens its dead-after window so the wizard server
-/// stays alive while the user completes consent on the provider's site,
-/// and `resolve_soft_failure_outcome` switches into "poll the backend
-/// before declaring cancellation" mode. One-way flag — set never reset
-/// in the same wizard session, since we expect the user not to come back
-/// to the wizard URL after navigating away (the provider redirects them
-/// to the frontend's `/keys/{id}` success page instead).
-async fn handle_oauth_navigate(State(state): State<ServerState>, headers: HeaderMap) -> Response {
-    if !check_caller_strict(&headers, state.bound_port) {
-        return (StatusCode::FORBIDDEN, "bad origin/host").into_response();
-    }
-    if !csrf_ok(&headers, &state.csrf_token) {
-        return (StatusCode::FORBIDDEN, "bad csrf").into_response();
-    }
-    state
-        .oauth_navigation_in_progress
-        .store(true, std::sync::atomic::Ordering::Release);
-    eprintln!(
-        "  [wizard] browser navigated to provider OAuth — extending watchdog grace + enabling backend polling fallback"
-    );
-    (StatusCode::NO_CONTENT, base_security_headers()).into_response()
-}
-
 async fn handle_status(State(state): State<ServerState>, headers: HeaderMap) -> Response {
     // GET: Origin may be omitted by the browser on same-origin requests.
     if !check_caller_relaxed(&headers, state.bound_port) {
@@ -1686,19 +1643,6 @@ async fn resolve_soft_failure_outcome_with_grace(
             drain_pending_keys(state).await;
             return WizardOutcome::AiKeyCompleted(value);
         }
-        // Issue #653 Gap D: when the wizard tab navigated away to OAuth,
-        // the user never came back to it to fire `/api/proxy/complete`.
-        // Poll the backend directly for any tracked `pending_keys` to see
-        // if OAuth landed asynchronously while the browser was off-page.
-        if state
-            .oauth_navigation_in_progress
-            .load(std::sync::atomic::Ordering::Acquire)
-            && let Some(value) = await_pending_keys_completion(state).await
-        {
-            eprintln!("  {completion_message}");
-            drain_pending_keys(state).await;
-            return WizardOutcome::AiKeyCompleted(value);
-        }
         if let Some(msg) = fallback_message {
             eprintln!("  {msg}");
         }
@@ -1706,60 +1650,6 @@ async fn resolve_soft_failure_outcome_with_grace(
         fallback_outcome
     }
 }
-
-/// Issue #653 Gap D: poll the backend for each tracked `pending_keys`
-/// placeholder until one reaches `active` (success → return its
-/// `ActionResult`-shape Value), reaches a terminal failure status (return
-/// None — caller falls through to cancellation), or
-/// `PENDING_KEYS_POLL_GRACE` elapses.
-///
-/// Called only from the soft-failure branch when the OAuth-navigate flag
-/// is set, so this never adds latency to the normal happy path.
-async fn await_pending_keys_completion(state: &ServerState) -> Option<serde_json::Value> {
-    let key_ids: Vec<String> = state.pending_keys.lock().await.iter().cloned().collect();
-    if key_ids.is_empty() {
-        return None;
-    }
-    let deadline = Instant::now() + PENDING_KEYS_POLL_GRACE;
-    let base = state.proxy.base_url_root.trim_end_matches('/').to_string();
-    while Instant::now() < deadline {
-        for key_id in &key_ids {
-            let token = state.access_token.lock().await.clone();
-            let url = format!("{}/api/v1/keys/{}", base, key_id);
-            let resp = match state.upstream.get(&url).bearer_auth(&token).send().await {
-                Ok(r) => r,
-                Err(_) => continue, // transient — try the next or the next tick
-            };
-            if !resp.status().is_success() {
-                continue;
-            }
-            let Ok(body) = resp.json::<serde_json::Value>().await else {
-                continue;
-            };
-            match body.get("status").and_then(|s| s.as_str()) {
-                Some("active") => return Some(body),
-                // Terminal failure statuses mean the OAuth flow concluded
-                // unsuccessfully — let the caller fall through to its
-                // cancellation message. We do NOT try to surface the
-                // backend error_message here because the soft-failure
-                // path's eprintln has its own copy and we want the CLI's
-                // exit code to be `Cancelled`, not `AiKeyCompleted`.
-                Some("failed" | "revoked" | "expired") => return None,
-                _ => {}
-            }
-        }
-        tokio::time::sleep(PENDING_KEYS_POLL_INTERVAL).await;
-    }
-    None
-}
-
-/// How long `await_pending_keys_completion` waits for an OAuth callback
-/// to land while the wizard tab is away from the wizard URL. Bounded by
-/// the OAuth state TTL on the backend (10 min), shorter so the CLI
-/// doesn't appear hung.
-const PENDING_KEYS_POLL_GRACE: Duration = Duration::from_secs(180);
-/// How often `await_pending_keys_completion` polls each pending placeholder.
-const PENDING_KEYS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 async fn wait_for_in_flight_completion(state: &ServerState, grace: Duration) {
     if state
@@ -2054,7 +1944,6 @@ pub async fn run_flow(
         bound_port: addr.port(),
         pending_keys: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         completed_ai_key: Arc::new(tokio::sync::Mutex::new(None)),
-        oauth_navigation_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         prefill: Arc::new(prefill_json),
     };
 
@@ -2074,7 +1963,6 @@ pub async fn run_flow(
         .route("/api/proxy/cancel", post(handle_cancel))
         .route("/api/proxy/cancel-unload", post(handle_cancel_unload))
         .route("/api/proxy/heartbeat", post(handle_heartbeat))
-        .route("/api/proxy/oauth-navigate", post(handle_oauth_navigate))
         .route("/api/proxy/status", get(handle_status))
         .route(
             "/api/proxy/abandon-placeholder",
@@ -2123,7 +2011,7 @@ pub async fn run_flow(
     // Per-flow dead-after window. DisplayOnce flows render a one-time
     // secret; keep the branch explicit even though both windows are
     // currently equal.
-    let baseline_dead_after = if kind.is_display_once() {
+    let dead_after = if kind.is_display_once() {
         HEARTBEAT_DEAD_AFTER_ROTATION
     } else {
         HEARTBEAT_DEAD_AFTER
@@ -2136,21 +2024,6 @@ pub async fn run_flow(
                 _ = tokio::time::sleep(HEARTBEAT_CHECK_INTERVAL) => {}
             }
             let last = *watchdog_state.last_heartbeat.lock().await;
-            // Issue #653 Gap D: when the browser POSTs `/api/proxy/oauth-
-            // navigate` before redirecting the wizard tab to the provider,
-            // widen the dead-after window so the watchdog tolerates the
-            // expected absence of heartbeats during OAuth on the
-            // provider's site. Without this, a user whose popup was
-            // blocked + falls back to same-tab navigation would have
-            // their CLI killed mid-OAuth.
-            let dead_after = if watchdog_state
-                .oauth_navigation_in_progress
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                HEARTBEAT_DEAD_AFTER_OAUTH_NAVIGATION
-            } else {
-                baseline_dead_after
-            };
             let dead = heartbeat_watchdog_dead(
                 watchdog_state.started_at,
                 last,
@@ -2296,7 +2169,6 @@ mod tests {
             bound_port: 0,
             pending_keys: Arc::new(tokio::sync::Mutex::new(set)),
             completed_ai_key: Arc::new(tokio::sync::Mutex::new(None)),
-            oauth_navigation_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             prefill: Arc::new(Value::Null),
         }
     }

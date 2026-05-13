@@ -30,7 +30,6 @@ import {
   rewindPairingAction,
 } from "@/pages/cli-pair/reserve-action";
 import { pollOAuthKeyUntilActive } from "./auth-flow-polling";
-import { postOauthNavigate } from "./client";
 
 interface FlowProps {
   readonly providerId: string;
@@ -868,26 +867,6 @@ export function OAuthFlow({
         // enough gesture-context in every browser we support.
         const w = window.open(initiate.authorization_url, "_blank", "noopener,noreferrer");
         if (!w) {
-          // Popup was blocked. Issue #653 Gap D: in Mode A (CLI-served
-          // wizard), fall back to navigating the wizard tab itself to
-          // the provider URL. The CLI's heartbeat watchdog gets a
-          // wider window via /api/proxy/oauth-navigate, AND its
-          // soft-failure path polls the backend for placeholder status
-          // before declaring cancellation, so the user gets a clean
-          // success even though the wizard tab is now off the wizard
-          // URL.
-          //
-          // The /api/proxy/oauth-navigate endpoint only exists on the
-          // CLI's local wizard server, so postOauthNavigate succeeds
-          // exclusively in Mode A. In Mode B (regular cli-pair page on
-          // the FE origin), it returns false (404 or CSRF reject) and
-          // we fall through to the legacy "click Reopen" UI.
-          const cliAcked = await postOauthNavigate();
-          if (cliAcked && !cancel) {
-            setPhase("waiting");
-            window.location.href = initiate.authorization_url;
-            return;
-          }
           setPhase("waiting");
           setError(
             "Browser blocked the popup. Use the button below to open the provider sign-in.",
