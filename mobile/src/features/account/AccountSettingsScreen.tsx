@@ -15,6 +15,7 @@ import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
 import { isApiError } from "../../lib/api/ApiError";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
+import { activatePushAfterLogin } from "../../lib/notifications/pushNotifications";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { createFlowStyles } from "../../theme/flowStyles";
@@ -173,6 +174,35 @@ export function AccountSettingsScreen({ navigation }: Props) {
   });
 
   const [isTelegramLinkVisible, setIsTelegramLinkVisible] = useState(false);
+
+  // Manual re-registration when the device isn't on the user's account
+  // (permission denied at first launch, token fetch failed, or original
+  // post-login registration silently failed). Surfaces the actual reason
+  // so the user can act — open Settings to flip permissions, or retry.
+  const pushRegisterMutation = useMutation({
+    mutationFn: async () => {
+      const result = await activatePushAfterLogin({ forceRegister: true });
+      if (!result.registered) {
+        if (result.reason === "permission_denied") {
+          throw new Error(
+            "Notification permission is off. Enable it in Settings → NyxID → Notifications."
+          );
+        }
+        if (result.reason === "token_unavailable") {
+          throw new Error("This device can't get a push token. Try a real device or reinstall.");
+        }
+        throw new Error("Couldn't register this device. Check your connection and try again.");
+      }
+      return result;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["account", "notificationSettings"] });
+      showToast("Push enabled on this device", "success");
+    },
+    onError: (error) => {
+      showToast(resolveErrorMessage(error), "error");
+    },
+  });
 
   const telegramDisconnectMutation = useMutation({
     mutationFn: () => mobileApi.telegramDisconnect(),
@@ -463,7 +493,15 @@ export function AccountSettingsScreen({ navigation }: Props) {
                       trackColor={{ false: colors.borderSoft, true: colors.success }}
                     />
                   ) : (
-                    <Text style={styles.accountRowValue}>No device</Text>
+                    <Pressable
+                      onPress={() => pushRegisterMutation.mutate()}
+                      disabled={pushRegisterMutation.isPending}
+                      style={styles.linkPill}
+                    >
+                      <Text style={styles.linkPillText}>
+                        {pushRegisterMutation.isPending ? "Enabling…" : "Enable on this device"}
+                      </Text>
+                    </Pressable>
                   )}
                 </View>
               </View>
