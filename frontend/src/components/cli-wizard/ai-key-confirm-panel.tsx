@@ -888,6 +888,7 @@ function CatalogConfirmForm({
         providerId={entry.provider_config_id}
         slug={entry.slug}
         label={label}
+        providerName={entry.name}
         nodeId={prefill.via_node}
         targetOrgId={targetOrgId}
         endpointUrl={effectiveEndpointUrl}
@@ -907,10 +908,12 @@ function CatalogConfirmForm({
         providerId={entry.provider_config_id}
         slug={entry.slug}
         label={label}
+        providerName={entry.name}
         nodeId={prefill.via_node}
         targetOrgId={targetOrgId}
         endpointUrl={effectiveEndpointUrl}
         pairingId={pairingId}
+        documentationUrl={entry.documentation_url}
         onSuccess={onSuccess}
         onCancel={() => {
           setAuthFlowActive(false);

@@ -35,6 +35,13 @@ interface FlowProps {
   readonly providerId: string;
   readonly slug: string;
   readonly label: string;
+  /**
+   * Display name of the provider (e.g. "Lark API (User OAuth)",
+   * "OpenAI Codex"). Used in the standardized waiting panel header
+   * so all OAuth-style flows render with consistent provider context.
+   * Falls back to `slug` if not provided.
+   */
+  readonly providerName?: string;
   readonly nodeId?: string;
   readonly targetOrgId?: string | null;
   /**
@@ -505,6 +512,7 @@ export function OAuthFlow({
   providerId,
   slug,
   label,
+  providerName,
   nodeId,
   targetOrgId,
   endpointUrl,
@@ -1014,52 +1022,36 @@ export function OAuthFlow({
     );
   }
 
+  // Standardized waiting panel (issue #653 alignment). Polling is
+  // handled by `pollUntilActive` regardless; this UI just gives the
+  // user a consistent "what's happening / what to do" surface across
+  // OAuth and device-code flows.
+  const displayName = providerName ?? slug;
+  const statusLine =
+    phase === "checking-credentials"
+      ? "Checking provider credentials…"
+      : phase === "starting"
+        ? "Setting up placeholder service…"
+        : "Waiting for provider authorization (polling every 2s)…";
+  const openProvider = authUrl
+    ? () => {
+        window.open(authUrl, "_blank", "noopener,noreferrer");
+      }
+    : null;
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h3 className="font-medium">Complete sign-in on the provider</h3>
-        <p className="text-sm text-muted-foreground">
-          We opened a new tab where you'll authorize NyxID. When it
-          completes, come back — this page will finish automatically.
-        </p>
-      </div>
-      {phase === "checking-credentials" ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Checking provider credentials...
-        </div>
-      ) : phase === "starting" ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Creating placeholder service...
-        </div>
-      ) : phase === "waiting" ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Waiting for provider authorization...
-        </div>
-      ) : null}
-
-      {authUrl && phase === "waiting" ? (
-        <a
-          href={authUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center justify-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm hover:bg-muted"
-        >
-          Reopen provider sign-in
-          <ExternalLink className="h-4 w-4" />
-        </a>
-      ) : null}
-
-      {error ? <ErrorLine message={error} /> : null}
-
-      {phase !== "done" ? (
-        <Button variant="outline" onClick={() => void cancelAndCleanup()}>
-          Cancel
-        </Button>
-      ) : null}
-    </div>
+    <ProviderWaitingPanel
+      providerName={displayName}
+      statusLine={statusLine}
+      instructions={[
+        `Click "Open ${displayName} sign-in" below to open the provider in a new tab.`,
+        "Approve the request on the provider page.",
+        "Return here — this page will finish automatically once the provider grants access.",
+      ]}
+      onOpenProvider={openProvider}
+      documentationUrl={documentationUrl}
+      onCancel={() => void cancelAndCleanup()}
+      error={error}
+    />
   );
 }
 
@@ -1069,10 +1061,12 @@ export function DeviceCodeFlow({
   providerId,
   slug,
   label,
+  providerName,
   nodeId,
   targetOrgId,
   endpointUrl,
   pairingId,
+  documentationUrl,
   onSuccess,
   onCancel,
 }: FlowProps) {
@@ -1389,78 +1383,213 @@ export function DeviceCodeFlow({
     }
   }
 
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h3 className="font-medium">Authorize via device code</h3>
-        <p className="text-sm text-muted-foreground">
-          Open the verification URL, enter the code, and complete
-          sign-in on the provider. This page will finish automatically.
-        </p>
-      </div>
+  // Standardized waiting panel (issue #653 alignment). Same surface
+  // as the OAuth flow; only the provider-specific block differs —
+  // device code shows the user_code + verification URL.
+  const displayName = providerName ?? slug;
 
-      {phase === "starting" ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Requesting device code...
-        </div>
-      ) : phase === "waiting" && code && verifyUrl ? (
-        <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-4">
-          <div className="flex flex-col gap-1">
-            <span className="text-xs uppercase tracking-wide text-muted-foreground">
-              Code
-            </span>
-            <div className="flex items-center gap-2">
-              <code className="rounded bg-background px-3 py-1.5 font-mono text-lg">
-                {code}
-              </code>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void handleCopy()}
-              >
-                <Copy className="mr-1.5 h-3.5 w-3.5" />
-                {copied ? "Copied" : "Copy"}
-              </Button>
-            </div>
-          </div>
-          <div className="flex flex-col gap-1">
-            <span className="text-xs uppercase tracking-wide text-muted-foreground">
-              Visit
-            </span>
-            <a
-              href={verifyUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-sm underline-offset-2 hover:underline"
-            >
-              {verifyUrl}
-              <ExternalLink className="h-3.5 w-3.5" />
-            </a>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            Waiting for authorization...
-          </div>
-        </div>
-      ) : phase === "expired" ? (
-        <div className="flex flex-col gap-2">
+  if (phase === "expired") {
+    return (
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-1">
+          <h3 className="font-medium">Connecting to {displayName}</h3>
           <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
             The device code expired before authorization completed.
           </p>
-          <Button onClick={() => void startSession()}>
-            Request a new code
-          </Button>
         </div>
-      ) : null}
-
-      {error ? <ErrorLine message={error} /> : null}
-
-      {phase !== "done" ? (
+        {error ? <ErrorLine message={error} /> : null}
+        <Button onClick={() => void startSession()}>Request a new code</Button>
         <Button variant="outline" onClick={() => void cancelAndCleanup()}>
           Cancel
         </Button>
+      </div>
+    );
+  }
+
+  const statusLine =
+    phase === "starting"
+      ? "Requesting device code…"
+      : "Waiting for authorization (polling every few seconds)…";
+  const providerBlock =
+    phase === "waiting" && code && verifyUrl ? (
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Code
+          </span>
+          <div className="flex items-center gap-2">
+            <code className="rounded bg-background px-3 py-1.5 font-mono text-lg">
+              {code}
+            </code>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void handleCopy()}
+            >
+              <Copy className="mr-1.5 h-3.5 w-3.5" />
+              {copied ? "Copied" : "Copy"}
+            </Button>
+          </div>
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Verification URL
+          </span>
+          <a
+            href={verifyUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-sm underline-offset-2 hover:underline"
+          >
+            {verifyUrl}
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        </div>
+      </div>
+    ) : undefined;
+  const openProvider = verifyUrl
+    ? () => {
+        window.open(verifyUrl, "_blank", "noopener,noreferrer");
+      }
+    : null;
+  return (
+    <ProviderWaitingPanel
+      providerName={displayName}
+      statusLine={statusLine}
+      providerBlock={providerBlock}
+      instructions={[
+        `Click "Open ${displayName} sign-in" below to open the verification page.`,
+        "Enter the code shown above on that page.",
+        "Approve the request — this page will finish automatically.",
+      ]}
+      onOpenProvider={openProvider}
+      documentationUrl={documentationUrl}
+      onCancel={() => void cancelAndCleanup()}
+      error={error}
+    />
+  );
+}
+
+// ── shared provider-waiting panel ────────────────────────────────────
+
+interface ProviderWaitingPanelProps {
+  /**
+   * Display name for the upstream provider (e.g. "Lark API (User OAuth)").
+   * Drives the panel title and the primary-button label.
+   */
+  readonly providerName: string;
+  /**
+   * Steps the user needs to take in their own words. Rendered as a
+   * numbered list under the provider-specific block.
+   */
+  readonly instructions: readonly string[];
+  /**
+   * Optional provider-specific block rendered above the instructions
+   * (e.g. the device code + verification URL for device-code flows).
+   * OAuth flows leave this undefined — they don't need to surface
+   * anything beyond the open button.
+   */
+  readonly providerBlock?: React.ReactNode;
+  /**
+   * Primary button: opens the provider sign-in (OAuth: pops the
+   * authorization URL; device code: pops the verification URL). When
+   * `null`, the button is hidden — used while we're still requesting
+   * the URL from the backend.
+   */
+  readonly onOpenProvider: (() => void) | null;
+  /**
+   * Status line under the panel title (e.g.
+   * "Waiting for authorization…"). Always polling; this just describes
+   * what the polling is for.
+   */
+  readonly statusLine: string;
+  /**
+   * Optional docs link rendered below the primary button. When unset,
+   * the link is omitted.
+   */
+  readonly documentationUrl?: string | null;
+  readonly onCancel: () => void;
+  readonly error?: string | null;
+}
+
+/**
+ * Standardized layout for every "the wizard is waiting for the
+ * provider to grant access" screen — issue #653 alignment to a single
+ * UX pattern across OAuth and device-code flows. Polling + heartbeat
+ * mechanics live in the wrapping flow component (auth-flow-polling.ts +
+ * the wizard server's heartbeat watchdog); this panel just renders the
+ * agreed-on shape:
+ *
+ *   • Title: "Connecting to {provider}"
+ *   • Status spinner: what we're waiting on
+ *   • Provider-specific block (optional — e.g. device code)
+ *   • Numbered "what to do" instructions
+ *   • Prominent primary button: open provider sign-in
+ *   • Optional docs link
+ *   • Cancel
+ *
+ * Pure presentational. No side effects beyond invoking the prop
+ * callbacks.
+ */
+export function ProviderWaitingPanel({
+  providerName,
+  instructions,
+  providerBlock,
+  onOpenProvider,
+  statusLine,
+  documentationUrl,
+  onCancel,
+  error,
+}: ProviderWaitingPanelProps) {
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h3 className="font-medium">Connecting to {providerName}</h3>
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          {statusLine}
+        </div>
+      </div>
+
+      {providerBlock ? (
+        <div className="rounded-md border bg-muted/30 p-4">{providerBlock}</div>
       ) : null}
+
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          What to do
+        </span>
+        <ol className="ml-4 list-decimal text-sm text-muted-foreground">
+          {instructions.map((step) => (
+            <li key={step}>{step}</li>
+          ))}
+        </ol>
+      </div>
+
+      {error ? <ErrorLine message={error} /> : null}
+
+      {onOpenProvider ? (
+        <Button onClick={onOpenProvider}>
+          Open {providerName} sign-in
+          <ExternalLink className="ml-1.5 h-4 w-4" />
+        </Button>
+      ) : null}
+
+      {documentationUrl ? (
+        <a
+          href={documentationUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 self-start text-xs text-muted-foreground underline-offset-2 hover:underline"
+        >
+          Learn more about this connection
+          <ExternalLink className="h-3 w-3" />
+        </a>
+      ) : null}
+
+      <Button variant="outline" onClick={onCancel}>
+        Cancel
+      </Button>
     </div>
   );
 }
