@@ -237,6 +237,8 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
         )),
         ssh_session_manager: Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user)),
         per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::new()),
+        device_code_pubkey_limiter: crate::mw::rate_limit::create_per_pubkey_rate_limiter(),
+        device_code_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
         // Production default from backend/src/main.rs — 5 claims per
         // 60s per IP; mirror here so claim-rate-limit tests see the
         // same shape.
