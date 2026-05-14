@@ -121,7 +121,7 @@ Lockout triggers device failure notifications. Bind success triggers a notificat
 
 ### Credential storage
 
-The approval service creates an API key and node, stores only hashes for opaque refresh material, and returns raw secrets only once on the first successful approved poll. After delivery, the row transitions to `delivered` and the delivery secrets are cleared.
+The approval service creates an API key and a device-code node stub, stores only hashes for opaque refresh material, and returns raw secrets only once on the first successful approved poll. The stub carries `metadata.provisioning_source = "device-code"` and intentionally has empty node WebSocket auth fields; device-code devices authenticate with the delivered API key, not `/api/v1/nodes/ws`. After delivery, the row transitions to `delivered` and the delivery secrets are cleared.
 
 ## Endpoints
 

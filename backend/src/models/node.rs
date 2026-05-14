@@ -34,6 +34,8 @@ pub struct NodeMetadata {
     pub arch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisioning_source: Option<String>,
 }
 
 /// Per-node proxy metrics. Stored as an embedded document in the Node model.
@@ -146,6 +148,7 @@ mod tests {
             os: Some("linux".to_string()),
             arch: Some("x86_64".to_string()),
             ip_address: None,
+            provisioning_source: None,
         });
         let doc = bson::to_document(&node).expect("serialize");
         let restored: Node = bson::from_document(doc).expect("deserialize");

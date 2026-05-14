@@ -79,6 +79,8 @@ pub struct DeviceNodeInput<'a> {
     pub device_pubkey: &'a [u8; 32],
 }
 
+const DEVICE_CODE_PROVISIONING_SOURCE: &str = "device-code";
+
 /// Create a one-time registration token for a new node.
 /// Returns (token_id, raw_token, expires_at). The raw token is shown once and never stored.
 pub async fn create_registration_token(
@@ -231,8 +233,10 @@ pub async fn register_node(
 /// Create a Node row for a device-code-provisioned device.
 ///
 /// Device-code devices receive their scoped NyxID API key through the poll
-/// endpoint, so the node auth token and signing secret are generated only as
-/// server-side placeholders until the device later joins a richer node flow.
+/// endpoint and authenticate through the proxy API, not the node WebSocket
+/// protocol. This creates a discriminator-bearing stub row with empty auth
+/// fields rather than fabricating auth-token/signing-secret hashes whose
+/// plaintext is not held by any device.
 pub async fn create_for_device(
     db: &mongodb::Database,
     input: DeviceNodeInput<'_>,
@@ -250,8 +254,6 @@ pub async fn create_for_device(
 
     let now = Utc::now();
     let node_id = uuid::Uuid::new_v4().to_string();
-    let raw_auth_token = format!("nyx_nauth_{}", hex::encode(rand::random::<[u8; 32]>()));
-    let raw_signing_secret = hex::encode(rand::random::<[u8; 32]>());
     let pubkey_digest = Sha256::digest(input.device_pubkey);
     let pubkey_fingerprint = hex::encode(&pubkey_digest[..8]);
 
@@ -260,16 +262,17 @@ pub async fn create_for_device(
         user_id: input.user_id.to_string(),
         name: device_node_name(input.label, &node_id),
         status: NodeStatus::Offline,
-        auth_token_hash: hash_token(&raw_auth_token),
+        auth_token_hash: String::new(),
         signing_secret_encrypted: None,
-        signing_secret_hash: hash_token(&raw_signing_secret),
+        signing_secret_hash: String::new(),
         last_heartbeat_at: None,
         connected_at: None,
         metadata: Some(NodeMetadata {
-            agent_version: Some("device-code".to_string()),
+            agent_version: None,
             os: None,
             arch: None,
             ip_address: None,
+            provisioning_source: Some(DEVICE_CODE_PROVISIONING_SOURCE.to_string()),
         }),
         metrics: crate::models::node::NodeMetrics::default(),
         is_active: true,
@@ -761,7 +764,11 @@ pub async fn update_binding_priority(
     Ok(())
 }
 
-/// Admin: list all active nodes (no user filter). Supports pagination and optional filters.
+/// Admin: list active operational nodes (no user filter).
+///
+/// Device-code provisioning creates node-shaped stubs for ownership linkage,
+/// but those devices authenticate with API keys and cannot connect to the node
+/// WebSocket protocol, so the operational admin list excludes them.
 pub async fn list_all_nodes(
     db: &mongodb::Database,
     page: u64,
@@ -769,7 +776,10 @@ pub async fn list_all_nodes(
     status_filter: Option<&str>,
     user_id_filter: Option<&str>,
 ) -> AppResult<(Vec<Node>, u64)> {
-    let mut filter = doc! { "is_active": true };
+    let mut filter = doc! {
+        "is_active": true,
+        "metadata.provisioning_source": { "$ne": DEVICE_CODE_PROVISIONING_SOURCE },
+    };
     if let Some(status) = status_filter {
         filter.insert("status", status);
     }
@@ -1340,6 +1350,70 @@ mod tests {
         );
         assert_eq!(device_node_name("!!!", node_id), "device-12345678");
         assert!(device_node_name(&"A".repeat(200), node_id).len() <= 64);
+    }
+
+    #[tokio::test]
+    async fn create_for_device_creates_api_key_only_stub_without_node_auth_secrets() {
+        let Some(db) = connect_test_database("node_device_code_stub").await else {
+            return;
+        };
+        let owner_id = Uuid::new_v4().to_string();
+
+        let node = create_for_device(
+            &db,
+            DeviceNodeInput {
+                user_id: &owner_id,
+                api_key_id: "api-key-1",
+                hw_id: "esp32-p4-cam",
+                label: "Kitchen Camera",
+                device_pubkey: &[7u8; 32],
+            },
+        )
+        .await
+        .expect("create device stub");
+
+        assert_eq!(node.auth_token_hash, "");
+        assert_eq!(node.signing_secret_hash, "");
+        assert!(node.signing_secret_encrypted.is_none());
+        assert_eq!(
+            node.metadata
+                .as_ref()
+                .and_then(|metadata| metadata.provisioning_source.as_deref()),
+            Some(DEVICE_CODE_PROVISIONING_SOURCE)
+        );
+    }
+
+    #[tokio::test]
+    async fn list_all_nodes_excludes_device_code_stubs_from_operational_view() {
+        let Some(db) = connect_test_database("node_device_code_stub_admin_list").await else {
+            return;
+        };
+        let owner_id = Uuid::new_v4().to_string();
+        let operational_node = make_node(&owner_id, "operational-node");
+        db.collection::<Node>(NODES)
+            .insert_one(&operational_node)
+            .await
+            .expect("insert operational node");
+        create_for_device(
+            &db,
+            DeviceNodeInput {
+                user_id: &owner_id,
+                api_key_id: "api-key-1",
+                hw_id: "esp32-p4-cam",
+                label: "Kitchen Camera",
+                device_pubkey: &[7u8; 32],
+            },
+        )
+        .await
+        .expect("create device stub");
+
+        let (nodes, total) = list_all_nodes(&db, 1, 50, None, None)
+            .await
+            .expect("list nodes");
+
+        assert_eq!(total, 1);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id, operational_node.id);
     }
 
     struct NodeAclFixture {
