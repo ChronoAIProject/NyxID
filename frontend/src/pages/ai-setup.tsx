@@ -21,6 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import { Copy, Plus } from "lucide-react";
+import { BrainIcon } from "@/components/icons/empty-state";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import {
@@ -67,8 +68,9 @@ function CodeBlock({
 function EmptyState() {
   return (
     <Card>
-      <CardContent className="flex flex-col items-center gap-4 py-12">
-        <p className="text-[12px] text-muted-foreground">
+      <CardContent className="flex flex-col items-center gap-1 py-12">
+        <BrainIcon className="h-48 w-48 text-muted-foreground/30" />
+        <p className="text-[12px] text-muted-foreground/30">
           Create an OAuth client first to generate AI setup configs.
         </p>
         <Button asChild variant="outline">

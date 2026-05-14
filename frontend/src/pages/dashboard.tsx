@@ -274,7 +274,7 @@ function OnboardingChecklist({
   const steps = [
     {
       done: serviceConnected,
-      title: "Connect a service",
+      title: "Connect a Service",
       description: "Add an API service to proxy through NyxID.",
       icon: <Cable className="h-4 w-4" />,
       href: "/keys?action=add-service",
@@ -286,7 +286,7 @@ function OnboardingChecklist({
       description: "Generate a scoped key for your AI agent.",
       icon: <KeyRound className="h-4 w-4" />,
       href: "/keys?tab=nyxid&action=create-key",
-      cta: "Create key",
+      cta: "Create Key",
     },
     {
       done: false,
@@ -460,7 +460,7 @@ function StatusCell({
   return (
     <Link
       to={href}
-      className="group flex items-center gap-3 rounded-xl border border-border/50 bg-card px-4 py-3 transition-colors duration-200 hover:bg-white/[0.03]"
+      className="group flex h-full items-center gap-3 rounded-xl border border-border/50 bg-card px-4 py-3 transition-colors duration-200 hover:bg-white/[0.03]"
     >
       <div
         className={cn(
@@ -471,7 +471,7 @@ function StatusCell({
         {icon}
       </div>
       <div className="min-w-0">
-        <p className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
+        <p className="truncate text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
           {label}
         </p>
         {loading ? (
@@ -731,7 +731,7 @@ function ApprovalsCard() {
             <ButtonIcon className="border-white/20 bg-white/10">
               <Smartphone className="h-3 w-3" />
             </ButtonIcon>
-            Get app
+            Get App
           </a>
         </Button>
       </div>

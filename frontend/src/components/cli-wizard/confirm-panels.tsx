@@ -308,7 +308,7 @@ export function ApiKeyCreateConfirm({
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
-        {loading ? "Creating..." : "Create key"}
+        {loading ? "Creating..." : "Create Key"}
       </Button>
     </div>
   );
@@ -702,7 +702,7 @@ export function ServiceAccountCreateConfirm({
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={submitDisabled}>
-        {loading ? "Creating..." : "Create service account"}
+        {loading ? "Creating..." : "Create Service Account"}
       </Button>
     </div>
   );

@@ -26,6 +26,28 @@ mod test_utils;
 
 use std::sync::Arc;
 
+/// Install `aws_lc_rs` as the rustls process-wide crypto provider.
+/// Called once at startup; no-op if a provider is already installed
+/// (e.g. by a library that lost the race to ours).
+///
+/// Without this, rustls panics on first TLS use because both `aws_lc_rs`
+/// and `ring` are present in the dependency graph (NyxID#716 + the
+/// pre-existing `gcp-kms` transitive chain).
+fn install_rustls_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        return;
+    }
+    if rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        // Another thread already installed a provider in between our
+        // `get_default` check and the install attempt. Either way, a
+        // default is now installed.
+        debug_assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
+}
+
 use crate::db::DbHandle;
 use config::AppConfig;
 use crypto::aes::EncryptionKeys;
@@ -140,6 +162,16 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    // Pick a rustls `CryptoProvider` explicitly before ANY TLS use. With
+    // both `aws_lc_rs` (via `gcp_auth` -> `hyper-rustls/aws-lc-rs`) and
+    // `ring` (via `google-cloud-kms` -> `tonic` -> jsonwebtoken 9.x +
+    // reqwest's transitively-enabled `__rustls-ring`) compiled into the
+    // backend, rustls cannot auto-select and panics on first TLS use
+    // (rustls/src/crypto/mod.rs:249) — observed first deployment after
+    // NyxID#716 merged. The CLI hit this same trap; see cli/src/main.rs
+    // for the canonical pattern.
+    install_rustls_crypto_provider();
+
     let cli = Cli::parse();
 
     // Load environment variables from .env file (if present)

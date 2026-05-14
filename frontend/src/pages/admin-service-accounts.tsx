@@ -45,13 +45,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  Bot,
   Search,
   ChevronLeft,
   ChevronRight,
   Copy,
   AlertTriangle,
 } from "lucide-react";
+import { RoboticArmIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { copyToClipboard } from "@/lib/utils";
 import type { CreateServiceAccountResponse } from "@/types/service-accounts";
@@ -189,23 +189,19 @@ export function AdminServiceAccountsPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Bot className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <RoboticArmIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">Failed to load service accounts</p>
-            <p className="text-xs text-muted-foreground">Please try again later.</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">Failed to load service accounts</p>
+            <p className="text-xs text-muted-foreground/30">Please try again later.</p>
           </div>
         </div>
       ) : accounts.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Bot className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <RoboticArmIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">No service accounts found</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No service accounts found</p>
+            <p className="text-xs text-muted-foreground/30">
               {search
                 ? "No service accounts match your search."
                 : "There are no service accounts to display."}
@@ -214,7 +210,50 @@ export function AdminServiceAccountsPage() {
         </div>
       ) : (
         <>
-          <div className="rounded-xl border">
+          {/* Mobile cards */}
+          <div className="flex flex-col gap-3 md:hidden">
+            {accounts.map((sa) => (
+              <div
+                key={sa.id}
+                className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-white/[0.03] cursor-pointer"
+                tabIndex={0}
+                role="link"
+                onClick={() =>
+                  void navigate({
+                    to: "/admin/service-accounts/$saId",
+                    params: { saId: sa.id },
+                  })
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    void navigate({
+                      to: "/admin/service-accounts/$saId",
+                      params: { saId: sa.id },
+                    });
+                  }
+                }}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium truncate">{sa.name}</p>
+                    <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                      {sa.client_id}
+                    </p>
+                  </div>
+                  <Badge variant={sa.is_active ? "success" : "destructive"}>
+                    {sa.is_active ? "Active" : "Inactive"}
+                  </Badge>
+                </div>
+                <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+                  <span>Created {formatDate(sa.created_at)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Desktop table */}
+          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -277,7 +316,7 @@ export function AdminServiceAccountsPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-[11px] text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               service accounts
@@ -285,23 +324,23 @@ export function AdminServiceAccountsPage() {
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
+                aria-label="Previous page"
               >
                 <ChevronLeft className="h-3 w-3" />
-                Previous
               </Button>
-              <span className="text-sm text-muted-foreground">
+              <span className="text-[11px] text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button
                 variant="outline"
-                size="sm"
+                size="icon"
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
+                aria-label="Next page"
               >
-                Next
                 <ChevronRight className="h-3 w-3" />
               </Button>
             </div>

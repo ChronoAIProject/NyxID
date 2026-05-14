@@ -18,6 +18,7 @@ import {
   Terminal,
   Zap,
 } from "lucide-react";
+import { MagicKeyIcon } from "@/components/icons/empty-state";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { useNodes } from "@/hooks/use-nodes";
@@ -83,14 +84,14 @@ function KeyCardContent({ keyInfo, source }: KeyCardProps) {
 
   return (
     <Card
-      className={`transition-colors duration-300 ${
+      className={`h-full transition-colors duration-300 ${
         isBlocked
           ? "opacity-60"
           : "hover:border-white/[0.15] hover:bg-accent/30"
       }`}
       aria-disabled={isBlocked ? true : undefined}
     >
-      <CardContent className="flex flex-col gap-3 p-4">
+      <CardContent className="flex h-full flex-col gap-3 p-4">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <p className="truncate text-[12px] font-medium text-foreground">
@@ -183,7 +184,7 @@ function KeyCard({ keyInfo, source }: KeyCardProps) {
   //   role) don't even appear in the listing because
   //   `list_user_services_with_sources` drops them.
   return (
-    <Link to="/keys/$keyId" params={{ keyId: keyInfo.id }}>
+    <Link to="/keys/$keyId" params={{ keyId: keyInfo.id }} className="h-full">
       <KeyCardContent keyInfo={keyInfo} source={source} />
     </Link>
   );
@@ -278,29 +279,17 @@ function groupKeysBySource(
 
 function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
   return (
-    <Card>
-      <CardContent className="flex flex-col items-center gap-4 py-16">
-        <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-          <KeyRound className="h-6 w-6 text-muted-foreground" />
-        </div>
-        <div className="max-w-md space-y-2 text-center">
-          <p className="text-[12px] font-medium">No AI services yet</p>
-          <p className="text-xs text-muted-foreground">
-            Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your
-            AI agents can call it through NyxID without ever seeing the raw key.
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Connect a service <span className="font-medium">before</span> wiring
-            up MCP &mdash; otherwise your AI agent will only see NyxID&apos;s{" "}
-            <code className="rounded bg-muted px-1 py-0.5 text-[0.7rem]">
-              nyx__&hellip;
-            </code>{" "}
-            meta-tools and proxy requests will look broken.
-          </p>
-        </div>
-        <AddCtaButton label="Add Service" onClick={onAdd} />
-      </CardContent>
-    </Card>
+    <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+      <MagicKeyIcon className="h-64 w-64 text-muted-foreground/30" />
+      <div className="space-y-1">
+        <p className="text-[12px] font-medium text-muted-foreground/30">No AI services yet</p>
+        <p className="text-xs text-muted-foreground/30">
+          Connect a downstream service (OpenAI, GitHub, Anthropic, etc.) so your
+          AI agents can call it through NyxID without ever seeing the raw key.
+        </p>
+      </div>
+      <AddCtaButton label="Add Service" onClick={onAdd} />
+    </div>
   );
 }
 
@@ -458,14 +447,13 @@ function AutoConnectedToggle({
   readonly onCheckedChange: (checked: boolean) => void;
   readonly count: number;
 }) {
-  if (count === 0) return null;
-
   return (
     <div className="flex items-center gap-2">
       <Switch
         id="show-auto-connected"
         checked={checked}
         onCheckedChange={onCheckedChange}
+        disabled={count === 0}
       />
       <Label
         htmlFor="show-auto-connected"
@@ -561,12 +549,12 @@ export function KeysPage() {
       />
 
       <Tabs value={tab} onValueChange={setTab}>
-        <div className="flex items-end justify-between gap-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
           <TabsList className="min-w-0">
             <TabsTrigger value="services">External Services</TabsTrigger>
             <TabsTrigger value="nyxid">Agent Keys</TabsTrigger>
           </TabsList>
-          <div className="flex shrink-0 items-center gap-4 pb-1">
+          <div className="flex shrink-0 items-center justify-between gap-4 sm:pb-1">
             {tab === "services" && (
               <AutoConnectedToggle
                 checked={showAutoConnected}

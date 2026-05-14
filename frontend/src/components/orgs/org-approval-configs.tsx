@@ -210,7 +210,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                 availableServices.length === 0
               }
             >
-              Add policy
+              Add Policy
             </Button>
           </div>
         </CardHeader>
@@ -225,15 +225,15 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
               <ErrorBanner message="Failed to load org approval policies. Try refreshing the page." onRetry={refetchConfigs} />
             </div>
           ) : orgServices.length === 0 ? (
-            <p className="py-4 text-center text-[12px] text-muted-foreground">
+            <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
               No org-owned services yet. Add a key to this org before
               configuring approval policies.
-            </p>
+            </div>
           ) : serviceConfigs?.configs.length === 0 ? (
-            <p className="py-4 text-center text-[12px] text-muted-foreground">
+            <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
               No org approval policies configured. Members use their personal
               approval settings.
-            </p>
+            </div>
           ) : (
             <div className="space-y-3">
               {serviceConfigs?.configs.map((config) => {
@@ -412,7 +412,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
               disabled={!selectedServiceId}
               isLoading={setConfigMutation.isPending}
             >
-              Add policy
+              Add Policy
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -472,9 +472,9 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
             <ErrorBanner message="Failed to load org approval grants. Try refreshing the page." onRetry={refetch} />
           </div>
         ) : grants.length === 0 ? (
-          <p className="py-4 text-center text-[12px] text-muted-foreground">
+          <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
             No active org approval grants.
-          </p>
+          </div>
         ) : (
           <div className="space-y-3">
             {grants.map((grant) => (

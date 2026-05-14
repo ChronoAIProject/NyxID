@@ -217,7 +217,7 @@ export function DefaultHeadersEditor({
           disabled={!canAdd}
         >
           <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>
-          Add header
+          Add Header
         </Button>
       </div>
     </div>

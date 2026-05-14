@@ -5,13 +5,13 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
 import {
   AlertTriangle,
-  Bot,
   ChevronLeft,
   ChevronRight,
   Copy,
   Plus,
   Search,
 } from "lucide-react";
+import { RoboticArmIcon } from "@/components/icons/empty-state";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import {
   useCreateServiceAccount,
@@ -200,15 +200,13 @@ export function OrgServiceAccountsTab({
           <ErrorBanner message={`Failed to load service accounts owned by ${orgName}.`} onRetry={refetch} />
         </div>
       ) : accounts.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Bot className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <RoboticArmIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">
+            <p className="text-[12px] font-medium text-muted-foreground/30">
               {search ? "No Results" : "No Service Accounts"}
             </p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-xs text-muted-foreground/30">
               {search
                 ? `No service accounts owned by ${orgName} match your search.`
                 : `No service accounts owned by ${orgName}.`}
@@ -280,7 +278,7 @@ export function OrgServiceAccountsTab({
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-[11px] text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               service accounts
@@ -294,7 +292,7 @@ export function OrgServiceAccountsTab({
                 <ChevronLeft className="h-4 w-4" />
                 Previous
               </Button>
-              <span className="text-[12px] text-muted-foreground">
+              <span className="text-[11px] text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button

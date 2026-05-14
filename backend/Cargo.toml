@@ -74,6 +74,15 @@ tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"]
 deunicode = "1.6"
 nyxid-cloud-auth = { path = "../cloud-auth" }
 http = "1.4"
+# Direct rustls dep so we can install a default CryptoProvider at startup.
+# Feature unification picks up BOTH `ring` (via google-cloud-kms ->
+# google-cloud-auth -> jsonwebtoken 9.x and via the transitively-enabled
+# `reqwest/__rustls-ring`) AND `aws_lc_rs` (via `gcp_auth` with the
+# `aws-lc-rs` feature flag we requested through cloud-auth). With both
+# providers compiled in, rustls cannot auto-select and panics on first
+# TLS use (rustls/src/crypto/mod.rs:249). The CLI hit the same trap;
+# see cli/Cargo.toml + cli/src/main.rs's install_rustls_crypto_provider.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging", "aws_lc_rs"] }
 
 # Optional KMS provider dependencies (behind feature flags)
 aws-config = { version = "1", optional = true }

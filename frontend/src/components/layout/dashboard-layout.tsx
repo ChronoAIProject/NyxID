@@ -1,6 +1,7 @@
-import { Suspense, useState, useCallback, useMemo, createContext, useContext } from "react";
+import { Suspense, useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
 import { Outlet, Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Sidebar, MAIN_NAV, APPROVALS_NAV, DEVELOPER_NAV, isNavActive } from "@/components/dashboard/sidebar";
+import { Sidebar, MAIN_NAV, APPROVALS_NAV, DEVELOPER_NAV, ADMIN_NAV, isNavActive } from "@/components/dashboard/sidebar";
+import { hasAdminRead } from "@/types/api";
 import { CommandPalette, ALL_ITEMS as SEARCH_ITEMS } from "@/components/navigation/command-palette";
 import { AmbientStatusLine } from "@/components/chrome/ambient-status-line";
 import { useAuthStore } from "@/stores/auth-store";
@@ -27,10 +28,30 @@ export function useRightPanel() {
   return useContext(RightPanelContext);
 }
 
+type BreadcrumbLabelContextType = {
+  label: string | null;
+  setLabel: (label: string | null) => void;
+};
+
+const BreadcrumbLabelContext = createContext<BreadcrumbLabelContextType>({
+  label: null,
+  setLabel: () => {},
+});
+
+export function useBreadcrumbLabel(label: string | undefined | null) {
+  const { setLabel } = useContext(BreadcrumbLabelContext);
+  const stableLabel = label ?? null;
+  useEffect(() => {
+    setLabel(stableLabel);
+    return () => setLabel(null);
+  }, [stableLabel, setLabel]);
+}
+
 export function DashboardLayout() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [mobileNavState, setMobileNavState] = useState<"closed" | "open" | "closing">("closed");
   const [rightPanel, setRightPanel] = useState<React.ReactNode>(null);
+  const [breadcrumbLabel, setBreadcrumbLabel] = useState<string | null>(null);
 
   const closeMobileNav = useCallback(() => setMobileNavState("closing"), []);
 
@@ -44,6 +65,7 @@ export function DashboardLayout() {
 
   return (
     <RightPanelContext.Provider value={{ setRightPanel }}>
+    <BreadcrumbLabelContext.Provider value={{ label: breadcrumbLabel, setLabel: setBreadcrumbLabel }}>
       <div
         className="flex flex-col h-dvh overflow-hidden bg-background"
         style={{
@@ -94,6 +116,7 @@ export function DashboardLayout() {
 
         <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
       </div>
+    </BreadcrumbLabelContext.Provider>
     </RightPanelContext.Provider>
   );
 }
@@ -143,6 +166,7 @@ const PARENT_LINK_OVERRIDES: Record<string, string> = {
 
 function TopBarBreadcrumbs() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const { label: detailLabel } = useContext(BreadcrumbLabelContext);
   const segments = pathname.split("/").filter(Boolean);
 
   if (segments.length === 0) return null;
@@ -157,7 +181,13 @@ function TopBarBreadcrumbs() {
   const crumbs: { label: string; to?: string }[] = [];
   for (const [i, segment] of segments.entries()) {
     const segPath = accPaths[i]!;
-    if (UUID_RE.test(segment)) continue;
+    const isLast = i === segments.length - 1;
+    if (UUID_RE.test(segment)) {
+      if (isLast && detailLabel) {
+        crumbs.push({ label: detailLabel });
+      }
+      continue;
+    }
     if (SKIP_SEGMENTS.has(segment)) continue;
     if (SKIP_BREADCRUMB_SEGMENTS.has(segment)) {
       const override = PARENT_LINK_OVERRIDES[segment];
@@ -172,7 +202,6 @@ function TopBarBreadcrumbs() {
     if (laterIsSidebarItem) continue;
 
     const label = SIDEBAR_ITEMS[segPath] ?? SEGMENT_LABELS[segment] ?? segment;
-    const isLast = i === segments.length - 1;
     const linkTo = isLast ? undefined : (ROUTE_LINK_OVERRIDES[segPath] ?? segPath);
     crumbs.push({ label, to: linkTo });
   }
@@ -402,7 +431,8 @@ function MobileNav({
   const navigate = useNavigate();
   const logoutMutation = useLogout();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const allItems = [...MAIN_NAV, ...APPROVALS_NAV, ...DEVELOPER_NAV];
+  const isAdmin = hasAdminRead(user);
+  const allItems = [...MAIN_NAV, ...APPROVALS_NAV, ...DEVELOPER_NAV, ...(isAdmin ? ADMIN_NAV : [])];
   const [searchQuery, setSearchQuery] = useState("");
 
   const searchResults = useMemo(() => {
@@ -539,6 +569,26 @@ function MobileNav({
                 />
               ))}
             </div>
+
+            {isAdmin && (
+              <>
+                <div className="px-4 my-3">
+                  <span className="text-[10px] font-medium uppercase tracking-[1.5px] text-text-tertiary/50">
+                    Admin
+                  </span>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {ADMIN_NAV.map((item) => (
+                    <MobileNavItem
+                      key={item.to}
+                      item={item}
+                      active={isNavActive(item.to, pathname, allItems)}
+                      onClick={onClose}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
           </>
         )}
       </nav>

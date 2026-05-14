@@ -834,7 +834,7 @@ function CatalogConfirmForm({
           variant="outline"
           onClick={() => void cancelThenNavigate(null)}
         >
-          Go back
+          Go Back
         </Button>
       </div>
     );
@@ -928,7 +928,7 @@ function CatalogConfirmForm({
     if (shape === "oauth") return "Continue with provider sign-in";
     if (shape === "device-code") return "Get device code";
     if (shape === "no-auth") return "Connect";
-    return "Create service";
+    return "Create Service";
   })();
 
   // Submit is disabled until all required inputs are filled. The

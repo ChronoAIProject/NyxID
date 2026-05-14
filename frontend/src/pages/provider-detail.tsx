@@ -3,9 +3,9 @@ import { useNavigate, useParams } from "@tanstack/react-router";
 import { useProvider, useDeleteProvider } from "@/hooks/use-providers";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -37,6 +37,8 @@ export function ProviderDetailPage() {
   const { data: provider, isLoading, error, refetch } = useProvider(providerId);
   const deleteMutation = useDeleteProvider();
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  useBreadcrumbLabel(provider?.name);
 
   async function handleDelete() {
     if (!provider) return;
@@ -146,7 +148,7 @@ export function ProviderDetailPage() {
 
       {isOAuth && (
         <>
-          <Separator />
+
           <DetailSection title="OAuth 2.0 Configuration">
             <DetailRow
               label="OAuth Configured"
@@ -178,7 +180,7 @@ export function ProviderDetailPage() {
 
       {isDeviceCode && (
         <>
-          <Separator />
+
           <DetailSection title="Device Code Configuration (RFC 8628)">
             <DetailRow
               label="OAuth Configured"
@@ -225,7 +227,7 @@ export function ProviderDetailPage() {
 
       {isApiKey && (
         <>
-          <Separator />
+
           <DetailSection title="API Key Configuration">
             {provider.api_key_instructions && (
               <div className="text-[12px]">
@@ -250,7 +252,7 @@ export function ProviderDetailPage() {
 
       {isTelegram && (
         <>
-          <Separator />
+
           <DetailSection title="Telegram Widget Configuration">
             <DetailRow
               label="Configured"
@@ -273,7 +275,7 @@ export function ProviderDetailPage() {
 
       {(provider.icon_url || provider.documentation_url) && (
         <>
-          <Separator />
+
           <DetailSection title="Display">
             {provider.icon_url && (
               <DetailRow label="Icon URL" value={provider.icon_url} copyable />

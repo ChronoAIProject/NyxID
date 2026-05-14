@@ -120,7 +120,7 @@ export function RedirectUriEditor({
           onClick={() => void handleSave()}
           isLoading={updateMutation.isPending}
         >
-          Save redirect URIs
+          Save Redirect URIs
         </Button>
       )}
     </div>

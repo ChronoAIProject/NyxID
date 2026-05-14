@@ -14,11 +14,11 @@ import { formatDate } from "@/lib/utils";
 import { canAdminWrite } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
@@ -37,7 +37,8 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
-import { Pencil, Trash2, AlertCircle, Users, ShieldCheck } from "lucide-react";
+import { Pencil, Trash2, AlertCircle, Users } from "lucide-react";
+import { SmartRemoteIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { Checkbox } from "@/components/ui/checkbox";
 
@@ -55,6 +56,8 @@ export function AdminRoleDetailPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
+
+  useBreadcrumbLabel(role?.name);
 
   const form = useForm<UpdateRoleFormData>({
     resolver: zodResolver(updateRoleSchema),
@@ -174,23 +177,21 @@ export function AdminRoleDetailPage() {
             <>
               <Button
                 variant="outline"
-                size="sm"
                 onClick={() => setBulkAssignOpen(true)}
               >
-                <Users className="h-3 w-3" />
-                Assign to All Users
+                <ButtonIcon><Users className="h-3 w-3" /></ButtonIcon>
+                Assign All
               </Button>
-              <Button variant="outline" size="sm" onClick={openEditDialog}>
-                <Pencil className="h-3 w-3" />
+              <Button variant="outline" onClick={openEditDialog}>
+                <ButtonIcon><Pencil className="h-3 w-3" /></ButtonIcon>
                 Edit
               </Button>
               {!role.is_system && (
                 <Button
                   variant="destructive"
-                  size="sm"
                   onClick={() => setDeleteOpen(true)}
                 >
-                  <Trash2 className="h-3 w-3" />
+                  <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
                   Delete
                 </Button>
               )}
@@ -222,18 +223,14 @@ export function AdminRoleDetailPage() {
         <DetailRow label="Updated" value={formatDate(role.updated_at)} />
       </DetailSection>
 
-      <Separator />
-
       <DetailSection title="Permissions">
         {role.permissions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border">
-              <ShieldCheck className="h-4 w-4 text-muted-foreground" />
-            </div>
-            <p className="text-[12px] text-muted-foreground">No permissions assigned.</p>
+          <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+            <SmartRemoteIcon className="h-48 w-48 text-muted-foreground/30" />
+            <p className="text-[12px] text-muted-foreground/30">No permissions assigned.</p>
           </div>
         ) : (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2 px-4 py-3">
             {role.permissions.map((perm) => (
               <Badge key={perm} variant="secondary" className="font-mono text-xs">
                 {perm}

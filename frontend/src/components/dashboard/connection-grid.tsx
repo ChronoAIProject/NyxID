@@ -26,6 +26,7 @@ import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Link2, Unlink, Server, KeyRound, Cable } from "lucide-react";
+import { MagnetIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import { CredentialDialog } from "./credential-dialog";
@@ -131,13 +132,11 @@ export function ConnectionGrid() {
 
   if (connectableServices.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-          <Server className="h-6 w-6 text-muted-foreground" />
-        </div>
+      <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+        <MagnetIcon className="h-64 w-64 text-muted-foreground/30" />
         <div className="space-y-1">
-          <p className="text-[12px] font-medium">No Services</p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-[12px] font-medium text-muted-foreground/30">No Services</p>
+          <p className="text-xs text-muted-foreground/30">
             No connectable services available. Create a service first.
           </p>
         </div>

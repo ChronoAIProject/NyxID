@@ -71,7 +71,7 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Create organization</DialogTitle>
+          <DialogTitle>Create Organization</DialogTitle>
           <DialogDescription>
             Organizations let you share services and credentials with teammates.
             You become the first admin.
@@ -150,7 +150,7 @@ export function CreateOrgDialog({ open, onOpenChange }: CreateOrgDialogProps) {
                 isLoading={createMutation.isPending}
                 disabled={!form.watch("display_name").trim()}
               >
-                Create organization
+                Create Organization
               </Button>
             </DialogFooter>
           </form>

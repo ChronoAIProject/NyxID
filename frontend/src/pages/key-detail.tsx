@@ -28,6 +28,7 @@ import { deriveServiceBadge } from "@/lib/service-status";
 import { copyToClipboard } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
 import { RoutingSection } from "@/components/dashboard/routing-section";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -429,7 +430,7 @@ function ApiKeySection({
           {showRotateInHeader && (
             <Button variant="outline" onClick={() => setRotating(true)}>
               <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
-              Rotate Credential
+              Rotate Credentials
             </Button>
           )}
         </div>
@@ -1687,6 +1688,8 @@ export function KeyDetailPage() {
   const { data: catalogEntry } = useCatalogEntry(
     keyInfo?.catalog_service_slug ?? null,
   );
+  useBreadcrumbLabel(keyInfo?.label ?? keyInfo?.catalog_service_slug);
+
   const [deleteOpen, setDeleteOpen] = useState(false);
 
   const catalogHeaders = useMemo<

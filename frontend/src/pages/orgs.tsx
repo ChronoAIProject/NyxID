@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Building2, Users } from "lucide-react";
+import { HierarchyIcon } from "@/components/icons/empty-state";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Card, CardContent } from "@/components/ui/card";
@@ -24,21 +25,17 @@ function OrgsLoading() {
 
 function OrgsEmptyState({ onCreate }: { readonly onCreate: () => void }) {
   return (
-    <Card>
-      <CardContent className="flex flex-col items-center gap-4 py-16">
-        <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-          <Building2 className="h-6 w-6 text-muted-foreground" />
-        </div>
-        <div className="text-center">
-          <p className="text-[12px] font-medium">No organizations yet</p>
-          <p className="text-xs text-muted-foreground">
-            Create an organization to share services and credentials with
-            teammates.
-          </p>
-        </div>
-        <AddCtaButton label="Create your first organization" onClick={onCreate} />
-      </CardContent>
-    </Card>
+    <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+      <HierarchyIcon className="h-64 w-64 text-muted-foreground/30" />
+      <div className="space-y-1">
+        <p className="text-[12px] font-medium text-muted-foreground/30">No organizations yet</p>
+        <p className="text-xs text-muted-foreground/30">
+          Create an organization to share services and credentials with
+          teammates.
+        </p>
+      </div>
+      <AddCtaButton label="Create your first organization" onClick={onCreate} />
+    </div>
   );
 }
 
@@ -52,7 +49,7 @@ export function OrgsPage() {
         title="Organizations"
         description="Organizations let you share services and credentials with a team."
         actions={
-          <AddCtaButton label="New organization" onClick={() => setCreateOpen(true)} />
+          <AddCtaButton label="New Organization" onClick={() => setCreateOpen(true)} />
         }
       />
 

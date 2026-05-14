@@ -57,23 +57,33 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  MessageSquare,
   RotateCcw,
+  Smartphone,
   Trash2,
   Unlink,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ApprovalSetupWizard } from "@/components/shared/approval-setup-wizard";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 
 export function NotificationSettingsPage() {
-  const { data: settings, isLoading, error, refetch } = useNotificationSettings();
+  const { data: rawSettings, isLoading, error, refetch } = useNotificationSettings();
   const updateMutation = useUpdateNotificationSettings();
   const telegramLinkMutation = useTelegramLink();
   const telegramDisconnectMutation = useTelegramDisconnect();
 
-  const { data: pushDevices, isLoading: isPushDevicesLoading } =
+  const { data: rawPushDevices, isLoading: isPushDevicesLoading } =
     usePushDevices();
   const removeDeviceMutation = useRemoveDevice();
+
+  // DEV: ?mock=disconnected forces both channels to appear unconnected
+  const isMockDisconnected = new URLSearchParams(window.location.search).get("mock") === "disconnected";
+  const settings = isMockDisconnected && rawSettings
+    ? { ...rawSettings, telegram_connected: false, telegram_username: null }
+    : rawSettings;
+  const pushDevices = isMockDisconnected
+    ? { devices: [] }
+    : rawPushDevices;
 
   const { data: userServices } = useUserServices();
   const {
@@ -401,6 +411,7 @@ export function NotificationSettingsPage() {
                 {settings?.telegram_connected ? (
                   <Button
                     variant="outline"
+                    className="text-text-tertiary hover:text-muted-foreground"
                     onClick={() => setDisconnectDialogOpen(true)}
                   >
                     <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
@@ -408,11 +419,16 @@ export function NotificationSettingsPage() {
                   </Button>
                 ) : (
                   <Button
-                    variant="primary"
+                    variant="outline"
+                    className="text-text-tertiary hover:text-muted-foreground"
                     onClick={() => void handleLinkTelegram()}
                     isLoading={telegramLinkMutation.isPending}
                   >
-                    <ButtonIcon variant="primary"><MessageSquare className="h-3 w-3" /></ButtonIcon>
+                    <ButtonIcon>
+                      <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" />
+                      </svg>
+                    </ButtonIcon>
                     Connect Telegram
                   </Button>
                 )}
@@ -436,10 +452,22 @@ export function NotificationSettingsPage() {
                   <Skeleton className="h-14 w-full" />
                 </div>
               ) : !pushDevices?.devices.length ? (
-                <p className="py-4 text-center text-[12px] text-muted-foreground">
-                  No devices registered. Install the NyxID mobile app and sign
-                  in to register a device.
-                </p>
+                <div className="space-y-3">
+                  <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
+                    No devices registered. Install the NyxID mobile app and sign
+                    in to register a device.
+                  </div>
+                  <div className="flex justify-end">
+                    <Button variant="primary" asChild>
+                      <a href="https://nyxid.dev/app" target="_blank" rel="noopener noreferrer">
+                        <ButtonIcon className="border-white/20 bg-white/10">
+                          <Smartphone className="h-3 w-3" />
+                        </ButtonIcon>
+                        Get App
+                      </a>
+                    </Button>
+                  </div>
+                </div>
               ) : (
                 <div className="space-y-3">
                   {pushDevices.devices.map((device) => (
@@ -651,9 +679,11 @@ export function NotificationSettingsPage() {
                     )}
                   />
 
-                  <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty || updateMutation.isPending}>
-                    Save Preferences
-                  </Button>
+                  <div className="flex justify-end">
+                    <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty || updateMutation.isPending}>
+                      Save Preferences
+                    </Button>
+                  </div>
                 </form>
               </Form>
             </CardContent>
@@ -663,7 +693,7 @@ export function NotificationSettingsPage() {
           <Card>
             <CardHeader>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
+                <div className="space-y-1.5">
                   <CardTitle>Per-Service Approval Overrides</CardTitle>
                   <CardDescription>
                     Override the global approval setting for specific services.
@@ -672,18 +702,17 @@ export function NotificationSettingsPage() {
                     grants or to exempt them from approval.
                   </CardDescription>
                 </div>
-                <Button
-                  variant="outline"
-                  className="shrink-0 self-start sm:self-center"
-                  onClick={() => setAddServiceDialogOpen(true)}
-                  disabled={
-                    isServiceConfigsLoading ||
-                    Boolean(serviceConfigsError) ||
-                    selectableUserServices.length === 0
-                  }
-                >
-                  Add Override
-                </Button>
+                <div className="shrink-0 self-start sm:self-center">
+                  <AddCtaButton
+                    label="Add Override"
+                    onClick={() => setAddServiceDialogOpen(true)}
+                    disabled={
+                      isServiceConfigsLoading ||
+                      Boolean(serviceConfigsError) ||
+                      selectableUserServices.length === 0
+                    }
+                  />
+                </div>
               </div>
             </CardHeader>
             <CardContent>
@@ -695,10 +724,10 @@ export function NotificationSettingsPage() {
               ) : serviceConfigsError ? (
                 <ErrorBanner message="Failed to load per-service overrides. Try refreshing the page." onRetry={refetchServiceConfigs} />
               ) : serviceConfigs?.configs.length === 0 ? (
-                <p className="py-4 text-center text-[12px] text-muted-foreground">
+                <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground">
                   No per-service overrides configured. All services use the
                   global default.
-                </p>
+                </div>
               ) : (
                 <div className="space-y-3">
                   {serviceConfigs?.configs.map((config) => {

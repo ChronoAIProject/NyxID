@@ -56,7 +56,7 @@ export function ConsentBanner() {
             onClick={() => setConsent(false)}
             aria-label="Decline telemetry"
           >
-            No thanks
+            No Thanks
           </Button>
           <Button
             onClick={() => setConsent(true)}

@@ -908,7 +908,7 @@ export function DesignSystemPage() {
                   <Cable className="h-6 w-6 text-muted-foreground" />
                 </div>
                 <div className="text-center max-w-md space-y-1">
-                  <p className="text-[12px] font-medium">No items yet</p>
+                  <p className="text-[12px] font-medium text-muted-foreground/30">No items yet</p>
                   <p className="text-[13px] text-muted-foreground">Get started by adding your first item.</p>
                 </div>
                 <AddCtaButton label="Add Item" onClick={() => {}} />

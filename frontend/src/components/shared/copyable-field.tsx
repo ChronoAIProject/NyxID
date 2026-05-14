@@ -39,16 +39,16 @@ export function CopyableField({
       <p className={`mb-1 ${labelSize} font-medium text-text-tertiary`}>
         {label}
       </p>
-      <div className="flex items-center gap-1">
+      <div className="relative">
         <code
-          className={`flex-1 rounded-lg border border-border bg-muted font-mono ${padding} ${textSize} break-all text-foreground`}
+          className={`block rounded-xl border border-border bg-muted font-mono ${padding} pr-10 ${textSize} break-all text-foreground`}
         >
           {value}
         </code>
         <Button
           variant="ghost"
           size="icon"
-          className={`${btnSize} shrink-0`}
+          className={`${btnSize} absolute right-1 top-1/2 -translate-y-1/2 shrink-0`}
           onClick={() => void handleCopy()}
         >
           {copied ? (

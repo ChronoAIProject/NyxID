@@ -11,10 +11,10 @@ import { Button } from "@/components/ui/button";
 import {
   ChevronLeft,
   ChevronRight,
-  MessageSquare,
   ArrowDownLeft,
   ArrowUpRight,
 } from "lucide-react";
+import { MobileNotificationIcon } from "@/components/icons/empty-state";
 import type {
   CallbackStatus,
   ChannelMessageItem,
@@ -225,13 +225,11 @@ export function ChannelConversationDetailPage() {
       {error ? (
         <ErrorBanner message="Failed to load messages. Please try again." onRetry={refetch} />
       ) : messages.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <MessageSquare className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <MobileNotificationIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">No Messages</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No Messages</p>
+            <p className="text-xs text-muted-foreground/30">
               No messages in this conversation yet.
             </p>
           </div>
@@ -247,7 +245,7 @@ export function ChannelConversationDetailPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-[11px] text-text-tertiary">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
@@ -259,7 +257,7 @@ export function ChannelConversationDetailPage() {
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
-                <span className="text-[12px]">
+                <span className="text-[11px] text-text-tertiary">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button

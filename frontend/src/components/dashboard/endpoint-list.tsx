@@ -11,8 +11,10 @@ import {
 import { EndpointFormDialog } from "./endpoint-form-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button, ButtonIcon } from "@/components/ui/button";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Pencil, Plus, Trash2, Wand2 } from "lucide-react";
+import { PowerBoltIcon } from "@/components/icons/empty-state";
+import { Pencil, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 
 interface EndpointListProps {
@@ -103,10 +105,7 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <Button variant="outline" onClick={handleAdd}>
-          <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>
-          Add Endpoint
-        </Button>
+        <AddCtaButton label="Add Endpoint" onClick={handleAdd} />
         {hasApiSpecUrl && (
           <Button
             variant="outline"
@@ -120,12 +119,15 @@ export function EndpointList({ serviceId, hasApiSpecUrl }: EndpointListProps) {
       </div>
 
       {!endpoints || endpoints.length === 0 ? (
-        <p className="py-4 text-center text-xs text-muted-foreground">
-          No endpoints configured.{" "}
-          {hasApiSpecUrl
-            ? "Use auto-discover or add one manually."
-            : "Add one manually or set an OpenAPI spec URL to auto-discover."}
-        </p>
+        <div className="flex flex-col items-center justify-center gap-1 py-8">
+          <PowerBoltIcon className="h-48 w-48 text-muted-foreground/30" />
+          <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground/30">
+            No endpoints configured.{" "}
+            {hasApiSpecUrl
+              ? "Use auto-discover or add one manually."
+              : "Add one manually or set an OpenAPI spec URL to auto-discover."}
+          </div>
+        </div>
       ) : (
         <div className="rounded-lg border">
           <table className="w-full text-[12px]">

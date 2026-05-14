@@ -544,7 +544,7 @@ export function ApiKeyCreateDialog({
                     isLoading={createMutation.isPending}
                     disabled={!form.watch("name").trim()}
                   >
-                    Create key
+                    Create Key
                   </Button>
                 </DialogFooter>
               </form>

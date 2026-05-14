@@ -25,7 +25,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -49,7 +48,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Bot, Check, Copy, Cpu, Trash2 } from "lucide-react";
+import { Check, Copy, Trash2 } from "lucide-react";
+import { RobotIcon, SmartSpeakerIcon } from "@/components/icons/empty-state";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 import type {
@@ -236,20 +236,16 @@ function BotsTable({
 
 function EmptyState({ onAdd }: { readonly onAdd: () => void }) {
   return (
-    <Card>
-      <CardContent className="flex flex-col items-center gap-4 py-16">
-        <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-          <Bot className="h-6 w-6 text-muted-foreground" />
-        </div>
-        <div className="text-center">
-          <p className="text-[12px] font-medium">No channel bots yet</p>
-          <p className="text-xs text-muted-foreground">
-            Add a messaging platform bot to relay conversations to your AI agents.
-          </p>
-        </div>
-        <AddCtaButton label="Add Bot" onClick={onAdd} />
-      </CardContent>
-    </Card>
+    <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+      <RobotIcon className="h-64 w-64 text-muted-foreground/30" />
+      <div className="space-y-1">
+        <p className="text-[12px] font-medium text-muted-foreground/30">No channel bots yet</p>
+        <p className="text-xs text-muted-foreground/30">
+          Add a messaging platform bot to relay conversations to your AI agents.
+        </p>
+      </div>
+      <AddCtaButton label="Add Bot" onClick={onAdd} />
+    </div>
   );
 }
 
@@ -976,18 +972,16 @@ function DeviceChannelsSection({
       {isLoading ? (
         <LoadingSkeleton />
       ) : devices.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center gap-3 py-10">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-border">
-              <Cpu className="h-5 w-5 text-muted-foreground" />
-            </div>
-            <p className="text-[12px] font-medium">No device channels yet</p>
-            <p className="text-xs text-muted-foreground text-center">
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <SmartSpeakerIcon className="h-64 w-64 text-muted-foreground/30" />
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No device channels yet</p>
+            <p className="text-xs text-muted-foreground/30">
               Create one to let devices push events into the channel relay
               pipeline.
             </p>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       ) : (
         <>
           {/* Mobile card view */}

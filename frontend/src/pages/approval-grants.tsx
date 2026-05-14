@@ -23,7 +23,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ShieldCheck, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
+import { Trash2, ChevronLeft, ChevronRight } from "lucide-react";
+import { SmartLockIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 export function ApprovalGrantsPage() {
@@ -76,13 +77,11 @@ export function ApprovalGrantsPage() {
       ) : error ? (
         <ErrorBanner message="Failed to load grants. Please try again." onRetry={refetch} />
       ) : grants.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <ShieldCheck className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <SmartLockIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="max-w-md space-y-1">
-            <p className="text-[12px] font-medium">No Active Grants</p>
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No Active Grants</p>
+            <p className="text-[12px] text-muted-foreground/30">
               Services using per-request approval do not create grants. Only
               services set to time-based grant mode will appear here.
             </p>
@@ -176,27 +175,31 @@ export function ApprovalGrantsPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-[12px] text-muted-foreground">
+              <p className="text-[11px] text-text-tertiary">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
+                  size="icon"
                   disabled={page <= 1}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  aria-label="Previous page"
                 >
-                  <ChevronLeft className="h-4 w-4" />
+                  <ChevronLeft className="h-3 w-3" />
                 </Button>
-                <span className="text-[12px]">
+                <span className="text-[11px] text-text-tertiary">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button
                   variant="outline"
+                  size="icon"
                   disabled={page >= totalPages}
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  aria-label="Next page"
                 >
-                  <ChevronRight className="h-4 w-4" />
+                  <ChevronRight className="h-3 w-3" />
                 </Button>
               </div>
             </div>

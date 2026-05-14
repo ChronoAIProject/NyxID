@@ -49,7 +49,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { HardDrive, Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
+import { WifiRouterIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
 import type { NodeInfo } from "@/types/nodes";
@@ -293,13 +294,11 @@ export function NodesPage() {
       ) : error ? (
         <ErrorBanner message="Failed to load nodes. Please try again." onRetry={refetch} />
       ) : !nodes || nodes.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <HardDrive className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <WifiRouterIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="max-w-md space-y-1">
-            <p className="text-[12px] font-medium">No Credential Nodes</p>
-            <p className="text-[12px] text-muted-foreground">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No Credential Nodes</p>
+            <p className="text-[12px] text-muted-foreground/30">
               Create a registration token to get started.
             </p>
           </div>

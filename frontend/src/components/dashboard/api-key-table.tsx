@@ -33,7 +33,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { MoreHorizontal, RefreshCw, Trash2, Copy, Check, KeyRound } from "lucide-react";
+import { MoreVertical, RefreshCw, Trash2, Copy, Check } from "lucide-react";
+import { CogsIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 function parseScopesString(scopes: string): readonly string[] {
@@ -110,13 +111,11 @@ export function ApiKeyTable() {
 
   if (!apiKeys || apiKeys.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-          <KeyRound className="h-6 w-6 text-muted-foreground" />
-        </div>
+      <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+        <CogsIcon className="h-64 w-64 text-muted-foreground/30" />
         <div className="space-y-1">
-          <p className="text-[12px] font-medium">No API keys yet</p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-[12px] font-medium text-muted-foreground/30">No API keys yet</p>
+          <p className="text-xs text-muted-foreground/30">
             Create one to get started.
           </p>
         </div>
@@ -145,7 +144,7 @@ export function ApiKeyTable() {
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button variant="ghost" size="icon" className="h-7 w-7">
-                      <MoreHorizontal className="h-3.5 w-3.5" />
+                      <MoreVertical className="h-3.5 w-3.5" />
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
@@ -278,7 +277,7 @@ export function ApiKeyTable() {
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon" className="h-7 w-7">
-                          <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                          <MoreVertical className="h-3.5 w-3.5" aria-hidden="true" />
                           <span className="sr-only">Actions for {key.name}</span>
                         </Button>
                       </DropdownMenuTrigger>
@@ -332,7 +331,7 @@ export function ApiKeyTable() {
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
             >
-              Revoke key
+              Revoke Key
             </Button>
           </DialogFooter>
         </DialogContent>

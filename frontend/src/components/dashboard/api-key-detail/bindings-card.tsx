@@ -34,6 +34,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { AlertTriangle, Link2, Plus, Trash2 } from "lucide-react";
+import { CrystalLatticeIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import type { AgentServiceBinding } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
@@ -319,10 +320,13 @@ export function BindingsCard({
             ))}
           </div>
         ) : (
-          <p className="text-xs text-muted-foreground">
-            No credential overrides. This agent uses default credentials for
-            all services.
-          </p>
+          <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+            <CrystalLatticeIcon className="h-48 w-48 text-muted-foreground/30" />
+            <p className="text-xs text-muted-foreground/30">
+              No credential overrides. This agent uses default credentials for
+              all services.
+            </p>
+          </div>
         )}
       </CardContent>
 

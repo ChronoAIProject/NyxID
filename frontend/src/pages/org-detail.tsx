@@ -9,9 +9,9 @@ import {
   Globe,
   KeyRound,
   Trash2,
-  Users,
   X,
 } from "lucide-react";
+import { BenchesIcon, MailSendingIcon } from "@/components/icons/empty-state";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import {
   Popover,
@@ -54,6 +54,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { ApiError } from "@/lib/api-client";
 import { buildOrgInviteJoinUrl } from "@/lib/org-invite-links";
 import {
@@ -116,6 +117,8 @@ export function OrgDetailPage() {
   const removeMemberMutation = useRemoveMember();
   const cancelInviteMutation = useCancelInvite();
   const deleteOrgMutation = useDeleteOrg();
+
+  useBreadcrumbLabel(org?.display_name);
 
   const [tab, setTab] = useState<TabValue>("members");
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -333,24 +336,20 @@ export function OrgDetailPage() {
         <TabsContent value="members" className="mt-6 space-y-4">
           {isAdmin && (
             <div className="flex justify-end">
-              <AddCtaButton label="Invite member" onClick={() => setInviteOpen(true)} />
+              <AddCtaButton label="Invite Member" onClick={() => setInviteOpen(true)} />
             </div>
           )}
 
           {membersLoading ? (
             <Skeleton className="h-40 w-full" />
           ) : !members || members.length === 0 ? (
-            <Card>
-              <CardContent className="flex flex-col items-center gap-4 py-12 text-center">
-                <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-                  <Users className="h-6 w-6 text-muted-foreground" />
-                </div>
-                <div className="space-y-1">
-                  <p className="text-[12px] font-medium">No Members</p>
-                  <p className="text-xs text-muted-foreground">No members yet.</p>
-                </div>
-              </CardContent>
-            </Card>
+            <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+              <BenchesIcon className="h-64 w-64 text-muted-foreground/30" />
+              <div className="space-y-1">
+                <p className="text-[12px] font-medium text-muted-foreground/30">No Members</p>
+                <p className="text-xs text-muted-foreground/30">No members yet.</p>
+              </div>
+            </div>
           ) : (
             <>
               {/* Mobile card view */}
@@ -459,7 +458,7 @@ export function OrgDetailPage() {
         <TabsContent value="invites" className="mt-6 space-y-4">
           {isAdmin ? (
             <div className="flex justify-end">
-              <AddCtaButton label="Create invite" onClick={() => setInviteOpen(true)} />
+              <AddCtaButton label="Create Invite" onClick={() => setInviteOpen(true)} />
             </div>
           ) : (
             <Card>
@@ -475,8 +474,9 @@ export function OrgDetailPage() {
                 <Skeleton className="h-40 w-full" />
               ) : !invites || invites.length === 0 ? (
                 <Card>
-                  <CardContent className="py-8 text-center text-[12px] text-muted-foreground">
-                    No pending invites.
+                  <CardContent className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+                    <MailSendingIcon className="h-48 w-48 text-muted-foreground/30" />
+                    <p className="text-[12px] text-muted-foreground/30">No pending invites.</p>
                   </CardContent>
                 </Card>
               ) : (
@@ -733,7 +733,7 @@ export function OrgDetailPage() {
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete organization</DialogTitle>
+            <DialogTitle>Delete Organization</DialogTitle>
             <DialogDescription>
               Delete{" "}
               <span className="font-medium text-foreground">
@@ -753,7 +753,7 @@ export function OrgDetailPage() {
               onClick={() => void handleDeleteOrg()}
               isLoading={deleteOrgMutation.isPending}
             >
-              Delete organization
+              Delete Organization
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1147,7 +1147,7 @@ function SettingsPanel({
 
               <div className="flex justify-end">
                 <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
-                  Save changes
+                  Save Changes
                 </Button>
               </div>
             </form>
@@ -1167,7 +1167,7 @@ function SettingsPanel({
           <div className="flex justify-end">
             <Button variant="destructive" onClick={onDelete}>
               <ButtonIcon variant="destructive"><Trash2 className="h-4 w-4 text-destructive" /></ButtonIcon>
-              Delete organization
+              Delete Organization
             </Button>
           </div>
         </CardContent>

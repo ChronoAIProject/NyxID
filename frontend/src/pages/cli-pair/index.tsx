@@ -874,7 +874,7 @@ function ResumedCreateWarningPanel({
       <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-muted-foreground">
         Check your {manageLabel} first — if a new entry is there,
         the first tab succeeded and you can close this tab. If
-        nothing shows up after a minute, use "Cancel pairing"
+        nothing shows up after a minute, use "Cancel Pairing"
         below so the waiting CLI exits promptly.
       </p>
       <div className="flex flex-col gap-2 sm:flex-row">
@@ -890,7 +890,7 @@ function ResumedCreateWarningPanel({
           disabled={cancelling}
           className="flex-1"
         >
-          {cancelling ? "Cancelling..." : "Cancel pairing"}
+          {cancelling ? "Cancelling..." : "Cancel Pairing"}
         </Button>
       </div>
     </div>
@@ -1265,7 +1265,7 @@ function ResumedRotationChoicePanel({
         </li>
         <li>
           If you <strong>did not see a secret</strong> (the
-          rotation may have failed), click "Cancel pairing". The
+          rotation may have failed), click "Cancel Pairing". The
           CLI will exit; re-run the original command to try again.
         </li>
       </ul>
@@ -1278,7 +1278,7 @@ function ResumedRotationChoicePanel({
           onClick={onCancel}
           className="flex-1"
         >
-          Cancel pairing
+          Cancel Pairing
         </Button>
       </div>
     </div>

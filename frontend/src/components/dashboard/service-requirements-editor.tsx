@@ -1,5 +1,6 @@
 import type { ProviderConfig } from "@/types/api";
 import { useProviders, useServiceRequirements } from "@/hooks/use-providers";
+import { EngineerCapIcon } from "@/components/icons/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CheckCircle, XCircle, KeyRound } from "lucide-react";
@@ -25,9 +26,12 @@ export function ServiceRequirementsView({
 
   if (!requirements || requirements.length === 0) {
     return (
-      <p className="text-[12px] text-muted-foreground">
-        This service has no provider requirements.
-      </p>
+      <div className="flex flex-col items-center justify-center gap-1 py-8">
+        <EngineerCapIcon className="h-48 w-48 text-muted-foreground/30" />
+        <div className="rounded-lg bg-white/[0.03] px-4 py-3 text-[12px] text-muted-foreground/30">
+          This service has no provider requirements.
+        </div>
+      </div>
     );
   }
 

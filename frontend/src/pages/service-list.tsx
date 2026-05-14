@@ -54,7 +54,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Server } from "lucide-react";
+import { BrickWallIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 export function ServiceListPage() {
@@ -546,13 +546,11 @@ export function ServiceListPage() {
           ))}
         </div>
       ) : !services || services.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-            <Server className="h-6 w-6 text-muted-foreground" />
-          </div>
+        <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
+          <BrickWallIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium">No services yet</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-[12px] font-medium text-muted-foreground/30">No services yet</p>
+            <p className="text-xs text-muted-foreground/30">
               Add a service to get started.
             </p>
           </div>

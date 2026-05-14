@@ -140,7 +140,7 @@ export function WsFrameInjectionsEditor({
             onClick={() => onChange([...value, cloneRule(emptyWsFrameRule)])}
           >
             <Plus />
-            Add rule
+            Add Rule
           </Button>
           <Button
             type="button"
@@ -148,7 +148,7 @@ export function WsFrameInjectionsEditor({
             onClick={() => onChange([cloneRule(homeAssistantWsFrameRule)])}
           >
             <Wand2 />
-            Home Assistant preset
+            Home Assistant Preset
           </Button>
           <Badge variant="secondary">{value.length}/4</Badge>
         </div>

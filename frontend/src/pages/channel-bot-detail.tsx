@@ -25,6 +25,7 @@ import {
 import { ApiError } from "@/lib/api-client";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
 import { DetailRow } from "@/components/shared/detail-row";
@@ -66,10 +67,11 @@ import {
 import {
   ExternalLink,
   MessageSquare,
-  MoreHorizontal,
+  MoreVertical,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
+import { ArticleIcon, RoadBarrierIcon } from "@/components/icons/empty-state";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 import type {
@@ -195,7 +197,7 @@ function ConversationRow({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" className="h-7 w-7">
-              <MoreHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+              <MoreVertical className="h-3.5 w-3.5" aria-hidden="true" />
               <span className="sr-only">Actions</span>
             </Button>
           </DropdownMenuTrigger>
@@ -262,9 +264,9 @@ function ConversationsSection({
           ))}
         </div>
       ) : !conversations || conversations.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-border py-8 text-center">
-          <MessageSquare className="mb-3 h-8 w-8 text-muted-foreground/50" />
-          <p className="text-[12px] text-muted-foreground">
+        <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+          <ArticleIcon className="h-48 w-48 text-muted-foreground/30" />
+          <p className="text-[12px] text-muted-foreground/30">
             No conversation routes configured. Add a route to start relaying
             messages to an AI agent.
           </p>
@@ -281,7 +283,7 @@ function ConversationsSection({
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon" className="h-7 w-7">
-                          <MoreHorizontal className="h-3.5 w-3.5" />
+                          <MoreVertical className="h-3.5 w-3.5" />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
@@ -885,6 +887,8 @@ export function ChannelBotDetailPage() {
   const deleteMutation = useDeleteChannelBot();
   const verifyMutation = useVerifyChannelBot();
 
+  useBreadcrumbLabel(bot?.label);
+
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 
   const apiKeyNames: ReadonlyMap<string, string> = new Map(
@@ -975,11 +979,12 @@ export function ChannelBotDetailPage() {
       />
 
       {bot.status === "pending_webhook" && (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+        <div className="flex flex-col items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-6 text-center">
+          <RoadBarrierIcon className="h-48 w-48 text-muted-foreground/30" />
           <p className="text-[12px] font-medium text-foreground">
             Pending webhook verification
           </p>
-          <p className="mt-1 text-[12px] text-muted-foreground">
+          <p className="mt-1 text-[12px] text-muted-foreground/30">
             {bot.platform === "lark" || bot.platform === "feishu"
               ? bot.lark_verification_token_configured
                 ? "Once Lark/Feishu delivers a verified inbound message, this bot will automatically move to Active."

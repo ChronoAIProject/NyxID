@@ -76,7 +76,7 @@ export function OidcCredentialsSection({
             onClick={() => setShowCredentials(true)}
           >
             <ButtonIcon><Eye className="h-3 w-3" /></ButtonIcon>
-            Reveal credentials
+            Reveal Credentials
           </Button>
           <p className="mt-1 text-xs text-muted-foreground">
             Credentials should be stored securely and never shared publicly.

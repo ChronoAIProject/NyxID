@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { CheckCircle2, Circle, Info } from "lucide-react";
+import { CheckCircle2, Info } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -75,7 +75,7 @@ export function ApprovalSetupWizard({
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
           <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-white/[0.08] bg-white/[0.04]">
-            <Info className="h-4 w-4 text-blue-500" aria-hidden="true" />
+            <Info className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
           </span>
           Set up approval protection
         </CardTitle>
@@ -96,28 +96,16 @@ export function ApprovalSetupWizard({
         <ol className="space-y-4">
           {steps.map((step, idx) => (
             <li key={step.label} className="flex items-start gap-3">
-              <span className="mt-0.5 shrink-0">
-                {step.done ? (
-                  <CheckCircle2 className="h-5 w-5 text-emerald-500" />
-                ) : (
-                  <Circle className="h-5 w-5 text-muted-foreground/40" />
-                )}
+              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.04] text-[10px] font-medium text-muted-foreground">
+                {String(idx + 1)}
               </span>
               <div className="space-y-0.5">
-                <p
-                  className={
-                    step.done
-                      ? "text-[12px] text-muted-foreground line-through"
-                      : "text-[12px] font-medium"
-                  }
-                >
+                <p className="text-[12px] font-medium">
                   Step {String(idx + 1)}: {step.label}
                 </p>
-                {!step.done && (
-                  <p className="text-xs text-muted-foreground">
-                    {step.description}
-                  </p>
-                )}
+                <p className="text-xs text-muted-foreground">
+                  {step.description}
+                </p>
               </div>
             </li>
           ))}

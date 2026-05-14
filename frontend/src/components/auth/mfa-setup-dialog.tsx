@@ -151,7 +151,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
               className="w-full"
               isLoading={setupMutation.isPending}
             >
-              Begin setup
+              Begin Setup
             </Button>
           </div>
         )}

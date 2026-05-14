@@ -1008,7 +1008,7 @@ export function ServiceEditPage() {
 
             <div className="flex items-center justify-end gap-3 pt-4">
               <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
-                Save changes
+                Save Changes
               </Button>
               <Button
                 type="button"

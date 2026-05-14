@@ -13,7 +13,6 @@ import {
 } from "@/components/ui/dialog";
 import {
   Bell,
-  Check,
   Download,
   ExternalLink,
   MessageSquare,
@@ -126,19 +125,13 @@ export function NotificationSetupCard() {
           <div className="flex flex-col gap-2">
             {steps.map((step, i) => (
               <div key={i} className="flex items-center gap-2.5">
-                {step.done ? (
-                  <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-                    <Check className="h-3 w-3" />
-                  </div>
-                ) : (
-                  <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-xl border-2 border-muted-foreground/30 text-xs text-muted-foreground">
-                    {i + 1}
-                  </div>
-                )}
+                <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.04] text-[10px] font-medium text-muted-foreground">
+                  {i + 1}
+                </div>
                 <span
                   className={
                     step.done
-                      ? "text-[13px] text-muted-foreground line-through"
+                      ? "text-[13px] text-muted-foreground"
                       : "text-[13px] font-medium"
                   }
                 >

@@ -74,7 +74,7 @@ export function OnboardingTakeover() {
           <ButtonIcon variant="primary">
             <ArrowRight className="h-4 w-4" />
           </ButtonIcon>
-          Connect a service
+          Connect a Service
         </Button>
 
         {/* Skip */}

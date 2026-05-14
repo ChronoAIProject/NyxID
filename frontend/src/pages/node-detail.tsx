@@ -16,6 +16,7 @@ import { ApiError } from "@/lib/api-client";
 import { pushNodeCredentialSchema } from "@/schemas/nodes";
 import { formatDate, formatRelativeTime } from "@/lib/utils";
 import { PageHeader } from "@/components/shared/page-header";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { CopyableField } from "@/components/shared/copyable-field";
 import { DetailRow } from "@/components/shared/detail-row";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -58,6 +59,7 @@ import {
   Trash2,
   Users,
 } from "lucide-react";
+import { SolarPanelIcon, SwitchIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { NodeStatusBadge } from "@/components/shared/node-status-badge";
 import type {
@@ -164,6 +166,7 @@ export function NodeDetailPage() {
   const [credentialTargetUrl, setCredentialTargetUrl] = useState("");
   const [credentialLabel, setCredentialLabel] = useState("");
 
+  useBreadcrumbLabel(node?.name);
   const canManage = canManageNode(node, currentUserId, admins);
   const { data: pendingCredentials, isLoading: pendingCredentialsLoading } =
     useNodePendingCredentials(nodeId, canManage);
@@ -410,60 +413,69 @@ export function NodeDetailPage() {
       </DetailSection>
 
       {/* Metrics */}
-      {node.metrics && node.metrics.total_requests > 0 && (
-        <DetailSection title="Metrics">
-          <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-4">
-            <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
-              <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
-                {String(node.metrics.total_requests)}
-              </p>
-              <p className="text-[11px] text-muted-foreground mt-1">Total Requests</p>
-            </div>
-            <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
-              <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
-                {(node.metrics.success_rate * 100).toFixed(1)}%
-              </p>
-              <p className="text-[11px] text-muted-foreground mt-1">Success Rate</p>
-            </div>
-            <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
-              <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
-                {node.metrics.avg_latency_ms.toFixed(0)}ms
-              </p>
-              <p className="text-[11px] text-muted-foreground mt-1">Avg Latency</p>
-            </div>
-            <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
-              <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
-                {String(node.metrics.error_count)}
-              </p>
-              <p className="text-[11px] text-muted-foreground mt-1">Errors</p>
-            </div>
-          </div>
-          {node.metrics.last_error && (
-            <div className="mx-4 mb-4 rounded-xl bg-destructive/10 p-4">
-              <div className="flex items-center gap-2 text-xs font-medium text-destructive">
-                <Activity className="h-3 w-3" />
-                Last Error
-                {node.metrics.last_error_at && (
-                  <span className="font-normal text-muted-foreground">
-                    {formatRelativeTime(node.metrics.last_error_at)}
-                  </span>
-                )}
+      <DetailSection title="Metrics">
+        {node.metrics && node.metrics.total_requests > 0 ? (
+          <>
+            <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-4">
+              <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
+                <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
+                  {String(node.metrics.total_requests)}
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-1">Total Requests</p>
               </div>
-              <p className="mt-1 text-xs text-destructive/80">
-                {node.metrics.last_error}
-              </p>
+              <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
+                <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
+                  {(node.metrics.success_rate * 100).toFixed(1)}%
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-1">Success Rate</p>
+              </div>
+              <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
+                <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
+                  {node.metrics.avg_latency_ms.toFixed(0)}ms
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-1">Avg Latency</p>
+              </div>
+              <div className="rounded-xl border border-border/50 bg-white/[0.02] p-4 text-center">
+                <p className="text-[22px] font-bold text-foreground" style={{ letterSpacing: "-0.02em" }}>
+                  {String(node.metrics.error_count)}
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-1">Errors</p>
+              </div>
             </div>
-          )}
-          {node.metrics.last_success_at && (
-            <DetailRow
-              label="Last Successful Request"
-              value={
-                formatRelativeTime(node.metrics.last_success_at) ?? "Never"
-              }
-            />
-          )}
-        </DetailSection>
-      )}
+            {node.metrics.last_error && (
+              <div className="mx-4 mb-4 rounded-xl bg-destructive/10 p-4">
+                <div className="flex items-center gap-2 text-xs font-medium text-destructive">
+                  <Activity className="h-3 w-3" />
+                  Last Error
+                  {node.metrics.last_error_at && (
+                    <span className="font-normal text-muted-foreground">
+                      {formatRelativeTime(node.metrics.last_error_at)}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 text-xs text-destructive/80">
+                  {node.metrics.last_error}
+                </p>
+              </div>
+            )}
+            {node.metrics.last_success_at && (
+              <DetailRow
+                label="Last Successful Request"
+                value={
+                  formatRelativeTime(node.metrics.last_success_at) ?? "Never"
+                }
+              />
+            )}
+          </>
+        ) : (
+          <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+            <SolarPanelIcon className="h-48 w-48 text-muted-foreground/30" />
+            <p className="text-[12px] text-muted-foreground/30">
+              No metrics recorded yet. Metrics will appear after the first proxy request.
+            </p>
+          </div>
+        )}
+      </DetailSection>
 
       {canManage && (
         <div className="space-y-6">
@@ -566,9 +578,12 @@ export function NodeDetailPage() {
                 <Skeleton className="h-10 w-2/3" />
               </div>
             ) : !pendingCredentials || pendingCredentials.length === 0 ? (
-              <p className="px-5 py-3 text-[12px] text-muted-foreground">
-                No pending credentials are waiting for this node.
-              </p>
+              <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+                <SwitchIcon className="h-48 w-48 text-muted-foreground/30" />
+                <p className="text-[12px] text-muted-foreground/30">
+                  No pending credentials are waiting for this node.
+                </p>
+              </div>
             ) : (
               <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
                 <Table>

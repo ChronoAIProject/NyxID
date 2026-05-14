@@ -143,7 +143,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
               className="w-full"
               onClick={handleCancel}
             >
-              Back to login
+              Back to Login
             </Button>
           </div>
         </form>

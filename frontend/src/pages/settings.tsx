@@ -67,6 +67,7 @@ import {
   Eye,
   EyeOff,
 } from "lucide-react";
+import { PowerButtonIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 interface DeleteAccountResponse {
@@ -194,7 +195,7 @@ function ProfileTab() {
       </CardContent>
       <CardFooter>
         <Button variant="primary" onClick={() => void handleSave()} isLoading={saving} disabled={!name || name === (user?.display_name ?? "")}>
-          Save changes
+          Save Changes
         </Button>
       </CardFooter>
     </Card>
@@ -513,7 +514,7 @@ function SecurityTab() {
                   isLoading={passwordForm.formState.isSubmitting}
                   disabled={!passwordForm.formState.isDirty}
                 >
-                  Change password
+                  Change Password
                 </Button>
               </div>
             </form>
@@ -854,12 +855,10 @@ function SessionsTab() {
       </CardHeader>
       <CardContent>
         {!sessions || sessions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl border border-border">
-              <Monitor className="h-4 w-4 text-muted-foreground" />
-            </div>
-            <p className="text-[12px] font-medium">No Active Sessions</p>
-            <p className="text-[12px] text-muted-foreground">
+          <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
+            <PowerButtonIcon className="h-48 w-48 text-muted-foreground/30" />
+            <p className="text-[12px] font-medium text-muted-foreground/30">No Active Sessions</p>
+            <p className="text-[12px] text-muted-foreground/30">
               Your active sessions across devices will appear here.
             </p>
           </div>

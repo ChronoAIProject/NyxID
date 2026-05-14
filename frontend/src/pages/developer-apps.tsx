@@ -39,6 +39,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { ClientSecretDialog } from "@/components/shared/client-secret-dialog";
 import { ApiError } from "@/lib/api-client";
 import { Code, ExternalLink, Plus, Shield, ShieldCheck } from "lucide-react";
+import { WebsiteLayoutIcon } from "@/components/icons/empty-state";
 
 const OIDC_SCOPES = [
   { id: "openid", label: "openid", required: true },
@@ -400,6 +401,7 @@ export function DeveloperAppsPage() {
                 <div className="flex justify-end">
                   <Button
                     variant="outline"
+                    className="text-text-tertiary hover:text-muted-foreground"
                     onClick={() =>
                       void navigate({
                         to: "/developer/apps/$clientId",
@@ -416,23 +418,19 @@ export function DeveloperAppsPage() {
           ))}
 
         {!isLoading && visibleApps.length === 0 && (
-          <Card className="xl:col-span-2">
-            <CardContent className="flex flex-col items-center gap-4 py-12 text-center">
-              <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
-                <Code className="h-6 w-6 text-muted-foreground" />
-              </div>
-              <div className="space-y-1">
-                <p className="text-[12px] font-medium">
-                  {apps.length === 0 ? "No Developer Apps" : "No Active Apps"}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {apps.length === 0
-                    ? "Create your first application."
-                    : "Enable 'Show inactive' to view deactivated apps."}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
+          <div className="xl:col-span-2 flex flex-col items-center justify-center gap-1 py-12 text-center">
+            <WebsiteLayoutIcon className="h-64 w-64 text-muted-foreground/30" />
+            <div className="space-y-1">
+              <p className="text-[12px] font-medium text-muted-foreground/30">
+                {apps.length === 0 ? "No Developer Apps" : "No Active Apps"}
+              </p>
+              <p className="text-xs text-muted-foreground/30">
+                {apps.length === 0
+                  ? "Create your first application."
+                  : "Enable 'Show inactive' to view deactivated apps."}
+              </p>
+            </div>
+          </div>
         )}
       </div>
     </div>
