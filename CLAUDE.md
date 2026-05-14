@@ -39,6 +39,8 @@ fn my_handler() -> AppResult<Json<MyResponse>> {
 ```
 Error variants map to HTTP status codes and numeric error codes; see `backend/src/errors/mod.rs` for the authoritative list. Internal/database errors never leak details to clients.
 
+Reserved device-code binding errors live in numeric block 9000-9099.
+
 ### 4. Frontend Patterns
 
 - Validation with Zod schemas (`schemas/` directory, one per domain)
@@ -89,6 +91,16 @@ Add new entries here when introducing additional vendored URN types.
   - 1013 `SshNodeExecChannelClosed`
   - 1014 `SshPrincipalAmbiguous`
   - 1015 `SshAuthModeUnsupportedForOperation`
+- Error codes 9000-9099 are reserved for device-code binding:
+  - 9000 `DeviceCodeNotFound`
+  - 9001 `DeviceCodeExpired`
+  - 9002 `DevicePollSignatureInvalid`
+  - 9003 `DeviceUserCodeInvalid`
+  - 9004 `DeviceCodePending`
+  - 9005 `DeviceCodeAlreadyDelivered`
+  - 9006 `DeviceCodeRateLimited`
+  - 9007 `DeviceCodeLocked`
+  - 9008 `DeviceCodeSlowDown`
 - `NodeStatus` is an enum (`Online`/`Offline`/`Draining`) -- not a bare string
 - WS writer channels are bounded (capacity: 256); `try_send` treats full buffers as node offline (H4)
 - WebSocket auth-frame injection rules live on `DownstreamService.ws_frame_injections` and `UserService.ws_frame_injections`; they are additive and separate from HTTP `auth_method` injection. `WsFrameDirection` is the trigger direction, so a `downstream` rule matches frames from the service and injects the configured response back toward that service. Direct and node-routed WS paths emit metadata-only `ws_frame_auth_injected` audit events; never log injected payloads or credentials.
@@ -217,18 +229,18 @@ backend/src/
 |-- db.rs                # MongoDB connection + ensure_indexes()
 |-- routes.rs            # All route definitions
 |-- main.rs              # Server startup
-|-- models/              # MongoDB document structs, one per collection (incl. agent_service_binding, node, node_service_binding, mcp_session, openclaw_channel_mapping, user_endpoint, user_api_key, user_service, channel_bot, channel_conversation, channel_event_log, channel_message)
-|-- services/            # Business logic (incl. agent_binding_service, node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service, action_description, channel_bot_service, channel_event_service, channel_routing_service, channel_relay_service, channel_platform, event_dedup_cache, channel_adapters/{telegram,discord,lark,openclaw})
-|-- handlers/            # HTTP handlers (incl. agent_bindings, node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel, keys, catalog, user_endpoints, user_api_keys_external, user_services_handler, channel_bots, channel_conversations, channel_events, channel_webhooks, channel_relay)
-|-- crypto/              # JWT, AES, password hashing, token generation, KeyProvider trait, KMS providers, JWKS
+|-- models/              # MongoDB document structs, one per collection (incl. agent_service_binding, device_code, node, node_service_binding, mcp_session, openclaw_channel_mapping, user_endpoint, user_api_key, user_service, channel_bot, channel_conversation, channel_event_log, channel_message)
+|-- services/            # Business logic (incl. agent_binding_service, device_code_service, node_service, node_routing_service, node_ws_manager, node_metrics_service, openclaw_channel_service, unified_key_service, catalog_service, user_endpoint_service, user_api_key_service, user_service_service, action_description, channel_bot_service, channel_event_service, channel_routing_service, channel_relay_service, channel_platform, event_dedup_cache, channel_adapters/{telegram,discord,lark,openclaw})
+|-- handlers/            # HTTP handlers (incl. agent_bindings, devices, node_admin, admin_nodes, node_ws, developer_apps, ssh_exec, llms_txt, openclaw_channel, keys, catalog, user_endpoints, user_api_keys_external, user_services_handler, channel_bots, channel_conversations, channel_events, channel_webhooks, channel_relay)
+|-- crypto/              # JWT, AES, password hashing, token generation, device-code Ed25519 verification, KeyProvider trait, KMS providers, JWKS
 |-- errors/              # AppError enum, ErrorResponse, AppResult
 |-- mw/                  # Middleware: auth, rate_limit, security_headers
 
 frontend/src/
-|-- pages/               # Route pages (incl. nodes, node-detail, admin-nodes, service-detail, providers, ai-setup, keys, key-detail, channel-bots, channel-bot-detail, channel-conversation-detail)
+|-- pages/               # Route pages (incl. nodes, node-detail, admin-nodes, service-detail, providers, ai-setup, keys, key-detail, devices-bind, channel-bots, channel-bot-detail, channel-conversation-detail)
 |-- components/          # UI components (auth/, dashboard/, layout/, shared/, ui/; incl. add-key-dialog for unified key creation)
-|-- hooks/               # TanStack Query hooks (incl. use-agent-bindings, use-nodes, use-admin-nodes, use-providers, use-developer-apps, use-keys, use-channel-bots, use-channel-conversations, use-channel-messages)
-|-- schemas/             # Zod validation schemas with vitest specs (incl. agent-bindings.ts, nodes.ts, channels.ts)
+|-- hooks/               # TanStack Query hooks (incl. use-agent-bindings, use-devices, use-nodes, use-admin-nodes, use-providers, use-developer-apps, use-keys, use-channel-bots, use-channel-conversations, use-channel-messages)
+|-- schemas/             # Zod validation schemas with vitest specs (incl. agent-bindings.ts, devices.ts, nodes.ts, channels.ts)
 |-- stores/              # Zustand stores (auth-store)
 |-- lib/                 # API client, constants, utils
 |-- types/               # TypeScript type definitions (incl. AdminNodeInfo, NodeMetricsInfo, approvals, keys)
@@ -268,6 +280,10 @@ All API routes under `/api/v1`:
 - `/notifications` -- notification settings CRUD, Telegram link/disconnect, device token management (register/list/remove)
 - `/approvals` -- approval request history, grants, decide, status polling, per-service approval configs (with `approval_mode`: `per_request` default or `grant` opt-in)
 - `/webhooks/telegram` -- Telegram webhook (unauthenticated, secret-verified)
+- `/devices` -- headless-device provisioning namespace; currently used for `/devices/code/*`
+- `/devices/code/request` -- unauthenticated device-code binding start for headless devices; returns `device_code`, `user_code`, and verification URLs
+- `/devices/code/poll` -- unauthenticated but Ed25519-signed device poll; returns pending user-code rotations or one-time credentials after approval
+- `/devices/code/approve` -- authenticated user approval endpoint for web and CLI; creates the scoped API key, node row, and refresh token
 - `/nodes` -- node management (register-token, list, get, delete, rotate-token, bindings CRUD + priority update)
 - `/nodes/ws` -- WebSocket upgrade for node agent connections (auth via WS protocol, not middleware)
 - `/admin/nodes` -- admin node management (list all, get, disconnect, delete -- no ownership check)
@@ -477,6 +493,10 @@ nyxid api-key show <ID_OR_NAME>         # Show key details + bindings
 nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>  # Credential override
 nyxid api-key rotate <ID_OR_NAME>       # Rotate API key
 nyxid api-key delete <ID_OR_NAME>       # Delete API key
+
+# Device-code binding
+nyxid device approve XXXX-XXXX-XXXX [--org <ID|SLUG|NAME>] [--label <LABEL>]
+nyxid device factory-key [--count N] [--out FILE] [--ndjson]
 
 # Channel bots
 nyxid channel-bot register --platform telegram --label support --token-env TELEGRAM_BOT_TOKEN
