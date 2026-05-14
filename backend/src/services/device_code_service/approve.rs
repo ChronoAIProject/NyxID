@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use mongodb::{
     Collection, Database,
     bson::{self, doc},
@@ -13,8 +13,8 @@ use crate::services::node_service::DeviceNodeInput;
 use crate::services::{key_service, node_service, org_service};
 
 use super::{
-    DEVICE_CODE_API_KEY_SCOPES, DeviceCodeApprove, DeviceCodeApproveInput, choose_device_label,
-    is_locked,
+    DEVICE_CODE_API_KEY_SCOPES, DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS, DeviceCodeApprove,
+    DeviceCodeApproveInput, choose_device_label, is_locked,
 };
 
 pub async fn approve(
@@ -98,6 +98,7 @@ pub async fn approve(
     let approved_status = bson::to_bson(&DeviceCodeStatus::Approved)
         .map_err(|e| AppError::Internal(format!("serialize device code status: {e}")))?;
     let now = Utc::now();
+    let delivery_expires_at = now + Duration::seconds(DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS);
     let update_result = collection
         .update_one(
             doc! {
@@ -115,6 +116,7 @@ pub async fn approve(
                     "delivery_api_key": &created_key.full_key,
                     "delivery_refresh_token": &refresh_token,
                     "refresh_token_hash": &refresh_token_hash,
+                    "expires_at": bson::DateTime::from_chrono(delivery_expires_at),
                 }
             },
         )
@@ -245,9 +247,7 @@ mod tests {
     use crate::models::node::NodeStatus;
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
-    use crate::services::device_code_service::{
-        DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS, DeviceCodePoll, DeviceCodePollInput, poll,
-    };
+    use crate::services::device_code_service::{DeviceCodePoll, DeviceCodePollInput, poll};
     use crate::test_utils::{connect_test_database, test_user};
     use chrono::Duration;
     use uuid::Uuid;
@@ -342,6 +342,52 @@ mod tests {
         assert_eq!(node_id, approval.node_id);
         assert_eq!(refresh_token.len(), 64);
         assert_eq!(expires_in, DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS);
+    }
+
+    #[tokio::test]
+    async fn approve_extends_near_ttl_expiry_for_delivery_window() {
+        let Some((db, response, _key)) = setup_pending_row("device_code_approve_ttl_bump").await
+        else {
+            return;
+        };
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .update_one(
+                doc! { "device_code_hash": hash_token(&response.device_code) },
+                doc! {
+                    "$set": {
+                        "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::seconds(1)),
+                    }
+                },
+            )
+            .await
+            .expect("move row close to TTL expiry");
+
+        let before_approve = Utc::now();
+        approve(
+            &db,
+            &Uuid::new_v4().to_string(),
+            DeviceCodeApproveInput {
+                user_code: response.user_code.clone(),
+                org_id: None,
+                label: None,
+            },
+        )
+        .await
+        .expect("approve near-expiry row");
+
+        let row = db
+            .collection::<DeviceCode>(DEVICE_CODES)
+            .find_one(doc! { "device_code_hash": hash_token(&response.device_code) })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(row.status, DeviceCodeStatus::Approved);
+        assert!(
+            row.expires_at
+                >= before_approve + Duration::seconds(DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS - 5),
+            "approved row should survive the delivery window before TTL can purge it"
+        );
     }
 
     #[tokio::test]
