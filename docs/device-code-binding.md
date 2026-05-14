@@ -102,10 +102,10 @@ Each poll request includes:
 The signature is over:
 
 ```text
-base64url_decode(device_code) || timestamp as signed i64 big-endian bytes
+"nyxid:device-code:poll:v1" || base64url_decode(device_code) || timestamp as signed i64 big-endian bytes
 ```
 
-NyxID accepts timestamps within plus or minus 60 seconds and rejects exact timestamp replay per device-code row.
+NyxID accepts timestamps within plus or minus 10 seconds and rejects exact timestamp replay per device-code row.
 
 ### Rate limit and lockout
 
@@ -289,7 +289,7 @@ On first boot, firmware should:
 1. Load the factory Ed25519 private key from secure storage.
 2. If NyxID credentials are absent from NVS, call `/devices/code/request`.
 3. Display `user_code` and a QR for `verification_uri_complete`.
-4. Poll every `poll_interval` seconds, signing each poll over `device_code || timestamp_be_bytes`.
+4. Poll every `poll_interval` seconds, signing each poll over `b"nyxid:device-code:poll:v1" || base64url_decode(device_code) || timestamp_be_bytes`.
 5. Update the displayed user code if a pending poll returns a rotated `current_user_code`.
 6. Store `api_key`, `node_id`, and `refresh_token` in NVS after the approved poll.
 7. Enter normal node operation using the NVS-backed credentials.

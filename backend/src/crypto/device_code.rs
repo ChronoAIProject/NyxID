@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -11,6 +11,7 @@ const DEVICE_CODE_BYTES: usize = 32;
 const USER_CODE_CHARS: usize = 12;
 const USER_CODE_GROUP: usize = 4;
 const USER_CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+pub const POLL_SIG_DOMAIN: &[u8] = b"nyxid:device-code:poll:v1";
 
 pub fn generate_device_code() -> (String, String) {
     let mut bytes = [0u8; DEVICE_CODE_BYTES];
@@ -52,11 +53,20 @@ pub fn verify_poll_signature(
     })?;
     let signature = Signature::from_bytes(sig);
 
+    let message = poll_signature_message(device_code_raw, timestamp)?;
+    verifying_key
+        .verify_strict(&message, &signature)
+        .map_err(|_| {
+            AppError::DevicePollSignatureInvalid("poll signature verification failed".to_string())
+        })
+}
+
+pub fn poll_signature_message(device_code_raw: &str, timestamp: i64) -> AppResult<Vec<u8>> {
     let device_code_bytes = decode_device_code_for_signature(device_code_raw)?;
-    let message = poll_signature_message(&device_code_bytes, timestamp);
-    verifying_key.verify(&message, &signature).map_err(|_| {
-        AppError::DevicePollSignatureInvalid("poll signature verification failed".to_string())
-    })
+    Ok(poll_signature_message_from_bytes(
+        &device_code_bytes,
+        timestamp,
+    ))
 }
 
 fn decode_device_code_for_signature(device_code_raw: &str) -> AppResult<[u8; DEVICE_CODE_BYTES]> {
@@ -74,9 +84,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn poll_signature_message(device_code_raw: &[u8; DEVICE_CODE_BYTES], timestamp: i64) -> Vec<u8> {
-    let mut message = Vec::with_capacity(DEVICE_CODE_BYTES + std::mem::size_of::<i64>());
-    message.extend_from_slice(device_code_raw);
+fn poll_signature_message_from_bytes(
+    device_code_bytes: &[u8; DEVICE_CODE_BYTES],
+    timestamp: i64,
+) -> Vec<u8> {
+    let mut message =
+        Vec::with_capacity(POLL_SIG_DOMAIN.len() + DEVICE_CODE_BYTES + std::mem::size_of::<i64>());
+    message.extend_from_slice(POLL_SIG_DOMAIN);
+    message.extend_from_slice(device_code_bytes);
     message.extend_from_slice(&timestamp.to_be_bytes());
     message
 }
@@ -91,8 +106,7 @@ mod tests {
     }
 
     fn sign(device_code_raw: &str, timestamp: i64, key: &SigningKey) -> [u8; 64] {
-        let device_code_bytes = decode_device_code(device_code_raw).expect("valid device code");
-        key.sign(&poll_signature_message(&device_code_bytes, timestamp))
+        key.sign(&poll_signature_message(device_code_raw, timestamp).expect("signature message"))
             .to_bytes()
     }
 
@@ -150,7 +164,7 @@ mod tests {
     fn verify_poll_signature_accepts_matching_signature() {
         let key = signing_key();
         let pubkey = key.verifying_key().to_bytes();
-        let timestamp = 1_761_000_000;
+        let timestamp: i64 = 1_761_000_000;
         let raw = URL_SAFE_NO_PAD.encode([7u8; DEVICE_CODE_BYTES]);
         let signature = sign(&raw, timestamp, &key);
 
@@ -162,7 +176,7 @@ mod tests {
     fn verify_poll_signature_rejects_wrong_device_code() {
         let key = signing_key();
         let pubkey = key.verifying_key().to_bytes();
-        let timestamp = 1_761_000_000;
+        let timestamp: i64 = 1_761_000_000;
         let raw = URL_SAFE_NO_PAD.encode([7u8; DEVICE_CODE_BYTES]);
         let signature = sign(&raw, timestamp, &key);
 
@@ -182,6 +196,39 @@ mod tests {
 
         let error = verify_poll_signature(&pubkey, &raw, timestamp + 1, &signature)
             .expect_err("signature should fail");
+        assert!(matches!(error, AppError::DevicePollSignatureInvalid(_)));
+    }
+
+    #[test]
+    fn verify_poll_signature_rejects_legacy_unprefixed_message() {
+        let key = signing_key();
+        let pubkey = key.verifying_key().to_bytes();
+        let timestamp: i64 = 1_761_000_000;
+        let raw = URL_SAFE_NO_PAD.encode([7u8; DEVICE_CODE_BYTES]);
+        let device_code_bytes = decode_device_code(&raw).expect("valid device code");
+        let mut legacy_message = Vec::with_capacity(DEVICE_CODE_BYTES + std::mem::size_of::<i64>());
+        legacy_message.extend_from_slice(&device_code_bytes);
+        legacy_message.extend_from_slice(&timestamp.to_be_bytes());
+        let signature = key.sign(&legacy_message).to_bytes();
+
+        let error = verify_poll_signature(&pubkey, &raw, timestamp, &signature)
+            .expect_err("legacy signature should fail");
+        assert!(matches!(error, AppError::DevicePollSignatureInvalid(_)));
+    }
+
+    #[test]
+    fn verify_poll_signature_rejects_small_subgroup_public_key() {
+        let key = signing_key();
+        let timestamp = 1_761_000_000;
+        let raw = URL_SAFE_NO_PAD.encode([7u8; DEVICE_CODE_BYTES]);
+        let signature = sign(&raw, timestamp, &key);
+        let mut small_order_pubkey = [0u8; 32];
+        // Compressed identity point, one of ed25519-dalek's low-order
+        // public-key test vectors.
+        small_order_pubkey[0] = 1;
+
+        let error = verify_poll_signature(&small_order_pubkey, &raw, timestamp, &signature)
+            .expect_err("small-subgroup public key should fail");
         assert!(matches!(error, AppError::DevicePollSignatureInvalid(_)));
     }
 

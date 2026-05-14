@@ -24,7 +24,7 @@ pub const DEVICE_CODE_LOCKOUT_SECS: i64 = 60 * 60;
 pub const DEVICE_CODE_EXPIRES_IN_SECS: i64 = 15 * 60;
 pub const DEVICE_CODE_POLL_INTERVAL_SECS: u32 = 5;
 pub const DEVICE_CODE_ROTATE_SECS: i64 = 30;
-pub const DEVICE_CODE_TIMESTAMP_SKEW_SECS: i64 = 60;
+pub const DEVICE_CODE_TIMESTAMP_SKEW_SECS: i64 = 10;
 pub const DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS: i64 = 24 * 60 * 60;
 pub(super) const DEVICE_CODE_API_KEY_SCOPES: &str = "read write proxy";
 pub(super) const DEVICE_CODE_USER_CODE_WRITE_RETRIES: usize = 5;
@@ -200,7 +200,7 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::*;
-    use crate::crypto::device_code::decode_device_code;
+    use crate::crypto::device_code::poll_signature_message;
     use crate::test_utils::connect_test_database;
     use ed25519_dalek::{Signer, SigningKey};
     use mongodb::Database;
@@ -210,11 +210,8 @@ pub(crate) mod tests_support {
     }
 
     pub(crate) fn sign_poll(device_code: &str, timestamp: i64, key: &SigningKey) -> [u8; 64] {
-        let decoded = decode_device_code(device_code).expect("valid device code");
-        let mut message = Vec::with_capacity(decoded.len() + std::mem::size_of::<i64>());
-        message.extend_from_slice(&decoded);
-        message.extend_from_slice(&timestamp.to_be_bytes());
-        key.sign(&message).to_bytes()
+        key.sign(&poll_signature_message(device_code, timestamp).expect("valid device code"))
+            .to_bytes()
     }
 
     pub(crate) async fn setup_pending_row(

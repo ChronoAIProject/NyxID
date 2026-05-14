@@ -441,6 +441,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_rejects_timestamp_thirty_seconds_old() {
+        let Some((db, response, key)) = setup_pending_row("device_code_poll_old_timestamp").await
+        else {
+            return;
+        };
+        let timestamp = Utc::now().timestamp() - 30;
+
+        let error = poll(
+            &db,
+            DeviceCodePollInput {
+                device_code: response.device_code.clone(),
+                timestamp,
+                signature: sign_poll(&response.device_code, timestamp, &key),
+            },
+        )
+        .await
+        .expect_err("old timestamp should fail");
+
+        assert!(matches!(error, AppError::DevicePollSignatureInvalid(_)));
+    }
+
+    #[tokio::test]
     async fn poll_rotates_pending_user_code_after_window() {
         let Some((db, response, key)) = setup_pending_row("device_code_poll_rotate").await else {
             return;
