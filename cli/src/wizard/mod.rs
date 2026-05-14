@@ -1176,10 +1176,11 @@ pub async fn print_resume_summary(
 
 /// Returns true when the CLI is running somewhere we can reasonably
 /// open a local browser for the wizard. False on SSH / explicit opt-out
-/// / Linux without DISPLAY/WAYLAND, in which case the caller falls
-/// through to the remote-pairing transport (see
-/// [`is_browser_flow_eligible`]) — or ultimately to the scripted
-/// stdin path when the user opts out entirely.
+/// / Linux without DISPLAY/WAYLAND (WSL excepted — it bridges to the
+/// Windows browser), in which case the caller falls through to the
+/// remote-pairing transport (see [`is_browser_flow_eligible`]) — or
+/// ultimately to the scripted stdin path when the user opts out
+/// entirely.
 ///
 /// Mirrors `cli::commands::service::is_headless_environment` (kept
 /// private there to avoid widening the public surface) but inverts the
@@ -1193,7 +1194,13 @@ pub fn is_wizard_eligible() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        // WSL usually has no X / Wayland display, but the wizard can
+        // still bridge to the Windows browser (see `crate::browser`), so
+        // a missing display there is not disqualifying.
+        if !crate::browser::is_wsl()
+            && std::env::var_os("DISPLAY").is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_none()
+        {
             return false;
         }
     }

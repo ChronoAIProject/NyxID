@@ -1993,9 +1993,19 @@ pub async fn run_flow(
     eprintln!("→ Opening {url} … (Ctrl-C to cancel)");
     eprintln!("  Waiting for browser …");
     if std::env::var_os("NYXID_WIZARD_NO_OPEN").is_none() {
-        if let Err(e) = open::that(&url) {
-            eprintln!("  Couldn't auto-open browser: {e}");
-            eprintln!("  Visit the URL above manually.");
+        if let Err(e) = crate::browser::open_browser(&url) {
+            if crate::browser::is_wsl() {
+                // WSL without `wslu`, or with interop disabled: the URL is
+                // still reachable from a Windows browser, so spell out the
+                // copy/paste path instead of a generic open error.
+                eprintln!("  WSL detected — couldn't auto-open a Windows browser: {e}");
+                eprintln!("  Copy this URL into your Windows browser to continue:");
+                eprintln!("    {url}");
+                eprintln!("  (installing the `wslu` package enables `wslview` auto-open)");
+            } else {
+                eprintln!("  Couldn't auto-open browser: {e}");
+                eprintln!("  Visit the URL above manually.");
+            }
         }
     } else {
         eprintln!("  (NYXID_WIZARD_NO_OPEN set — not opening a browser)");

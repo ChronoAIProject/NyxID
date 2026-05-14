@@ -13,7 +13,7 @@ pub fn issues_url() -> String {
 pub async fn run_repo(args: RepoArgs) -> Result<()> {
     println!("{REPO_URL}");
     if args.open
-        && let Err(e) = open::that(REPO_URL)
+        && let Err(e) = crate::browser::open_browser(REPO_URL)
     {
         eprintln!("Failed to open browser: {e}");
     }

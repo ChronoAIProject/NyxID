@@ -1253,7 +1253,7 @@ async fn run_oauth_add(
     eprintln!("  {authorization_url}");
     eprintln!();
 
-    let _ = open::that(authorization_url);
+    let _ = crate::browser::open_browser(authorization_url);
 
     let final_key = wait_for_authorized_key(api, key_id).await?;
     print_add_result(api, &final_key, auth.output)?;
@@ -1378,7 +1378,7 @@ async fn run_device_code_add(
     eprintln!();
     eprintln!("Enter the code at the URL above, then wait for authorization...");
 
-    let _ = open::that(verification_uri);
+    let _ = crate::browser::open_browser(verification_uri);
 
     // Poll for completion
     let poll_body = serde_json::json!({ "state": state });
@@ -1561,7 +1561,8 @@ fn prompt_password(prompt: &str, flag: &str) -> Result<String> {
 /// Checks, in order:
 /// - `NYXID_NO_WIZARD` set to anything → explicit opt-out
 /// - `SSH_CONNECTION` / `SSH_TTY` set → SSH session (no local display)
-/// - Linux-only: both `DISPLAY` and `WAYLAND_DISPLAY` unset → no X/Wayland
+/// - Linux-only: both `DISPLAY` and `WAYLAND_DISPLAY` unset → no X/Wayland,
+///   *unless* running under WSL, which bridges to the Windows browser
 ///
 /// We intentionally skip this detection on macOS / Windows when not in
 /// SSH — there's always a GUI available, so the wizard should run.
@@ -1580,7 +1581,10 @@ fn is_headless_environment() -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        if !crate::browser::is_wsl()
+            && std::env::var_os("DISPLAY").is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_none()
+        {
             return true;
         }
     }
@@ -2236,6 +2240,8 @@ mod tests {
             "SSH_TTY",
             "DISPLAY",
             "WAYLAND_DISPLAY",
+            "WSL_INTEROP",
+            "WSL_DISTRO_NAME",
         ]);
 
         // Explicit opt-out wins.
@@ -2254,12 +2260,16 @@ mod tests {
 
         // Linux-only: no display at all means headless. On non-Linux
         // we don't gate on display vars (macOS always has a GUI, Windows
-        // similar), so just assert the fallback.
+        // similar), so just assert the fallback. WSL is also exempt — it
+        // bridges to the Windows browser — and `is_wsl` reads `/proc`,
+        // which env stashing can't neutralize, so skip there.
         #[cfg(target_os = "linux")]
         {
-            assert!(is_headless_environment());
-            guard.set("DISPLAY", ":0");
-            assert!(!is_headless_environment());
+            if !crate::browser::is_wsl() {
+                assert!(is_headless_environment());
+                guard.set("DISPLAY", ":0");
+                assert!(!is_headless_environment());
+            }
         }
         #[cfg(not(target_os = "linux"))]
         {

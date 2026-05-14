@@ -314,7 +314,7 @@ async fn run_browser_login(base_url: &str, profile: Option<&str>) -> Result<()> 
     eprintln!("(e.g. \"invite code required\" for new social sign-ups).");
     eprintln!();
 
-    let _ = open::that(&auth_url);
+    let _ = crate::browser::open_browser(&auth_url);
 
     let callback = wait_for_callback(listener, &state).await?;
     save_tokens_for(
