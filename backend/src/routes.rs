@@ -833,6 +833,10 @@ pub fn build_router(proxy_max_body_size: usize) -> (Router<AppState>, Router<App
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
         .nest("/auth", auth_routes)
+        .route(
+            "/devices/code/approve",
+            post(handlers::devices::approve_device_code),
+        )
         .nest("/users", user_routes)
         .nest("/api-keys", api_key_routes)
         .nest("/services", service_routes)

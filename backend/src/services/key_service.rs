@@ -46,7 +46,14 @@ const VALID_API_KEY_SCOPES: &[&str] = &[
 ];
 
 /// Valid platform identifiers for API keys.
-const VALID_PLATFORMS: &[&str] = &["claude-code", "cursor", "codex", "openclaw", "generic"];
+const VALID_PLATFORMS: &[&str] = &[
+    "claude-code",
+    "cursor",
+    "codex",
+    "openclaw",
+    "generic",
+    "device-code",
+];
 
 /// Validate the platform field if provided.
 fn validate_platform(platform: Option<&str>) -> AppResult<()> {

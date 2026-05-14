@@ -1,12 +1,15 @@
 use axum::{Json, extract::State};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::mw::auth::AuthUser;
+use crate::services::audit_service;
 use crate::services::device_code_service::{
-    DeviceCodeInitiate, DeviceCodeInitiateInput, DeviceCodePoll, DeviceCodePollInput, initiate,
-    poll,
+    DeviceCodeApprove, DeviceCodeApproveInput, DeviceCodeInitiate, DeviceCodeInitiateInput,
+    DeviceCodePoll, DeviceCodePollInput, approve, initiate, poll,
 };
 
 #[derive(Debug, Deserialize)]
@@ -22,6 +25,15 @@ pub struct PollDeviceCodeRequest {
     pub device_code: String,
     pub timestamp: i64,
     pub signature: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApproveDeviceCodeRequest {
+    pub user_code: String,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 pub async fn request_device_code(
@@ -65,6 +77,43 @@ pub async fn poll_device_code(
     Ok(Json(response))
 }
 
+pub async fn approve_device_code(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(req): Json<ApproveDeviceCodeRequest>,
+) -> AppResult<Json<DeviceCodeApprove>> {
+    let user_code = normalize_user_code(&req.user_code)?;
+    let label = normalize_label(req.label)?;
+    let org_id = normalize_org_id(req.org_id)?;
+
+    let response = approve(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        DeviceCodeApproveInput {
+            user_code,
+            org_id,
+            label,
+        },
+    )
+    .await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "device_code_approved",
+        Some(json!({
+            "api_key_id": response.api_key_id,
+            "node_id": response.node_id,
+            "owner_user_id": response.owner_user_id,
+            "org_id": response.org_id,
+            "hw_id": response.hw_id,
+            "device_label": response.device_label,
+        })),
+    );
+
+    Ok(Json(response))
+}
+
 fn normalize_device_code(value: &str) -> AppResult<String> {
     let trimmed = value.trim();
     if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -73,6 +122,62 @@ fn normalize_device_code(value: &str) -> AppResult<String> {
         ));
     }
     Ok(trimmed.to_ascii_lowercase())
+}
+
+fn normalize_user_code(value: &str) -> AppResult<String> {
+    let compact = value
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && *c != '-')
+        .collect::<String>()
+        .to_ascii_uppercase();
+
+    if compact.len() != 12 || !compact.bytes().all(is_user_code_byte) {
+        return Err(AppError::DeviceUserCodeInvalid);
+    }
+
+    Ok(format!(
+        "{}-{}-{}",
+        &compact[0..4],
+        &compact[4..8],
+        &compact[8..12]
+    ))
+}
+
+fn is_user_code_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'A' | b'B'
+            | b'C'
+            | b'D'
+            | b'E'
+            | b'F'
+            | b'G'
+            | b'H'
+            | b'J'
+            | b'K'
+            | b'L'
+            | b'M'
+            | b'N'
+            | b'P'
+            | b'Q'
+            | b'R'
+            | b'S'
+            | b'T'
+            | b'U'
+            | b'V'
+            | b'W'
+            | b'X'
+            | b'Y'
+            | b'Z'
+            | b'2'
+            | b'3'
+            | b'4'
+            | b'5'
+            | b'6'
+            | b'7'
+            | b'8'
+            | b'9'
+    )
 }
 
 fn decode_poll_signature(value: &str) -> AppResult<[u8; 64]> {
@@ -119,6 +224,35 @@ fn normalize_suggested_label(value: Option<String>) -> AppResult<Option<String>>
     Ok(Some(trimmed.to_string()))
 }
 
+fn normalize_label(value: Option<String>) -> AppResult<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > 200 {
+        return Err(AppError::BadRequest(
+            "label must be at most 200 characters".to_string(),
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn normalize_org_id(value: Option<String>) -> AppResult<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    uuid::Uuid::parse_str(trimmed)
+        .map_err(|_| AppError::BadRequest("org_id must be a UUID".to_string()))?;
+    Ok(Some(trimmed.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +296,34 @@ mod tests {
     }
 
     #[test]
+    fn normalize_user_code_accepts_spaces_dashes_and_lowercase() {
+        assert_eq!(
+            normalize_user_code("abcd efgh jklm").unwrap(),
+            "ABCD-EFGH-JKLM"
+        );
+        assert_eq!(
+            normalize_user_code("abcd-efgh-jklm").unwrap(),
+            "ABCD-EFGH-JKLM"
+        );
+    }
+
+    #[test]
+    fn normalize_user_code_rejects_ambiguous_or_wrong_length_input() {
+        assert!(matches!(
+            normalize_user_code("ABCD-EFGH-JKL").expect_err("short"),
+            AppError::DeviceUserCodeInvalid
+        ));
+        assert!(matches!(
+            normalize_user_code("ABCD-EFGH-IJKL").expect_err("ambiguous"),
+            AppError::DeviceUserCodeInvalid
+        ));
+        assert!(matches!(
+            normalize_user_code("ABCD-EFGH-OJKL").expect_err("ambiguous"),
+            AppError::DeviceUserCodeInvalid
+        ));
+    }
+
+    #[test]
     fn decode_poll_signature_accepts_exactly_64_base64_bytes() {
         let encoded = BASE64_STANDARD.encode([8u8; 64]);
 
@@ -193,5 +355,22 @@ mod tests {
             None
         );
         assert!(normalize_suggested_label(Some("x".repeat(257))).is_err());
+    }
+
+    #[test]
+    fn normalize_label_trims_empty_to_none_and_caps_length() {
+        assert_eq!(
+            normalize_label(Some(" Hallway ".to_string())).unwrap(),
+            Some("Hallway".to_string())
+        );
+        assert_eq!(normalize_label(Some("   ".to_string())).unwrap(), None);
+        assert!(normalize_label(Some("x".repeat(201))).is_err());
+    }
+
+    #[test]
+    fn normalize_org_id_accepts_uuid_and_rejects_names() {
+        let id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(normalize_org_id(Some(id.clone())).unwrap(), Some(id));
+        assert!(normalize_org_id(Some("my-org".to_string())).is_err());
     }
 }
