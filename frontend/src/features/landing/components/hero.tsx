@@ -87,6 +87,11 @@ export function Hero() {
 
       {/* Content */}
       <div className="relative z-10 mt-[260px] flex flex-col items-center md:mt-[190px]">
+        <img
+          src="/nyxid-wordmark.svg"
+          alt="NyxID"
+          className="mb-8 h-12 w-auto drop-shadow-[0_0_24px_rgba(90,42,241,0.45)] md:h-14"
+        />
         <h1 className="max-w-[700px] text-center font-serif text-[32px] leading-tight text-white md:text-5xl lg:text-6xl">
           {t("hero.eyebrow")}
         </h1>
@@ -99,27 +104,35 @@ export function Hero() {
           {t("hero.subtitle")}
         </p>
 
-        <a
-          href="#beta"
-          className="mt-10 inline-flex items-center gap-2 rounded-xl bg-primary px-8 py-4 text-lg font-semibold text-white transition-all hover:bg-nyx-400 hover:shadow-lg hover:shadow-primary/25"
-        >
-          {t("hero.cta")}
-          <svg
-            width="20"
-            height="20"
-            viewBox="0 0 20 20"
-            fill="none"
-            aria-hidden="true"
+        <div className="mt-10 flex flex-col items-center gap-3 sm:flex-row sm:gap-4">
+          <a
+            href={`/register${typeof window !== "undefined" ? window.location.search : ""}`}
+            className="inline-flex items-center gap-2 rounded-xl bg-primary px-8 py-4 text-lg font-semibold text-white transition-all hover:bg-nyx-400 hover:shadow-lg hover:shadow-primary/25"
           >
-            <path
-              d="M4 10h12m0 0l-4-4m4 4l-4 4"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </a>
+            {t("hero.ctaRegister")}
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 20 20"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="M4 10h12m0 0l-4-4m4 4l-4 4"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </a>
+          <a
+            href="#beta"
+            className="inline-flex items-center gap-2 rounded-xl border border-primary/40 px-8 py-4 text-lg font-semibold text-white transition-colors hover:bg-primary/10"
+          >
+            {t("hero.ctaEarlyAccess")}
+          </a>
+        </div>
 
         <p className="mt-4 text-sm text-gray-500">{t("hero.ctaSubtext")}</p>
       </div>
