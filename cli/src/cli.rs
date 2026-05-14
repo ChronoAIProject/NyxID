@@ -78,6 +78,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: NodeCommands,
     },
+    /// Approve device-code provisioning requests
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommands,
+    },
     /// Push credential setup metadata to node operators
     #[command(name = "node-credential")]
     NodeCredential {
@@ -1562,6 +1567,29 @@ impl PendingCredentialInjectionMethod {
     }
 }
 
+// ---- Device-code commands ----
+
+#[derive(Subcommand)]
+pub enum DeviceCommands {
+    /// Approve a device binding code and provision device credentials
+    Approve {
+        /// User code shown by the device. Dashes and spaces are optional.
+        user_code: String,
+        /// Approve the device under this org (admin required)
+        #[arg(
+            long,
+            value_name = "ID|SLUG|NAME",
+            help = "Organization to act on (UUID, slug, or display name)"
+        )]
+        org: Option<String>,
+        /// Device label to store on the provisioned API key and node
+        #[arg(long)]
+        label: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
 // ---- Node Docker subcommands ----
 
 #[derive(Args, Clone)]
@@ -1689,6 +1717,38 @@ mod tests {
                             },
                     },
             } => assert_eq!(config.as_deref(), Some("/tmp")),
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn device_approve_accepts_code_org_and_label() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "device",
+            "approve",
+            "ABCD-EFGH-JKLM",
+            "--org",
+            "team-ai",
+            "--label",
+            "Hallway camera",
+        ])
+        .expect("device approve should parse");
+
+        match cli.command {
+            Commands::Device {
+                command:
+                    DeviceCommands::Approve {
+                        user_code,
+                        org,
+                        label,
+                        ..
+                    },
+            } => {
+                assert_eq!(user_code, "ABCD-EFGH-JKLM");
+                assert_eq!(org.as_deref(), Some("team-ai"));
+                assert_eq!(label.as_deref(), Some("Hallway camera"));
+            }
             _ => panic!("unexpected parse result"),
         }
     }
