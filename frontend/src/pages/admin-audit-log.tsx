@@ -106,18 +106,24 @@ export function AdminAuditLogPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ClipboardList className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load audit log entries.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <ClipboardList className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">Failed to load audit log</p>
+            <p className="text-xs text-muted-foreground">Please try again later.</p>
+          </div>
         </div>
       ) : entries.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <ClipboardList className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            No audit events match the current filters.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <ClipboardList className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">No audit events found</p>
+            <p className="text-xs text-muted-foreground">No audit events match the current filters.</p>
+          </div>
         </div>
       ) : (
         <>
@@ -194,7 +200,7 @@ export function AdminAuditLogPage() {
                 onClick={() => setPage((current) => Math.max(1, current - 1))}
                 disabled={page <= 1}
               >
-                <ChevronLeft className="mr-1 h-4 w-4" />
+                <ChevronLeft className="h-3 w-3" />
                 Previous
               </Button>
               <Button
@@ -204,7 +210,7 @@ export function AdminAuditLogPage() {
                 disabled={page >= totalPages}
               >
                 Next
-                <ChevronRight className="ml-1 h-4 w-4" />
+                <ChevronRight className="h-3 w-3" />
               </Button>
             </div>
           </div>

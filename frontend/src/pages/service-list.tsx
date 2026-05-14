@@ -24,6 +24,8 @@ import {
 import { parseAllowedPrincipals } from "@/lib/ssh";
 import { ApiError } from "@/lib/api-client";
 import { ServiceCard } from "@/components/dashboard/service-card";
+import { PageHeader } from "@/components/shared/page-header";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import {
@@ -33,7 +35,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   Form,
@@ -129,11 +130,9 @@ export function ServiceListPage() {
         params: { serviceId: created.id },
       });
     } catch (error) {
-      if (error instanceof ApiError) {
-        form.setError("root", { message: error.message });
-      } else {
-        toast.error("Failed to create service");
-      }
+      toast.error(
+        error instanceof ApiError ? error.message : "Failed to create service",
+      );
     }
   }
 
@@ -151,27 +150,15 @@ export function ServiceListPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-            Services
-          </h2>
-          <p className="text-[12px] text-muted-foreground">
-            Manage downstream services and their authentication.
-          </p>
-        </div>
-        <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-          <DialogTrigger asChild>
-            <button
-              type="button"
-              className="flex h-10 items-center gap-2.5 rounded-xl border border-white/[0.08] px-3 text-[13px] text-text-tertiary transition-all duration-300 hover:border-white/[0.15] hover:text-muted-foreground"
-            >
-              <span className="flex h-[22px] w-[22px] items-center justify-center rounded-[6px] border border-white/[0.08] bg-white/[0.04]">
-                <Plus className="h-3 w-3" />
-              </span>
-              Create Service
-            </button>
-          </DialogTrigger>
+      <PageHeader
+        title="Services"
+        description="Manage downstream services and their authentication."
+        actions={
+          <AddCtaButton label="Create Service" onClick={() => setCreateOpen(true)} />
+        }
+      />
+
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Create Service</DialogTitle>
@@ -186,11 +173,6 @@ export function ServiceListPage() {
                 onSubmit={form.handleSubmit(onSubmit)}
                 className="space-y-4"
               >
-                {form.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
-                    {form.formState.errors.root.message}
-                  </div>
-                )}
 
                 <FormField
                   control={form.control}
@@ -555,8 +537,7 @@ export function ServiceListPage() {
               </form>
             </Form>
           </DialogContent>
-        </Dialog>
-      </div>
+      </Dialog>
 
       {isLoading ? (
         <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">

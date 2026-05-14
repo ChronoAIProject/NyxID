@@ -14,6 +14,7 @@ import { formatDate } from "@/lib/utils";
 import { canAdminWrite } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -42,7 +43,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Users, Plus, Trash2 } from "lucide-react";
+import { Users, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 export function AdminGroupsPage() {
@@ -100,11 +101,9 @@ export function AdminGroupsPage() {
       toast.success("Group created successfully");
       setCreateOpen(false);
     } catch (err) {
-      if (err instanceof ApiError) {
-        createForm.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to create group");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to create group",
+      );
     }
   }
 
@@ -129,10 +128,7 @@ export function AdminGroupsPage() {
         description="Manage groups and their role assignments."
         actions={
           canWrite ? (
-            <Button size="sm" onClick={openCreateDialog}>
-              <Plus className="mr-1 h-4 w-4" />
-              Add Group
-            </Button>
+            <AddCtaButton label="Add Group" onClick={openCreateDialog} />
           ) : null
         }
       />
@@ -144,16 +140,24 @@ export function AdminGroupsPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Users className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load groups. Please try again.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <Users className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">Failed to load groups</p>
+            <p className="text-xs text-muted-foreground">Please try again later.</p>
+          </div>
         </div>
       ) : groups.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Users className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">No groups found.</p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <Users className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">No groups found</p>
+            <p className="text-xs text-muted-foreground">There are no groups to display.</p>
+          </div>
         </div>
       ) : (
         <div className="rounded-xl border border-border">
@@ -233,7 +237,7 @@ export function AdminGroupsPage() {
                           setDeleteGroupId(group.id);
                         }}
                       >
-                        <Trash2 className="h-4 w-4 text-muted-foreground" />
+                        <Trash2 className="h-3 w-3 text-muted-foreground" />
                       </Button>
                     )}
                   </TableCell>
@@ -260,11 +264,6 @@ export function AdminGroupsPage() {
               )}
               className="space-y-4"
             >
-              {createForm.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                  {createForm.formState.errors.root.message}
-                </div>
-              )}
               <FormField
                 control={createForm.control}
                 name="name"
@@ -312,7 +311,7 @@ export function AdminGroupsPage() {
                     <FormLabel>Roles</FormLabel>
                     <FormControl>
                       <select
-                        className="flex w-full rounded-[10px] border border-input bg-popover px-3 py-2 text-[13px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
+                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-[12px] text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value
@@ -350,7 +349,7 @@ export function AdminGroupsPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={createMutation.isPending}>
+                <Button type="submit" variant="primary" isLoading={createMutation.isPending}>
                   Create Group
                 </Button>
               </DialogFooter>

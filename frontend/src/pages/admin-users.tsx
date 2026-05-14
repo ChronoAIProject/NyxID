@@ -9,6 +9,7 @@ import { formatDate } from "@/lib/utils";
 import { resolvePlatformRole, canAdminWrite } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -49,7 +50,8 @@ import {
   Search,
   ChevronLeft,
   ChevronRight,
-  UserPlus,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -98,6 +100,8 @@ export function AdminUsersPage() {
     setCreateOpen(true);
   }
 
+  const [showPassword, setShowPassword] = useState(false);
+
   async function handleCreate(data: CreateUserFormData) {
     try {
       await createMutation.mutateAsync({
@@ -109,11 +113,9 @@ export function AdminUsersPage() {
       toast.success("User created successfully");
       setCreateOpen(false);
     } catch (err) {
-      if (err instanceof ApiError) {
-        createForm.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to create user");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to create user",
+      );
     }
   }
 
@@ -122,44 +124,41 @@ export function AdminUsersPage() {
       <PageHeader
         title="User Management"
         description="View and manage all registered users."
+        actions={
+          canWrite ? (
+            <AddCtaButton label="Create User" onClick={openCreateDialog} />
+          ) : null
+        }
       />
 
-      <div className="flex items-center justify-between gap-2">
-        <form onSubmit={handleSearch} className="flex items-center gap-2">
-          <div className="relative flex-1 max-w-sm">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder="Search by email..."
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              className="pl-9"
-            />
-          </div>
-          <Button type="submit" variant="outline" size="sm">
-            Search
-          </Button>
-          {search && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setSearchInput("");
-                setSearch("");
-                setPage(1);
-              }}
-            >
-              Clear
-            </Button>
-          )}
-        </form>
-        {canWrite && (
-          <Button size="sm" onClick={openCreateDialog}>
-            <UserPlus className="mr-1 h-4 w-4" />
-            Create User
+      <form onSubmit={handleSearch} className="flex items-center gap-2">
+        <div className="relative max-w-sm flex-1">
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            placeholder="Search by email..."
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            className="pl-9"
+          />
+        </div>
+        <Button type="submit" variant="outline" size="sm">
+          Search
+        </Button>
+        {search && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setSearchInput("");
+              setSearch("");
+              setPage(1);
+            }}
+          >
+            Clear
           </Button>
         )}
-      </div>
+      </form>
 
       {isLoading ? (
         <div className="space-y-2">
@@ -168,18 +167,26 @@ export function AdminUsersPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Users className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load users. Please try again.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <Users className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">Failed to load users</p>
+            <p className="text-xs text-muted-foreground">Please try again later.</p>
+          </div>
         </div>
       ) : users.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Users className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            {search ? "No users match your search." : "No users found."}
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <Users className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">No users found</p>
+            <p className="text-xs text-muted-foreground">
+              {search ? "No users match your search." : "There are no users to display."}
+            </p>
+          </div>
         </div>
       ) : (
         <>
@@ -288,7 +295,7 @@ export function AdminUsersPage() {
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
-                <ChevronLeft className="h-4 w-4" />
+                <ChevronLeft className="h-3 w-3" />
                 Previous
               </Button>
               <span className="text-sm text-muted-foreground">
@@ -301,7 +308,7 @@ export function AdminUsersPage() {
                 onClick={() => setPage((p) => p + 1)}
               >
                 Next
-                <ChevronRight className="h-4 w-4" />
+                <ChevronRight className="h-3 w-3" />
               </Button>
             </div>
           </div>
@@ -324,11 +331,6 @@ export function AdminUsersPage() {
               )}
               className="space-y-4"
             >
-              {createForm.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                  {createForm.formState.errors.root.message}
-                </div>
-              )}
               <FormField
                 control={createForm.control}
                 name="email"
@@ -353,11 +355,23 @@ export function AdminUsersPage() {
                   <FormItem>
                     <FormLabel>Password</FormLabel>
                     <FormControl>
-                      <Input
-                        type="password"
-                        placeholder="Minimum 8 characters"
-                        {...field}
-                      />
+                      <div className="relative">
+                        <Input
+                          type={showPassword ? "text" : "password"}
+                          placeholder="Minimum 8 characters"
+                          className="pr-9"
+                          {...field}
+                        />
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          onClick={() => setShowPassword((v) => !v)}
+                          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                          aria-label={showPassword ? "Hide password" : "Show password"}
+                        >
+                          {showPassword ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                        </button>
+                      </div>
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -408,7 +422,7 @@ export function AdminUsersPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={createMutation.isPending}>
+                <Button type="submit" variant="primary" isLoading={createMutation.isPending}>
                   Create User
                 </Button>
               </DialogFooter>

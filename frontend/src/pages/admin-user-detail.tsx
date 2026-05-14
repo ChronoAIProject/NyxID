@@ -74,6 +74,7 @@ import {
   MailCheck,
   LogOut,
   AlertCircle,
+  Monitor,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -160,11 +161,9 @@ export function AdminUserDetailPage() {
       toast.success("User updated successfully");
       setEditOpen(false);
     } catch (err) {
-      if (err instanceof ApiError) {
-        form.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to update user");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to update user",
+      );
     }
   }
 
@@ -301,7 +300,7 @@ export function AdminUserDetailPage() {
           canWrite ? (
             <>
               <Button variant="outline" size="sm" onClick={openEditDialog}>
-                <Pencil className="mr-1 h-3 w-3" />
+                <Pencil className="h-3 w-3" />
                 Edit
               </Button>
               {!isSelf && (
@@ -310,7 +309,7 @@ export function AdminUserDetailPage() {
                   size="sm"
                   onClick={() => setConfirmAction("delete")}
                 >
-                  <Trash2 className="mr-1 h-3 w-3" />
+                  <Trash2 className="h-3 w-3" />
                   Delete
                 </Button>
               )}
@@ -380,7 +379,7 @@ export function AdminUserDetailPage() {
                         setConfirmAction("set-role");
                       }}
                     >
-                      <SelectTrigger className="h-9 w-[180px]">
+                      <SelectTrigger className="h-8 w-[180px]">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -398,9 +397,9 @@ export function AdminUserDetailPage() {
                     onClick={() => setConfirmAction("toggle-status")}
                   >
                     {user.is_active ? (
-                      <UserX className="mr-1 h-3 w-3" />
+                      <UserX className="h-3 w-3" />
                     ) : (
-                      <UserCheck className="mr-1 h-3 w-3" />
+                      <UserCheck className="h-3 w-3" />
                     )}
                     {user.is_active ? "Disable User" : "Enable User"}
                   </Button>
@@ -412,7 +411,7 @@ export function AdminUserDetailPage() {
                   size="sm"
                   onClick={() => setConfirmAction("verify-email")}
                 >
-                  <MailCheck className="mr-1 h-3 w-3" />
+                  <MailCheck className="h-3 w-3" />
                   Verify Email
                 </Button>
               )}
@@ -421,7 +420,7 @@ export function AdminUserDetailPage() {
                 size="sm"
                 onClick={() => setConfirmAction("reset-password")}
               >
-                <KeyRound className="mr-1 h-3 w-3" />
+                <KeyRound className="h-3 w-3" />
                 Reset Password
               </Button>
               <Button
@@ -429,7 +428,7 @@ export function AdminUserDetailPage() {
                 size="sm"
                 onClick={() => setConfirmAction("revoke-sessions")}
               >
-                <LogOut className="mr-1 h-3 w-3" />
+                <LogOut className="h-3 w-3" />
                 Revoke Sessions
               </Button>
             </div>
@@ -449,7 +448,12 @@ export function AdminUserDetailPage() {
 
       <DetailSection title="Sessions">
         {sessions.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No sessions found.</p>
+          <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border">
+              <Monitor className="h-4 w-4 text-muted-foreground" />
+            </div>
+            <p className="text-[12px] text-muted-foreground">No sessions found.</p>
+          </div>
         ) : (
           <div className="rounded-xl border border-border">
             <Table>
@@ -513,11 +517,6 @@ export function AdminUserDetailPage() {
               onSubmit={form.handleSubmit((data) => void handleEdit(data))}
               className="space-y-4"
             >
-              {form.formState.errors.root && (
-                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                  {form.formState.errors.root.message}
-                </div>
-              )}
               <FormField
                 control={form.control}
                 name="display_name"
@@ -565,7 +564,7 @@ export function AdminUserDetailPage() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" isLoading={updateMutation.isPending}>
+                <Button type="submit" variant="primary" isLoading={updateMutation.isPending}>
                   Save Changes
                 </Button>
               </DialogFooter>

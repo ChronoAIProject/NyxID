@@ -113,7 +113,7 @@ export function AdminNodesPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Node Management"
+        title="Node Registry"
         description="View and manage all credential nodes across all users."
       />
 
@@ -175,20 +175,28 @@ export function AdminNodesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <HardDrive className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load nodes. Please try again.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <HardDrive className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">Failed to load nodes</p>
+            <p className="text-xs text-muted-foreground">Please try again later.</p>
+          </div>
         </div>
       ) : nodes.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <HardDrive className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            {search || statusFilter
-              ? "No nodes match your filters."
-              : "No credential nodes registered."}
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <HardDrive className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">No nodes found</p>
+            <p className="text-xs text-muted-foreground">
+              {search || statusFilter
+                ? "No nodes match your filters."
+                : "No credential nodes registered."}
+            </p>
+          </div>
         </div>
       ) : (
         <>
@@ -267,7 +275,7 @@ export function AdminNodesPage() {
                                 })
                               }
                             >
-                              <Unplug className="h-4 w-4" />
+                              <Unplug className="h-3 w-3" />
                               <span className="sr-only">
                                 Disconnect {node.name}
                               </span>
@@ -281,7 +289,7 @@ export function AdminNodesPage() {
                               setActionTarget({ node, action: "delete" })
                             }
                           >
-                            <Trash2 className="h-4 w-4" />
+                            <Trash2 className="h-3 w-3" />
                             <span className="sr-only">Delete {node.name}</span>
                           </Button>
                         </div>
@@ -306,7 +314,7 @@ export function AdminNodesPage() {
                 disabled={page <= 1}
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
-                <ChevronLeft className="h-4 w-4" />
+                <ChevronLeft className="h-3 w-3" />
                 Previous
               </Button>
               <span className="text-sm text-muted-foreground">
@@ -319,7 +327,7 @@ export function AdminNodesPage() {
                 onClick={() => setPage((p) => p + 1)}
               >
                 Next
-                <ChevronRight className="h-4 w-4" />
+                <ChevronRight className="h-3 w-3" />
               </Button>
             </div>
           </div>

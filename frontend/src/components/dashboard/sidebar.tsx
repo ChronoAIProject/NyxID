@@ -22,6 +22,7 @@ import {
   KeyRound,
   Link2,
   Bot,
+  Network,
   Ticket,
   PanelLeftClose,
   PanelLeft,
@@ -70,7 +71,7 @@ const ADMIN_NAV = [
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },
   { to: "/admin/groups", icon: UsersRound, label: "Groups" },
-  { to: "/admin/nodes", icon: HardDrive, label: "Nodes" },
+  { to: "/admin/nodes", icon: Network, label: "Node Registry" },
   { to: "/services", icon: Server, label: "Services" },
   { to: "/providers", icon: Plug, label: "Providers" },
 ] as const;

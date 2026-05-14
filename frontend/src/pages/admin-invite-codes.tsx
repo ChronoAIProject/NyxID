@@ -16,6 +16,7 @@ import { cn, copyToClipboard, formatDate } from "@/lib/utils";
 import { canAdminWrite } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { PageHeader } from "@/components/shared/page-header";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -51,7 +52,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Ticket, Plus, Copy, Check, Ban, Link2 } from "lucide-react";
+import { Ticket, Copy, Check, Ban, Link2 } from "lucide-react";
 import { toast } from "sonner";
 import type { InviteCode } from "@/types/admin";
 
@@ -133,11 +134,9 @@ export function AdminInviteCodesPage() {
       setCreatedCode(created);
       toast.success("Invite code created");
     } catch (err) {
-      if (err instanceof ApiError) {
-        createForm.setError("root", { message: err.message });
-      } else {
-        toast.error("Failed to create invite code");
-      }
+      toast.error(
+        err instanceof ApiError ? err.message : "Failed to create invite code",
+      );
     }
   }
 
@@ -226,16 +225,12 @@ export function AdminInviteCodesPage() {
       <PageHeader
         title="Invite Codes"
         description="Create and manage invite codes that gate new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time."
+        actions={
+          canWrite ? (
+            <AddCtaButton label="Create Invite Code" onClick={openCreateDialog} />
+          ) : null
+        }
       />
-
-      {canWrite && (
-        <div className="flex items-center justify-end">
-          <Button size="sm" onClick={openCreateDialog}>
-            <Plus className="mr-1 h-4 w-4" />
-            Create Invite Code
-          </Button>
-        </div>
-      )}
 
       {isLoading ? (
         <div className="space-y-2">
@@ -247,18 +242,24 @@ export function AdminInviteCodesPage() {
           ))}
         </div>
       ) : error ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Ticket className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            Failed to load invite codes. Please try again.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <Ticket className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">Failed to load invite codes</p>
+            <p className="text-xs text-muted-foreground">Please try again later.</p>
+          </div>
         </div>
       ) : inviteCodes.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-12 text-center">
-          <Ticket className="mb-4 h-12 w-12 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">
-            No invite codes yet. Create one to allow a new user to register.
-          </p>
+        <div className="flex flex-col items-center justify-center gap-4 py-12 text-center">
+          <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border">
+            <Ticket className="h-6 w-6 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <p className="text-[12px] font-medium">No invite codes found</p>
+            <p className="text-xs text-muted-foreground">Create one to allow a new user to register.</p>
+          </div>
         </div>
       ) : (
         <div className="rounded-xl border border-border">
@@ -323,11 +324,11 @@ export function AdminInviteCodesPage() {
                       >
                         {copiedId === ic.id ? (
                           <Check
-                            className="h-4 w-4 text-success"
+                            className="h-3 w-3 text-success"
                             aria-hidden="true"
                           />
                         ) : (
-                          <Copy className="h-4 w-4" aria-hidden="true" />
+                          <Copy className="h-3 w-3" aria-hidden="true" />
                         )}
                       </Button>
                       <Button
@@ -343,11 +344,11 @@ export function AdminInviteCodesPage() {
                       >
                         {copiedLinkId === ic.id ? (
                           <Check
-                            className="h-4 w-4 text-success"
+                            className="h-3 w-3 text-success"
                             aria-hidden="true"
                           />
                         ) : (
-                          <Link2 className="h-4 w-4" aria-hidden="true" />
+                          <Link2 className="h-3 w-3" aria-hidden="true" />
                         )}
                       </Button>
                       {canWrite && ic.is_active && (
@@ -361,7 +362,7 @@ export function AdminInviteCodesPage() {
                           }}
                           aria-label={`Deactivate ${ic.code}`}
                         >
-                          <Ban className="h-4 w-4" aria-hidden="true" />
+                          <Ban className="h-3 w-3" aria-hidden="true" />
                         </Button>
                       )}
                     </div>
@@ -415,14 +416,14 @@ export function AdminInviteCodesPage() {
                     {copiedId === createdCode.id ? (
                       <>
                         <Check
-                          className="mr-1 h-4 w-4 text-success"
+                          className="h-3 w-3 text-success"
                           aria-hidden="true"
                         />
                         Copied
                       </>
                     ) : (
                       <>
-                        <Copy className="mr-1 h-4 w-4" aria-hidden="true" />
+                        <Copy className="h-3 w-3" aria-hidden="true" />
                         Copy
                       </>
                     )}
@@ -444,11 +445,6 @@ export function AdminInviteCodesPage() {
                 )}
                 className="space-y-4"
               >
-                {createForm.formState.errors.root && (
-                  <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-                    {createForm.formState.errors.root.message}
-                  </div>
-                )}
                 <FormField
                   control={createForm.control}
                   name="max_uses"
@@ -507,7 +503,7 @@ export function AdminInviteCodesPage() {
                   >
                     Cancel
                   </Button>
-                  <Button type="submit" isLoading={createMutation.isPending}>
+                  <Button type="submit" variant="primary" isLoading={createMutation.isPending}>
                     Create Invite Code
                   </Button>
                 </DialogFooter>

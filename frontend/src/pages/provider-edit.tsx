@@ -715,7 +715,7 @@ export function ProviderEditPage() {
               </>
             )}
 
-            <div className="flex items-center gap-3 pt-4">
+            <div className="flex items-center justify-end gap-3 pt-4">
               <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
                 Save changes
               </Button>
