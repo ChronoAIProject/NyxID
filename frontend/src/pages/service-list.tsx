@@ -54,7 +54,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Plus, Server } from "lucide-react";
+import { Server } from "lucide-react";
 import { toast } from "sonner";
 
 export function ServiceListPage() {
